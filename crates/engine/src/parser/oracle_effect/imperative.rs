@@ -1306,10 +1306,18 @@ pub(super) fn parse_targeted_action_ast(
                 min_count,
             });
         }
-        let (count, after_count) = super::super::oracle_util::parse_count_expr(rest).unwrap_or((
-            crate::types::ability::QuantityExpr::Fixed { value: 1 },
-            rest,
-        ));
+        // Use the exclusion-aware sibling so a source-exclusion "another"
+        // ("sacrifice another creature or land") is reported as a typed
+        // `CountWord::SourceExclusion` instead of being silently consumed as a
+        // bare count of 1. `parse_count_expr` discards the word's identity, so
+        // without this the parsed target never regains `FilterProp::Another`
+        // and the source could sacrifice itself (Morkrut Necropod, #4513).
+        let (count, after_count, count_word) =
+            super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
+                crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                rest,
+                super::super::oracle_util::CountWord::Plain,
+            ));
         let (target_text, _) = super::strip_optional_target_prefix(after_count.trim_start());
         // Strip the "of their choice" / "of your choice" confirmation suffix —
         // CR 701.16b makes player choice the default, so the phrase is a no-op
@@ -1372,6 +1380,44 @@ pub(super) fn parse_targeted_action_ast(
         // sacrifice a non-Demon creature" must restrict the prompt to the
         // actor's permanents — sacrificing requires controlling the permanent.
         apply_actor_default(&mut target, ctx);
+        // Re-apply the source exclusion the count word stripped. The count
+        // grammar consumes "another " as a bare count of 1, discarding the
+        // exclusion, so the filter built from the remainder ("creature or land")
+        // carries no `FilterProp::Another` and would let the source sacrifice
+        // itself (Morkrut Necropod, #4513).
+        //
+        // Apply the exclusion to EVERY leg of an `Or` disjunction. "Another"
+        // means "not this source permanent"; it is required on any leg the
+        // source's type could match and is harmless (vacuous) on legs it cannot
+        // (a land is never the source creature). Marking only the first leg, or
+        // only same-type legs, leaves a self-sacrifice hole for a source that
+        // matches a non-first leg — e.g. Mukotai Soulripper, an artifact
+        // creature, in "sacrifice another creature or artifact".
+        //
+        // Single-type "sacrifice another <type>" exclusion is deliberately NOT
+        // applied here: it reduces a single-eligible mandatory sacrifice (e.g.
+        // Disciple of Bolas) to one option, routing it through the
+        // auto-sacrifice fast-path, which mis-resolves a follow-on "that
+        // creature's power" reference — a separate, pre-existing engine bug for
+        // its own fix.
+        //
+        // No CR annotation here: this is parser-grammar scoping of the word
+        // "another"; the exclusion itself is CR-annotated at the filter layer
+        // (`game/filter.rs` `FilterProp::Another`).
+        if matches!(
+            count_word,
+            super::super::oracle_util::CountWord::SourceExclusion
+        ) {
+            if let TargetFilter::Or { filters } = &mut target {
+                for leg in filters.iter_mut() {
+                    if let TargetFilter::Typed(typed) = leg {
+                        if !typed.properties.contains(&FilterProp::Another) {
+                            typed.properties.push(FilterProp::Another);
+                        }
+                    }
+                }
+            }
+        }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
             count,
@@ -3174,8 +3220,10 @@ fn try_parse_choose_owned_by_voter(
 ///   Epiphany).
 /// - "exiled with ~" / "exiled with it" → the source's linked-exile set,
 ///   scanned in `Zone::Exile` by [`TargetFilter::ExiledBySource`]. Lowered via
-///   [`ChooseImperativeAst::FromZone`] so the runtime applies the linked-exile
-///   filter (Omenpath Journey).
+///   [`ChooseImperativeAst::FromZone`] with [`ZoneOwner::AllOwners`] so the
+///   runtime scans the whole shared exile zone (CR 400.1) and the linked-exile
+///   filter (CR 607.2a) does all scoping — opponent-owned cards Koh exiled are
+///   in the pool, not just the controller's own (Omenpath Journey, Koh).
 ///
 /// The optional "at random" qualifier sets [`CardSelectionMode::Random`]
 /// (CR 608.2d override): the game selects, the controller does not.
@@ -3206,13 +3254,16 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         }
     }
 
-    // "choose " / "you choose ", then the singular card anaphor "a card" / "one
-    // card" / "a [type] card". Only the bare card forms are handled here; typed
-    // restrictions on impulse-exile choices are not yet attested and would fall
-    // through to the honest fallback.
-    let (rest_after, ()) = preceded(
+    // "choose " / "you choose ", then the singular card anaphor "a [type] card" /
+    // "one [type] card". The optional card-type qualifier (Koh, the Face Stealer's
+    // "a creature card exiled with ~") narrows the choice; the bare "a card" form
+    // leaves it untyped. The type is intersected with the linked-exile set below.
+    let (rest_after, card_type) = preceded(
         alt((tag::<_, _, E>("choose "), tag("you choose "))),
-        value((), alt((tag("a card"), tag("one card")))),
+        preceded(
+            alt((tag("a "), tag("one "))),
+            parse_choose_card_type_qualifier,
+        ),
     )
     .parse(lower)
     .ok()?;
@@ -3223,27 +3274,49 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         Err(_) => (rest_after, CardSelectionMode::Chosen),
     };
 
-    // "exiled this way" — the chain tracked set.
-    if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
-        if tail.is_empty() {
-            return Some(ChooseImperativeAst::FromTrackedSet {
-                count: 1,
-                chooser: Chooser::Controller,
-                selection,
-            });
+    // "exiled this way" — the chain tracked set. Only the untyped form is attested
+    // (impulse-exile reductions choose from the whole chain set); a typed
+    // restriction here would need `TrackedSetFiltered`, so fall through honestly.
+    if card_type.is_none() {
+        if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
+            if tail.is_empty() {
+                return Some(ChooseImperativeAst::FromTrackedSet {
+                    count: 1,
+                    chooser: Chooser::Controller,
+                    selection,
+                });
+            }
         }
     }
 
-    // "exiled with ~" / "exiled with it" — the source's linked-exile set.
+    // "exiled with ~" / "exiled with it" — the source's linked-exile set
+    // (`ExiledBySource`), intersected with the optional card-type qualifier so the
+    // pool is exactly the matching cards exiled with the host (Koh: creature cards
+    // exiled with Koh).
     if let Ok((tail, _)) =
         alt((tag::<_, _, E>(" exiled with ~"), tag(" exiled with it"))).parse(rest_after)
     {
         if tail.is_empty() {
+            let filter = match card_type {
+                Some(tf) => TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(tf)),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                None => TargetFilter::ExiledBySource,
+            };
+            // CR 400.1 + CR 607.2a: "exiled with [source]" is owner-agnostic —
+            // exile is a zone shared by all players (CR 400.1) and the
+            // linked-exile reference (CR 607.2a) is defined by linkage, not
+            // ownership. Koh exiles opponents' creatures, so the candidate pool
+            // must span every owner; `ZoneOwner::AllOwners` scans the whole
+            // exile zone and lets `ExiledBySource` (in `filter`) do all scoping.
             return Some(ChooseImperativeAst::FromZone {
                 count: 1,
                 zones: vec![Zone::Exile],
-                zone_owner: ZoneOwner::Controller,
-                filter: TargetFilter::ExiledBySource,
+                zone_owner: ZoneOwner::AllOwners,
+                filter,
                 chooser: Chooser::Controller,
                 up_to: false,
                 selection,
@@ -3306,6 +3379,34 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
         // CR 608.2d: controller-directed selection, never random.
         selection: CardSelectionMode::Chosen,
     })
+}
+
+/// CR 205.2a: Parse the card-type qualifier of a singular card anaphor — one card
+/// type word followed by " card" (→ `Some(type)`), or the bare "card" (→ `None`).
+/// Used by [`try_parse_choose_exiled_anaphor`] for "choose a [type] card exiled
+/// with ~". A single type covers the attested class (Koh's "creature card");
+/// multi-type qualifiers ("artifact creature card") are not yet attested.
+fn parse_choose_card_type_qualifier(input: &str) -> OracleResult<'_, Option<TypeFilter>> {
+    alt((
+        map(
+            terminated(
+                alt((
+                    value(TypeFilter::Creature, tag("creature")),
+                    value(TypeFilter::Artifact, tag("artifact")),
+                    value(TypeFilter::Enchantment, tag("enchantment")),
+                    value(TypeFilter::Land, tag("land")),
+                    value(TypeFilter::Planeswalker, tag("planeswalker")),
+                    value(TypeFilter::Instant, tag("instant")),
+                    value(TypeFilter::Sorcery, tag("sorcery")),
+                    value(TypeFilter::Battle, tag("battle")),
+                )),
+                tag(" card"),
+            ),
+            Some,
+        ),
+        value(None, tag("card")),
+    ))
+    .parse(input)
 }
 
 fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {

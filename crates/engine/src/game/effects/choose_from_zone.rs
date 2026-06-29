@@ -633,6 +633,32 @@ fn collect_direct_zone_cards(
             .collect());
     }
 
+    // CR 400.1 + CR 607.2a: For AllOwners, scan the referenced zone(s) across
+    // EVERY player and rely entirely on the filter to scope. Exile is a zone
+    // shared by all players (CR 400.1), and "exiled with [source]" is a
+    // linked-ability reference (CR 607.2a) whose membership ignores ownership,
+    // so owner-gating would drop the opponent-owned cards Koh exiled before the
+    // filter ever runs. Mirrors the ScopedPlayer-on-Battlefield branch above:
+    // scan broadly, let the filter (here ExiledBySource) narrow. Kept general
+    // for all zones — the union across players reduces to the whole shared
+    // exile zone for Exile and to each player's own zone for per-player zones,
+    // with every object counted once (each object has exactly one owner).
+    if matches!(zone_owner, ZoneOwner::AllOwners) {
+        let owners: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
+        return Ok(owners
+            .into_iter()
+            .flat_map(|owner| {
+                zones
+                    .iter()
+                    .flat_map(|&zone| object_ids_in_player_zone(state, owner, zone))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|id| {
+                filter.is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+            })
+            .collect());
+    }
+
     let owner = resolve_zone_owner(state, ability, zone_owner)?;
 
     Ok(zones
@@ -671,6 +697,13 @@ fn resolve_zone_owner(
         ZoneOwner::EachPlayer | ZoneOwner::EachOpponent => Err(EffectError::MissingParam(
             "ChooseFromZone EachPlayer/EachOpponent resolves per-player, not via single owner"
                 .to_string(),
+        )),
+        // CR 400.1: `AllOwners` scans a zone shared across EVERY owner, not a
+        // single one — it is handled by the early return in
+        // `collect_direct_zone_cards` and never routes through this
+        // single-owner resolver.
+        ZoneOwner::AllOwners => Err(EffectError::MissingParam(
+            "ChooseFromZone AllOwners scans all owners, not via single owner".to_string(),
         )),
     }
 }
@@ -1052,6 +1085,126 @@ mod tests {
             }
             other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
         }
+    }
+
+    /// CR 400.1 + CR 607.2a: `ZoneOwner::AllOwners` scans a shared zone across
+    /// EVERY owner and lets the `TargetFilter` perform all scoping — the
+    /// per-owner gate in `object_ids_in_player_zone` is bypassed. Building-block
+    /// proof for the category "membership is defined by the filter, not by
+    /// ownership" (Koh, the Face Stealer: a creature card exiled with Koh, where
+    /// Koh typically exiles *opponents'* creatures).
+    ///
+    /// Discriminating on two axes: (1) an opponent-owned linked card MUST be
+    /// offered under `AllOwners` but is DROPPED under the old `Controller` scope
+    /// (the bug); (2) an opponent-owned *unlinked* exiled card must be excluded,
+    /// proving `AllOwners` does not over-collect — the `ExiledBySource` filter
+    /// still narrows the whole-zone scan.
+    #[test]
+    fn all_owners_scope_enumerates_exile_across_owners() {
+        let mut state = GameState::new_two_player(42);
+
+        // The linked-exile source (a Koh-like permanent under the controller).
+        let source = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Koh-like Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Two creature cards in the SHARED exile zone (CR 400.1), owned by
+        // different players, both linked to `source` (CR 607.2a).
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "My Exiled Face".to_string(),
+            Zone::Exile,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Exiled Face".to_string(),
+            Zone::Exile,
+        );
+        // An opponent-owned exiled card NOT linked to the source — the filter
+        // must exclude it even though `AllOwners` scans the whole zone.
+        let unlinked = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unlinked Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, mine, source);
+        crate::game::exile_links::push_tracked_by_source(&mut state, theirs, source);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::ExiledBySource),
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let filter = TargetFilter::ExiledBySource;
+
+        // AllOwners: BOTH owners' linked cards are offered; the unlinked card is
+        // filtered out. The opponent-owned card present here is the fix.
+        let all = collect_direct_zone_cards(
+            &state,
+            &ability,
+            Zone::Exile,
+            &[],
+            ZoneOwner::AllOwners,
+            Some(&filter),
+        )
+        .expect("AllOwners enumerates without routing through a single-owner resolver");
+        assert!(
+            all.contains(&mine),
+            "AllOwners offers the controller's own exiled card"
+        );
+        assert!(
+            all.contains(&theirs),
+            "AllOwners offers the OPPONENT-owned exiled card {theirs:?} (the fix)"
+        );
+        assert!(
+            !all.contains(&unlinked),
+            "AllOwners excludes the unlinked exiled card {unlinked:?} — the filter still scopes"
+        );
+        assert_eq!(
+            all.len(),
+            2,
+            "exactly the two linked cards regardless of owner, got {all:?}"
+        );
+
+        // Controller (the old scope): the owner gate drops the opponent-owned
+        // linked card, leaving only the controller's own — exactly the bug that
+        // `AllOwners` fixes. Asserted so a regression into owner-gating fails.
+        let controller_only = collect_direct_zone_cards(
+            &state,
+            &ability,
+            Zone::Exile,
+            &[],
+            ZoneOwner::Controller,
+            Some(&filter),
+        )
+        .expect("Controller scope resolves to a single owner");
+        assert_eq!(
+            controller_only,
+            vec![mine],
+            "Controller scope offers only the controller's own exiled card — \
+             the opponent-owned linked card {theirs:?} is wrongly dropped"
+        );
     }
 
     #[test]

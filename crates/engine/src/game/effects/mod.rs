@@ -157,6 +157,7 @@ pub mod rad_counters;
 pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
+pub mod remember_card;
 pub mod remove_all_damage;
 pub mod remove_from_combat;
 pub mod renown;
@@ -2952,6 +2953,7 @@ pub fn resolve_effect(
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
         Effect::ForEachCategoryExile { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }

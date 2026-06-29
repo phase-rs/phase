@@ -596,6 +596,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chars = text.chars().peekable();
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
+    // CR 111.3 (issue #4605): a created token has the abilities defined in its
+    // creation effect. Tracks whether the currently-open single-quoted span is a
+    // genuine NESTED ability quote — the inner ability of a token/permanent
+    // created inside a double-quoted granted ability (Urza's Saga:
+    // `... gains "... create a token with 'X.'"`). Only an anchored opener
+    // (`with '` / `and '` / `or '` / `, '`) opens such a span; a possessive or
+    // contraction apostrophe (`~'s`, `can't`) does not. Inside a genuine ability
+    // quote a `.` is part of the quoted text, NOT a sentence boundary.
+    let mut single_quote_is_ability = false;
     let mut in_double_quote = false;
     // CR 109.5 + CR 115.1: once a compound-subject-each head ("you and" / "~ and"
     // followed by "<noun> each") is detected, keep the WHOLE distributed body
@@ -627,7 +636,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 if is_possessive_apostrophe(&current, chars.peek().copied()) {
                     current.push(ch);
                 } else {
-                    in_single_quote = !in_single_quote;
+                    if in_single_quote {
+                        in_single_quote = false;
+                        single_quote_is_ability = false;
+                    } else {
+                        in_single_quote = true;
+                        // Anchor mirrors `extract_token_static_abilities`'s
+                        // single-quote pass: only `with '` / `and '` / `or '` /
+                        // `, '` opens a genuine nested ability span.
+                        single_quote_is_ability = ends_with_single_quote_ability_anchor(&current);
+                    }
                     current.push(ch);
                 }
             }
@@ -678,8 +696,18 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             // split here and reset the phantom single-quote state.
             // `in_double_quote` (a genuine quoted ability) still suppresses the
             // split.
-            '.' if paren_depth == 0 && !in_double_quote => {
+            // CR 111.3 (issue #4605): inside a genuine nested ability quote
+            // (`single_quote_is_ability`) the `.` belongs to the quoted text
+            // (`... with 'This token gets +1/+1 for each artifact you control.'`)
+            // and must NOT close the clause — otherwise the span is bisected and
+            // the token-creation effect loses its inner ability (and dispatches
+            // to the inner `Pump` instead of `Token`).
+            '.' if paren_depth == 0
+                && !in_double_quote
+                && !(in_single_quote && single_quote_is_ability) =>
+            {
                 in_single_quote = false;
+                single_quote_is_ability = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
@@ -2490,6 +2518,19 @@ fn starts_with_damage_clause(lower: &str) -> bool {
     } else {
         false
     }
+}
+
+/// CR 111.3 (issue #4605): true when the text accumulated right before an
+/// apostrophe ends at a phrase boundary that opens a nested quoted ability
+/// (`with '` / `and '` / `or '` / `, '`). Mirrors the opener anchors in
+/// `extract_token_static_abilities`'s single-quote pass, so a possessive
+/// (`~'s`) or contraction (`can't`) apostrophe is never treated as an
+/// ability-quote opener and a sentence-ending `.` keeps splitting normally.
+fn ends_with_single_quote_ability_anchor(current: &str) -> bool {
+    // allow-noncombinator: terminal suffix probe on the incremental chunk buffer during the char scan in `split_clause_sequence`, not parsing dispatch against raw oracle text (mirrors `current_ends_with_bare_and`).
+    ["with ", "and ", "or ", ", "]
+        .iter()
+        .any(|anchor| current.ends_with(anchor))
 }
 
 pub(super) fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
@@ -4772,6 +4813,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

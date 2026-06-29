@@ -14374,6 +14374,36 @@ fn cant_cast_opponent_attacked_this_turn() {
 }
 
 #[test]
+fn cant_cast_opponent_attacked_you_this_turn() {
+    // CR 101.2 + CR 508.6 + CR 109.5: Sandswirl Wanderglyph — "Each opponent who
+    // attacked you or a planeswalker you control this turn can't cast spells." The
+    // per-affected-player predicate is YouAttackedSourceControllerThisTurn (defender
+    // = the source's controller), distinct from Angelic Arbiter's attacked-ANYONE.
+    let def = parse_static_line(
+        "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedSourceControllerThisTurn),
+        "must carry the source-controller-defender predicate"
+    );
+    // Discriminating: must NOT collapse to Angelic Arbiter's attacked-anyone leaf.
+    assert_ne!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedThisTurn),
+    );
+    // The source-relative functioning gate must stay None (always-on static).
+    assert_eq!(def.condition, None);
+}
+
+#[test]
 fn cant_attack_opponent_cast_spell_this_turn() {
     // CR 508.1 + CR 109.5: "Each opponent who cast a spell this turn can't
     // attack with creatures" — restricts OPPONENTS' creatures, not the source

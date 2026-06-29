@@ -1928,6 +1928,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
     // "up to one" antecedent target is declined (no object target chosen).
     gate_reflexive_rider_on_declined_optional_target(&mut result);
+    // CR 608.2c + CR 613.1f: persist a standalone "choose a [type] card exiled
+    // with ~" pick as the host's last chosen card (Koh, the Face Stealer).
+    append_remember_card_to_standalone_exiled_choice(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
@@ -1941,6 +1944,48 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     result
+}
+
+/// CR 608.2c + CR 613.1f: A standalone "choose a [type] card exiled with ~"
+/// ability — a `ChooseFromZone` from the host's linked-exile set
+/// (`ExiledBySource`) with no follow-up consumer — persists its pick as the host's
+/// "last chosen card" by appending an `Effect::RememberCard` sub-ability. A choice
+/// with no consumer is otherwise a no-op no real card prints; the only cards with
+/// this shape feed a companion `TargetFilter::ChosenCard` grant (Koh, the Face
+/// Stealer — "has all activated and triggered abilities of the last chosen card").
+/// RememberCard reads the resolution chain's published pick via the
+/// `TrackedSetId(0)` sentinel (`resolve_tracked_set_sentinel`).
+fn append_remember_card_to_standalone_exiled_choice(def: &mut AbilityDefinition) {
+    if def.sub_ability.is_some() {
+        return;
+    }
+    let from_linked_exile = matches!(
+        &*def.effect,
+        Effect::ChooseFromZone { filter: Some(f), .. } if filter_mentions_exiled_by_source(f)
+    );
+    if !from_linked_exile {
+        return;
+    }
+    def.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RememberCard {
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        },
+    )));
+}
+
+/// Recursively detect a `TargetFilter::ExiledBySource` leaf (possibly nested under
+/// `And`/`Or`) — the "exiled with ~" linked-exile marker.
+fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ExiledBySource => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_mentions_exiled_by_source)
+        }
+        _ => false,
+    }
 }
 
 fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
@@ -7269,6 +7314,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -7363,6 +7409,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }

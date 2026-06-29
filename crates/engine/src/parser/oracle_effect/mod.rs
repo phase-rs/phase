@@ -2897,17 +2897,30 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     })?;
     let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
 
-    // Duration: "during their next turn" / "during that player's next turn".
-    // REQUIRED — this is the discriminator that gates the whole recognizer, so a
-    // generic "can't attack you" static line never reaches it.
-    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
-        value(
-            (),
-            alt((
-                tag(" during their next turn"),
-                tag(" during that player's next turn"),
-            )),
-        )
+    // Duration: REQUIRED discriminator — gates the whole recognizer so a generic
+    // permanent "can't attack you" static line (no duration) never reaches here.
+    // Two CR-distinct branches, captured as the resolved `Option<Duration>`:
+    //   - "during their next turn" / "during that player's next turn"
+    //     → `UntilEndOfNextTurnOf` (CR 514.2 + CR 500.7), the restricted player's
+    //       NEXT turn (Willie Lumpkin).
+    //   - "this turn" → no duration override; the `RestrictionExpiry::EndOfTurn`
+    //     below cleans the restriction up at the END OF THE CURRENT TURN (CR 514.2 —
+    //     Sandswirl Wanderglyph "they can't attack you … this turn").
+    // The two are NOT interchangeable: swapping them changes which turn the ban
+    // covers (a discriminating duration test must distinguish the two).
+    let (duration, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                alt((
+                    tag(" during their next turn"),
+                    tag(" during that player's next turn"),
+                )),
+            ),
+            value(None, tag(" this turn")),
+        ))
         .parse(input)
     })?;
     let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
@@ -2920,15 +2933,15 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
+                // CR 514.2: end-of-current-turn cleanup for the "this turn" branch.
+                // For the "next turn" branch this is a placeholder — `duration`
+                // below re-anchors the expiry to the restricted player's next turn
+                // in `add_restriction`.
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack { defended },
             },
         },
-        // CR 514.2 + CR 500.7: pre-armed end-of-next-turn anchor. The expiry is
-        // lowered in `add_restriction` to the RESTRICTED player's next turn.
-        duration: Some(Duration::UntilEndOfNextTurnOf {
-            player: PlayerScope::Controller,
-        }),
+        duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -6272,6 +6285,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/this creature] perpetually becomes a [subtypes]
+    // with base power and toughness N/N [and gains [keyword(s)]]" — persistent
+    // type change + base P/T + keyword grant (Second Little Pig).
+    if let Some(effect) = try_parse_perpetual_become(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
     if let Some(effect) = try_parse_perpetual_base_pt(tp) {
@@ -6420,6 +6440,93 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::Intensify {
         scope: IntensityScope::Source,
         amount,
+    })
+}
+
+/// Digital-only Alchemy: parse the self-subject perpetual type-change form —
+/// "[~ / this creature / …] perpetually become(s) a [subtypes] with base power
+/// and toughness N/N [and gains [keyword(s)]]" → [`Effect::ApplyPerpetual`]
+/// with [`PerpetualModification::Become`] (Second Little Pig).
+///
+/// Self-subjects only; referenced-object forms ("the duplicate"/"it") are
+/// deferred. The clause tail must be fully consumed so compound riders that
+/// are not modeled (e.g. Heir to Dragonfire's ", gets +3/+3") fall through to
+/// `Unimplemented` rather than being silently dropped.
+fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
+    use crate::parser::oracle_util::parse_subtype;
+
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let lower = tp.lower;
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("becomes a "),
+        tag::<_, _, OracleError<'_>>("become a "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, subtype_part) =
+        take_until::<_, _, OracleError<'_>>(" with base power and toughness ")
+            .parse(rest)
+            .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" with base power and toughness ")
+        .parse(rest)
+        .ok()?;
+    let mut creature_subtypes = Vec::new();
+    let mut subtype_rest = subtype_part.trim();
+    while !subtype_rest.is_empty() {
+        let (canonical, consumed) = parse_subtype(subtype_rest)?;
+        creature_subtypes.push(canonical);
+        subtype_rest = subtype_rest[consumed..].trim_start();
+    }
+    if creature_subtypes.is_empty() {
+        return None;
+    }
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, keywords) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" and gains "),
+        tag::<_, _, OracleError<'_>>(" and gain "),
+    ))
+    .parse(rest)
+    {
+        let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
+        (rest, keywords)
+    } else {
+        (rest, Vec::new())
+    };
+    if !tail_done(rest) {
+        return None;
+    }
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::Become {
+            creature_subtypes,
+            power: power as i32,
+            toughness: toughness as i32,
+            keywords,
+        },
     })
 }
 
@@ -17011,8 +17118,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
             min: n + 1,
             max: 20,
         })
-    } else if rest == "a number" || tag::<_, _, E>("a number ").parse(rest).is_ok() {
-        // Generic "choose a number" — default range 0-20
+    } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
+        // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
+        // mirroring the "a color" branch above, so a sentence-ending clause such
+        // as "As ~ enters, choose a number." parses (Squall, Gunblade Duelist,
+        // #722). The previous exact/trailing-space match dropped the period and
+        // produced no choice. The bounded "a number between" / "a number greater
+        // than" forms are consumed by the earlier branches, so this arm is reached
+        // only for a bare "a number".
         Some(ChoiceType::NumberRange { min: 0, max: 20 })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
         .parse(rest)
@@ -48455,6 +48568,57 @@ mod tests {
     }
 
     #[test]
+    fn that_player_cant_attack_branches_on_duration_phrase() {
+        use crate::types::triggers::AttackTargetFilter;
+        // Sandswirl Wanderglyph trigger child (after the trigger strips "they"):
+        // "can't attack you or planeswalkers you control this turn" → end-of-CURRENT-
+        // turn ban (no next-turn duration), defended = you OR your planeswalkers.
+        let this_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "can't attack you or planeswalkers you control this turn",
+            "can't attack you or planeswalkers you control this turn",
+        ))
+        .expect("'... this turn' must parse");
+        assert!(
+            this_turn.duration.is_none(),
+            "the 'this turn' branch must NOT carry a next-turn duration (got {:?})",
+            this_turn.duration
+        );
+        assert!(
+            matches!(
+                this_turn.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::Attack {
+                            defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "got {:?}",
+            this_turn.effect
+        );
+        // Willie Lumpkin: "... during their next turn" → next-turn duration. This is
+        // the DISCRIMINATOR — swapping the two duration branches flips this assertion
+        // (revert-probe: a swap makes exactly one of these two asserts fail).
+        let next_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "that player can't attack you during their next turn",
+            "that player can't attack you during their next turn",
+        ))
+        .expect("'... during their next turn' must parse");
+        assert!(
+            matches!(
+                next_turn.duration,
+                Some(Duration::UntilEndOfNextTurnOf { .. })
+            ),
+            "the 'next turn' branch must carry UntilEndOfNextTurnOf (got {:?})",
+            next_turn.duration
+        );
+    }
+
+    #[test]
     fn figure_of_fable_source_matches_filter_condition() {
         // CR 608.2c: "If this creature is a Scout, ..." gates on source subtype.
         let def = parse_effect_chain(
@@ -52201,6 +52365,42 @@ mod tests {
                 ..
             } if keywords == vec![Keyword::Flying]
         ));
+    }
+
+    #[test]
+    fn perpetual_parser_maps_become_type_change() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::keywords::Keyword;
+
+        let e = parse_effect(
+            "~ perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying.",
+        );
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::Become {
+                    creature_subtypes,
+                    power: 4,
+                    toughness: 4,
+                    keywords,
+                },
+                ..
+            } if creature_subtypes == vec!["Boar".to_string(), "Spirit".to_string()]
+                && keywords == vec![Keyword::Flying]
+        ));
+
+        let e = parse_effect("~ perpetually becomes a Dragon, gets +3/+3.");
+        assert!(
+            !matches!(
+                e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::Become { .. },
+                    ..
+                }
+            ),
+            "compound P/T riders must not parse as Become, got {e:?}"
+        );
     }
 
     #[test]

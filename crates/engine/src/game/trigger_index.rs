@@ -835,6 +835,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ProcessRadCounters
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
+        | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
         | EffectKind::ChooseAndSacrificeRest
         | EffectKind::Exploit

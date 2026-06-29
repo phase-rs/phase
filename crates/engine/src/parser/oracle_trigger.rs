@@ -34670,6 +34670,59 @@ mod snapshot_tests {
         assert_eq!(*target, TargetFilter::TriggeringSource);
     }
 
+    // CR 701.21a: Morkrut Necropod's
+    // "Whenever ~ attacks or blocks, sacrifice another creature or land" — the
+    // source-exclusion "another" must land `FilterProp::Another` on the CREATURE
+    // leg only. A creature is never a land, so distributing the exclusion to the
+    // land leg is meaningless; more importantly, WITHOUT the exclusion on the
+    // creature leg the source could sacrifice ITSELF, a functional bug (#4513).
+    // Parsed end-to-end through the production trigger entry to lock in that the
+    // sacrifice imperative re-applies the exclusion the count word consumed.
+    #[test]
+    fn morkrut_necropod_sacrifice_another_creature_or_land_trigger() {
+        let def = parse_trigger_line(
+            "Whenever Morkrut Necropod attacks or blocks, sacrifice another creature or land.",
+            "Morkrut Necropod",
+        );
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        let Effect::Sacrifice { target, .. } = execute.effect.as_ref() else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected an Or target for 'creature or land', got {target:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs, got {filters:?}");
+        // Leg 0: creature — the source-exclusion MUST be present.
+        let TargetFilter::Typed(creature_leg) = &filters[0] else {
+            panic!("expected a typed creature leg, got {:?}", filters[0]);
+        };
+        assert!(
+            creature_leg.type_filters.contains(&TypeFilter::Creature),
+            "first leg should be the creature leg, got {creature_leg:?}"
+        );
+        assert!(
+            creature_leg.properties.contains(&FilterProp::Another),
+            "creature leg must carry FilterProp::Another so the source can't \
+             sacrifice itself (#4513), got {creature_leg:?}"
+        );
+        // Leg 1: land — the source-exclusion is present here too. "Another" is
+        // applied to every leg: it is vacuous on the land leg (a creature source
+        // is never a land) but the uniform rule is what keeps a source that
+        // matches a non-first leg (e.g. an artifact creature in "creature or
+        // artifact") from sacrificing itself.
+        let TargetFilter::Typed(land_leg) = &filters[1] else {
+            panic!("expected a typed land leg, got {:?}", filters[1]);
+        };
+        assert!(
+            land_leg.type_filters.contains(&TypeFilter::Land),
+            "second leg should be the land leg, got {land_leg:?}"
+        );
+        assert!(
+            land_leg.properties.contains(&FilterProp::Another),
+            "land leg should carry FilterProp::Another (vacuous but uniform), got {land_leg:?}"
+        );
+    }
+
     // CR 701.3d: shorter form "becomes unattached" (future-proofing)
     #[test]
     fn trigger_becomes_unattached_short_form() {

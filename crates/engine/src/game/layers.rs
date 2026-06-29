@@ -2740,6 +2740,23 @@ fn active_continuous_effects_from_static_definitions(
                 ));
                 continue;
             }
+            // CR 613.1f + CR 603.1: "~ has all triggered abilities of [source]"
+            // (Koh, the Face Stealer). Triggered-ability mirror of the activated
+            // expansion above: expand into one `GrantTrigger` per triggered ability
+            // of each object matching `source`, recomputed each pass and reusing the
+            // existing `GrantTrigger` apply + dedup. No `cap` — triggered abilities
+            // carry no activation use-restriction (CR 602.5b is activated-only). The
+            // meta-effect itself has no standalone layer-6 behaviour, so skip it.
+            if let ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = modification {
+                effects.extend(expand_granted_triggered_abilities(
+                    state,
+                    source_id,
+                    timestamp,
+                    &affected_filter,
+                    source,
+                ));
+                continue;
+            }
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
@@ -2970,6 +2987,103 @@ fn expand_granted_activated_abilities(
                     timestamp: host_timestamp,
                     modification: ContinuousModification::GrantAbility {
                         definition: Box::new(donated),
+                    },
+                    affected_filter: TargetFilter::SelfRef,
+                    condition: None,
+                    mode: StaticMode::Continuous,
+                    characteristic_defining: false,
+                });
+                next_mod_index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// CR 613.1f + CR 603.1 + CR 603.2: Triggered-ability mirror of
+/// [`expand_granted_activated_abilities`]. Expands a
+/// `GrantAllTriggeredAbilitiesOf { source }` host modification into one
+/// `GrantTrigger` effect per triggered ability of each object matching `source`
+/// (Koh, the Face Stealer — "all activated and triggered abilities of the last
+/// chosen card"). Providers are scanned across all zones (the granted-from card
+/// is typically in exile) in deterministic `ObjectId` order, and each provider's
+/// LIVE `trigger_definitions` is read — reset from `base_trigger_definitions`
+/// every layer pass exactly like `abilities` (layers.rs reset loop), so an exiled
+/// provider's printed triggers are present at expansion time, identical to how
+/// the activated mirror reads live `abilities`. Synthesized effects target the
+/// recipient via `SelfRef`, reusing the layer-6 `GrantTrigger` apply and its
+/// structural dedup, and are recomputed each pass so the granted set tracks the
+/// current `source` membership. No `cap`: triggered abilities carry no activation
+/// use-restriction (CR 602.5b is activated-only). The `source` filter resolves
+/// against the host id with each recipient's controller, memoized per controller
+/// — mirroring the activated expander exactly; the recipient-equality self-skip
+/// (CR 613.1f) stays per-recipient at emission.
+fn expand_granted_triggered_abilities(
+    state: &GameState,
+    host_source_id: ObjectId,
+    host_timestamp: u64,
+    host_affected_filter: &TargetFilter,
+    source: &TargetFilter,
+) -> Vec<ActiveContinuousEffect> {
+    let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
+    let mut out = Vec::new();
+    let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+    provider_ids.sort_unstable_by_key(|id| id.0);
+    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
+        std::collections::HashMap::new();
+    for &recipient_id in &state.battlefield {
+        if !crate::game::filter::matches_target_filter(
+            state,
+            recipient_id,
+            host_affected_filter,
+            &host_ctx,
+        ) {
+            continue;
+        }
+        let recipient_controller = match state.objects.get(&recipient_id) {
+            Some(obj) => obj.controller,
+            None => continue,
+        };
+        let matching = providers_by_controller
+            .entry(recipient_controller)
+            .or_insert_with(|| {
+                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    host_source_id,
+                    recipient_controller,
+                );
+                provider_ids
+                    .iter()
+                    .copied()
+                    .filter(|&provider_id| {
+                        crate::game::perf_counters::record_granted_ability_provider_scan();
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            provider_id,
+                            source,
+                            &provider_ctx,
+                        )
+                    })
+                    .collect()
+            });
+        let mut next_mod_index = 0usize;
+        for &provider_id in matching.iter() {
+            if provider_id == recipient_id {
+                continue;
+            }
+            let Some(provider) = state.objects.get(&provider_id) else {
+                continue;
+            };
+            for trigger in provider.trigger_definitions.iter_all() {
+                out.push(ActiveContinuousEffect {
+                    source_id: recipient_id,
+                    controller: recipient_controller,
+                    def_index: None,
+                    transient_id: None,
+                    mod_index: next_mod_index,
+                    layer: Layer::Ability,
+                    timestamp: host_timestamp,
+                    modification: ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger.clone()),
                     },
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
@@ -4367,6 +4481,10 @@ fn apply_continuous_effect_filtered(
             // read access to the provider objects, which the per-object apply
             // borrow cannot give). No direct per-object mutation here.
             ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
+            // CR 613.1f: Mirror of the activated case above — expanded into one
+            // `GrantTrigger` per matching trigger at collection time
+            // (`expand_granted_triggered_abilities`). No direct per-object mutation.
+            ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {

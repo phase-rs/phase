@@ -512,6 +512,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -2773,6 +2774,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
+        Effect::RememberCard { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::ForEachCategoryExile { category, zone, .. } => {
             d.push((
                 "category".into(),
@@ -3631,6 +3635,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
             "grant all activated abilities of".into()
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {
+            "grant all triggered abilities of".into()
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),

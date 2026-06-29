@@ -1037,8 +1037,10 @@ impl GameObject {
     pub fn apply_perpetual_modification(
         &mut self,
         modification: &crate::types::ability::PerpetualModification,
+        all_creature_types: &[String],
     ) {
         use crate::types::ability::PerpetualModification;
+        use crate::types::card_type::CoreType;
         match modification {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
                 // The base_* fields are the persistent baseline the layer pass
@@ -1072,6 +1074,46 @@ impl GameObject {
                     // CR 613.1: perpetual keyword grants must survive the layer
                     // pass's `keywords = base_keywords.clone()` reset — mirror
                     // base_* P/T edits and the crew-keyword test seeding pattern.
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
+            }
+            PerpetualModification::Become {
+                creature_subtypes,
+                power,
+                toughness,
+                keywords,
+            } => {
+                // CR 613.1d + CR 613.1f + CR 613.4b: update the persistent
+                // type, keyword, and base-P/T baselines while retaining
+                // non-creature subtypes (Artifact, Aura, etc.).
+                self.sync_missing_base_characteristics();
+                if !self
+                    .base_card_types
+                    .core_types
+                    .contains(&CoreType::Creature)
+                {
+                    self.base_card_types.core_types.push(CoreType::Creature);
+                }
+                self.base_card_types.subtypes.retain(|subtype| {
+                    !all_creature_types
+                        .iter()
+                        .any(|creature_type| creature_type.eq_ignore_ascii_case(subtype))
+                });
+                for subtype in creature_subtypes {
+                    if !self
+                        .base_card_types
+                        .subtypes
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(subtype))
+                    {
+                        self.base_card_types.subtypes.push(subtype.clone());
+                    }
+                }
+                self.base_power = Some(*power);
+                self.base_toughness = Some(*toughness);
+                for keyword in keywords {
                     if !self.base_keywords.contains(keyword) {
                         self.base_keywords.push(keyword.clone());
                     }
