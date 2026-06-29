@@ -787,7 +787,16 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // is NEVER split. ---
     {
         let mut defs = Vec::new();
-        if let Some(def) = parse_continuous_gets_has(predicate, affected.clone(), description) {
+        // CR 611.3a: parse the grant from the unless/as-long-as-stripped body and
+        // attach any trailing `suffix_condition` (Heroic Defiance: "gets +3/+3
+        // unless it shares a color with the most common color among all
+        // permanents"), rather than parsing the whole predicate and dropping it.
+        if let Some(mut def) =
+            parse_continuous_gets_has(body_tp.original, affected.clone(), description)
+        {
+            if let Some(condition) = &suffix_condition {
+                def.condition = Some(condition.clone());
+            }
             defs.push(def);
         }
         // CR 509.1c: "<grant> and must be blocked by <filter> if able"

@@ -21331,3 +21331,41 @@ fn draw_from_bottom_singular_opponents() {
         }
     );
 }
+
+/// CR 611.3a (Heroic Defiance): an Aura's "Enchanted creature gets +3/+3 unless
+/// <condition>" grant must parse the P/T bonus AND attach the negated condition
+/// — the grant applies precisely when the condition is false. Here the condition
+/// is the most-common-color predicate, so the gate is
+/// `Not(SharesColorWithMostCommonColorAmongPermanents)`.
+#[test]
+fn heroic_defiance_pt_grant_gated_on_most_common_color() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+3 unless it shares a color with the most common \
+         color among all permanents or a color tied for most common.",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T grant");
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 }),
+        "grant must add +3 power, got {:?}",
+        grant.modifications
+    );
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 3 }),
+        "grant must add +3 toughness, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SharesColorWithMostCommonColorAmongPermanents),
+        }),
+        "the +3/+3 must be gated on Not(shares-most-common-color)"
+    );
+}

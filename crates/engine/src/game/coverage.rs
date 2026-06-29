@@ -3559,6 +3559,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
         SC::DuringYourTurn => "during your turn".into(),
+        SC::SharesColorWithMostCommonColorAmongPermanents => {
+            "shares a color with the most common color among all permanents".into()
+        }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
         SC::SourceHasDealtDamage => "source has dealt damage".into(),
         SC::WasCast { zone } => match zone {
@@ -6581,6 +6584,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            ("SharesColorWithMostCommonColorAmongPermanents", Handled)
+        }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),

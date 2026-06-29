@@ -3019,6 +3019,7 @@ pub(crate) fn static_condition_to_trigger_condition(
             player: PlayerFilter::Controller,
         }),
         StaticCondition::DayNightIs { .. } => None,
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => None,
 
         // CR 608.2c: Quantity comparisons map 1:1 (same fields). The only
         // asymmetry is the `Another` → `OtherThanTriggerObject` substitution

@@ -5642,6 +5642,12 @@ pub enum StaticCondition {
         text: String,
     },
     DuringYourTurn,
+    /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with
+    /// the most common color among all permanents on the battlefield (including
+    /// any color tied for most common). Used by Heroic Defiance's "gets +3/+3
+    /// unless it shares a color with the most common color among all permanents
+    /// or a color tied for most common" (the static gate wraps this in `Not`).
+    SharesColorWithMostCommonColorAmongPermanents,
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
