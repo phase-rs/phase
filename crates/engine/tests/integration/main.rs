@@ -126,6 +126,7 @@ mod halana_alena_partners_where_x;
 mod harrow_regression;
 mod heist_production_path_handoff;
 mod hellkite_tyrant_steal_artifacts_2906;
+mod heroic_defiance_recipient_color_4590;
 mod hunters_insight_combat_draw;
 mod inevitable_betrayal_no_mana_cost;
 mod integration_adventure;

@@ -21369,3 +21369,32 @@ fn heroic_defiance_pt_grant_gated_on_most_common_color() {
         "the +3/+3 must be gated on Not(shares-most-common-color)"
     );
 }
+
+/// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
+/// inside the quoted ability — the attached-subject grant parser must not lift it
+/// onto the static grant as a condition. Coral Net grants a triggered ability
+/// whose text contains "…unless you discard a card."; the static must surface a
+/// `GrantTrigger` with no spurious `condition`.
+#[test]
+fn granted_ability_inner_unless_stays_inside_quoted_ability() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has \"At the beginning of your upkeep, sacrifice this \
+         creature unless you discard a card.\"",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous granted-ability static");
+    assert!(
+        grant
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "the granted triggered ability must survive intact, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition, None,
+        "the granted ability's inner `unless` must NOT become a static-grant condition"
+    );
+}

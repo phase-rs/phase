@@ -683,7 +683,17 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
-    let (body_tp, suffix_condition) = if let Some((body_tp, _)) = pred_tp.split_around(" unless ") {
+    //
+    // Only peel a trailing static-grant " unless " rider (Heroic Defiance:
+    // "gets +3/+3 unless it shares a color…") when the split point sits OUTSIDE a
+    // quoted/granted ability. A granted ability's own inner "unless" (e.g. Sunken
+    // Field's "Counter target spell unless its controller pays {1}") must stay
+    // with the quoted text — the body has balanced double quotes iff the split is
+    // outside any "...".
+    let unless_split = pred_tp
+        .split_around(" unless ")
+        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0);
+    let (body_tp, suffix_condition) = if let Some((body_tp, _)) = unless_split {
         (
             body_tp,
             super::shared::parse_unless_static_condition(&pred_tp),
