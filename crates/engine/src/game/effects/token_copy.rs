@@ -3678,23 +3678,10 @@ mod tests {
     /// P1 owns but P0 controls (Mind Control style) is exiled; "each player other
     /// than its controller" should exclude P0, so only P1 creates a copy.
     ///
-    /// IGNORED — documented LKI deferral. `reset_for_battlefield_exit`
-    /// (game_object.rs:1524) reverts `base_controller`/`controller` to the owner
-    /// when the permanent leaves the battlefield, and `parent_target_controller`
-    /// reads that reset live value (the exiled object is still in `state.objects`,
-    /// a public zone) BEFORE its LKI-cache fallback. The pre-exit controller (P0)
-    /// IS captured in `state.lki_cache` (zones.rs:161), so the fix is to make
-    /// `parent_target_controller` prefer the LKI controller for an object target
-    /// whose live zone is no longer the battlefield (CR 608.2h). That is a
-    /// behavioral change to a shared helper used by every "<target>'s controller
-    /// does X" card and is deferred to a dedicated cross-layer LKI PR (see the
-    /// executor scopeExpansion). The COMMON case — exiling a permanent its owner
-    /// controls — is rules-correct and proven by
-    /// `fractured_identity_three_player_excludes_exiled_controller`. Un-ignore
-    /// this test to validate the LKI fix when it lands.
+    /// `parent_target_controller` now prefers the LKI snapshot (captured before
+    /// `reset_for_battlefield_exit` reverts the controller to the owner) for any
+    /// object that is no longer on the battlefield (CR 608.2h).
     #[test]
-    #[ignore = "CR 608.2h control-stolen LKI edge: parent_target_controller reads \
-                exit-reset controller instead of LKI; deferred cross-layer fix"]
     fn fractured_identity_its_controller_excludes_controller_not_owner() {
         use crate::game::scenario::GameScenario;
         use crate::types::phase::Phase;
