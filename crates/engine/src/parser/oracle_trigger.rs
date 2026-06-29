@@ -1035,7 +1035,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
+    // CR 601.2c: An optional-targeting quantifier ("up to one target …" /
+    // "any number of target …") permits a variable number of targets down to
+    // zero, so the execute ability must surface `optional_targeting` and let the
+    // player decline. Without this, "attach any number of target Equipment you
+    // control to it" (Super-Soldier Serum) forces a mandatory target and
+    // softlocks when every Equipment is already attached.
+    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
+        || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
         if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
             Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
@@ -15168,6 +15175,33 @@ mod tests {
             }
             other => panic!("expected attachment intervening-if, got {other:?}"),
         }
+    }
+
+    /// CR 601.2c: "attach any number of target Equipment you control to it"
+    /// (Super-Soldier Serum) is a variable-count target down to zero. The execute
+    /// ability must carry `optional_targeting` so the player can decline — without
+    /// it the trigger forces a mandatory Equipment target and softlocks when every
+    /// Equipment is already attached to the creature.
+    #[test]
+    fn trigger_attacks_or_blocks_attach_any_number_optional_targeting() {
+        let def = parse_trigger_line(
+            "Whenever enchanted creature attacks or blocks, attach any number of target Equipment you control to it.",
+            "Super-Soldier Serum",
+        );
+        assert_eq!(def.mode, TriggerMode::AttacksOrBlocks);
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("attach body must lower to an execute ability");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Attach { .. }),
+            "expected Attach effect, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.optional_targeting,
+            "\"any number of target\" must surface optional_targeting=true so the player can decline"
+        );
     }
 
     #[test]
