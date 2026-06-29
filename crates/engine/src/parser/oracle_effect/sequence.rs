@@ -4645,6 +4645,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileResolvingSpellInsteadOfGraveyard
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }

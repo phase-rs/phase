@@ -7504,6 +7504,15 @@ pub(super) fn parse_imperative_family_ast(
         };
     }
 
+    // CR 614.11 + CR 614.6: One-shot "the next time you would draw a card this
+    // turn, [effect] instead" delayed DRAW replacement (Words of Worship/
+    // Wilding). Also begins with "the next time", so intercepted here before the
+    // first-word verb dispatch. The detector is the prefix combinator inside
+    // `parse_oneshot_draw_replacement`; on failure it returns `None`.
+    if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_draw_replacement(lower) {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
     // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {

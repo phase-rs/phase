@@ -820,6 +820,12 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
     match effect {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
+        // CR 614.11: A one-shot draw replacement nests its substitute Effect
+        // (Words of Worship/Wilding). Walk it so any conjure name it carries is
+        // surfaced (GainLife/Token carry none today, but it is a nested carrier).
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            walk_effect(replacement_effect, out)
+        }
         // Heist exiles a card from an opponent's library at random; it does not
         // name a conjure card, so there is no static face to preload.
         Effect::Heist { .. } | Effect::HeistExile => {}
@@ -2982,6 +2988,22 @@ mod tests {
         };
         face.replacements.push(repl_optional);
 
+        // CR 614.11: CreateDrawReplacement nests its substitute Effect; the
+        // walker must descend into it (Words of Worship/Wilding class).
+        let draw_repl = Effect::CreateDrawReplacement {
+            replacement_effect: Box::new(Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "draw_replacement".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Hand,
+                tapped: false,
+            }),
+        };
+        walk_effect(&draw_repl, &mut names);
+
         collect_conjure_names_from_face(&face, &mut names);
 
         let expected = [
@@ -3012,6 +3034,7 @@ mod tests {
             "counter_source_static",
             "unless_pay_ability",
             "unless_pay_trigger",
+            "draw_replacement",
         ];
         for name in expected {
             assert!(

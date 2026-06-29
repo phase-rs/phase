@@ -2599,6 +2599,12 @@ fn detect_duration_this_turn(
         // to the one-shot effect (it expires at cleanup, CR 514.2), not a
         // separate `duration` slot.
         "CreateDamageReplacement",
+        // CR 614.11 + CR 514.2: `CreateDrawReplacement` is the one-shot draw
+        // replacement for "the next time you would draw a card this turn,
+        // [effect] instead" (Words of Worship/Wilding). Its "this turn" lifetime
+        // is inherent to the one-shot effect (expires at cleanup), not a
+        // separate `duration` slot — same as `CreateDamageReplacement` above.
+        "CreateDrawReplacement",
         "AddTargetReplacement",
         // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
         // IS the "next [event] this turn" delayed-trigger scope (Chandra,
@@ -3645,6 +3651,32 @@ mod tests {
             other => panic!("expected SearchOutsideGame, got {other:?}"),
         }
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
+        use crate::types::ability::PlayerFilter;
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.",
+            "Protection Racket",
+            &["Enchantment"],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Protection Racket upkeep trigger execute");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Protection Racket trigger must parse without Unimplemented"
+        );
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "repeat-for-each-opponent-in-turn-order must stamp player_scope = Opponent"
+        );
+        assert!(!has_swallowed_detector(&parsed, "APNAP"));
     }
 
     #[test]

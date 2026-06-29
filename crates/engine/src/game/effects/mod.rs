@@ -66,6 +66,7 @@ pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
+pub mod create_draw_replacement;
 pub mod create_emblem;
 pub mod create_token_copy_from_pool;
 pub mod deal_damage;
@@ -2938,6 +2939,9 @@ pub fn resolve_effect(
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
+        }
+        Effect::CreateDrawReplacement { .. } => {
+            create_draw_replacement::resolve(state, ability, events)
         }
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),

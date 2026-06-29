@@ -4465,6 +4465,76 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
     None
 }
 
+/// CR 614.11 + CR 614.6 + CR 514.2: Parse a one-shot delayed DRAW replacement —
+/// "the next time you would draw a card this turn, [effect] instead" (Words of
+/// Worship: "you gain 5 life"; Words of Wilding: "create a 2/2 green Bear
+/// creature token"). Mirrors `parse_oneshot_damage_replacement` for the Draw
+/// event class, lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
+///
+/// The detector IS the parser: the branch is gated by the `tag("the next time ")`
+/// prefix combinator + a `peek` for "would draw"; it returns `None` on any
+/// mismatch so it never shadows other "the next time" effects.
+///
+/// SCOPE: the substitute payload is parsed by the generic `parse_effect`, which
+/// does NOT honor a player-scoped subject ("each player", "each opponent", "that
+/// player"). Words of Wind ("each player returns a permanent...") and Words of
+/// Waste ("each opponent discards...") would mis-lower to a `Controller`-scoped
+/// effect, so those subject-scoped payloads are REJECTED here (return `None`) to
+/// stay an honest Unimplemented gap rather than a silently-wrong parse.
+pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect> {
+    // CR 614.1a: "the next time ... would draw ... this turn ... instead".
+    let (after_prefix, _) = preceded(
+        tag::<_, _, OracleError<'_>>("the next time "),
+        peek(take_until::<_, _, OracleError<'_>>("would draw")),
+    )
+    .parse(norm_lower)
+    .ok()?;
+    if !nom_primitives::scan_contains(after_prefix, "would draw")
+        || !nom_primitives::scan_contains(after_prefix, "this turn")
+        || !nom_primitives::scan_contains(after_prefix, "instead")
+    {
+        return None;
+    }
+
+    // CR 614.6: isolate the substitute payload — the clause after "this turn,"
+    // up to (and excluding) the trailing "instead". Split with the shared nom
+    // combinator, never byte math.
+    let (_, (_, after_turn)) = nom_primitives::split_once_on(after_prefix, "this turn").ok()?;
+    let payload_text = after_turn.trim_start_matches([',', ' ']);
+    // Drop the trailing "instead" so the payload parser sees only the effect.
+    let payload_text = match nom_primitives::split_once_on(payload_text, "instead") {
+        Ok((_, (before, _))) => before,
+        Err(_) => payload_text,
+    }
+    .trim();
+
+    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
+    // Honest-gap guard 1: an Unimplemented payload is not a clean replacement.
+    if matches!(payload, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    // Honest-gap guard 2: player-scoped subjects ("each player", "each
+    // opponent", "that player", "target player/opponent") are NOT honored by
+    // bare `parse_effect` (it would emit a Controller-scoped effect, dropping
+    // the scope). Reject so Words of Wind/Waste stay honest Unimplemented gaps
+    // rather than silently-wrong parses. This is a leaf reject-check on the
+    // already-split payload, not dispatch.
+    if payload_text.starts_with("each ") // allow-noncombinator: leaf reject-guard on split payload
+        || payload_text.starts_with("target player") // allow-noncombinator
+        || payload_text.starts_with("target opponent") // allow-noncombinator
+        || payload_text.starts_with("that player") // allow-noncombinator
+        || payload_text.starts_with("each opponent") // allow-noncombinator
+        || payload_text.starts_with("each player")
+    // allow-noncombinator
+    {
+        return None;
+    }
+
+    Some(Effect::CreateDrawReplacement {
+        replacement_effect: Box::new(payload),
+    })
+}
+
 /// CR 614.9 + CR 614.5: Parse the en-Kor cycle's one-shot redirection —
 /// "the next N damage that would be dealt to ~ this turn is dealt to target
 /// creature you control instead" (Nomads / Lancers / Outrider / Shaman / Spirit
@@ -13028,6 +13098,62 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
     }
 
+    /// CR 614.1c + CR 707.9: The Master, Formed Anew — "you may have ~ enter as a
+    /// copy of a creature card in exile with a takeover counter on it." The copy
+    /// SOURCE is an exile-zoned card constrained by a takeover-counter predicate.
+    /// The full source phrase (zone clause THEN counter clause) must flow through
+    /// `parse_type_phrase` with no leftover, so the optional Moved/Battlefield
+    /// clone replacement registers and its `BecomeCopy` target filter carries both
+    /// `InZone { Exile }` and the `Counters { OfType("takeover"), GE, 1 }` source
+    /// predicate (honored at runtime by `find_copy_targets` scanning exile).
+    #[test]
+    fn the_master_enter_as_copy_of_exile_card_with_takeover_counter() {
+        let def = parse_replacement_line(
+            "You may have The Master enter as a copy of a creature card in exile with a takeover counter on it.",
+            "The Master, Formed Anew",
+        )
+        .expect("must register a clone replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+
+        let execute = def.execute.as_ref().expect("execute must be present");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!(
+                "non-tapped clone must have BecomeCopy, got {:?}",
+                execute.effect
+            );
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed copy-source filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "copy source must be a creature filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Exile })),
+            "copy source zone must be exile, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic(ct)),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                } if ct == "takeover"
+            )),
+            "copy source must require a takeover counter, got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn mockingbird_clone_replacement_uses_typed_copy_metadata() {
         let def = parse_replacement_line(
@@ -15198,11 +15324,95 @@ mod snapshot_tests {
 
     #[test]
     fn oneshot_rejects_unrelated_next_time_text() {
-        // "the next time you draw" must not be hijacked by the damage parser.
+        // A draw-form "the next time" must not be hijacked by the DAMAGE parser
+        // (it has no "would deal" spine) — the draw parser claims it instead.
         assert!(parse_oneshot_damage_replacement(
             "the next time you would draw a card this turn, draw two cards instead"
         )
         .is_none());
+        // A genuinely-unrelated "the next time" (not draw, not damage) parses to
+        // neither one-shot replacement.
+        assert!(parse_oneshot_damage_replacement(
+            "the next time you would gain life this turn, you gain twice that much instead"
+        )
+        .is_none());
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would gain life this turn, you gain twice that much instead"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_worship_gains_life() {
+        // Words of Worship: "The next time you would draw a card this turn, you
+        // gain 5 life instead."
+        let effect = parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, you gain 5 life instead",
+        )
+        .expect("Words of Worship draw replacement must parse");
+        match effect {
+            Effect::CreateDrawReplacement { replacement_effect } => {
+                assert!(
+                    matches!(*replacement_effect, Effect::GainLife { .. }),
+                    "payload must be GainLife, got {replacement_effect:?}"
+                );
+            }
+            other => panic!("expected CreateDrawReplacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_routes_through_parse_effect() {
+        // End-to-end through the imperative dispatch: the activated-ability body
+        // (after "{1}:") for Words of Worship routes to CreateDrawReplacement.
+        let effect = crate::parser::oracle_effect::parse_effect(
+            "the next time you would draw a card this turn, you gain 5 life instead",
+        );
+        assert!(
+            matches!(effect, Effect::CreateDrawReplacement { .. }),
+            "the imperative dispatch must route the draw form, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_wilding_creates_token() {
+        // Words of Wilding: "The next time you would draw a card this turn,
+        // create a 2/2 green Bear creature token instead."
+        let effect = parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, create a 2/2 green bear creature token instead",
+        )
+        .expect("Words of Wilding draw replacement must parse");
+        match effect {
+            Effect::CreateDrawReplacement { replacement_effect } => {
+                assert!(
+                    matches!(*replacement_effect, Effect::Token { .. }),
+                    "payload must be a Token, got {replacement_effect:?}"
+                );
+            }
+            other => panic!("expected CreateDrawReplacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_rejects_player_scoped_payload() {
+        // GUARD: Words of Wind ("each player returns a permanent...") and Words
+        // of Waste ("each opponent discards...") have player-scoped payloads
+        // that bare `parse_effect` mis-scopes — they must stay HONEST
+        // Unimplemented gaps (return None), NOT silently-wrong CreateDrawReplacement.
+        assert!(
+            parse_oneshot_draw_replacement(
+                "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead"
+            )
+            .is_none(),
+            "Words of Wind (each-player payload) must remain an honest gap"
+        );
+        assert!(
+            parse_oneshot_draw_replacement(
+                "the next time you would draw a card this turn, each opponent discards a card instead"
+            )
+            .is_none(),
+            "Words of Waste (each-opponent payload) must remain an honest gap"
+        );
     }
 
     #[test]

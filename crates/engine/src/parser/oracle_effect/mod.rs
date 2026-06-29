@@ -28392,6 +28392,54 @@ mod tests {
         );
     }
 
+    /// Issue #3466: counter spells with non-mana unless costs must not silently
+    /// drop the unless clause. CR 118.12 / CR 119.4 / CR 608.2c.
+    #[test]
+    fn effect_counter_unless_parses_non_mana_costs() {
+        let dash = parse_effect_chain(
+            "Counter target spell unless its controller pays 5 life.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*dash.effect, Effect::Counter { .. }));
+        let unless_pay = dash.unless_pay.expect("life unless must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 }
+            }
+        );
+
+        let sacrifice = parse_effect_chain(
+            "Counter target spell unless its controller sacrifices a creature.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*sacrifice.effect, Effect::Counter { .. }));
+        assert!(
+            matches!(
+                sacrifice.unless_pay.as_ref().map(|u| &u.cost),
+                Some(AbilityCost::Sacrifice(_))
+            ),
+            "sacrifice unless must parse, got {:?}",
+            sacrifice.unless_pay
+        );
+
+        let discard = parse_effect_chain(
+            "Counter target spell unless its controller discards a card.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*discard.effect, Effect::Counter { .. }));
+        assert!(
+            matches!(
+                discard.unless_pay.as_ref().map(|u| &u.cost),
+                Some(AbilityCost::Discard { count, .. })
+                    if *count == QuantityExpr::Fixed { value: 1 }
+            ),
+            "discard unless must parse, got {:?}",
+            discard.unless_pay
+        );
+    }
+
     #[test]
     fn then_if_control_count_conditions_followup_transform() {
         let def = parse_effect_chain(
@@ -47342,6 +47390,27 @@ mod tests {
             d.enters_under, None,
             "owner's control must not set a controller override"
         );
+    }
+
+    /// CR 508.4: "return it to the battlefield tapped and attacking" (Jocasta,
+    /// Automaton Avenger) must lower with both `enter_tapped` and
+    /// `enters_attacking` when the anaphor refers to the trigger source.
+    #[test]
+    fn effect_return_it_tapped_and_attacking() {
+        let e = parse_effect("return it to the battlefield tapped and attacking");
+        match e {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(enter_tapped.is_tapped());
+                assert!(enters_attacking);
+            }
+            other => panic!("expected Effect::ChangeZone, got {other:?}"),
+        }
     }
 
     /// CR 508.4: "return target creature card from your graveyard to the

@@ -812,6 +812,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileResolvingSpellInsteadOfGraveyard
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
+        | EffectKind::CreateDrawReplacement
         | EffectKind::Regenerate
         | EffectKind::RemoveAllDamage
         | EffectKind::LoseTheGame
