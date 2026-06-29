@@ -82,7 +82,7 @@ describe("openPhaseSocket", () => {
   it("rejects the previous protocol version for Full servers", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 10 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 11 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -94,14 +94,14 @@ describe("openPhaseSocket", () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(
-      helloFrame({ protocol_version: 10, mode: "LobbyOnly" }),
+      helloFrame({ protocol_version: 11, mode: "LobbyOnly" }),
     );
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("LobbyOnly");
-    expect(socket.serverInfo.protocolVersion).toBe(10);
+    expect(socket.serverInfo.protocolVersion).toBe(11);
     expect(ws.send).toHaveBeenCalledWith(
-      expect.stringContaining('"protocol_version":10'),
+      expect.stringContaining('"protocol_version":11'),
     );
   });
 
