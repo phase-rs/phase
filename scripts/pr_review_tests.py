@@ -92,6 +92,31 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "defer")
         self.assertEqual(recommendation["reason"], "frontend_policy")
 
+    def test_current_head_hold_does_not_suppress_green_review(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4574,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "needs_review")
+
     def test_merged_pr_recommends_prune(self) -> None:
         packet = {
             "pr": {
