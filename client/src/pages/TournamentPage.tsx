@@ -151,7 +151,7 @@ export function TournamentPage() {
       <MenuShell
         eyebrow={code ?? ""}
         title={tournament?.name ?? "Tournament"}
-        subtitle={
+        description={
           tournament
             ? `Round ${tournament.currentRound} of ${tournament.totalRounds} · ${tournament.playerCount} players`
             : "Loading…"

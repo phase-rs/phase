@@ -87,7 +87,7 @@ export function TournamentLandingPage() {
       <MenuShell
         eyebrow="Swiss events"
         title="Tournaments"
-        subtitle="Organize multi-round Swiss events for your playgroup — pairings and standings without a spreadsheet."
+        description="Organize multi-round Swiss events for your playgroup — pairings and standings without a spreadsheet."
       >
         <section className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-white/10 bg-black/25 p-5">

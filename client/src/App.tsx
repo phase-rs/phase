@@ -28,6 +28,9 @@ const CoveragePage = lazy(() => import("./pages/CoveragePage").then((m) => ({ de
 const DraftLandingPage = lazy(() => import("./pages/DraftLandingPage").then((m) => ({ default: m.DraftLandingPage })));
 const DraftPage = lazy(() => import("./pages/DraftPage").then((m) => ({ default: m.DraftPage })));
 const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ default: m.DraftPodPage })));
+const DraftSpectatorPage = lazy(() =>
+  import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
+);
 const TournamentLandingPage = lazy(() =>
   import("./pages/TournamentLandingPage").then((m) => ({ default: m.TournamentLandingPage })),
 );
