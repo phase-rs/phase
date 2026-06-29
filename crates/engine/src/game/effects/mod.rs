@@ -6200,15 +6200,22 @@ fn resolve_chain_body(
     }
 
     // CR 609.3: Extract the numeric result emitted by this parent effect for
-    // `QuantityRef::PreviousEffectAmount` in sub-abilities. The event class is
-    // selected by the parent `Effect` so unrelated numeric side effects from the
-    // same resolution are not mixed together: damage to a battle removes defense
-    // counters and also deals damage, but "damage dealt this way" must read only
-    // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
-    // `CounterRemoved`.
-    if let Some(amount) =
-        previous_effect_amount_from_events(state, ability, &events[events_before..])
-    {
+    // `QuantityRef::PreviousEffectAmount` / `EventContextAmount` in sub-abilities.
+    // The event class is selected by the parent `Effect` so unrelated numeric
+    // side effects from the same resolution are not mixed together: damage to a
+    // battle removes defense counters and also deals damage, but "damage dealt
+    // this way" must read only `DamageDealt`; Coalition Relic's "counter removed
+    // this way" must read only `CounterRemoved`. Mirror the `player_scope` loop's
+    // discard accounting so controller-only "discard your hand, then draw that
+    // many" chains (Tolarian Winds) stamp `last_effect_count`.
+    let parent_events = &events[events_before..];
+    let counts_by_player =
+        previous_effect_counts_by_player_from_events(&ability.effect, parent_events);
+    if !counts_by_player.is_empty() {
+        state.last_effect_count = counts_by_player.values().copied().max();
+        state.last_effect_amount = state.last_effect_count;
+        state.last_effect_counts_by_player = counts_by_player;
+    } else if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
         state.last_effect_amount = Some(amount);
     }
 
@@ -14214,6 +14221,69 @@ mod tests {
             state.players[1].hand.len(),
             7,
             "OPPONENT must also discard their hand then draw 7 (#781)"
+        );
+    }
+
+    /// Tolarian Winds class: controller discards their hand, then draws that many
+    /// (EventContextAmount). Without stamping `last_effect_count` after a
+    /// non-`player_scope` Discard, the chained Draw resolves to 0.
+    #[test]
+    fn discard_hand_then_draw_event_context_amount_without_player_scope() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(0),
+                format!("Lib {i}"),
+                Zone::Library,
+            );
+        }
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut winds = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        winds.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &winds, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            3,
+            "controller should draw as many cards as they discarded"
         );
     }
 
