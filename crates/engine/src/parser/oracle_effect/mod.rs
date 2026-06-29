@@ -33805,7 +33805,10 @@ mod tests {
                 duration,
                 ..
             } => {
-                assert_eq!(static_abilities[0].mode, StaticMode::MustBeBlocked);
+                assert_eq!(
+                    static_abilities[0].mode,
+                    StaticMode::MustBeBlocked { by: None }
+                );
                 assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
                 assert_eq!(
                     static_abilities[0].affected,
@@ -38896,7 +38899,7 @@ mod tests {
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    matches!(sd.mode, crate::types::statics::StaticMode::MustBeBlocked { by: None })
                 )
             ),
             "Expected GenericEffect with MustBeBlocked, got {:?}",
@@ -38911,7 +38914,7 @@ mod tests {
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    matches!(sd.mode, crate::types::statics::StaticMode::MustBeBlocked { by: None })
                 )
             ),
             "Expected GenericEffect with MustBeBlocked, got {:?}",
@@ -38940,7 +38943,7 @@ mod tests {
         assert!(
             matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    matches!(sd.mode, crate::types::statics::StaticMode::MustBeBlocked { by: None })
                 )
             ),
             "Expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
@@ -48316,7 +48319,7 @@ mod tests {
         assert!(
             matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    matches!(sd.mode, crate::types::statics::StaticMode::MustBeBlocked { by: None })
                 )
             ),
             "expected sub_ability GenericEffect with MustBeBlocked, got {:?}",

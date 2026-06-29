@@ -1456,9 +1456,19 @@ pub enum StaticMode {
     // -- Tier 2: Rule-modification statics --
     CantTap,
     CantUntap,
-    /// CR 509.1c: This creature must be blocked if able — the defending player
-    /// must assign at least one legal blocker to it.
-    MustBeBlocked,
+    /// CR 509.1c: This creature must be blocked if able. `by == None` ⇒ any
+    /// blocker satisfies the requirement (the bare "must be blocked if able"
+    /// form — the defending player must assign at least one legal blocker to
+    /// it). `by == Some(filter)` ⇒ the requirement is obeyed only by assigning
+    /// a blocker matching `filter` (Ace's Baseball Bat: "must be blocked by a
+    /// Dalek if able"; Slayer's Cleaver: "…by an Eldrazi…"). Data-carrying
+    /// (holds `TargetFilter`) — not registry-keyed (see
+    /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in
+    /// combat.rs declare-blockers validation. Positive mirror of
+    /// `CantBeBlockedBy { filter }`.
+    MustBeBlocked {
+        by: Option<TargetFilter>,
+    },
     /// CR 509.1c: "All creatures able to block this creature do so" (Lure,
     /// Prized Unicorn, Breaker of Armies, …). Unlike [`MustBeBlocked`], this
     /// places a block requirement on *every* creature able to block it: each
@@ -1786,6 +1796,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::MustBeBlocked { .. } => {} // optional TargetFilter does not implement Hash; discriminant only
             StaticMode::BlockRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
@@ -1973,7 +1984,7 @@ impl StaticMode {
             | StaticMode::FlashBack
             | StaticMode::CantTap
             | StaticMode::CantUntap
-            | StaticMode::MustBeBlocked
+            | StaticMode::MustBeBlocked { .. }
             | StaticMode::MustBeBlockedByAll
             | StaticMode::Goaded
             | StaticMode::CombatAlone { .. }
@@ -2295,7 +2306,13 @@ impl fmt::Display for StaticMode {
             // Tier 2
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
-            StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::MustBeBlocked { by: None } => write!(f, "MustBeBlocked"),
+            // CR 509.1c: TargetFilter has no parseable string form — Debug
+            // format, one-way (mirrors CantBeBlockedBy). No from_str
+            // reconstruction; the Some form is parse-time only.
+            StaticMode::MustBeBlocked { by: Some(filter) } => {
+                write!(f, "MustBeBlocked:By({filter:?})")
+            }
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CombatAlone {
@@ -2743,7 +2760,7 @@ impl FromStr for StaticMode {
             // Tier 2
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
-            "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "MustBeBlocked" => StaticMode::MustBeBlocked { by: None },
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
@@ -3219,7 +3236,7 @@ mod tests {
         assert_eq!(StaticMode::from_str("Flying").unwrap(), StaticMode::Flying);
         assert_eq!(
             StaticMode::from_str("MustBeBlocked").unwrap(),
-            StaticMode::MustBeBlocked
+            StaticMode::MustBeBlocked { by: None }
         );
         assert_eq!(
             StaticMode::from_str("NoMaximumHandSize").unwrap(),
@@ -3303,7 +3320,7 @@ mod tests {
             // Tier 2: rule-mod statics
             StaticMode::CantTap,
             StaticMode::CantUntap,
-            StaticMode::MustBeBlocked,
+            StaticMode::MustBeBlocked { by: None },
             StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,
                 requirement: CombatAloneRequirement::NeedsCompanion,
@@ -3465,7 +3482,7 @@ mod tests {
             StaticMode::CantBeTargeted,
             StaticMode::CantBeBlocked,
             StaticMode::Flying,
-            StaticMode::MustBeBlocked,
+            StaticMode::MustBeBlocked { by: None },
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {

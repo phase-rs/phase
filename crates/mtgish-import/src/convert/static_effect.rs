@@ -308,7 +308,7 @@ pub fn convert_permanent_rule(
         },
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
-        P::MustBeBlocked => StaticMode::MustBeBlocked,
+        P::MustBeBlocked => StaticMode::MustBeBlocked { by: None },
         P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
             StaticMode::BlockRestriction {
                 filter: engine::types::statics::block_only_creatures_with_flying_filter(),
