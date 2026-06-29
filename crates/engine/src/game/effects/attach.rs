@@ -425,15 +425,13 @@ pub fn attach_to(
         return None;
     }
 
-    let old_target = current_attachment_target(state, attachment_id)
-        .filter(|target| *target != TargetRef::Object(target_id));
-
-    // CR 613.7e + CR 701.3b/c: bump the attachment's timestamp when it becomes
-    // attached (first attach) or moves to a different host. A no-op re-attach to
-    // the host it's already on (CR 701.3b) issues no new timestamp. Read the
-    // UNFILTERED prior host — `old_target` above collapses both first-attach and
-    // same-host re-attach to `None`, so it cannot distinguish them.
+    // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once. The timestamp
+    // bump (below) must distinguish first-attach (None) from a same-host re-attach
+    // (Some(host)); `old_target` collapses both to `None` and cannot. `old_target`
+    // is just the filtered view, so derive it from the single read rather than
+    // querying the attachment's host twice.
     let prior_host = current_attachment_target(state, attachment_id);
+    let old_target = prior_host.filter(|target| *target != TargetRef::Object(target_id));
 
     // CR 701.3a: Attaching moves attachment onto target.
     // If already attached to something, detach first. We only need to clear an
@@ -680,13 +678,12 @@ pub fn attach_to_player(
         return None;
     }
 
-    let old_target = current_attachment_target(state, attachment_id)
-        .filter(|target| *target != TargetRef::Player(target_player));
-
-    // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host so a first-attach
+    // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once so a first-attach
     // (None) and a same-player re-attach (Some(player)) are distinguishable —
-    // `old_target` above collapses both to `None`.
+    // `old_target` collapses both to `None`. Derive the filtered view from the
+    // single read rather than querying the attachment's host twice.
     let prior_host = current_attachment_target(state, attachment_id);
+    let old_target = prior_host.filter(|target| *target != TargetRef::Player(target_player));
 
     // CR 701.3a: If already attached to an object, detach from that object's
     // `attachments` list. Re-attaching to a player has no symmetric cleanup —
