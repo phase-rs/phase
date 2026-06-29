@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Convenience wrapper for contributor review analytics.
+#
+# Usage:
+#   scripts/pr-analytics
+#   scripts/pr-analytics author <login>
+#   scripts/pr-analytics json
+#   scripts/pr-analytics refresh
+#   scripts/pr-analytics top 10
+#   scripts/pr-analytics -- --sort acceptance --include-open
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+args=("analytics")
+
+while (($#)); do
+  case "$1" in
+    author)
+      args+=("--author" "${2:?author requires a login}")
+      shift 2
+      ;;
+    json)
+      args+=("--format" "json")
+      shift
+      ;;
+    refresh)
+      args+=("--refresh-github")
+      shift
+      ;;
+    top)
+      args+=("--limit" "${2:?top requires a count}")
+      shift 2
+      ;;
+    --)
+      shift
+      args+=("$@")
+      break
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+exec python3 "$script_dir/pr_review.py" "${args[@]}"

@@ -155,6 +155,156 @@ class PrReviewTests(unittest.TestCase):
             self.assertIn("false-green", events[0]["quality"]["signals"])
             self.assertIn("runtime-test-gap", events[0]["quality"]["signals"])
 
+    def test_canonical_outcome_maps_tracker_and_unknown_values(self) -> None:
+        accepted = pr_review.canonical_outcome(
+            {"event_type": "tracker_row", "tracker": {"verdict": "ENQUEUED"}}
+        )
+        unknown = pr_review.canonical_outcome(
+            {"event_type": "custom_event", "tracker": {"verdict": "SURPRISE"}}
+        )
+
+        self.assertEqual(accepted.state, "accepted")
+        self.assertEqual(unknown.state, "unknown")
+
+    def test_analytics_uses_latest_head_terminal_state_for_success(self) -> None:
+        events = [
+            {
+                "event_type": "changes_requested",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "old-head",
+            },
+            {
+                "event_type": "approved_enqueued",
+                "timestamp": "2026-06-28T01:00:00Z",
+                "event_id": "b",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "new-head",
+            },
+        ]
+
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=False,
+        )
+        contributor = model["contributors"][0]
+
+        self.assertEqual(contributor["accepted_or_enqueued"], 1)
+        self.assertEqual(contributor["blocks"], 1)
+        self.assertEqual(contributor["observed_success_rate"], 1.0)
+        self.assertEqual(model["prs"][0]["observed_heads"], 2)
+
+    def test_quality_entry_affects_signals_not_pr_activity(self) -> None:
+        events = [
+            {
+                "event_type": "quality_entry",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "author": "contributor",
+                "quality": {"login": "contributor", "signals": ["wrong-seam"]},
+            }
+        ]
+
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=True,
+        )
+        contributor = model["contributors"][0]
+
+        self.assertEqual(contributor["prs"], 0)
+        self.assertEqual(contributor["quality_signals"], {"wrong-seam": 1})
+        self.assertEqual(contributor["confidence"], "low")
+
+    def test_low_sample_size_gets_insufficient_data_label(self) -> None:
+        events = [
+            {
+                "event_type": "approved_enqueued",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "head",
+            }
+        ]
+
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=3,
+            include_open=False,
+        )
+        contributor = model["contributors"][0]
+
+        self.assertEqual(contributor["confidence"], "low")
+        self.assertEqual(contributor["score_label"], "Insufficient Data")
+
+    def test_ascii_renderer_uses_json_model(self) -> None:
+        events = [
+            {
+                "event_type": "approved_enqueued",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "head",
+            }
+        ]
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=False,
+        )
+        args = type("Args", (), {"author": None, "sort": "score", "limit": None})()
+
+        rendered = pr_review.render_analytics_ascii(model, args)
+
+        self.assertIn("Local Observed Review Analytics", rendered)
+        self.assertIn("contributor", rendered)
+
+    def test_filter_open_prs_recomputes_contributors_after_refresh(self) -> None:
+        events = [
+            {
+                "event_type": "hold_ci",
+                "timestamp": "2026-06-28T00:00:00Z",
+                "event_id": "a",
+                "pr": 1,
+                "author": "contributor",
+                "head_sha": "head",
+            }
+        ]
+        model = pr_review.build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=1,
+            include_open=True,
+        )
+        model["prs"][0]["terminal_state"] = "merged"
+        model["prs"][0]["is_open_or_pending"] = False
+
+        pr_review.filter_open_prs(model, min_prs=1, author=None, refreshed=True)
+
+        self.assertEqual(model["contributors"][0]["terminal_prs"], 1)
+        self.assertEqual(model["contributors"][0]["accepted_or_enqueued"], 1)
+
+    def test_wrapper_script_exists_and_is_executable(self) -> None:
+        wrapper = Path(__file__).resolve().parent / "pr-analytics"
+
+        self.assertTrue(wrapper.exists())
+        self.assertTrue(wrapper.stat().st_mode & 0o111)
+
 
 if __name__ == "__main__":
     unittest.main()
