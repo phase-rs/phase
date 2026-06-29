@@ -43297,6 +43297,117 @@ mod tests {
         }
     }
 
+    /// CR 118.9 + CR 122.1 + CR 202.3 + CR 601.2b: As Foretold — runtime proof
+    /// of the metered "pay {0}" free cast. The novel combination is OncePerTurn ×
+    /// a dynamic mana-value cap that reads `CountersOn { scope: Source }` (the
+    /// number of time counters on As Foretold) — no shipping card exercised this
+    /// before, so the parser shape alone is not enough. These tests drive
+    /// `hand_cast_free_candidates` end-to-end against a parsed As Foretold to
+    /// prove the cap resolves via `FilterContext::from_source_with_controller`.
+    mod as_foretold_metered_free_cast {
+        use super::*;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaCost;
+
+        const AS_FORETOLD_ORACLE: &str = "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.";
+
+        /// A benign no-target instant in P0's hand with the given mana value.
+        fn benign_spell(scenario: &mut GameScenario, name: &str, generic: u32) -> ObjectId {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![],
+                    generic,
+                })
+                .id()
+        }
+
+        /// CR 122.1 + CR 202.3: the free cast is offered for a hand spell whose
+        /// mana value is within the cap (= time counters on the source) and NOT
+        /// for one above it; raising the counter count lifts the cap, proving the
+        /// bound is dynamic and source-scoped.
+        #[test]
+        fn offers_only_spells_within_dynamic_counter_cap() {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let af = scenario
+                .add_creature_from_oracle(P0, "As Foretold", 0, 0, AS_FORETOLD_ORACLE)
+                .id();
+            scenario.with_counter(af, CounterType::Time, 2);
+            let cheap = benign_spell(&mut scenario, "Cheap Spell", 2); // MV 2 <= 2
+            let pricey = benign_spell(&mut scenario, "Pricey Spell", 3); // MV 3 > 2
+            let mut runner = scenario.build();
+
+            let offered: Vec<ObjectId> = hand_cast_free_candidates(runner.state(), P0)
+                .iter()
+                .map(|(hand, _src, _freq)| *hand)
+                .collect();
+            assert!(
+                offered.contains(&cheap),
+                "MV-2 spell must be offered at cap 2: {offered:?}"
+            );
+            assert!(
+                !offered.contains(&pricey),
+                "MV-3 spell must NOT be offered at cap 2: {offered:?}"
+            );
+
+            // Cap is dynamic: a third time counter raises it to 3.
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&af)
+                .unwrap()
+                .counters
+                .entry(CounterType::Time)
+                .and_modify(|c| *c += 1);
+            let offered_now: Vec<ObjectId> = hand_cast_free_candidates(runner.state(), P0)
+                .iter()
+                .map(|(hand, _src, _freq)| *hand)
+                .collect();
+            assert!(
+                offered_now.contains(&pricey),
+                "MV-3 spell must be offered once cap reaches 3: {offered_now:?}"
+            );
+        }
+
+        /// CR 601.2b: the OncePerTurn gate consults
+        /// `hand_cast_free_permissions_used`; once the slot is consumed the source
+        /// offers nothing more this turn, and clearing the slot (as turn-start
+        /// cleanup does) re-opens the permission.
+        #[test]
+        fn once_per_turn_gate_consults_permissions_used() {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let af = scenario
+                .add_creature_from_oracle(P0, "As Foretold", 0, 0, AS_FORETOLD_ORACLE)
+                .id();
+            scenario.with_counter(af, CounterType::Time, 2);
+            let _cheap = benign_spell(&mut scenario, "Cheap Spell", 0);
+            let mut runner = scenario.build();
+
+            assert!(
+                !hand_cast_free_candidates(runner.state(), P0).is_empty(),
+                "a free cast must be offered before the slot is used"
+            );
+
+            runner
+                .state_mut()
+                .hand_cast_free_permissions_used
+                .insert(af);
+            assert!(
+                hand_cast_free_candidates(runner.state(), P0).is_empty(),
+                "a consumed OncePerTurn slot must offer nothing more this turn"
+            );
+
+            runner.state_mut().hand_cast_free_permissions_used.clear();
+            assert!(
+                !hand_cast_free_candidates(runner.state(), P0).is_empty(),
+                "clearing the per-turn slot must re-open the free cast"
+            );
+        }
+    }
+
     /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.
     mod exert_cost {
         use super::*;

@@ -9224,6 +9224,147 @@ fn exile_cast_permission_maralen_fae_ascendant() {
     );
 }
 
+// --- As Foretold: metered "pay {0}" free-cast permission (CR 118.9 / 118.9a) ---
+
+/// CR 118.9 + CR 118.9a + CR 601.2b: As Foretold's free-cast line must lower to
+/// `CastFromHandFree { OncePerTurn, DefaultCastPermission }` with the affected
+/// filter carrying the dynamic mana-value cap `Cmc(LE, CountersOn{Source, Time})`.
+/// Anchored on `parse_static_line` so the dispatch routing through
+/// `parse_static_line_inner` is exercised end-to-end. The Oracle text is supplied
+/// post-`normalize_card_name_refs` ("this enchantment" → "~"), as the static
+/// parser receives it.
+#[test]
+fn pay_zero_free_cast_as_foretold_lowers_to_cast_from_hand_free() {
+    let text = "Once each turn, you may pay {0} rather than pay the mana cost \
+                for a spell you cast with mana value X or less, where X is the \
+                number of time counters on ~.";
+    let def = parse_static_line(text).expect("As Foretold free-cast line must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastFromHandFree {
+            frequency: CastFrequency::OncePerTurn,
+            origin: CastFreeOrigin::DefaultCastPermission,
+        },
+        "expected CastFromHandFree(OncePerTurn, DefaultCastPermission), got {:?}",
+        def.mode
+    );
+    let affected = def.affected.as_ref().expect("affected filter present");
+    let TargetFilter::Typed(tf) = affected else {
+        panic!("expected typed filter, got {affected:?}");
+    };
+    let has_dynamic_cap = tf.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Time),
+                    },
+                },
+            }
+        )
+    });
+    assert!(
+        has_dynamic_cap,
+        "filter must carry Cmc(LE, CountersOn{{Source, Time}}): {:?}",
+        tf.properties
+    );
+}
+
+/// Build-for-the-class: the combinator reuses `parse_mana_value_suffix` +
+/// `parse_quantity_ref`, so it must generalize over the comparator axis
+/// (`or greater`) and over any counter type (`charge`). Drives the helper
+/// directly to prove the class, not the single card.
+#[test]
+fn pay_zero_free_cast_generalizes_comparator_and_counter_type() {
+    let text = "Once each turn, you may pay {0} rather than pay the mana cost \
+                for a spell you cast with mana value X or greater, where X is the \
+                number of charge counters on ~.";
+    let lower = text.to_lowercase();
+    let def = try_parse_pay_zero_free_cast_permission(text, &lower)
+        .expect("comparator/counter-type generalization must parse");
+    let TargetFilter::Typed(tf) = def.affected.expect("affected filter") else {
+        panic!("expected typed filter");
+    };
+    let has_ge_charge = tf.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(ref ct),
+                    },
+                },
+            } if *ct == CounterType::Generic("charge".to_string())
+        )
+    });
+    assert!(
+        has_ge_charge,
+        "filter must carry Cmc(GE, CountersOn{{Source, charge}}): {:?}",
+        tf.properties
+    );
+}
+
+/// CR 118.9a: the literal `{0}` is the discriminator. A nonzero alternative cost
+/// ("{1}") is NOT a free cast and must stay on the `CastWithAlternativeCost`
+/// path — the combinator must decline so the line is not diverted.
+#[test]
+fn pay_zero_free_cast_rejects_nonzero_cost() {
+    let text = "Once each turn, you may pay {1} rather than pay the mana cost \
+                for a spell you cast with mana value X or less, where X is the \
+                number of time counters on ~.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_pay_zero_free_cast_permission(text, &lower).is_none(),
+        "a nonzero {{1}} cost must not match the metered free-cast class"
+    );
+}
+
+/// The "where X is <quantity>" forward-reference definer is required: a bare
+/// "with mana value X or less" with no definer leaves X unbound, so the
+/// combinator must decline (the line then falls through to `Unimplemented`,
+/// never a silent misparse).
+#[test]
+fn pay_zero_free_cast_requires_where_x_definer() {
+    let text = "Once each turn, you may pay {0} rather than pay the mana cost \
+                for a spell you cast with mana value X or less.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_pay_zero_free_cast_permission(text, &lower).is_none(),
+        "missing \", where X is …\" definer must decline"
+    );
+}
+
+/// Classifier routing: `is_static_pattern` must claim the As Foretold line so it
+/// reaches Priority 7 static dispatch, but must NOT claim the unmetered
+/// Rooftop-Storm alternative-cost line (no frequency prefix) — that belongs to
+/// Priority 6c (`is_spells_alternative_cost_pattern`).
+#[test]
+fn pay_zero_free_cast_classifier_routing() {
+    let af = "once each turn, you may pay {0} rather than pay the mana cost \
+              for a spell you cast with mana value x or less, where x is the \
+              number of time counters on ~.";
+    assert!(
+        crate::parser::oracle_classifier::is_static_pattern(af),
+        "As Foretold metered free-cast must classify as static"
+    );
+
+    let rooftop = "you may pay {0} rather than pay the mana cost for zombie \
+                   creature spells you cast.";
+    assert!(
+        !crate::parser::oracle_classifier::is_static_pattern(rooftop),
+        "unmetered Rooftop Storm alt-cost line must not be claimed by the metered anchor"
+    );
+    assert!(
+        crate::parser::oracle_classifier::is_spells_alternative_cost_pattern(rooftop),
+        "Rooftop Storm must remain on the alternative-cost path"
+    );
+}
+
 /// Issue #594 sibling — the parser must accept the longer "once during
 /// each of your turns" synonym, leaving the rest of the lowering
 /// unchanged. No card prints this shape today, but `add-engine-variant`

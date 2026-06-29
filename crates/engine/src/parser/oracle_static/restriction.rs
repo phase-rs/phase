@@ -2468,6 +2468,117 @@ fn try_parse_disjunctive_top_of_library_cast_permission(
     Some(def)
 }
 
+/// CR 118.9 + CR 118.9a: Parse the metered "pay {0}" free-cast permission —
+/// "[Once each turn,] you may pay {0} rather than pay the mana cost for a spell
+/// you cast with mana value X or less, where X is <quantity>." (As Foretold).
+///
+/// CR 118.9: "you may [action] rather than pay [the] mana cost" is an
+/// alternative cost; the literal `{0}` means paying nothing, i.e. a free cast.
+/// CR 118.9a: only one alternative cost applies, so this lowers onto the single
+/// cost-zeroing path `StaticMode::CastFromHandFree`, exactly like Zaffai's
+/// "once during each of your turns, you may cast ... without paying" form — the
+/// only difference is a dynamic mana-value cap, expressed as a `FilterProp::Cmc`
+/// on the affected filter rather than a new runtime axis.
+///
+/// The required frequency prefix and the required literal `{0}` are the
+/// discriminators that keep this disjoint from the unmetered, nonzero
+/// alternative-cost class (Rooftop Storm `{0}`, Fist of Suns `{WUBRG}`, Jodah),
+/// which has no per-turn axis and routes through `parse_spells_alternative_cost`
+/// → `StaticMode::CastWithAlternativeCost`. A future unification (per-turn
+/// enforcement on the alternative-cost path) could merge the two homes; that is
+/// a cross-cutting runtime refactor, out of scope for this card.
+///
+/// Builds for the class: the comparator (`or less`/`or greater`/`less than`/
+/// `equal to`) is parsed by the shared `parse_mana_value_suffix`, and the
+/// "where X is <quantity>" forward reference is resolved by `parse_quantity_ref`
+/// and bound through `bind_where_x_in_quantity_expr`, so any counter type or any
+/// recognized dynamic quantity slots in without parser changes.
+pub(crate) fn try_parse_pay_zero_free_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 601.2a + CR 118.9: The frequency prefix is required. It bounds the match
+    // to the metered (once-per-turn) class and keeps the unmetered Rooftop Storm
+    // class out. An `Unlimited` sibling would be a one-line `opt(...)` change if
+    // an Oracle-confirmed "pay {0}" printing without a frequency prefix appears.
+    let rest = nom_tag_lower(lower, lower, "once each turn, ")
+        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))?;
+    let frequency = CastFrequency::OncePerTurn;
+
+    // CR 118.9a: The literal `{0}` is the discriminator — paying nothing is a
+    // free cast (one alternative cost per spell). A nonzero cost ("{1}", "{X}",
+    // "{WUBRG}") must stay on the `CastWithAlternativeCost` path, so it must not
+    // match here. `{0}` survives `.to_lowercase()` unchanged.
+    let rest = nom_tag_lower(
+        rest,
+        rest,
+        "you may pay {0} rather than pay the mana cost for ",
+    )?;
+
+    // The "where X is <quantity>" forward-reference definer is the defining
+    // characteristic of this dynamic-cap pattern; require it. Without it the line
+    // falls through to the Priority 9 `Unimplemented` path (no silent misparse).
+    let (_, (filter_part, x_def)) = nom_primitives::split_once_on(rest, ", where x is ").ok()?;
+
+    // CR 122.1 + CR 202.3: Resolve the dynamic cap. `parse_quantity_ref` maps
+    // "the number of time counters on ~" → `CountersOn { scope: Source,
+    // counter_type: Some(Time) }`; the same combinator covers any counter type
+    // and any other dynamic quantity, so the cap is class-generic.
+    let where_x = parse_quantity_ref(x_def.trim().trim_end_matches('.'))?;
+
+    // Parse the affected-spell phrase: optional article, "spell"/"spells",
+    // optional " you cast", then the shared mana-value suffix combinator.
+    fn parse_spell_filter_head(input: &str) -> OracleResult<'_, ()> {
+        let (i, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+        let (i, _) = alt((tag("spells"), tag("spell"))).parse(i)?;
+        let (i, _) = opt(tag(" you cast")).parse(i)?;
+        Ok((i, ()))
+    }
+    let (after_head, ()) = parse_spell_filter_head(filter_part).ok()?;
+    let mv_text = after_head.trim_start();
+
+    // CR 202.3: Reuse the shared mana-value suffix parser. "with mana value x or
+    // less" lowers to `FilterProp::Cmc { comparator: LE, value: Ref(Variable("X")) }`;
+    // the forward reference is bound below. Require full consumption.
+    let (prop, consumed) = parse_mana_value_suffix(mv_text, &mut ParseContext::default())?;
+    if !mv_text[consumed..].trim().is_empty() {
+        return None;
+    }
+    let FilterProp::Cmc { comparator, value } = prop else {
+        return None;
+    };
+
+    // CR 601.2b: Bind the announced cap. `bind_where_x_in_quantity_expr` rewrites
+    // the placeholder `Ref(Variable("X"))` into `Ref(where_x)` (the counter count),
+    // so the affected filter reads the source's counters at evaluation time.
+    let value = bind_where_x_in_quantity_expr(value, &where_x)?;
+    let cmc = FilterProp::Cmc { comparator, value };
+
+    // CR 109.5: "a spell you cast" scopes to the controller; reuse the shared
+    // subject-constraint helper (the same path `parse_spells_alternative_cost`
+    // uses to attach its MV filter) so the `ControllerRef::You` + `Cmc` rider
+    // lands on every leaf of the base filter.
+    let base = TargetFilter::Typed(TypedFilter::card());
+    let affected = apply_spell_keyword_subject_constraints(base, None, Some(cmc), Vec::new());
+
+    // CR 118.9a: `DefaultCastPermission` mirrors the unqualified branch of
+    // `try_parse_cast_free_permission` ("a spell you cast", no "from your hand"):
+    // the static replaces the mana cost for spells in the controller's built-in
+    // cast zones rather than creating an independent cast-from-anywhere window.
+    // Runtime scope today is hand plus command-zone commanders/signature spells
+    // (`cast_free_origin_admits_object` in game/casting.rs); spells cast from
+    // graveyard/exile via a separate permission are not yet covered — broadening
+    // the origin is tracked as future work.
+    Some(
+        StaticDefinition::new(StaticMode::CastFromHandFree {
+            frequency,
+            origin: CastFreeOrigin::DefaultCastPermission,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 601.2b + CR 118.9a: Parse Omniscience-class restricted free-cast static
 /// abilities — "you may cast [filter] [from your hand]? without paying [its|their]
 /// mana cost[s]?" — covering Omniscience and the Tamiyo, Field Researcher emblem
@@ -2492,8 +2603,10 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     };
 
     // The zone qualifier "from your hand" is optional. When omitted, the static
-    // only replaces the mana cost for spells already castable from their current
-    // zone; it does not create an independent cast-from-anywhere permission.
+    // only replaces the mana cost for spells in the controller's built-in cast
+    // zones (runtime scope: hand plus command-zone commanders/signature spells,
+    // per `cast_free_origin_admits_object`); it does not create an independent
+    // cast-from-anywhere permission.
     //
     // Both branches must terminate at " without paying" — that token is the
     // single anchor for the static. The qualified branch keeps a permissive

@@ -745,6 +745,17 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 118.9 + CR 118.9a + CR 601.2b: "[Once each turn,] you may pay {0} rather
+    // than pay the mana cost for a spell you cast with mana value X or less, where
+    // X is the number of <ct> counters on ~." (As Foretold). The literal `{0}`
+    // alternative cost is a metered free cast; lowers to `CastFromHandFree`
+    // (OncePerTurn) with a dynamic `FilterProp::Cmc` cap. Runs before the
+    // Omniscience-class handler because its `{0}` anchor is disjoint from that
+    // handler's "you may cast" anchor.
+    if let Some(result) = try_parse_pay_zero_free_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
