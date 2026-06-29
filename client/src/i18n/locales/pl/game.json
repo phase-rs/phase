@@ -1668,6 +1668,10 @@
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
   },
+  "announcingOpponent": {
+    "title": "Wybierz ogłaszającego przeciwnika",
+    "subtitle": "Wybierz, który przeciwnik ogłasza cel."
+  },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."

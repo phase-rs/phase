@@ -1668,6 +1668,10 @@
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
   },
+  "announcingOpponent": {
+    "title": "Elegir oponente que anuncia",
+    "subtitle": "Elige qué oponente anuncia el objetivo."
+  },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."

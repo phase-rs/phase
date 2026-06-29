@@ -1668,6 +1668,10 @@
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
+  "announcingOpponent": {
+    "title": "Ansagenden Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner das Ziel ansagt."
+  },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."

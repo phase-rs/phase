@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { GameAction, PlayerId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -26,6 +28,7 @@ export function AnnouncingOpponentModalContent({
   seatOrder,
   dispatch,
 }: AnnouncingOpponentModalContentProps) {
+  const { t } = useTranslation("game");
   const candidates = [...waitingFor.data.candidates].sort((a, b) => {
     const aIdx = seatOrder?.indexOf(a) ?? a;
     const bIdx = seatOrder?.indexOf(b) ?? b;
@@ -34,8 +37,8 @@ export function AnnouncingOpponentModalContent({
 
   return (
     <ChoiceModal
-      title="Choose Announcing Opponent"
-      subtitle="Choose which opponent announces the target."
+      title={t("announcingOpponent.title")}
+      subtitle={t("announcingOpponent.subtitle")}
       options={candidates.map((opponent) => ({
         id: String(opponent),
         label: getOpponentDisplayName(opponent),

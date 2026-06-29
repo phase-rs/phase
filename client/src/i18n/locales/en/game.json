@@ -1705,6 +1705,10 @@
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
   },
+  "announcingOpponent": {
+    "title": "Choose Announcing Opponent",
+    "subtitle": "Choose which opponent announces the target."
+  },
   "clashOpponent": {
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
