@@ -238,3 +238,116 @@ pub(crate) fn guess_is_correct(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::game_state::GameState;
+
+    /// CR 608.2b + CR 609.3: `references_target_scope` must recurse into
+    /// `QuantityExpr::Offset` so a composed expression like "that card's mana
+    /// value plus 1" is correctly detected as target-dependent.
+    ///
+    /// The prior bug: `Offset` was not traversed — only bare `QuantityExpr::Ref`
+    /// was matched — so a composed lhs was treated as target-independent, and
+    /// `OpponentGuess` could be raised with a false 0-based truth value even when
+    /// no object target existed.
+    #[test]
+    fn references_target_scope_detects_offset_wrapping_target_ref() {
+        let composed = QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            offset: 1,
+        };
+        assert!(
+            references_target_scope(&composed),
+            "Offset wrapping a Target-scope ref must be detected as target-dependent"
+        );
+    }
+
+    /// CR 608.2b + CR 609.3: `references_target_scope` must recurse into
+    /// `QuantityExpr::Sum` to detect a Target-scope ref in any summand.
+    #[test]
+    fn references_target_scope_detects_sum_containing_target_ref() {
+        let target_ref = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            },
+        };
+        let sum = QuantityExpr::Sum {
+            exprs: vec![QuantityExpr::Fixed { value: 1 }, target_ref],
+        };
+        assert!(
+            references_target_scope(&sum),
+            "Sum containing a Target-scope ref must be detected as target-dependent"
+        );
+    }
+
+    /// CR 608.2b: A non-Target ObjectScope ref (`Source`) must NOT be flagged
+    /// as target-dependent by `references_target_scope`.
+    #[test]
+    fn references_target_scope_ignores_source_scope() {
+        let source_ref = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert!(
+            !references_target_scope(&source_ref),
+            "A Source-scope ref must not be treated as target-dependent"
+        );
+    }
+
+    /// CR 608.2d + CR 609.3: When the proposition's `lhs` is a composed
+    /// `QuantityExpr` (Offset wrapping ObjectManaValue{Target}) and the
+    /// resolving ability carries no object target (simulating the empty-hand /
+    /// no-card-chosen path), the resolver must skip `OpponentGuess` entirely —
+    /// the guess does nothing and the no-guess tail proceeds.
+    ///
+    /// This test would have FAILED on the old `references_target_scope`
+    /// implementation (which only matched bare `QuantityExpr::Ref` at top level),
+    /// because the composed `lhs` would have been treated as target-independent
+    /// and a guess would have been raised against a false 0-based proposition.
+    #[test]
+    fn resolve_skips_guess_for_composed_target_scope_proposition_with_no_object_target() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+
+        // Composed lhs: "that card's mana value plus 1" — references ObjectScope::Target
+        // inside an Offset wrapper. The old code missed this.
+        let composed_lhs = QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            offset: 1,
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::OpponentGuess {
+                guesser: ControllerRef::Opponent,
+                subject: Box::new(GuessSubject::Proposition {
+                    lhs: composed_lhs,
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            },
+            vec![], // No object target — simulates the empty-hand / no-card-chosen path
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok(), "resolve must not error: {:?}", result);
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OpponentGuess { .. }),
+            "a composed target-scope proposition with no object target must not raise \
+             OpponentGuess — the guess does nothing (CR 609.3); got: {:?}",
+            state.waiting_for
+        );
+    }
+}

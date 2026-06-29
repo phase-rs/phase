@@ -100,10 +100,9 @@ use crate::types::ability::{
     PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
     ReplacementCondition, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
-    StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetSelectionMode, ThisWayCause, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
