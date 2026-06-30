@@ -717,6 +717,7 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::YouControlLandsWithSameNameAtLeast { .. }
         | ParsedCondition::YouControlNoCreatures
         | ParsedCondition::YouAttackedThisTurn
+        | ParsedCondition::YouAttackedSourceControllerThisTurn
         | ParsedCondition::YouAttackedWithAtLeast { .. }
         | ParsedCondition::YouPlayedLandThisTurn
         | ParsedCondition::YouCastSpellThisTurn { .. }

@@ -1077,6 +1077,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::LastCreated => "LastCreated",
         TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
+        TargetFilter::ChosenCard => "ChosenCard",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
         TargetFilter::ExiledBySource => "ExiledBySource",

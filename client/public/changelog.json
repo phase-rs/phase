@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 156,
+      "date": "2026-06-30",
+      "title": "Infinite combos end the game (∞)",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Infinite combos can now be detected and resolved: enable the combo detector when creating a game, and confirmed infinite loops end the game (or draw it) and show an ∞ badge for unbounded mana, tokens, damage, life drain, mill, poison, counters, draws, casts, and triggers\n• Alchemy perpetual effects now cover spells that perpetually cost more or less to cast and permanents that perpetually change types (e.g. Second Little Pig)\n• Greymond, Avacyn's Stalwart grants two chosen keywords and anthems your Humans\n• Koh, the Face Stealer now gains all activated and triggered abilities of the last card you exiled face down (with Sandswirl Wanderglyph)\n• New card: Endangered Armodon\n• Fractured Identity now works\n\n🛠️ Cards That Now Work Right\n• Thassa's Oracle now wins even when reanimated with an empty library (e.g. via Dread Return after milling out)\n• Incubate tokens now set off \"a permanent enters\" abilities like Soul Warden, Altar of the Brood, and Panharmonicon\n• Heartwood Storyteller now lets each of the casting player's opponents draw, each choosing independently — and never your teammate in Two-Headed Giant\n• Three Blind Mice's later chapters can now copy a token you control\n• Solitude's \"exile up to one target creature\" no longer soft-locks the game\n• Winter Soldier's attack trigger and graveyard Hero +1/+1 counter now resolve correctly\n• Bite Down and other one-sided fights no longer ask for an extra target\n• Kari Zev's Ragavan token (and similar delayed exiles) no longer crash when the token already died\n• Urza's Saga's second chapter, and other nested token-granting abilities, now create their token instead of misreading the inner ability\n• Per-opponent effects now respect hexproof\n• Ethereal Valkyrie's foretold cards are no longer castable for free\n• Many conditional cards now read their gates correctly: \"you lost life this turn\" (The Book of Vile Darkness), \"more cards in hand than each opponent\", \"any player / no opponent controls X\", and \"choose a creature you don't control\" (~193 cards)\n• \"Choose a number\" effects now parse when the phrase ends a sentence, and \"sacrifice another X or Y\" correctly excludes the source on every option\n\n⚔️ Combat & Gameplay\n• Continuous effects are more rules-accurate (CR 613): face-down overrides, timestamp ordering, and granted-ability timestamps now layer correctly\n\n🖥️ Interface\n• The hand fan now sizes itself by the total cards shown, so Delve and other graveyard/exile payments no longer spill cards off-screen — and Delve now glows the graveyard pile to open its selection modal\n\n🌐 Multiplayer\n• Fixed a server hang when creating multiplayer games",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521565348745314395"
+    },
+    {
       "id": 155,
       "date": "2026-06-29",
       "title": "Fblthp plots from the library",

@@ -628,6 +628,7 @@ fn redundancy_delta(
         | Effect::Heist { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
+        | Effect::RememberCard { .. }
         | Effect::HeistExile => None,
     }
 }

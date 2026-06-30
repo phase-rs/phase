@@ -72,7 +72,7 @@ Hand this to your LLM:
 ```
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow it end-to-end to implement {a card I name, or pick one for me}.
-Use the $engine-implementer skill. Use medium thinking. Don't stop for my input.
+Use the $engine-implementer skill. Use high thinking. Don't stop for my input.
 Open a PR when done.
 ```
 

@@ -85,6 +85,22 @@ fn perpetual_target_object_ids(
         }
     }
 
+    // Mass perpetual over a non-battlefield zone (CR 601.2f hand-card cost grants:
+    // "[type] cards in [your/that player's] hand perpetually gain …"). When the
+    // filter pins an `InZone` other than the battlefield, enumerate that zone and
+    // keep every object matching the filter — NOT a single declared target and
+    // NOT the source fallback (the grant edits a set of cards, possibly empty, in
+    // a hidden zone). Mirrors `layers::apply_continuous_effect_filtered`.
+    if let Some(zone) = target.extract_in_zone() {
+        if zone != crate::types::zones::Zone::Battlefield {
+            let ctx = crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            return crate::game::targeting::zone_object_ids(state, zone)
+                .into_iter()
+                .filter(|&id| crate::game::filter::matches_target_filter(state, id, target, &ctx))
+                .collect();
+        }
+    }
+
     if ids.is_empty() {
         ids.push(ability.source_id);
     }
@@ -110,11 +126,12 @@ pub fn resolve(
     let target = target.clone();
 
     let ids = perpetual_target_object_ids(state, ability, &target);
+    let all_creature_types = &state.all_creature_types;
 
     let mut changed = false;
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.apply_perpetual_modification(&modification);
+            obj.apply_perpetual_modification(&modification, all_creature_types);
             changed = true;
         }
     }
@@ -484,5 +501,76 @@ mod tests {
         assert_eq!(obj.base_power, Some(2));
         assert_eq!(obj.base_toughness, Some(2));
         assert_eq!(state.objects.get(&source).unwrap().base_power, None);
+    }
+
+    /// CR 613.1d + CR 613.1f + CR 613.4b: perpetual type-change replaces
+    /// creature subtypes, grants keywords, sets base P/T, and recomputes live
+    /// characteristics after flush.
+    #[test]
+    fn perpetual_become_updates_types_pt_and_keywords_after_layer_flush() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        state.all_creature_types =
+            vec!["Pig".to_string(), "Boar".to_string(), "Spirit".to_string()];
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Second Little Pig".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Pig".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+
+        let modification = PerpetualModification::Become {
+            creature_subtypes: vec!["Boar".to_string(), "Spirit".to_string()],
+            power: 4,
+            toughness: 4,
+            keywords: vec![Keyword::Flying],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: modification.clone(),
+            },
+            vec![TargetRef::Object(id)],
+            id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+
+        let obj = state.objects.get(&id).unwrap();
+        assert!(obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Boar")));
+        assert!(obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Spirit")));
+        assert!(!obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Pig")));
+        assert_eq!(obj.power, Some(4));
+        assert_eq!(obj.toughness, Some(4));
+        assert!(obj.has_keyword(&Keyword::Flying));
+        assert!(obj.perpetual_mods.contains(&modification));
     }
 }

@@ -50,8 +50,8 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
     contains_implicit_tracked_set_pronoun, each_target_filter_mut, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, mark_uses_tracked_set, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     publishes_tracked_set_from_resolution, refine_damage_target_remainder,
     replace_player_anaphor_with_parent_target, retarget_counter_additional_cost_to_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
@@ -1882,6 +1882,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    // CR 105.4 + CR 702.16: inject a color choice ahead of a "gains
+    // protection/hexproof from the color of your choice" grant so the source
+    // carries a chosen color for the layer applier to bake in.
+    inject_chosen_color_choice_grant(&mut result, false);
     rewrite_that_type_mana_instead(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
@@ -1912,6 +1916,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     fold_token_it_has_grants_into_token_statics(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
+    fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
     // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
@@ -1928,6 +1933,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
     // "up to one" antecedent target is declined (no object target chosen).
     gate_reflexive_rider_on_declined_optional_target(&mut result);
+    // CR 608.2c + CR 613.1f: persist a standalone "choose a [type] card exiled
+    // with ~" pick as the host's last chosen card (Koh, the Face Stealer).
+    append_remember_card_to_standalone_exiled_choice(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
@@ -1941,6 +1949,48 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     result
+}
+
+/// CR 608.2c + CR 613.1f: A standalone "choose a [type] card exiled with ~"
+/// ability — a `ChooseFromZone` from the host's linked-exile set
+/// (`ExiledBySource`) with no follow-up consumer — persists its pick as the host's
+/// "last chosen card" by appending an `Effect::RememberCard` sub-ability. A choice
+/// with no consumer is otherwise a no-op no real card prints; the only cards with
+/// this shape feed a companion `TargetFilter::ChosenCard` grant (Koh, the Face
+/// Stealer — "has all activated and triggered abilities of the last chosen card").
+/// RememberCard reads the resolution chain's published pick via the
+/// `TrackedSetId(0)` sentinel (`resolve_tracked_set_sentinel`).
+fn append_remember_card_to_standalone_exiled_choice(def: &mut AbilityDefinition) {
+    if def.sub_ability.is_some() {
+        return;
+    }
+    let from_linked_exile = matches!(
+        &*def.effect,
+        Effect::ChooseFromZone { filter: Some(f), .. } if filter_mentions_exiled_by_source(f)
+    );
+    if !from_linked_exile {
+        return;
+    }
+    def.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RememberCard {
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        },
+    )));
+}
+
+/// Recursively detect a `TargetFilter::ExiledBySource` leaf (possibly nested under
+/// `And`/`Or`) — the "exiled with ~" linked-exile marker.
+fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ExiledBySource => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_mentions_exiled_by_source)
+        }
+        _ => false,
+    }
 }
 
 fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
@@ -2017,6 +2067,66 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
+/// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
+/// additional +1/+1 counter on it" riders on a parent battlefield zone change
+/// are entry replacement properties, not post-move `PutCounter` subs.
+fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
+    let parent_moves_to_battlefield = matches!(
+        *def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } | Effect::Dig {
+            destination: Some(Zone::Battlefield),
+            ..
+        }
+    );
+    if !parent_moves_to_battlefield {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            fold_enters_this_way_counter_rider(sub);
+        }
+        if let Some(else_branch) = def.else_ability.as_mut() {
+            fold_enters_this_way_counter_rider(else_branch);
+        }
+        return;
+    }
+
+    let Some(mut sub) = def.sub_ability.take() else {
+        return;
+    };
+
+    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = sub.condition.clone() else {
+        def.sub_ability = Some(sub);
+        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+        return;
+    };
+
+    if let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::ParentTarget,
+    } = &*sub.effect
+    {
+        if let Effect::ChangeZone {
+            conditional_enter_with_counters,
+            ..
+        } = &mut *def.effect
+        {
+            conditional_enter_with_counters.push((filter, counter_type.clone(), count.clone()));
+            def.sub_ability = sub.sub_ability.take();
+            if let Some(nested) = def.sub_ability.as_mut() {
+                fold_enters_this_way_counter_rider(nested);
+            }
+            return;
+        }
+    }
+
+    def.sub_ability = Some(sub);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_enters_this_way_counter_rider(sub);
+    }
+}
+
 fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
@@ -3326,6 +3436,22 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
+/// Parse the player anchor in an "each player other than ⟨anchor⟩" subject into
+/// the `PlayerFilter` whose population is excluded. Composable `alt()` so future
+/// anchors ("you", "that player") slot in without new `PlayerFilter` variants.
+fn parse_excluded_player_anchor(i: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((
+        // CR 109.4 + CR 608.2h: "its controller" = controller of the targeted
+        // permanent named earlier in the spell (the exiled object for Fractured
+        // Identity), resolved via `PlayerFilter::ParentObjectTargetController`.
+        value(
+            PlayerFilter::ParentObjectTargetController,
+            tag("its controller"),
+        ),
+    ))
+    .parse(i)
+}
+
 pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
@@ -3335,7 +3461,32 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 tag("each player with the highest speed among players "),
             ),
             value(PlayerFilter::Opponent, tag("each other player ")),
+            // CR 102.2 + CR 603.2: "each of that player's opponents" — the
+            // caster's opponents (mandatory variant), fanned out per-player.
+            // Apostrophe variants: ASCII ' and curly U+2019 '.
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player's opponents "),
+            ),
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player\u{2019}s opponents "),
+            ),
             value(PlayerFilter::Opponent, tag("each opponent ")),
+            // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than <ref>" —
+            // all players except the anchor's player (resolved with last-known
+            // information when the anchor object has left the battlefield, e.g.
+            // Fractured Identity's exiled permanent). Placed before the bare
+            // "each player " arm so the longer prefix wins.
+            map(
+                preceded(
+                    tag("each player other than "),
+                    terminated(parse_excluded_player_anchor, tag(" ")),
+                ),
+                |anchor| PlayerFilter::AllExcept {
+                    exclude: Box::new(anchor),
+                },
+            ),
             value(PlayerFilter::All, tag("each player ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
@@ -7269,6 +7420,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -7363,6 +7515,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -8098,6 +8251,29 @@ mod tests {
         assert_eq!(
             residual, "destroy up to one target creature that player controls",
             "residual must be the bare imperative"
+        );
+    }
+
+    // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than its controller
+    // <verb>" strips to `PlayerFilter::AllExcept { ParentObjectTargetController }`
+    // and leaves the deconjugated imperative residual. The "each player other
+    // than " arm must beat the bare "each player " arm. Building block for
+    // Fractured Identity and the "each player other than ⟨ref⟩ does X" class.
+    #[test]
+    fn each_player_other_than_its_controller_strips_to_all_except_scope() {
+        use crate::types::ability::PlayerFilter;
+        let (scope, residual) = super::strip_each_player_subject(
+            "each player other than its controller creates a token that's a copy of it.",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            }),
+        );
+        assert_eq!(
+            residual, "create a token that's a copy of it.",
+            "residual must be the deconjugated imperative with the exclusion stripped"
         );
     }
 

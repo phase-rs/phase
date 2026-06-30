@@ -1600,6 +1600,11 @@ fn continuous_mods_grant_chosen_keyword_anaphor() {
         "gain that ability",
         "gain the chosen ability",
         "gain the chosen keyword",
+        // CR 608.2d: plural anaphors refer back to a multi-keyword choice
+        // (Greymond's "Humans you control have each of the chosen abilities").
+        // The same `AddChosenKeyword` reads ALL persisted chosen keywords.
+        "have each of the chosen abilities",
+        "have the chosen abilities",
     ] {
         let mods = parse_continuous_modifications(phrase);
         assert_eq!(
@@ -14374,6 +14379,36 @@ fn cant_cast_opponent_attacked_this_turn() {
 }
 
 #[test]
+fn cant_cast_opponent_attacked_you_this_turn() {
+    // CR 101.2 + CR 508.6 + CR 109.5: Sandswirl Wanderglyph — "Each opponent who
+    // attacked you or a planeswalker you control this turn can't cast spells." The
+    // per-affected-player predicate is YouAttackedSourceControllerThisTurn (defender
+    // = the source's controller), distinct from Angelic Arbiter's attacked-ANYONE.
+    let def = parse_static_line(
+        "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedSourceControllerThisTurn),
+        "must carry the source-controller-defender predicate"
+    );
+    // Discriminating: must NOT collapse to Angelic Arbiter's attacked-anyone leaf.
+    assert_ne!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedThisTurn),
+    );
+    // The source-relative functioning gate must stay None (always-on static).
+    assert_eq!(def.condition, None);
+}
+
+#[test]
 fn cant_attack_opponent_cast_spell_this_turn() {
     // CR 508.1 + CR 109.5: "Each opponent who cast a spell this turn can't
     // attack with creatures" — restricts OPPONENTS' creatures, not the source
@@ -17397,6 +17432,53 @@ fn cant_search_library_opponents_form() {
         StaticMode::CantSearchLibrary {
             cause: ProhibitionScope::Opponents,
         }
+    );
+}
+
+// --- CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop (Aven Mindcensor class) ---
+
+#[test]
+fn restrict_search_to_top_aven_mindcensor() {
+    // CR 701.23f + CR 614.1a: Aven Mindcensor — "If an opponent would search a
+    // library, that player searches the top four cards of that library instead."
+    let def = parse_static_line(
+        "If an opponent would search a library, that player searches the top four cards of that library instead.",
+    )
+    .expect("Aven Mindcensor Oracle text should parse as a static");
+    assert_eq!(
+        def.mode,
+        StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::Opponents,
+            count: 4,
+        },
+        "must lower to the top-N restriction static, not Unimplemented/replacement"
+    );
+}
+
+#[test]
+fn restrict_search_to_top_count_is_parsed_not_hardcoded() {
+    // Hostile count: a top-six variant proves `count` is extracted from the text,
+    // not pinned to Aven's 4.
+    let def = parse_static_line(
+        "If a player would search a library, that player searches the top six cards of that library instead.",
+    )
+    .expect("top-six variant should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::AllPlayers,
+            count: 6,
+        }
+    );
+}
+
+#[test]
+fn restrict_search_to_top_does_not_claim_plain_search_effect() {
+    // Negative: a normal tutor effect is not this static — the static parser must
+    // decline it so it routes to the effect parser as an ordinary search.
+    assert!(
+        parse_static_line("Search your library for a card, then shuffle.").is_none(),
+        "a plain library-search effect must not parse as RestrictLibrarySearchToTop"
     );
 }
 

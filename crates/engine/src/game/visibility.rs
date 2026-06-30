@@ -594,6 +594,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         owner_library,
         track_exiled_by_source,
         ref face_down_profile,
+        ref enter_with_counters,
+        ref conditional_enter_with_counters,
         count_param,
         library_position: None,
         is_cost_payment: _,
@@ -619,6 +621,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 // Face-down entry characteristics are public effect parameters,
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
+                enter_with_counters: enter_with_counters.clone(),
+                conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
                 library_position: None,
                 is_cost_payment: false,

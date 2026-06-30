@@ -73,6 +73,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -275,6 +276,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -1721,6 +1723,23 @@ fn filter_inner_for_object(
         TargetFilter::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
             .is_some_and(|snapshot| snapshot.object_id == object_id),
+        // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
+        // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
+        // live each layer pass against `source_id` (the permanent that HAS the
+        // granting static — Koh), not the resolving `ability`, so the static grant
+        // resolves it. The `obj.zone == Zone::Exile` guard is the invalidation:
+        // a chosen card that leaves exile becomes a new object (CR 400.7) with a
+        // fresh id, so the stored id stops matching an exiled object and the grant
+        // drops. Re-choosing replaces the stored `Card` (RememberCard is
+        // replace-on-rechoose), so this always reflects the single latest choice.
+        TargetFilter::ChosenCard => {
+            obj.zone == Zone::Exile
+                && state.objects.get(&source_id).is_some_and(|src| {
+                    src.chosen_attributes
+                        .iter()
+                        .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == object_id))
+                })
+        }
         // CR 603.7: Match objects in a tracked set from the originating effect.
         TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
@@ -2091,6 +2110,7 @@ fn zone_change_filter_inner(
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -2340,6 +2360,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -2584,6 +2605,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
