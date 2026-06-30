@@ -153,11 +153,14 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+    use crate::game::scenario::GameRunner;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, PerpetualModification, ResolvedAbility, TargetRef};
+    use crate::types::ability::{
+        Effect, PerpetualModification, ResolvedAbility, TargetFilter, TargetRef,
+    };
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -554,8 +557,8 @@ mod tests {
             "grizzly bears".to_string(),
             CardFace {
                 name: "Grizzly Bears".to_string(),
-                power: Some(PtValue::Fixed { value: 5 }),
-                toughness: Some(PtValue::Fixed { value: 5 }),
+                power: Some(PtValue::Fixed(5)),
+                toughness: Some(PtValue::Fixed(5)),
                 card_type: CardType {
                     core_types: vec![CoreType::Creature],
                     ..Default::default()
@@ -605,9 +608,9 @@ mod tests {
     /// — not the spell — receives the perpetual 1/1 base P/T edit.
     #[test]
     fn three_tree_battalion_perpetual_duplicate_base_pt_end_to_end() {
-        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::game::scenario::{GameScenario, P0, P1};
         use crate::types::actions::GameAction;
-        use crate::types::game_state::{CastPaymentMode, WaitingFor};
+        use crate::types::game_state::CastPaymentMode;
         use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
         use crate::types::phase::Phase;
 
