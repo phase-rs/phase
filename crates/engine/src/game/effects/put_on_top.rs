@@ -44,22 +44,19 @@ pub fn resolve(
     // back to `resolved_targets`'s generic self-fallback (below), which would
     // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
     // into the library it just found empty, corrupting devotion and
-    // library-count reads for any trailing win condition. Checked only here —
-    // not in the shared `resolved_targets` chokepoint — so every OTHER
-    // `ParentTarget` consumer (Avenging Angel's LTB self-return, etc.) keeps
-    // its ordinary self-fallback regardless of an unrelated Dig elsewhere in
-    // the same resolution.
-    let checking_parent_target_after_dig =
-        matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty();
-    let dig_found_nothing_for_parent_target =
-        checking_parent_target_after_dig && state.last_dig_found_nothing;
-    // Consume the signal the moment it's consulted, whether or not it ends up
-    // true — so a LATER, unrelated `PutAtLibraryPosition { ParentTarget }`
-    // call in the same top-level resolution (e.g. a second card's genuine LTB
-    // self-return) never inherits a stale flag from this Dig.
-    if checking_parent_target_after_dig {
-        state.last_dig_found_nothing = false;
-    }
+    // library-count reads for any trailing win condition.
+    //
+    // `ability.dig_found_nothing_for_parent_target` is a typed, per-ability
+    // signal stamped ONLY by `effects::apply_parent_chain_context` at the
+    // exact moment THIS ability is handed off as a Dig's immediate
+    // sub_ability — never copied to grandchildren and never read from raw
+    // global state here. That means every OTHER `ParentTarget` consumer
+    // (Avenging Angel's LTB self-return, etc.) keeps its ordinary
+    // self-fallback regardless of an unrelated Dig anywhere else in the same
+    // resolution, including a second, later `PutAtLibraryPosition` call.
+    let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.targets.is_empty()
+        && ability.dig_found_nothing_for_parent_target;
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
@@ -689,12 +686,14 @@ mod tests {
         assert_eq!(state.objects[&obj_id].zone, Zone::Library);
     }
 
-    /// Issue #1365 follow-up: `last_dig_found_nothing` must be scoped to the
-    /// ONE `PutAtLibraryPosition { ParentTarget }` call that consults it, not
-    /// leak forward to a later, unrelated one in the same resolution. Without
-    /// the consume-on-read fix, an empty-library Dig earlier in a chain would
-    /// wrongly suppress a completely unrelated Avenging Angel-class LTB
-    /// self-return that happens to resolve afterward.
+    /// Issue #1365 follow-up: this resolver must consult
+    /// `ability.dig_found_nothing_for_parent_target` (a typed field stamped
+    /// ONLY by `effects::apply_parent_chain_context` at a real Dig->child
+    /// hand-off), never `state.last_dig_found_nothing` directly. A freshly
+    /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
+    /// never goes through that hand-off, so its field stays `false` no matter
+    /// what stray global state an unrelated, earlier empty-library Dig left
+    /// behind in the same resolution.
     #[test]
     fn stale_dig_found_nothing_does_not_suppress_unrelated_ltb_self_return() {
         let mut state = GameState::new_two_player(42);

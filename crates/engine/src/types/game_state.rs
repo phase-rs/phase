@@ -6872,18 +6872,23 @@ pub struct GameState {
 
     /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
     /// at an empty library (`count == 0`) — distinct from "no Dig has run in
-    /// this chain link," which is `false`. Consumed ONLY by the
-    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) for "put up to
-    /// one of them on top … the rest on the bottom" — deliberately NOT read by
-    /// the shared `resolved_targets` chokepoint, so it can never affect any
-    /// other `ParentTarget` consumer (e.g. Avenging Angel's unrelated LTB
-    /// self-return). `put_on_top.rs` clears it the moment it checks it,
-    /// whether or not it was set, so it cannot leak to a later, unrelated
-    /// `PutAtLibraryPosition` call in the same resolution either. Without this,
-    /// a reanimated Thassa's Oracle with an empty library (issue #1365) would
-    /// fall back to moving its own source into the library it just found
-    /// empty, corrupting devotion and library-count reads for the trailing win
-    /// condition. Transient resolution bookkeeping — not serialized.
+    /// this chain link," which is `false`. This is a brief, transient relay:
+    /// `effects::apply_parent_chain_context` reads and immediately clears it
+    /// at the very next parent->child hand-off (whatever that child turns out
+    /// to be), copying it onto that ONE child's typed
+    /// `ResolvedAbility::dig_found_nothing_for_parent_target` field. Nothing
+    /// else reads this flag directly — in particular, the shared
+    /// `resolved_targets` chokepoint does not, so an empty Dig can never
+    /// affect any `ParentTarget` consumer beyond its own immediate
+    /// sub_ability (e.g. Avenging Angel's unrelated LTB self-return stays
+    /// unaffected). The `PutAtLibraryPosition` Dig-tail seam
+    /// (`put_on_top.rs`) is the one place that acts on the per-ability field
+    /// for "put up to one of them on top … the rest on the bottom" — without
+    /// it, a reanimated Thassa's Oracle with an empty library (issue #1365)
+    /// would fall back to moving its own source into the library it just
+    /// found empty, corrupting devotion and library-count reads for the
+    /// trailing win condition. Transient resolution bookkeeping — not
+    /// serialized.
     #[serde(skip)]
     pub last_dig_found_nothing: bool,
 

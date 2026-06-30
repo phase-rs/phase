@@ -77,9 +77,10 @@ pub fn resolve(
     let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
 
     // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
-    // earlier link in the same chain — decides whether a chained `ParentTarget`
-    // consumer may self-fallback. Reset here; the two "found nothing" returns
-    // below (and in `resolve_from_prior_look`) set it back to `true`.
+    // earlier link in the same chain — is what `apply_parent_chain_context`
+    // relays to this Dig's immediate sub_ability. Reset here; the two "found
+    // nothing" returns below (and in `resolve_from_prior_look`) set it back
+    // to `true`.
     state.last_dig_found_nothing = false;
 
     // CR 701.20e + CR 608.2c: PriorLook means the card set was already populated

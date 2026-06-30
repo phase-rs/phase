@@ -17491,6 +17491,18 @@ pub struct ResolvedAbility {
     /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
+    /// CR 401.5 + CR 608.2c (issue #1365): Stamped ONLY by
+    /// `effects::apply_parent_chain_context` at the exact moment this ability
+    /// is handed off as the immediate sub_ability of a `Dig` that just looked
+    /// at an empty library — never set any other way, so it cannot be
+    /// confused with a stale value from an unrelated resolution. Consulted
+    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
+    /// to resolve a `target: ParentTarget` with no selection to NO target
+    /// instead of the generic self-fallback, which would otherwise move the
+    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
+    /// it just found empty.
+    #[serde(skip)]
+    pub dig_found_nothing_for_parent_target: bool,
 }
 
 impl ResolvedAbility {
@@ -17543,6 +17555,7 @@ impl ResolvedAbility {
             source_incarnation: None,
             modal: None,
             mode_abilities: Vec::new(),
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
