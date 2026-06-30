@@ -104,7 +104,11 @@ pub fn resolve_gated_sets(catalog: &SetCatalog) -> HashSet<String> {
 
 /// Test helper: build a minimal catalog entry for gating tests.
 #[cfg(test)]
-pub(crate) fn test_set_meta(code: &str, release_date: &str, set_type: &str) -> super::set_catalog::SetMeta {
+pub(crate) fn test_set_meta(
+    code: &str,
+    release_date: &str,
+    set_type: &str,
+) -> super::set_catalog::SetMeta {
     super::set_catalog::SetMeta {
         code: code.to_uppercase(),
         name: code.to_string(),
