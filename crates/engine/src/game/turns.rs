@@ -1795,7 +1795,7 @@ fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
     should_skip_step_static(state, step) || consume_next_step_skip(state, step)
 }
 
-/// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
+/// CR 714.3c: As the precombat main phase begins, put a lore counter on each Saga
 /// the active player controls. This is a turn-based action, not a triggered ability.
 fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
     let active = state.active_player;
@@ -2028,7 +2028,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 };
             }
             Phase::PreCombatMain | Phase::PostCombatMain => {
-                // CR 714.3b: As the precombat main phase begins, add a lore counter
+                // CR 714.3c: As the precombat main phase begins, add a lore counter
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
                     if !add_lore_counters_to_sagas(state, events) {
