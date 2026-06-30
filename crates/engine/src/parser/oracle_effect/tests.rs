@@ -9939,6 +9939,50 @@ fn effect_target_creature_gains_keyword_uses_continuous_effect() {
     ));
 }
 
+/// Issue #4371 + CR 105.4 + CR 702.16: "gains protection from the color of
+/// your choice" must inject a color `Choose` ahead of the grant so the
+/// granting source carries a `ChosenAttribute::Color` for the layer applier
+/// to bake into `Protection(ChosenColor)`. Without the injected choice the
+/// grant reads a `None` chosen color and protects from nothing (the reported
+/// "doesn't resolve" bug). Mirrors the `try_parse_become_choice` structure.
+#[test]
+fn protection_from_color_of_your_choice_injects_color_choice() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
+        "Mother of Runes",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = &parsed.abilities[0];
+    // Outer effect is the injected color choice.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { excluded },
+                ..
+            } if excluded.is_empty()
+        ),
+        "expected injected Choose(Color), got {:?}",
+        def.effect
+    );
+    // The grant rides as the sub-ability and targets the chosen color.
+    let sub = def.sub_ability.as_ref().expect("grant sub_ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*sub.effect
+    else {
+        panic!("expected grant GenericEffect, got {:?}", sub.effect);
+    };
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }
+    )));
+}
+
 /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
 /// conjunct>" must keep the `until end of turn` duration on the keyword
 /// grant. Homarid Warrior: "This creature gains shroud until end of turn

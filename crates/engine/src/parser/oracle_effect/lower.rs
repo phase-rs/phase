@@ -50,8 +50,8 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
     contains_implicit_tracked_set_pronoun, each_target_filter_mut, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, mark_uses_tracked_set, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     publishes_tracked_set_from_resolution, refine_damage_target_remainder,
     replace_player_anaphor_with_parent_target, retarget_counter_additional_cost_to_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
@@ -1882,6 +1882,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    // CR 105.4 + CR 702.16: inject a color choice ahead of a "gains
+    // protection/hexproof from the color of your choice" grant so the source
+    // carries a chosen color for the layer applier to bake in.
+    inject_chosen_color_choice_grant(&mut result, false);
     rewrite_that_type_mana_instead(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
