@@ -1077,6 +1077,20 @@ pub fn resolve_effect_player_ref(
             let index = filter.chosen_player_index().expect("checked by guard");
             ability.chosen_players.get(index as usize).copied()
         }
+        // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside an unless
+        // clause ("unless target opponent/target player pays") resolves to the
+        // player chosen at stack placement — read from `ability.targets`,
+        // identically to the anaphoric `Player` arm above. Uses the shared
+        // `payer_is_declared_target` authority (also gates slot creation in
+        // `ability_utils` and the `resolve_unless_payer` arm) so the declared-
+        // target shape has one definition. Ordered after the `ChosenPlayer` arm,
+        // which it never overlaps (declared-target payers carry no chosen index).
+        _ if crate::game::ability_utils::payer_is_declared_target(filter) => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),

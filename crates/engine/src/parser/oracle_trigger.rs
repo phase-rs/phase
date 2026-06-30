@@ -1898,6 +1898,31 @@ fn extract_unless_pay_modifier(
         }
     }
 
+    // CR 115.1 + CR 118.12a: "target opponent/target player pays {cost}" — the
+    // trigger's declared player target (chosen at stack placement, CR 603.3d)
+    // restated as the unless-payer. Represented as a declared-target `Typed`
+    // payer (resolved from ability.targets), distinct from the anaphoric "that
+    // opponent" (-> TriggeringPlayer) handled above. The verb+cost remainder is
+    // parsed by the shared `parse_unless_they_branch_by_verb` authority so the
+    // full cost taxonomy (pays N life, sacrifices, discards) is covered.
+    let declared_target_payer: Result<(&str, TargetFilter), _> = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag::<_, _, OracleError<'_>>("target opponent "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::default()),
+            tag("target player "),
+        ),
+    ))
+    .parse(after_unless);
+    if let Ok((after_payer, payer)) = declared_target_payer {
+        if let Some((cost, _)) = parse_unless_they_branch_by_verb(after_payer) {
+            let cleaned = text[..unless_pos].trim().to_string();
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+        }
+    }
+
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
     // a card", "you sacrifice a [filter]", "you pay N life") map to existing
     // `UnlessCost` variants — the runtime resolver in `engine_payment_choices.rs`

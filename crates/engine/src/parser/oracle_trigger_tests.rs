@@ -5148,6 +5148,98 @@ fn satya_delayed_end_step_energy_unless_rides_delayed_sacrifice() {
     );
 }
 
+/// CR 115.1 + CR 118.12a + CR 603.3d: Athreos, God of Passage — "Whenever
+/// another creature you control dies, return it to its owner's hand unless
+/// target opponent pays 3 life." The unless-payer is declared as a target
+/// inside the unless clause, distinct from the anaphoric "they"/"that
+/// opponent" forms.
+#[test]
+fn athreos_god_of_passage_targeted_opponent_unless_pay() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control dies, return it to its owner's hand \
+             unless target opponent pays 3 life.",
+        "Athreos, God of Passage",
+    );
+
+    let unless = def
+        .unless_pay
+        .as_ref()
+        .expect("Athreos trigger must carry the unless-pay modifier");
+    assert_eq!(
+        unless.payer,
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        "payer must be a declared-target opponent Typed, not the anaphoric forms"
+    );
+    assert_eq!(
+        unless.cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 }
+        },
+        "cost must be PayLife 3, got {:?}",
+        unless.cost
+    );
+
+    let exec = def.execute.as_deref().expect("Athreos execute body");
+    assert!(
+        !matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "body effect must be the parsed return-to-hand, got {:?}",
+        exec.effect
+    );
+    assert!(
+        matches!(
+            &*exec.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                ..
+            } | Effect::Bounce {
+                destination: Some(Zone::Hand) | None,
+                ..
+            }
+        ),
+        "body effect must return the creature to its owner's hand, got {:?}",
+        exec.effect
+    );
+}
+
+/// CR 118.12a: Sibling guard for the declared-target arm. The anaphoric
+/// pronoun forms must not collapse to the declared-target `Typed` payer.
+#[test]
+fn unless_pay_anaphoric_payers_distinct_from_declared_target() {
+    let they = parse_trigger_line(
+        "Whenever you attack, target opponent loses 3 life unless they pay 3 life.",
+        "They Pay Test",
+    );
+    let they_unless = they
+        .unless_pay
+        .as_ref()
+        .expect("\"they pay\" must yield an unless-pay modifier");
+    assert_eq!(
+        they_unless.payer,
+        TargetFilter::Player,
+        "\"they pay\" stays anaphoric Player, not the declared-target Typed"
+    );
+
+    let that = parse_trigger_line(
+        "Whenever a player casts a spell, that player draws a card \
+             unless that opponent pays 3 life.",
+        "That Opponent Pay Test",
+    );
+    let that_unless = that
+        .unless_pay
+        .as_ref()
+        .expect("\"that opponent pays\" must yield an unless-pay modifier");
+    assert_eq!(
+        that_unless.payer,
+        TargetFilter::TriggeringPlayer,
+        "\"that opponent pays\" stays anaphoric TriggeringPlayer"
+    );
+    assert!(
+        matches!(that_unless.cost, AbilityCost::PayLife { .. }),
+        "cost must be PayLife, got {:?}",
+        that_unless.cost
+    );
+}
+
 #[test]
 fn non_token_enters_exile_it_stays_triggering_source() {
     // No-regression: a non-token ETB trigger "exile it" has NO token creator
