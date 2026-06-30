@@ -28288,6 +28288,39 @@ fn perpetual_parser_maps_self_base_pt() {
 }
 
 #[test]
+fn perpetual_parser_maps_referenced_base_pt() {
+    use crate::types::ability::PerpetualModification;
+
+    // "the duplicate …" (Three Tree Battalion's conjured copy) binds to the
+    // most-recently-created object the preceding Conjure published.
+    let e = parse_effect("the duplicate perpetually has base power and toughness 1/1.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::LastCreated,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 1,
+                toughness: 1,
+            },
+        }
+    ));
+
+    // Inverted possessive "its base power and toughness perpetually become …"
+    // (Blood Age Muster); "its" is the conjured card → LastCreated.
+    let e = parse_effect("its base power and toughness perpetually become 2/2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::LastCreated,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 2,
+                toughness: 2,
+            },
+        }
+    ));
+}
+
+#[test]
 fn perpetual_parser_maps_modify_pt() {
     use crate::types::ability::PerpetualModification;
     let e = parse_effect("~ perpetually gets +3/+3.");
