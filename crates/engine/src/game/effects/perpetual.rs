@@ -649,7 +649,9 @@ mod tests {
                 .abilities
                 .first()
                 .expect("Three Tree Battalion must parse a spell ability");
-            fn find_apply_perpetual(def: &crate::types::ability::AbilityDefinition) -> Option<TargetFilter> {
+            fn find_apply_perpetual(
+                def: &crate::types::ability::AbilityDefinition,
+            ) -> Option<TargetFilter> {
                 if matches!(*def.effect, Effect::ApplyPerpetual { .. }) {
                     return match &*def.effect {
                         Effect::ApplyPerpetual { target, .. } => Some(target.clone()),
@@ -731,7 +733,10 @@ mod tests {
         );
 
         // Both players pass — no further stack objects.
-        assert!(state.stack.is_empty(), "stack must be empty after resolution");
+        assert!(
+            state.stack.is_empty(),
+            "stack must be empty after resolution"
+        );
         let _ = P1;
     }
 
