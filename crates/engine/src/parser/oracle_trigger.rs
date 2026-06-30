@@ -33875,6 +33875,7 @@ mod tests {
             choose.0,
             ChoiceType::Keyword {
                 options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 1,
             },
             "choose clause must be a typed keyword choice"
         );

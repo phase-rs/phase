@@ -17172,6 +17172,13 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Word)
     } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
         Some(ChoiceType::Artist)
+    } else if let Some((options, count)) = try_parse_keyword_choice_from_among(rest) {
+        // CR 608.2d: "choose N abilities/keywords from among <kw>, <kw>, and
+        // <kw>" — the explicit count-parameterized form (Greymond, Avacyn's
+        // Stalwart: "choose two abilities from among first strike, vigilance,
+        // and lifelink"). Recognized BEFORE the bare single-keyword form below
+        // so the leading "<N> abilities from among " stripper claims the count.
+        Some(ChoiceType::Keyword { options, count })
     } else if let Some(options) = try_parse_keyword_choice(rest) {
         // CR 608.2d: "choose [keyword], [keyword], or [keyword]" — a typed
         // keyword enumeration (Angelic Skirmisher's "first strike, vigilance,
@@ -17179,8 +17186,9 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // indestructible"). Recognized BEFORE the generic labeled fallback so
         // the chosen value persists as a typed `ChosenAttribute::Keyword` that
         // `ContinuousModification::AddChosenKeyword` ("creatures you control
-        // gain that ability") can read at layer evaluation.
-        Some(ChoiceType::Keyword { options })
+        // gain that ability") can read at layer evaluation. The bare single
+        // keyword choice carries `count: 1`.
+        Some(ChoiceType::Keyword { options, count: 1 })
     } else {
         // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
         // must come AFTER all specific patterns above.
@@ -17208,6 +17216,47 @@ fn try_parse_keyword_choice(rest: &str) -> Option<Vec<Keyword>> {
         })
         .collect::<Option<Vec<_>>>()?;
     Some(keywords)
+}
+
+/// CR 608.2d: Parse the count-parameterized keyword choice
+/// "<N> abilities/keywords from among <kw>, <kw>, ..., and <kw>" into its
+/// `Keyword` option list and chosen count `N` (Greymond, Avacyn's Stalwart:
+/// "choose two abilities from among first strike, vigilance, and lifelink",
+/// `N = 2`).
+///
+/// Strips the leading "<number> abilities/keywords from among " preamble, then
+/// reuses the shared `split_choice_list_items` list splitter (the FromAmong
+/// grammar — it accepts ", and " as the final separator over bare keyword
+/// names) and maps every item through `parse_keyword_from_oracle`. Returns
+/// `None` unless **every** item maps to a real keyword, so non-keyword "from
+/// among" lists fall through to the generic handlers. Building for the class:
+/// any "choose <N> abilities from among <list>" line, not the single card.
+fn try_parse_keyword_choice_from_among(rest: &str) -> Option<(Vec<Keyword>, usize)> {
+    type E<'a> = OracleError<'a>;
+    // "<number> " — the count of abilities to choose (Greymond's "two ").
+    let (rest, count) = terminated(nom_primitives::parse_number, tag::<_, _, E>(" "))
+        .parse(rest)
+        .ok()?;
+    // "abilities from among " / "keywords from among " — the FromAmong preamble.
+    let (list, _) = preceded(
+        alt((tag::<_, _, E>("abilities"), tag("keywords"))),
+        tag(" from among "),
+    )
+    .parse(rest)
+    .ok()?;
+    // CR 608.2d: Greymond's printed text ends "...and lifelink." — strip the
+    // trailing sentence period (and surrounding whitespace) BEFORE splitting so
+    // the final item arrives as "lifelink", not "lifelink." (which
+    // `parse_keyword_from_oracle` would reject, failing the whole list).
+    let list = list.trim().trim_end_matches('.').trim_end();
+    let items = split_choice_list_items(list)?;
+    let keywords: Vec<Keyword> = items
+        .iter()
+        .map(|item| {
+            crate::parser::oracle_keyword::parse_keyword_from_oracle(&item.trim().to_lowercase())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((keywords, count as usize))
 }
 
 /// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
@@ -53599,6 +53648,7 @@ mod tests {
             super::try_parse_named_choice("choose first strike, vigilance, or lifelink"),
             Some(ChoiceType::Keyword {
                 options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 1,
             })
         );
     }
@@ -53611,6 +53661,55 @@ mod tests {
             super::try_parse_named_choice("choose hexproof or indestructible"),
             Some(ChoiceType::Keyword {
                 options: vec![Keyword::Hexproof, Keyword::Indestructible],
+                count: 1,
+            })
+        );
+    }
+
+    /// CR 608.2d: Count-parameterized keyword choice — Greymond, Avacyn's
+    /// Stalwart's "choose two abilities from among first strike, vigilance, and
+    /// lifelink" (note the ", and " FromAmong separator and the leading "two
+    /// abilities from among " preamble that carries `count: 2`). The trailing
+    /// sentence period must be stripped before the list split so the final item
+    /// is "lifelink", not "lifelink.".
+    #[test]
+    fn keyword_choice_two_from_among_first_strike_vigilance_lifelink() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose two abilities from among first strike, vigilance, and lifelink."
+            ),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 2,
+            })
+        );
+    }
+
+    /// CR 608.2d: The "keywords from among" spelling parses identically (same
+    /// FromAmong grammar, count carried from the leading number).
+    #[test]
+    fn keyword_choice_from_among_accepts_keywords_noun() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose two keywords from among first strike, vigilance, and lifelink"
+            ),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 2,
+            })
+        );
+    }
+
+    /// Discriminating: a bare single-disjunction keyword choice (no "N abilities
+    /// from among" preamble) still parses as `count: 1` — Angelic Skirmisher's
+    /// "first strike, vigilance, or lifelink".
+    #[test]
+    fn keyword_choice_bare_disjunction_is_count_one() {
+        assert_eq!(
+            super::try_parse_named_choice("choose first strike, vigilance, or lifelink"),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 1,
             })
         );
     }

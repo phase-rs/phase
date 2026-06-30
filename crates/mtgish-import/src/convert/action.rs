@@ -4068,7 +4068,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 .map(static_effect::check_hasable_to_keyword_option)
                 .collect::<ConvResult<_>>()?;
             Effect::Choose {
-                choice_type: ChoiceType::Keyword { options },
+                // CR 608.2d: mtgish only models single-keyword choices, so count = 1.
+                choice_type: ChoiceType::Keyword { options, count: 1 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
             }

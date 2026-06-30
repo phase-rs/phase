@@ -1734,6 +1734,22 @@ impl GameObject {
         })
     }
 
+    /// CR 608.2d: Look up ALL stored chosen keywords (Greymond, Avacyn's
+    /// Stalwart "choose two abilities from among first strike, vigilance, and
+    /// lifelink" persists two `ChosenAttribute::Keyword` entries). The plural
+    /// companion to `chosen_keyword`; read by
+    /// `ContinuousModification::AddChosenKeyword` at Layer 6 evaluation so a
+    /// multi-keyword choice grants every chosen ability, not just the first.
+    pub fn chosen_keywords(&self) -> Vec<&Keyword> {
+        self.chosen_attributes
+            .iter()
+            .filter_map(|a| match a {
+                ChosenAttribute::Keyword(k) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen
     /// as this permanent entered the battlefield (e.g. "Jeskai" / "Temur" on
     /// Frostcliff Siege, "Khans" / "Dragons" on a Khans of Tarkir Siege).
