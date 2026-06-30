@@ -3611,6 +3611,64 @@ mod tests {
         }
     }
 
+    /// CR 117.3a + CR 702.160a: direct-call contract for `detect_optional_you_may`.
+    /// A bare "you may <verb>" optional effect with no AST representation must fire
+    /// `Optional_YouMay`, while the Prototype keyword reminder text
+    /// ("You may cast this spell with different mana cost...") is keyword reminder
+    /// text — not a resolution-time optional effect — and must stay silent. This
+    /// pins the reminder-text exemption directly: reverting that gate re-fires the
+    /// detector on every Prototype card, and dropping the final `diagnostics.push`
+    /// drops the fire case.
+    #[test]
+    fn optional_you_may_fires_on_bare_verb_and_exempts_prototype_reminder() {
+        let parsed = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+
+        // Fire: an unrepresented "you may draw a card" optional effect.
+        let mut fire = Vec::new();
+        super::detect_optional_you_may(
+            "you may draw a card.",
+            "You may draw a card.",
+            &parsed,
+            &mut fire,
+        );
+        assert!(
+            fire.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. }
+                    if detector == "Optional_YouMay"
+            )),
+            "bare 'you may <verb>' with no AST representation must fire Optional_YouMay: {fire:?}"
+        );
+
+        // Silent: Prototype keyword reminder text is not an optional effect.
+        let mut silent = Vec::new();
+        super::detect_optional_you_may(
+            "you may cast this spell with different mana cost, color, and size. \
+             it keeps its abilities and types.",
+            "(You may cast this spell with different mana cost, color, and size. \
+             It keeps its abilities and types.)",
+            &parsed,
+            &mut silent,
+        );
+        assert!(
+            silent.is_empty(),
+            "Prototype reminder text must not fire Optional_YouMay: {silent:?}"
+        );
+    }
+
     /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` (directly
     /// or via `GrantStaticAbility`) — the flash-grant shape Teferi's [+1] lowers
     /// to and the swallow-check exemption keys on.
