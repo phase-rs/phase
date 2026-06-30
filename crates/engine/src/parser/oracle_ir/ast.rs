@@ -1038,6 +1038,10 @@ pub(crate) enum UtilityImperativeAst {
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,
+        /// CR 115.1d: "attach up to N target ..." / "attach any number of
+        /// target ..." cardinality belongs to the ability's target selection,
+        /// not the `Effect::Attach` payload.
+        multi_target: Option<MultiTargetSpec>,
     },
     UnattachAll {
         attachment: TargetFilter,

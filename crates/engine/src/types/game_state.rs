@@ -1096,6 +1096,15 @@ pub struct PendingChangeZoneIteration {
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
+    /// Conditional entry-counter specs carried across a pause so each remaining
+    /// object can be re-evaluated per-object on resume (Winter Soldier Hero
+    /// rider through `EffectZoneChoice`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_enter_with_counters: Vec<(
+        crate::types::ability::TargetFilter,
+        crate::types::counter::CounterType,
+        crate::types::ability::QuantityExpr,
+    )>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
@@ -3370,6 +3379,16 @@ pub enum WaitingFor {
         /// `enter_transformed` / `enters_under_player` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+        /// CR 122.1 + CR 614.1c: Unconditional entry-time counters carried across
+        /// the `EffectZoneChoice` round-trip (e.g. "enters with two +1/+1
+        /// counters").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 122.1 + CR 614.1c: Conditional entry-time counter specs carried
+        /// across the `EffectZoneChoice` round-trip (e.g. "If a Hero enters
+        /// this way, it enters with an additional +1/+1 counter on it").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
         /// CR 701.68a: N for Blight N — number of -1/-1 counters to place.
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
@@ -6638,6 +6657,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 608.2c: The single object whose move paused the active
+    /// `pending_change_zone_iteration` on a per-permanent replacement CHOICE
+    /// (`ZoneMoveResult::NeedsChoice`), paired with its pre-move zone. Unlike the
+    /// `remaining` members, this object is delivered out-of-band by the
+    /// replacement resume (not by the iteration drain), so the drain would
+    /// otherwise never count it toward `moved_count`. The drain consumes this at
+    /// its top and increments the carried count iff the object actually reached
+    /// the iteration's destination — so a downstream "that many" includes the
+    /// object that prompted the replacement. Pause/resume is strictly sequential,
+    /// so at most one object is ever in flight (set on the pause, taken on the
+    /// next drain pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_change_zone_in_flight: Option<(ObjectId, crate::types::zones::Zone)>,
+
     /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
     /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
     /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
@@ -6869,6 +6902,28 @@ pub struct GameState {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+
+    /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
+    /// at an empty library (`count == 0`) — distinct from "no Dig has run in
+    /// this chain link," which is `false`. This is a brief, transient relay:
+    /// `effects::apply_parent_chain_context` reads and immediately clears it
+    /// at the very next parent->child hand-off (whatever that child turns out
+    /// to be), copying it onto that ONE child's typed
+    /// `ResolvedAbility::dig_found_nothing_for_parent_target` field. Nothing
+    /// else reads this flag directly — in particular, the shared
+    /// `resolved_targets` chokepoint does not, so an empty Dig can never
+    /// affect any `ParentTarget` consumer beyond its own immediate
+    /// sub_ability (e.g. Avenging Angel's unrelated LTB self-return stays
+    /// unaffected). The `PutAtLibraryPosition` Dig-tail seam
+    /// (`put_on_top.rs`) is the one place that acts on the per-ability field
+    /// for "put up to one of them on top … the rest on the bottom" — without
+    /// it, a reanimated Thassa's Oracle with an empty library (issue #1365)
+    /// would fall back to moving its own source into the library it just
+    /// found empty, corrupting devotion and library-count reads for the
+    /// trailing win condition. Transient resolution bookkeeping — not
+    /// serialized.
+    #[serde(skip)]
+    pub last_dig_found_nothing: bool,
 
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
@@ -7810,6 +7865,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
+            pending_change_zone_in_flight: None,
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
@@ -7840,6 +7896,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            last_dig_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
@@ -9212,6 +9269,8 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -9468,6 +9527,8 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -9511,6 +9572,7 @@ mod tests {
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
             moved_count: None,
@@ -9571,6 +9633,8 @@ mod tests {
                 subtypes: vec!["Forest".to_string()],
                 ward: None,
             }),
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,

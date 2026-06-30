@@ -928,6 +928,7 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",

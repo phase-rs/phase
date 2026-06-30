@@ -1007,6 +1007,7 @@
       "manifest": "Manifest",
       "untap": "Untap",
       "tap": "Tap",
+      "attach": "Attach",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -1114,6 +1115,7 @@
       "titleHand": "Return",
       "titleUntap": "Untap",
       "titleTap": "Tap",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Choose {{count}} permanent to sacrifice",
       "subtitleSacrificeExact_other": "Choose {{count}} permanents to sacrifice",
       "subtitleSacrificeUpTo_one": "Choose up to {{count}} permanent to sacrifice",
@@ -1150,6 +1152,12 @@
       "subtitleTapUpTo_other": "Choose up to {{count}} permanents to tap",
       "subtitleTapRange_one": "Choose {{min}}-{{count}} permanent to tap",
       "subtitleTapRange_other": "Choose {{min}}-{{count}} permanents to tap",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Skip",
       "labelDecline": "Decline",
       "labelPutOnTop": "Put on top ({{order}})",
@@ -1157,6 +1165,7 @@
       "labelTop": "Top ({{selected}}/{{count}})",
       "labelPut": "Put ({{selected}}/{{count}})",
       "labelReturn": "Return ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Top"
     },
     "drawnThisTurn": {

@@ -259,6 +259,41 @@ describe("Discard cost modal", () => {
     expect(screen.queryByText(/sacrifice/i)).not.toBeInTheDocument();
   });
 
+  it("describes optional attach selection without saying sacrifice and allows decline", () => {
+    setWaitingFor(
+      {
+        type: "EffectZoneChoice",
+        data: {
+          player: 0,
+          cards: [10, 11],
+          count: 2,
+          min_count: 0,
+          up_to: true,
+          source_id: 19,
+          effect_kind: "Attach",
+          zone: "Battlefield",
+        },
+      } as unknown as WaitingFor,
+      {
+        10: { ...makeObject(10, "S.H.I.E.L.D. Spy Kit"), zone: "Battlefield" },
+        11: { ...makeObject(11, "Vibranium Energy Daggers"), zone: "Battlefield" },
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Attach")).toBeInTheDocument();
+    expect(screen.getByText("Choose up to 2 Equipment to attach")).toBeInTheDocument();
+    expect(screen.queryByText(/sacrifice/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [] },
+    });
+  });
+
   it("describes library placement without saying battlefield", () => {
     setWaitingFor({
       type: "EffectZoneChoice",

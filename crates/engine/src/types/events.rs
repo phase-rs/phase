@@ -46,6 +46,20 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
+/// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
+/// that "Whenever you activate a loyalty ability" triggers (CR 606.2) can be told
+/// apart from ordinary activated abilities (CR 602.2) while both share the single
+/// `GameEvent::AbilityActivated` event family. A loyalty ability is an activated
+/// ability of a planeswalker paid for by adding or removing loyalty counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ActivatedAbilityKind {
+    /// CR 602.2: An ordinary activated ability.
+    #[default]
+    Normal,
+    /// CR 606.1 + CR 606.2: A loyalty ability of a planeswalker.
+    Loyalty,
+}
+
 impl ManaTapState {
     /// True when the mana was produced by tapping a source, regardless of
     /// whether the coupled triggered mana abilities have been resolved yet.
@@ -189,6 +203,14 @@ pub enum GameEvent {
         /// ability's effect (Burning-Tree Shaman, Flamescroll Celebrant).
         player_id: PlayerId,
         source_id: ObjectId,
+        /// CR 606.2: Distinguishes loyalty-ability activations (planeswalker
+        /// abilities paid with loyalty counters) from ordinary activated
+        /// abilities so the "Whenever you activate a loyalty ability" trigger
+        /// class can match without a separate event. `#[serde(default)]` keeps
+        /// older serialized `AbilityActivated` events (which predate this field)
+        /// deserializing as `Normal`.
+        #[serde(default)]
+        kind: ActivatedAbilityKind,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -914,6 +936,42 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "TurnStarted");
         assert_eq!(json["data"]["turn_number"], 1);
+    }
+
+    #[test]
+    fn ability_activated_kind_defaults_to_normal_for_legacy_state() {
+        // CR 606.2: an older serialized `AbilityActivated` event predates the
+        // `kind` field. `#[serde(default)]` must deserialize it as `Normal`,
+        // never failing or silently treating it as `Loyalty`.
+        let legacy = serde_json::json!({
+            "type": "AbilityActivated",
+            "data": { "player_id": 0, "source_id": 7 }
+        });
+        let event: GameEvent = serde_json::from_value(legacy).unwrap();
+        match event {
+            GameEvent::AbilityActivated { kind, .. } => {
+                assert_eq!(kind, ActivatedAbilityKind::Normal);
+            }
+            other => panic!("expected AbilityActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ability_activated_kind_round_trips() {
+        // CR 606.2: the discriminator survives serialization.
+        for kind in [ActivatedAbilityKind::Normal, ActivatedAbilityKind::Loyalty] {
+            let event = GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: ObjectId(9),
+                kind,
+            };
+            let json = serde_json::to_value(&event).unwrap();
+            let back: GameEvent = serde_json::from_value(json).unwrap();
+            match back {
+                GameEvent::AbilityActivated { kind: k, .. } => assert_eq!(k, kind),
+                other => panic!("expected AbilityActivated, got {other:?}"),
+            }
+        }
     }
 
     #[test]

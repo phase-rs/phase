@@ -973,6 +973,7 @@
       "manifest": "Manifest",
       "untap": "Odkręć",
       "tap": "Przekręć",
+      "attach": "Attach",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -1080,6 +1081,7 @@
       "titleHand": "Zwróć",
       "titleUntap": "Odkręć",
       "titleTap": "Przekręć",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Wybierz {{count}} trwałego do poświęcenia",
       "subtitleSacrificeExact_other": "Wybierz {{count}} trwałych do poświęcenia",
       "subtitleSacrificeUpTo_one": "Wybierz do {{count}} trwałego do poświęcenia",
@@ -1116,6 +1118,12 @@
       "subtitleTapUpTo_other": "Wybierz do {{count}} trwałych do przekręcenia",
       "subtitleTapRange_one": "Wybierz {{min}}-{{count}} trwałego do przekręcenia",
       "subtitleTapRange_other": "Wybierz {{min}}-{{count}} trwałych do przekręcenia",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
@@ -1123,6 +1131,7 @@
       "labelTop": "Wierzch ({{selected}}/{{count}})",
       "labelPut": "Połóż ({{selected}}/{{count}})",
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Wierzch"
     },
     "drawnThisTurn": {

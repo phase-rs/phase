@@ -690,6 +690,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    // CR 608.2c: reflexive "enters this way" riders on triggered abilities
+    // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
+    // not CR 614.1c ETB replacements.
+    if has_trigger_prefix(lower) && scan_contains(lower, "enters this way,") {
+        return false;
+    }
+
     if is_counter_prohibition_replacement_pattern(lower) {
         return true;
     }

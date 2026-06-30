@@ -329,6 +329,13 @@ fn handle_activated_mode_choice(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: `ability_index` is `Option<usize>` here; classify via the
+        // source ability cost when an index is present, else `Normal`. Using the
+        // index guard avoids the partial-move of `ability_cost` consumed above.
+        kind: ability_index.map_or(
+            crate::types::events::ActivatedAbilityKind::Normal,
+            |index| super::planeswalker::activated_ability_kind(state, source_id, index),
+        ),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     if let Some(index) = ability_index {

@@ -76,6 +76,13 @@ pub fn resolve(
 
     let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
 
+    // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
+    // earlier link in the same chain — is what `apply_parent_chain_context`
+    // relays to this Dig's immediate sub_ability. Reset here; the two "found
+    // nothing" returns below (and in `resolve_from_prior_look`) set it back
+    // to `true`.
+    state.last_dig_found_nothing = false;
+
     // CR 701.20e + CR 608.2c: PriorLook means the card set was already populated
     // by a preceding look-only Dig (e.g. Birthing Ritual: sacrifice sits between
     // the look step and the choice step). Read from private_look_ids so that
@@ -105,6 +112,15 @@ pub fn resolve(
     // CR 401.5: If a library has fewer cards than required, use as many as available.
     let count = dig_num.min(player.library.len());
     if count == 0 {
+        // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
+        // ("put up to one of them on top … the rest on the bottom") has no
+        // cards to act on and must not fall back to acting on this ability's
+        // own source (issue #1365).
+        state.last_dig_found_nothing = true;
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
         return Ok(());
     }
 
@@ -250,6 +266,10 @@ fn resolve_from_prior_look(
 ) -> Result<(), EffectError> {
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
+        // CR 608.2c: mirrors the empty-library branch in `resolve` (issue
+        // #1365) — no cards were looked at, so a chained `ParentTarget`
+        // consumer must not self-fallback.
+        state.last_dig_found_nothing = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
             source_id: ability.source_id,
@@ -444,6 +464,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -519,6 +540,17 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(
+            state.last_dig_found_nothing,
+            "an empty-library Dig must flag that it found nothing, so a chained \
+             ParentTarget consumer does not self-fallback (issue #1365)"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EffectResolved { .. })),
+            "an empty-library Dig must still emit EffectResolved"
+        );
     }
 
     #[test]
@@ -2153,6 +2185,65 @@ mod tests {
             state.players[0].hand.len(),
             2,
             "kicked Consult the Star Charts must put exactly 2 cards into hand"
+        );
+    }
+
+    /// Issue #1365 (Thassa's Oracle reanimated via Dread Return with an empty
+    /// library — Hermit Druid milled the whole deck first). CR 401.5: a Dig
+    /// against an empty library looks at zero cards. The chained "put up to
+    /// one of them on top … the rest on the bottom" instruction has nothing to
+    /// place, but the trailing `WinTheGame` gate (devotion >= library size)
+    /// must still evaluate against the UNDISTURBED game state — Thassa's
+    /// Oracle must still be on the battlefield and the library must still be
+    /// empty when the condition is checked.
+    ///
+    /// Pre-fix, the `PutAtLibraryPosition` link's `ParentTarget` resolution
+    /// fell back to "self" (no prior Dig selection, empty `ability.targets`),
+    /// moving Thassa's Oracle itself from the battlefield onto its own
+    /// library — corrupting devotion (no longer on the battlefield) and the
+    /// library count (now 1, not 0) before `WinTheGame`'s condition evaluated.
+    #[test]
+    fn thassas_oracle_dread_return_empty_library_still_wins() {
+        let def = parse_effect_chain(
+            "Look at the top X cards of your library, where X is your devotion to blue. \
+             Put up to one of them on top of your library and the rest on the bottom of \
+             your library in a random order. If X is greater than or equal to the number \
+             of cards in your library, you win the game.",
+            AbilityKind::Spell,
+        );
+
+        let mut state = GameState::new_two_player(42);
+        assert!(state.players[0].library.is_empty(), "library milled to 0");
+
+        // Thassa's Oracle reanimated onto the battlefield (e.g. via Dread
+        // Return) — its own {1}{U} cost contributes 1 to devotion to blue.
+        let oracle = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Thassa's Oracle".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&oracle).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        };
+
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, oracle, PlayerId(0));
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Thassa's Oracle ETB chain must resolve");
+
+        assert_eq!(
+            state.objects[&oracle].zone,
+            Zone::Battlefield,
+            "Thassa's Oracle itself must NOT be moved into the library — there was \
+             nothing looked at to place"
+        );
+        assert!(
+            state.eliminated_players.contains(&PlayerId(1)),
+            "devotion (1) >= library size (0) must win the game (CR 104.2b)"
         );
     }
 }

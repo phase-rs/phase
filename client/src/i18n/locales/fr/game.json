@@ -973,6 +973,7 @@
       "manifest": "Manifester",
       "untap": "Dégager",
       "tap": "Engager",
+      "attach": "Attach",
       "crew": "Équipage ({{power}})",
       "saddle": "Seller ({{power}})",
       "station": "Station (+{{power}})"
@@ -1080,6 +1081,7 @@
       "titleHand": "Renvoyer",
       "titleUntap": "Dégager",
       "titleTap": "Engager",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Choisissez {{count}} permanent à sacrifier",
       "subtitleSacrificeExact_other": "Choisissez {{count}} permanents à sacrifier",
       "subtitleSacrificeUpTo_one": "Choisissez jusqu'à {{count}} permanent à sacrifier",
@@ -1116,6 +1118,12 @@
       "subtitleTapUpTo_other": "Choisissez jusqu'à {{count}} permanents à engager",
       "subtitleTapRange_one": "Choisissez {{min}}-{{count}} permanent à engager",
       "subtitleTapRange_other": "Choisissez {{min}}-{{count}} permanents à engager",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Ignorer",
       "labelDecline": "Refuser",
       "labelPutOnTop": "Mettre au-dessus ({{order}})",
@@ -1123,6 +1131,7 @@
       "labelTop": "Dessus ({{selected}}/{{count}})",
       "labelPut": "Placer ({{selected}}/{{count}})",
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Dessus"
     },
     "drawnThisTurn": {
