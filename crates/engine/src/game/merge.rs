@@ -818,7 +818,7 @@ mod tests {
             "status follows the face-up topmost component (CR 730.2e)"
         );
         assert!(
-            !s.keywords.contains(&ward_2()),
+            !s.keywords.contains(&ward_2()), // allow-raw-authority: asserts the exact post-merge keyword snapshot, not an off-zone-aware query
             "a face-up merged permanent does not inherit a buried face-down ward (CR 708.2a)"
         );
         assert!(
@@ -843,9 +843,9 @@ mod tests {
         let buried = make_face_down(&mut state, player, FaceDownProfile::cloaked_2_2());
 
         let (values, _, _, _) = merged_copiable_values(&state, &[top, buried], top).unwrap();
-        assert!(values.keywords.contains(&Keyword::Flying));
+        assert!(values.keywords.contains(&Keyword::Flying)); // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
         assert!(
-            !values.keywords.contains(&ward_2()),
+            !values.keywords.contains(&ward_2()), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
             "non-topmost face-down component's ward is suppressed (CR 708.2a + CR 730.2e)"
         );
 
@@ -854,7 +854,7 @@ mod tests {
         state.objects.get_mut(&buried_up).unwrap().base_keywords = vec![Keyword::Trample];
         let (values2, _, _, _) = merged_copiable_values(&state, &[top, buried_up], top).unwrap();
         assert!(
-            values2.keywords.contains(&Keyword::Trample),
+            values2.keywords.contains(&Keyword::Trample), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
             "a face-up non-topmost component's keywords are unioned (CR 702.140e)"
         );
     }
