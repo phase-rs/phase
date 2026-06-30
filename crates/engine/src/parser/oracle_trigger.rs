@@ -14316,6 +14316,82 @@ mod snapshot_tests;
 #[path = "oracle_trigger_slicer_control_handoff_tests.rs"]
 mod slicer_control_handoff_tests;
 
+/// Issue #2346 (bullet-line modal form): Grenzo, Havoc Raiser's printed Oracle
+/// text lists its modes as bullet lines (`\n\u{2022} ...`), which route through
+/// the `TriggeredModal` block path rather than the inline `"; or"` path. "that
+/// player" in each mode body must scope to the damaged player (`TriggeringPlayer`),
+/// not Grenzo's controller (`You`).
+#[cfg(test)]
+mod grenzo_bullet_modal_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+    use crate::types::TriggerMode;
+
+    /// Walk a chained `AbilityDefinition` collecting one effect per node (parent
+    /// then each nested `sub_ability`).
+    fn flatten_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// For a "deals combat damage to a player" trigger, the damaged player is
+    /// the triggering player; "that player controls" / "that player's library"
+    /// in the modes must resolve to them.
+    #[test]
+    fn damage_done_bullet_modal_uses_triggering_player_for_that_player() {
+        let parsed = parse_oracle_text(
+            "Whenever a creature you control deals combat damage to a player, choose one \u{2014}\n\u{2022} Goad target creature that player controls.\n\u{2022} Exile the top card of that player's library.",
+            "Grenzo, Havoc Raiser",
+            &[],
+            &["Creature".into()],
+            &["Goblin".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let mode_abilities = &execute.mode_abilities;
+        assert_eq!(mode_abilities.len(), 2, "must have two modes");
+
+        let mode0_effects = flatten_effects(&mode_abilities[0]);
+        let goad_controller = mode0_effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Goad {
+                    target: TargetFilter::Typed(tf),
+                } => Some(tf.controller.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("mode 0 must contain Goad, got {mode0_effects:?}"));
+        assert_eq!(
+            goad_controller,
+            Some(ControllerRef::TriggeringPlayer),
+            "BULLET Goad controller must be TriggeringPlayer (damaged player), got {goad_controller:?}",
+        );
+
+        let mode1_effects = flatten_effects(&mode_abilities[1]);
+        let exile_player = mode1_effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ExileTop { player, .. } => Some(player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("mode 1 must contain ExileTop, got {mode1_effects:?}"));
+        assert_eq!(
+            exile_player,
+            TargetFilter::TriggeringPlayer,
+            "BULLET ExileTop player must be TriggeringPlayer (damaged player), got {exile_player:?}",
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "oracle_trigger_controlled_chosen_type_enters_tests.rs"]
 mod controlled_chosen_type_enters_tests;
