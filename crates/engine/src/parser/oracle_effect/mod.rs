@@ -6564,54 +6564,27 @@ fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
     })
 }
 
-/// Digital-only Alchemy: parse the self-subject base-P/T "perpetually" form —
-/// "[~ / it / this creature / …] perpetually become(s)/has base power and
-/// toughness N/N" → [`Effect::ApplyPerpetual`] with
-/// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster).
+/// Digital-only Alchemy: parse the base-P/T "perpetually" set form —
+/// "[subject] perpetually become(s)/has base power and toughness N/N" →
+/// [`Effect::ApplyPerpetual`] with [`PerpetualModification::SetBasePowerToughness`].
 ///
-/// Increment 1 handles only the self-subject (resolved to the source). The
-/// referenced-object forms ("the duplicate"/"its base power and toughness
-/// perpetually become …", Three Tree Battalion, Blood Age Muster) are left to
-/// `Unimplemented` until the referenced-object target wiring lands. The clause
-/// tail must be fully consumed so riders (e.g. "… and gains flying") fall
-/// through instead of being silently dropped.
+/// Three subject classes are recognized, each resolved by the perpetual
+/// resolver's referent binding:
+///   * self-subjects ("~"/"this creature"/…) → [`TargetFilter::Any`], the source
+///     (High Fae Prankster);
+///   * "the duplicate" → [`TargetFilter::ParentTarget`], the conjured copy in
+///     Three Tree Battalion's put-then-duplicate chain;
+///   * the inverted possessive "its base power and toughness perpetually
+///     become …" → [`TargetFilter::SelfRef`] (Blood Age Muster). "its" is a
+///     self-possessive here, matching the quantity/counter parsers' grouping of
+///     "its"/"~'s"/"this creature's".
+///
+/// The anaphoric bare "it " is still excluded — it can refer to an unrelated
+/// prior object choice, so accepting it would mutate the wrong object. The
+/// clause tail must be fully consumed so riders (e.g. "… and gains flying") fall
+/// through to `Unimplemented` instead of being silently dropped.
 fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
-    let lower = tp.lower;
-    // Only unambiguous self-subjects. The anaphoric "it " is intentionally
-    // excluded: after a prior object choice it refers to that object, not the
-    // source, so accepting it here would let a referenced-object perpetual clause
-    // parse as supported while mutating the wrong object. Referenced-object forms
-    // ("the duplicate"/"its …") are deferred until real referent binding lands.
-    let after_subject = [
-        "~ ",
-        "this creature ",
-        "this artifact ",
-        "this enchantment ",
-        "this permanent ",
-        "this token ",
-        "this card ",
-    ]
-    .iter()
-    .find_map(|subject| {
-        tag::<_, _, OracleError<'_>>(*subject)
-            .parse(lower)
-            .ok()
-            .map(|(rest, _)| rest)
-    })?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-        .parse(after_subject)
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("becomes "),
-        tag::<_, _, OracleError<'_>>("become "),
-        tag::<_, _, OracleError<'_>>("has "),
-        tag::<_, _, OracleError<'_>>("have "),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
-        .parse(rest)
-        .ok()?;
+    let (target, rest) = parse_perpetual_base_pt_subject(tp.lower)?;
     let (rest, power) = nom_primitives::parse_number(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
     let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
@@ -6619,12 +6592,64 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
         return None;
     }
     Some(Effect::ApplyPerpetual {
-        target: TargetFilter::Any,
+        target,
         modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
             power: power as i32,
             toughness: toughness as i32,
         },
     })
+}
+
+/// Consume a perpetual base-P/T subject + verb prefix, returning the bound
+/// [`TargetFilter`] and the remaining text positioned at the "N/N" tail.
+fn parse_perpetual_base_pt_subject(lower: &str) -> Option<(TargetFilter, &str)> {
+    // Normal order: "<subject> perpetually <becomes|become|has|have> base power
+    // and toughness <N/N>". The subjects are mutually exclusive prefixes.
+    let normal_subjects: [(&str, TargetFilter); 8] = [
+        ("~ ", TargetFilter::Any),
+        ("this creature ", TargetFilter::Any),
+        ("this artifact ", TargetFilter::Any),
+        ("this enchantment ", TargetFilter::Any),
+        ("this permanent ", TargetFilter::Any),
+        ("this token ", TargetFilter::Any),
+        ("this card ", TargetFilter::Any),
+        ("the duplicate ", TargetFilter::ParentTarget),
+    ];
+    for (subject, target) in normal_subjects {
+        let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(subject).parse(lower) else {
+            continue;
+        };
+        let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("perpetually ").parse(rest) else {
+            continue;
+        };
+        let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("becomes "),
+            tag::<_, _, OracleError<'_>>("become "),
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
+        ))
+        .parse(rest) else {
+            continue;
+        };
+        let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("base power and toughness ").parse(rest)
+        else {
+            continue;
+        };
+        return Some((target, rest));
+    }
+
+    // Inverted possessive order (Blood Age Muster): "its base power and toughness
+    // perpetually <becomes|become> <N/N>". "its" is a self-possessive → SelfRef.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("its base power and toughness perpetually ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("becomes "),
+        tag::<_, _, OracleError<'_>>("become "),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some((TargetFilter::SelfRef, rest))
 }
 
 /// Digital-only Alchemy: parse the "perpetually gets +N/+M" modifier form —
@@ -52692,6 +52717,39 @@ mod tests {
                     toughness: 2,
                 },
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn perpetual_parser_maps_referenced_base_pt() {
+        use crate::types::ability::PerpetualModification;
+
+        // "the duplicate …" (Three Tree Battalion's conjured copy) binds to the
+        // chained parent object, not the source.
+        let e = parse_effect("the duplicate perpetually has base power and toughness 1/1.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 1,
+                    toughness: 1,
+                },
+            }
+        ));
+
+        // Inverted possessive "its base power and toughness perpetually become …"
+        // (Blood Age Muster); "its" is a self-possessive → SelfRef.
+        let e = parse_effect("its base power and toughness perpetually become 2/2.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::SelfRef,
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 2,
+                    toughness: 2,
+                },
             }
         ));
     }
