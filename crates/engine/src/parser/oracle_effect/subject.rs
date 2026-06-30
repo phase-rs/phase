@@ -579,6 +579,12 @@ enum BasePtSetValue {
     Fixed { power: i32, toughness: i32 },
     /// Dynamic "[each] equal to <quantity>" — `SetPowerDynamic`/`SetToughnessDynamic`.
     Dynamic(QuantityExpr),
+    /// Split dynamic values per axis — Amplifire ("becomes twice that card's power
+    /// and its base toughness becomes twice that card's toughness").
+    SplitDynamic {
+        power: QuantityExpr,
+        toughness: QuantityExpr,
+    },
 }
 
 /// CR 208.1: Parse the value following the "become[s] " copula of a base-P/T-set
@@ -608,6 +614,47 @@ fn parse_base_pt_set_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
     let expr = oracle_quantity::parse_cda_quantity(tail)
         .or_else(|| oracle_quantity::parse_event_context_quantity(tail))?;
     Some((BasePtSetValue::Dynamic(expr), ""))
+}
+
+/// Parse a single-axis base-P/T quantity tail, including "twice that card's power"
+/// where the inner referent is event-context scoped (Amplifire).
+fn parse_base_pt_axis_quantity(tail: &str) -> Option<QuantityExpr> {
+    type VE<'a> = OracleError<'a>;
+    if let Some(qty) = oracle_quantity::parse_cda_quantity(tail)
+        .or_else(|| oracle_quantity::parse_event_context_quantity(tail))
+    {
+        return Some(qty);
+    }
+    let lower = tail.to_lowercase();
+    let Ok((rest_lower, factor)) = alt((
+        value(2i32, tag::<_, _, VE>("twice ")),
+        value(3, tag("three times ")),
+    ))
+    .parse(lower.as_str()) else {
+        return None;
+    };
+    let inner_text = tail[tail.len() - rest_lower.len()..].trim();
+    let inner = oracle_quantity::parse_event_context_quantity(inner_text)?;
+    Some(QuantityExpr::Multiply {
+        factor,
+        inner: Box::new(inner),
+    })
+}
+
+/// CR 208.1 + CR 608.2c: "<power-expr> and its base toughness becomes <toughness-expr>"
+/// when power and toughness each carry independent dynamic quantities (Amplifire).
+fn parse_split_base_pt_dynamic_values(
+    remainder: &str,
+) -> Option<(QuantityExpr, QuantityExpr, &str)> {
+    const TOUGHNESS_INTRO: &str = " and its base toughness becomes ";
+    let (power_part, rest) = nom_primitives::split_once_on(remainder, TOUGHNESS_INTRO)
+        .ok()?
+        .1;
+    let power_tail = power_part.trim().trim_end_matches('.').trim();
+    let tough_tail = rest.trim().trim_end_matches('.').trim();
+    let power = parse_base_pt_axis_quantity(power_tail)?;
+    let toughness = parse_base_pt_axis_quantity(tough_tail)?;
+    Some((power, toughness, ""))
 }
 
 /// CR 613.4b + CR 613.1f: "[subject]'s base power [and toughness] become[s]
@@ -699,8 +746,12 @@ fn try_parse_subject_base_pt_set_clause_ast(
         (subject, axes, remainder)
     };
 
-    // Parse the value side (fixed N/M or dynamic "[each] equal to <quantity>").
-    let (value, after_pt) = parse_base_pt_set_value(remainder)?;
+    // Parse the value side (fixed N/M, shared dynamic, or split per-axis dynamic).
+    let (value, after_pt) = parse_base_pt_set_value(remainder).or_else(|| {
+        parse_split_base_pt_dynamic_values(remainder).map(|(power, toughness, after)| {
+            (BasePtSetValue::SplitDynamic { power, toughness }, after)
+        })
+    })?;
 
     // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
     let keywords = parse_base_pt_set_trailing_keywords(after_pt);
@@ -731,6 +782,10 @@ fn try_parse_subject_base_pt_set_clause_ast(
             if axes.set_toughness {
                 modifications.push(ContinuousModification::SetToughnessDynamic { value: expr });
             }
+        }
+        BasePtSetValue::SplitDynamic { power, toughness } => {
+            modifications.push(ContinuousModification::SetPowerDynamic { value: power });
+            modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
         }
     }
     if modifications.is_empty() {
@@ -7124,6 +7179,48 @@ mod tests {
             keyword: Keyword::Flying
         }));
         assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn parse_split_base_pt_dynamic_values_smoke() {
+        let (power, toughness, _) = parse_split_base_pt_dynamic_values(
+            "twice that card's power and its base toughness becomes twice that card's toughness",
+        )
+        .expect("split dynamic values");
+        assert!(matches!(power, QuantityExpr::Multiply { factor: 2, .. }));
+        assert!(matches!(
+            toughness,
+            QuantityExpr::Multiply { factor: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn base_pt_set_clause_split_dynamic_revealed_card_referent() {
+        let (mods, duration) = base_pt_set_mods(
+            "Until your next turn, this creature's base power becomes twice that card's power and its base toughness becomes twice that card's toughness",
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPowerDynamic { value }
+                    if matches!(value, QuantityExpr::Multiply { factor: 2, .. })
+            )),
+            "expected SetPowerDynamic(Multiply x2), got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic { value }
+                    if matches!(value, QuantityExpr::Multiply { factor: 2, .. })
+            )),
+            "expected SetToughnessDynamic(Multiply x2), got {mods:?}"
+        );
+        assert!(matches!(
+            duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        ));
     }
 
     #[test]

@@ -4945,6 +4945,17 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 102.2 + CR 603.2 + CR 608.2d: Each opponent of the *triggering* player
+    /// (the caster of the spell that fired the trigger), resolved live from
+    /// `state.current_trigger_event` via `extract_player_from_event`. Models
+    /// "each of that player's opponents [may] <effect>" (Heartwood Storyteller) —
+    /// "that player" is the triggering/casting player, NOT the source's controller.
+    /// The recipient SET is fanned out per-player by the standard `player_scope`
+    /// loop; the body recipient stays `Controller`, rebound per opponent. CR 102.2
+    /// two-player opponent (`p.id != caster`); CR 102.3 teams intentionally not
+    /// modeled (mirrors `Opponent`). Fails closed (no recipient, count 0) when no
+    /// trigger event is in scope — the caster anchor is undefined without it.
+    OpponentOfTriggeringPlayer,
     /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
     /// player (resolved from the active AttackersDeclared trigger event) who is NOT
     /// in that player's attacked-this-combat set. Models "that player has another

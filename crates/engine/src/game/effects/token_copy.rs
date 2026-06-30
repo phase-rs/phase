@@ -462,6 +462,10 @@ pub(crate) fn apply_copy_token_after_replacement(
             Zone::Battlefield,
         );
 
+        // CR 613.7d: a copy token enters the battlefield, so it receives a
+        // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
+
         let token = state.objects.get_mut(&token_id).unwrap();
         token.is_token = true;
         token.display_source = display_source;
@@ -499,7 +503,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
         // below via `extra_keywords` (Twinflame, etc.) is folded in at query
         // time by `has_summoning_sickness`.
-        token.reset_for_battlefield_entry(state.turn_number);
+        token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
 
         // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
         // keywords on top of the copied characteristics. Twinflame's haste

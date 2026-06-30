@@ -28,6 +28,12 @@
     "updateIssue": "update issue",
     "updated": "updated"
   },
+  "comboDetector": {
+    "label": "Combo Detector",
+    "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
+    "on": "On",
+    "off": "Off"
+  },
   "gameMenu": {
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",

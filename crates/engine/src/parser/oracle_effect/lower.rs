@@ -3380,6 +3380,17 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 tag("each player with the highest speed among players "),
             ),
             value(PlayerFilter::Opponent, tag("each other player ")),
+            // CR 102.2 + CR 603.2: "each of that player's opponents" — the
+            // caster's opponents (mandatory variant), fanned out per-player.
+            // Apostrophe variants: ASCII ' and curly U+2019 '.
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player's opponents "),
+            ),
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player\u{2019}s opponents "),
+            ),
             value(PlayerFilter::Opponent, tag("each opponent ")),
             value(PlayerFilter::All, tag("each player ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —

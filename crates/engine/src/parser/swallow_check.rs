@@ -3667,6 +3667,68 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 611.2a: Amplifire — upkeep P/T set uses "until your next turn" duration
+    /// on a layer effect; must not trip Duration_NextTurn swallow warnings (issue #2239).
+    #[test]
+    fn duration_next_turn_accepts_amplifire_upkeep_pt_set() {
+        use crate::types::ability::{ContinuousModification, Duration, PlayerScope};
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature card. Until your next turn, this creature's base power becomes twice that card's power and its base toughness becomes twice that card's toughness. Put the revealed cards on the bottom of your library in a random order.",
+            "Amplifire",
+            &["Creature"],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Amplifire upkeep trigger");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Amplifire trigger must parse without Unimplemented"
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::RevealUntil { .. }),
+            "Amplifire head must be RevealUntil, got {:?}",
+            execute.effect
+        );
+        fn find_timed_pt_layer(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            let has_pt_layer = matches!(
+                def.effect.as_ref(),
+                Effect::GenericEffect {
+                    static_abilities,
+                    ..
+                } if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::SetPowerDynamic { .. }
+                                | ContinuousModification::SetToughnessDynamic { .. }
+                        )
+                    })
+                })
+            );
+            if has_pt_layer
+                && matches!(
+                    def.duration,
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller
+                    })
+                )
+            {
+                return Some(def);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_timed_pt_layer)
+                .or_else(|| def.else_ability.as_deref().and_then(find_timed_pt_layer))
+        }
+        assert!(
+            find_timed_pt_layer(execute).is_some(),
+            "expected until-your-next-turn duration on the P/T layer clause, got {execute:#?}",
+        );
+        assert!(!has_swallowed_detector(&parsed, "Duration_NextTurn"));
+    }
+
     /// CR 400.11 + CR 701.23j: Wish-cycle and planeswalker wishboard fetches must
     /// lower to SearchOutsideGame without Optional_YouMay swallow warnings (issue #2276).
     #[test]

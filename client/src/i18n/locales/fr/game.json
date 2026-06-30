@@ -341,7 +341,20 @@
     "pendingFlash": "Le prochain sort peut être lancé comme s'il avait la flash",
     "pendingFree": "Le prochain sort sans payer son coût de mana",
     "pendingCheaper": "Le prochain sort coûte {{amount}} de moins",
-    "companion": "Compagnon"
+    "companion": "Compagnon",
+    "unboundedTooltip": "{{resource}} illimité (∞)",
+    "unboundedManaPoolMarker": "Mana illimité (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "points de vie",
+    "unboundedDamage": "blessures",
+    "unboundedMill": "meule",
+    "unboundedCounters": "marqueurs",
+    "unboundedTokens": "jetons",
+    "unboundedCards": "cartes",
+    "unboundedCasts": "sorts",
+    "unboundedCombats": "combats",
+    "unboundedTurns": "tours",
+    "unboundedTriggers": "déclenchements"
   },
   "avatar": {
     "underAttack": "{{name}} est attaqué"

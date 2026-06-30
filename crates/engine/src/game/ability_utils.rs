@@ -2,8 +2,8 @@
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, EffectScope, FilterProp,
-    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource, Effect, EffectScope,
+    FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -2013,6 +2013,7 @@ fn collect_target_slots(
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         {
             let filter = effect_target_slot_filter(&ability.effect)
                 .expect("slot filter present when gate true");
@@ -2735,6 +2736,87 @@ fn sub_ability_inherits_parent_creature_target_only(
         && effect_player_filter_is_parent_target_anaphor(&sub.effect)
 }
 
+/// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target
+/// creature you control deals damage equal to its power to target creature or
+/// planeswalker you don't control") reuses the parent-declared source creature
+/// (`targets[0]`) for BOTH the damage source (`damage_source: Target`) and the
+/// `Power { Target }` / `Toughness { Target }` magnitude. The amount's per-target
+/// creature-quantity slot would therefore surface a SECOND "target creature" —
+/// the bug in GH #4234, where Bite Down asked for one target too many (CR 601.2c:
+/// one slot per distinct instance of "target", and the magnitude here is NOT a
+/// distinct instance — "its power" anaphorically reuses the source).
+///
+/// Sibling of `sub_ability_inherits_parent_creature_target_only`, which handles
+/// the Swords to Plowshares GainLife rider whose ONLY slot is the redundant
+/// magnitude; here the genuine recipient slot remains, so we drop only the
+/// magnitude slot. The boost variant (Bite Down on Crime / Ambuscade) reads
+/// `Power { Anaphoric }`, which surfaces no quantity slot, so it is unaffected.
+///
+/// `damage_source: Some(Target)` is only emitted for a one-sided-fight clause
+/// whose damage-dealing object was named with "target" in an earlier clause (the
+/// subject, e.g. "Target creature you control deals…"), so that earlier slot
+/// always supplies `targets[0]`; the magnitude `Power { Target }` reads the SAME
+/// `targets[0]` and never needs a slot of its own. This is purely a function of
+/// the effect shape, so every slot-mapping site (producer, spec builder, both
+/// consumers, the minimum-count) can apply it identically and stay in lockstep
+/// (CR 700.2 slot-mapping invariant). It only ever fires when
+/// `effect_needs_target_creature_quantity_slot` is already true — i.e. the
+/// recipient filter (here `Or[Creature, Planeswalker] you don't control`) failed
+/// `effect_primary_target_supplies_creature_target`, the exact gap that left Bite
+/// Down asking for an extra target while Rabid Bite (plain creature recipient)
+/// was already correct — so it can only drop a redundant slot, never a real one.
+fn one_sided_fight_source_supplies_quantity_creature(effect: &Effect) -> bool {
+    let amount = match effect {
+        Effect::DealDamage {
+            damage_source: Some(DamageSource::Target),
+            amount,
+            ..
+        }
+        | Effect::DamageAll {
+            damage_source: Some(DamageSource::Target),
+            amount,
+            ..
+        } => amount,
+        _ => return false,
+    };
+    // CR 208.1: the magnitude reads the Target-scoped source object's P/T — the
+    // same object `damage_source: Target` reads. Recipient-scoped or fixed
+    // magnitudes keep their own slots.
+    quantity_expr_reads_target_object_pt(amount)
+}
+
+/// CR 208.1: whether a magnitude reads the Target-scoped object's power or
+/// toughness (`Power { Target }` / `Toughness { Target }`), recursing through the
+/// arithmetic wrappers `quantity_expr_target_slot_filter` already traverses.
+fn quantity_expr_reads_target_object_pt(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => matches!(
+            qty,
+            QuantityRef::Power {
+                scope: ObjectScope::Target,
+            } | QuantityRef::Toughness {
+                scope: ObjectScope::Target,
+            }
+        ),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_reads_target_object_pt(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_reads_target_object_pt)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_target_object_pt(left)
+                || quantity_expr_reads_target_object_pt(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
 fn effect_player_filter_is_parent_target_anaphor(effect: &Effect) -> bool {
     match effect {
         Effect::GainLife { player, .. } => matches!(
@@ -3237,6 +3319,7 @@ fn collect_target_slot_specs(
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         {
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
@@ -3558,18 +3641,33 @@ fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<Target
     })
 }
 
+fn per_opponent_fanout_legal_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    bound_player: PlayerId,
+) -> Vec<TargetRef> {
+    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+        return Vec::new();
+    };
+    targeting::find_legal_object_targets_for_ability_with_filter_controller(
+        state,
+        &object_filter,
+        ability,
+        bound_player,
+    )
+}
+
 fn collect_per_opponent_target_fanout_slots(
     state: &GameState,
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
-    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+    if per_opponent_fanout_object_filter(ability).is_none() {
         return Ok(());
-    };
+    }
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
-        let legal_targets =
-            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
+        let legal_targets = per_opponent_fanout_legal_object_targets(state, ability, opponent);
         if legal_targets.is_empty() {
             if ability.targeting_is_optional() {
                 // CR 115.1 + CR 603.3d: "Up to one" per-opponent fanout — an
@@ -3612,8 +3710,7 @@ fn collect_per_opponent_target_fanout_specs(
         // creature pool is empty when targeting is optional so specs and slots
         // stay in lockstep.
         if ability.targeting_is_optional()
-            && targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id)
-                .is_empty()
+            && per_opponent_fanout_legal_object_targets(state, ability, opponent).is_empty()
         {
             continue;
         }
@@ -3641,9 +3738,9 @@ fn validate_per_opponent_target_fanout_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+    if per_opponent_fanout_object_filter(ability).is_none() {
         return Vec::new();
-    };
+    }
 
     let mut current_player = None;
     let mut legal = Vec::new();
@@ -3654,12 +3751,8 @@ fn validate_per_opponent_target_fanout_targets(
                 let Some(player_id) = current_player else {
                     continue;
                 };
-                let legal_targets = targeting::find_legal_targets(
-                    state,
-                    &object_filter,
-                    player_id,
-                    ability.source_id,
-                );
+                let legal_targets =
+                    per_opponent_fanout_legal_object_targets(state, ability, player_id);
                 if legal_targets.contains(target) {
                     legal.push(TargetRef::Object(*object_id));
                 }
@@ -3816,12 +3909,44 @@ fn legal_targets_for_selected_slot(
     } else {
         None
     };
+    let per_opponent_fanout_object_targets = if is_per_opponent_target_fanout(ability) {
+        match per_opponent_fanout_object_filter(ability) {
+            Some(object_filter) if spec.filter == object_filter => {
+                if let Some(TargetSlotSpec {
+                    filter: TargetFilter::SpecificPlayer { id },
+                    ..
+                }) = prior_specs.last()
+                {
+                    if let Some(Some(TargetRef::Player(selected_id))) = selected_slots.last() {
+                        if id == selected_id {
+                            Some(per_opponent_fanout_legal_object_targets(
+                                state,
+                                ability,
+                                *selected_id,
+                            ))
+                        } else {
+                            Some(Vec::new())
+                        }
+                    } else {
+                        Some(Vec::new())
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     let mut legal: Vec<TargetRef> = if matches!(ability.effect, Effect::PairWith { .. }) {
         pair_with_legal_choices(state, ability, &spec.filter)
     } else if let Some(targets) = damage_any_target_legal_targets(state, ability, &spec.filter) {
         targets
     } else if let Some(targets) = per_opponent_fanout_targets {
+        targets
+    } else if let Some(targets) = per_opponent_fanout_object_targets {
         targets
     } else {
         // CR 109.4 + CR 115.1: A filter scoped to a *relative* controller —
@@ -4796,6 +4921,7 @@ fn assign_targets_recursive(
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
     {
         if let Some(target) = targets.get(*next_target) {
             ability.targets.push(target.clone());
@@ -4822,9 +4948,14 @@ fn assign_targets_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
+            // CR 601.2c + issue #3864: An inheriting rider (Solitude's life-gain)
+            // surfaces no slot of its own, so it reserves no minimum here. Mirror
+            // the filter in `minimum_targets_in_chain`'s `rest` term and the
+            // step-by-step `assign_selected_slots_recursive` path.
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
+                .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
                 .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
@@ -5073,6 +5204,7 @@ fn assign_selected_slots_recursive(
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
     {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
             return Err(EngineError::InvalidAction(
@@ -5113,9 +5245,18 @@ fn assign_selected_slots_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
+            // CR 601.2c + issue #3864: A rider that inherits the parent's chosen
+            // creature ("exile up to one target creature. That creature's
+            // controller gains life equal to its power." — Solitude) surfaces no
+            // target slot of its own, so it reserves no minimum here. Filtering
+            // it out mirrors `minimum_targets_in_chain`'s own `rest` term; without
+            // the filter its phantom `Power{Target}` companion minimum (1) cancels
+            // this node's slot, leaving the chosen target unassigned and hard-
+            // erroring with "Unused selected target slots".
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
+                .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
                 .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
@@ -5463,6 +5604,7 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     let target_creature_quantity_companion = if ability.target_choice_timing
         == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         && !ability.optional_targeting
     {
         1
@@ -5695,8 +5837,10 @@ mod tests {
         WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
-    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::keywords::{HexproofFilter, Keyword};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
     use crate::types::{FormatConfig, GameAction};
 
@@ -8125,6 +8269,247 @@ mod tests {
     }
 
     #[test]
+    fn dismantling_wave_fanout_offer_excludes_regular_hexproof_permanent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact Creature",
+            &[CoreType::Artifact, CoreType::Creature],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        let unprotected_enchantment = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(3),
+            "Unprotected Enchantment",
+            &[CoreType::Enchantment],
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(unprotected_enchantment)]
+        );
+        assert!(!slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(hexproof_artifact)));
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("hidden player slot should be accepted") else {
+            panic!("expected object slot");
+        };
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(unprotected_enchantment)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_revalidation_drops_regular_hexproof_from_spell_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        let mut ability = dismantling_wave_fanout_ability(source);
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(hexproof_artifact),
+            ],
+        )
+        .expect("assignment should preserve pair structure");
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert!(
+            validated.targets.is_empty(),
+            "hexproof object is illegal from the spell controller and must drop"
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_excludes_matching_hexproof_from_source_quality() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_from_white = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof From White Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_from_white)
+            .unwrap()
+            .keywords
+            .push(Keyword::HexproofFrom(HexproofFilter::Color(
+                ManaColor::White,
+            )));
+        let unprotected_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(3),
+            "Unprotected Artifact",
+            &[CoreType::Artifact],
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(unprotected_artifact)]
+        );
+        assert!(!slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(hexproof_from_white)));
+    }
+
+    #[test]
+    fn per_opponent_fanout_ignore_hexproof_bypasses_regular_hexproof() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_dismantling_wave_source(&mut state);
+        let hexproof_artifact = create_permanent_with_types(
+            &mut state,
+            PlayerId(1),
+            CardId(2),
+            "Hexproof Artifact",
+            &[CoreType::Artifact],
+        );
+        state
+            .objects
+            .get_mut(&hexproof_artifact)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::IgnoreHexproof,
+            }],
+            None,
+        );
+        let ability = dismantling_wave_fanout_ability(source);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(hexproof_artifact)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_fanout_later_sub_ability_target_uses_normal_recompute() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opponent_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opponent_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        let ability = per_opponent_gain_control_ability().sub_ability(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 5);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("first hidden player slot should be accepted") else {
+            panic!("expected first object slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponent_one_creature)),
+        )
+        .expect("first object slot should be accepted") else {
+            panic!("expected second hidden player slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(2))),
+        )
+        .expect("second hidden player slot should be accepted") else {
+            panic!("expected second object slot");
+        };
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponent_two_creature)),
+        )
+        .expect("second object slot should advance to sub-ability target") else {
+            panic!("expected trailing sub-ability target slot");
+        };
+
+        assert_eq!(progress.current_slot, 4);
+        assert!(
+            progress
+                .current_legal_targets
+                .contains(&TargetRef::Player(PlayerId(1))),
+            "trailing non-fanout target slot should fall through to normal target recompute"
+        );
+    }
+
+    #[test]
     fn per_opponent_fanout_optional_skips_opponent_with_no_legal_targets() {
         // Regression: Haytham Kenway crash — "for each opponent, exile up to
         // one target creature that player controls." When one opponent has no
@@ -8367,6 +8752,73 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         object
+    }
+
+    fn create_permanent_with_types(
+        state: &mut GameState,
+        controller: PlayerId,
+        card_id: CardId,
+        name: &str,
+        core_types: &[CoreType],
+    ) -> ObjectId {
+        let object = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types = core_types.to_vec();
+        object
+    }
+
+    fn create_dismantling_wave_source(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Dismantling Wave".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        source
+    }
+
+    fn dismantling_wave_fanout_ability(source: ObjectId) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::AnyOf(vec![
+                        TypeFilter::Artifact,
+                        TypeFilter::Enchantment,
+                    ]))
+                    .controller(ControllerRef::TargetPlayer),
+                ),
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        ability
     }
 
     fn per_opponent_gain_control_ability() -> ResolvedAbility {
