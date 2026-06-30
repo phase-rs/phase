@@ -220,6 +220,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
     finalize_rules_state(state);
+    result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
@@ -15319,6 +15320,7 @@ mod trigger_target_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             Vec::new(),
@@ -15437,6 +15439,7 @@ mod trigger_target_tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![],
@@ -16421,6 +16424,7 @@ mod exile_return_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(victim_id)],
@@ -17412,6 +17416,7 @@ mod phase_trigger_regression_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -19661,6 +19666,8 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -19732,6 +19739,8 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -19779,6 +19788,8 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -20952,6 +20963,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             );
@@ -21143,6 +21155,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )

@@ -8449,6 +8449,13 @@ pub enum Effect {
         /// with three egg counters on it" (Darigaaz Reincarnated).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 122.1 + CR 614.1c: Entry-time counters gated on the entering
+        /// object's characteristics (e.g. Winter Soldier's "If a Hero enters
+        /// this way, it enters with an additional +1/+1 counter on it").
+        /// Applied inside the zone-change entry pipeline when the moved object
+        /// matches `filter`, not via a post-move `PutCounter` sub-ability.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
         /// CR 708.2a + CR 708.3: when `Some`, the object that enters the
         /// battlefield via this move is turned face down (before entry, CR
         /// 708.3) with these characteristics. `None` = normal face-up entry.
@@ -15902,6 +15909,17 @@ pub enum CoinFlipResult {
     Lost,
 }
 
+/// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
+/// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
+/// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE
+/// threshold special case ("roll a N or higher"), folded in for ergonomics rather
+/// than reusing `(Comparator, u8)` so the valid design space stays exact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DieResultFilter {
+    Exact(Vec<u8>),
+    AtLeast(u8),
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
@@ -16028,6 +16046,11 @@ pub struct TriggerDefinition {
     /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin_flip_result: Option<CoinFlipResult>,
+    /// CR 706.2: result-face filter for RolledDieOnce triggers; None accepts any
+    /// face. CR 706.7: a numeric filter never fires on a non-numeric (planar) roll
+    /// (result None); a None filter is unaffected. See match_rolled_die.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result: Option<DieResultFilter>,
     /// CR 603.2 + CR 106.1: Produced-mana filter for `TriggerMode::TapsForMana`
     /// triggers whose event text specifies "for {C}" / "for {G}" rather than
     /// the generic "for mana". When `Some`, the `TappedForMana` event must
@@ -16070,6 +16093,7 @@ impl TriggerDefinition {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            die_result: None,
             taps_for_mana_produced: None,
         }
     }
@@ -18813,11 +18837,40 @@ mod tests {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            die_result: None,
             taps_for_mana_produced: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(trigger, deserialized);
+    }
+
+    #[test]
+    fn die_result_filter_roundtrips_each_variant() {
+        // CR 706.2: each DieResultFilter variant survives a serde round-trip.
+        for filter in [
+            DieResultFilter::Exact(vec![1]),
+            DieResultFilter::Exact(vec![1, 2]),
+            DieResultFilter::AtLeast(3),
+        ] {
+            let json = serde_json::to_string(&filter).unwrap();
+            let deserialized: DieResultFilter = serde_json::from_str(&json).unwrap();
+            assert_eq!(filter, deserialized);
+        }
+    }
+
+    #[test]
+    fn die_result_back_compat_omitted_key_is_none() {
+        // CR 706.2: a TriggerDefinition JSON with no `die_result` key (the
+        // pre-feature serialization) deserializes to `die_result: None`.
+        let trigger = TriggerDefinition::new(TriggerMode::RolledDieOnce);
+        let json = serde_json::to_value(&trigger).unwrap();
+        assert!(
+            json.get("die_result").is_none(),
+            "None die_result must be skipped on serialize"
+        );
+        let deserialized: TriggerDefinition = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.die_result, None);
     }
 
     #[test]
@@ -19355,6 +19408,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
@@ -19437,6 +19491,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
@@ -19580,6 +19635,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }
     }

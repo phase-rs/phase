@@ -1912,6 +1912,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     fold_token_it_has_grants_into_token_statics(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
+    fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
     // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
@@ -2062,6 +2063,66 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
+/// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
+/// additional +1/+1 counter on it" riders on a parent battlefield zone change
+/// are entry replacement properties, not post-move `PutCounter` subs.
+fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
+    let parent_moves_to_battlefield = matches!(
+        *def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } | Effect::Dig {
+            destination: Some(Zone::Battlefield),
+            ..
+        }
+    );
+    if !parent_moves_to_battlefield {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            fold_enters_this_way_counter_rider(sub);
+        }
+        if let Some(else_branch) = def.else_ability.as_mut() {
+            fold_enters_this_way_counter_rider(else_branch);
+        }
+        return;
+    }
+
+    let Some(mut sub) = def.sub_ability.take() else {
+        return;
+    };
+
+    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = sub.condition.clone() else {
+        def.sub_ability = Some(sub);
+        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+        return;
+    };
+
+    if let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::ParentTarget,
+    } = &*sub.effect
+    {
+        if let Effect::ChangeZone {
+            conditional_enter_with_counters,
+            ..
+        } = &mut *def.effect
+        {
+            conditional_enter_with_counters.push((filter, counter_type.clone(), count.clone()));
+            def.sub_ability = sub.sub_ability.take();
+            if let Some(nested) = def.sub_ability.as_mut() {
+                fold_enters_this_way_counter_rider(nested);
+            }
+            return;
+        }
+    }
+
+    def.sub_ability = Some(sub);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_enters_this_way_counter_rider(sub);
+    }
+}
+
 fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
