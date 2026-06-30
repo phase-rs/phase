@@ -536,6 +536,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             up_to: false,
             // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
             enter_with_counters,
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     )
@@ -2777,9 +2778,14 @@ pub(crate) fn parse_oracle_ir(
         // counters", "an additional loyalty counter") are CR 614.1c
         // replacements. `is_enters_with_counter_trigger` recognizes the untyped
         // trigger and excludes it from this replacement interceptor.
+        // CR 608.2c: "If a [type] enters this way, it enters with …" is a reflexive
+        // conditional rider on a non-ETB trigger (Winter Soldier, Reborn Avenger),
+        // not a CR 614.1c enters-with replacement head. Skip the replacement
+        // interceptor so the line routes through trigger dispatch.
         if has_trigger_prefix(&lower)
             && !is_enters_with_counter_trigger(&lower)
             && scan_contains(&lower, "enters with")
+            && !scan_contains(&lower, "enters this way,")
         {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
@@ -6593,6 +6599,27 @@ mod tests {
             }
             other => panic!("expected Typed affected filter, got {other:?}"),
         }
+    }
+
+    /// CR 603.2 + CR 608.2c: Winter Soldier, Reborn Avenger — attack trigger with
+    /// graveyard reanimation and a reflexive Hero enters-with-counter rider must
+    /// classify as a trigger, not a replacement (issue #4560).
+    #[test]
+    fn winter_soldier_reborn_avenger_attack_trigger_not_replacement() {
+        let parsed = parse_oracle_text(
+            "Whenever Winter Soldier attacks, return target creature card with mana value less than or equal to Winter Soldier's power from your graveyard to the battlefield. If a Hero enters this way, it enters with an additional +1/+1 counter on it.",
+            "Winter Soldier, Reborn Avenger",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Hero".to_string()],
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "must not misclassify as replacement: {:?}",
+            parsed.replacements
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        assert_eq!(parsed.triggers[0].mode, TriggerMode::Attacks);
     }
 
     /// CR 301.5a + CR 613.4c: Winter Soldier, Icy Assassin — "Winter Soldier gets

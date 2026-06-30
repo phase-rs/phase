@@ -1972,6 +1972,7 @@ fn lander_ability() -> AbilityDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         )
@@ -2493,7 +2494,7 @@ pub(super) fn inject_resolved_token_abilities(
 /// CR 111.4 + CR 707.2a: Grant catalog `rules_text` when token creation resolved
 /// a `token_image_ref` preset whose abilities are not already covered by the
 /// predefined path (e.g. SOS Pest attack life gain).
-pub(super) fn inject_catalog_token_abilities(
+pub(crate) fn inject_catalog_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {

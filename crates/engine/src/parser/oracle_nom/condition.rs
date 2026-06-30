@@ -6759,6 +6759,16 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     // matches cleanly.
     let after_filter = after_filter.trim_start();
 
+    // Two surface forms:
+    //   * auxiliary + past participle / multi-word verb ("is put onto the battlefield this way")
+    //   * present-tense third-person singular without auxiliary ("enters this way" — Winter Soldier)
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(after_filter)
+    {
+        let (rest, _) = tag(" this way").parse(rest)?;
+        return Ok((rest, (filter, false)));
+    }
+
     // tense: singular "is"/"was" + plural "are"/"were". Verb number is
     // grammatically inert here — "one or more cards are milled" and "an X was
     // milled" produce the same existential condition. (Negations stay
@@ -13566,6 +13576,26 @@ mod tests {
                 assert_eq!(type_filters, vec![TypeFilter::Enchantment]);
             }
             other => panic!("expected Typed Enchantment, got {other:?}"),
+        }
+    }
+
+    /// CR 603.2 + CR 608.2c: present-tense "enters this way" — Winter Soldier,
+    /// Reborn Avenger's Hero rider after graveyard reanimation.
+    #[test]
+    fn test_zone_changed_this_way_hero_enters() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "a hero enters this way, it enters with an additional +1/+1 counter on it",
+        )
+        .unwrap();
+        assert_eq!(rest, ", it enters with an additional +1/+1 counter on it");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Hero"))
+                ));
+            }
+            other => panic!("expected Typed Hero, got {other:?}"),
         }
     }
 

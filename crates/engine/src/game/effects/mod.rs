@@ -734,6 +734,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enters_under_player,
             enters_attacking,
             enter_with_counters,
+            conditional_enter_with_counters,
             duration,
             track_exiled_by_source,
             mut moved_count,
@@ -741,27 +742,6 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             library_placement,
             effect_kind,
         } = pending;
-        let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
-            source_id,
-            controller,
-            origin,
-            destination,
-            enter_transformed,
-            enter_tapped,
-            enters_under_player,
-            enters_attacking,
-            enter_with_counters,
-            duration,
-            track_exiled_by_source,
-            // CR 708.2a + CR 708.3: thread the preserved face-down profile back
-            // into the resume ctx so a face-down move that parked on a
-            // per-permanent replacement-ordering / as-enters choice resumes
-            // FACE DOWN with the same characteristics (Yedora-style return),
-            // instead of exposing the real object face up. Mirrors the
-            // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
-            face_down_profile,
-            library_placement,
-        };
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and
         // their observer triggers collected. NOTE (no-field DEFERRED residual):
@@ -772,6 +752,36 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
+            let per_obj_enter_counters =
+                crate::game::effects::change_zone::enter_with_counters_for_pending_object(
+                    state,
+                    source_id,
+                    *obj_id,
+                    &enter_with_counters,
+                    &conditional_enter_with_counters,
+                );
+            let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
+                source_id,
+                controller,
+                origin,
+                destination,
+                enter_transformed,
+                enter_tapped,
+                enters_under_player,
+                enters_attacking,
+                enter_with_counters: per_obj_enter_counters,
+                conditional_enter_with_counters: vec![],
+                duration: duration.clone(),
+                track_exiled_by_source,
+                // CR 708.2a + CR 708.3: thread the preserved face-down profile back
+                // into the resume ctx so a face-down move that parked on a
+                // per-permanent replacement-ordering / as-enters choice resumes
+                // FACE DOWN with the same characteristics (Yedora-style return),
+                // instead of exposing the real object face up. Mirrors the
+                // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
+                face_down_profile: face_down_profile.clone(),
+                library_placement: library_placement.clone(),
+            };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
                 state, &ctx, *obj_id, events,
@@ -810,7 +820,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_tapped: ctx.enter_tapped,
                             enters_under_player: ctx.enters_under_player,
                             enters_attacking: ctx.enters_attacking,
-                            enter_with_counters: ctx.enter_with_counters.clone(),
+                            enter_with_counters: enter_with_counters.clone(),
+                            conditional_enter_with_counters: conditional_enter_with_counters
+                                .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
@@ -835,7 +847,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_tapped: ctx.enter_tapped,
                             enters_under_player: ctx.enters_under_player,
                             enters_attacking: ctx.enters_attacking,
-                            enter_with_counters: ctx.enter_with_counters.clone(),
+                            enter_with_counters: enter_with_counters.clone(),
+                            conditional_enter_with_counters: conditional_enter_with_counters
+                                .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
@@ -891,7 +905,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
-            source_id: ctx.source_id,
+            source_id,
         });
         // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
         // landed us back at Priority (no further replacement choice), B1-drain the
@@ -8839,6 +8853,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -8911,6 +8926,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -8988,6 +9004,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             )
@@ -9078,6 +9095,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             )
@@ -9106,6 +9124,8 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -9877,6 +9897,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![],
@@ -10254,6 +10275,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(victim)],
@@ -10738,6 +10760,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(creature)],
@@ -10804,6 +10827,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -10895,6 +10919,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )),
@@ -10923,6 +10948,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(creature)],
@@ -11025,6 +11051,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(equipment)],
@@ -11119,6 +11146,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -11637,6 +11665,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )),
@@ -11658,6 +11687,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
@@ -11708,6 +11738,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )),
@@ -11729,6 +11760,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(obj)],
@@ -12310,6 +12342,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )),
@@ -12331,6 +12364,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![], // no targets
@@ -13575,6 +13609,8 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
@@ -13613,6 +13649,8 @@ mod tests {
                 owner_library: false,
                 track_exiled_by_source: false,
                 face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
                 is_cost_payment: false,
@@ -13735,6 +13773,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -13944,6 +13983,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -14718,6 +14758,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -15310,6 +15351,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -17044,6 +17086,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -17301,6 +17344,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(permanent)],
