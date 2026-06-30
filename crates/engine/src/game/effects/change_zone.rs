@@ -778,6 +778,19 @@ pub(crate) fn process_one_zone_move(
     obj_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    // CR 400.7 + CR 111.7: An object that has already left the game (a token
+    // that ceased to exist via CR 704.5d, or any other object removed from
+    // `state.objects` since this effect snapshotted it as a target) cannot
+    // undergo a further zone change — skip silently rather than falling
+    // through to `move_to_zone`, which assumes the object is live and panics
+    // otherwise. A delayed trigger that snapshots `TargetFilter::LastCreated`
+    // (e.g. Kari Zev, Skyship Raider's "exile that token at end of combat")
+    // is the common path here: the token dies in combat before the delayed
+    // trigger fires.
+    if !state.objects.contains_key(&obj_id) {
+        return ZoneMoveResult::Done;
+    }
+
     // CR 114.5: Emblems cannot be moved between zones.
     if state.objects.get(&obj_id).is_some_and(|o| o.is_emblem) {
         return ZoneMoveResult::Done;
