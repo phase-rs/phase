@@ -1289,6 +1289,25 @@ pub(crate) fn apply_zone_delivery_tail(
     if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
         && state.post_replacement_continuation.is_some()
     {
+        // CR 603.6d + CR 614.12a: For an "as-enters" (battlefield-entry) Moved
+        // post-effect, the effect resolves against the zone-changing object (the
+        // ENTRANT), NOT the replacement's host source. Drop the stashed host
+        // source slot for battlefield entries — exactly as the cast-resolution
+        // (`stack.rs`), land-play (`engine.rs`), and replacement-choice resume
+        // (`engine_replacement.rs`) drain sites already do — so a non-self `Moved`
+        // GenericEffect (Displaced Dinosaurs: "As a historic permanent you control
+        // enters, it becomes a 7/7 Dinosaur creature in addition to its other
+        // types") binds its `SelfRef` execute to the entrant, not the host.
+        //
+        // Scoped to `to == Battlefield`: only as-enters replacements bind to the
+        // entrant. A non-battlefield delivery that incidentally drains an outer
+        // effect's still-pending continuation here (e.g. a Mill replacement's
+        // doubling continuation while its milled cards move to the graveyard)
+        // must keep the host source slot — its post-effect belongs to the host,
+        // not the moved card.
+        if to == Zone::Battlefield {
+            state.post_replacement_source = None;
+        }
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
             Some(object_id),

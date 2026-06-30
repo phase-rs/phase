@@ -1384,12 +1384,14 @@ fn execute_draw_for(
             };
             let allowed = crate::game::effects::draw::allowed_draw_count(state, player_id, count);
 
-            let cards_to_draw: Vec<_> = state
-                .players
-                .iter()
-                .find(|p| p.id == player_id)
-                .map(|p| p.library.iter().take(allowed as usize).copied().collect())
-                .unwrap_or_default();
+            // CR 121.1 + CR 613.11: route card selection through the single
+            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
+            // honored on the turn-based draw step too.
+            let cards_to_draw = crate::game::effects::draw::select_cards_to_draw(
+                state,
+                player_id,
+                allowed as usize,
+            );
 
             // CR 704.5b: Attempting to draw from an empty library causes a game loss.
             if allowed > 0 && cards_to_draw.len() < allowed as usize {
@@ -1536,16 +1538,23 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 603.7b + CR 513.2: Remove "this turn" delayed triggers at cleanup.
     // WheneverEvent (multi-fire, one_shot=false) triggers persist until cleanup.
-    // WhenNextEvent (one-shot) triggers that didn't fire also expire — their
-    // "this turn" duration means they must not carry over to the next turn.
-    // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is NOT a
-    // "this turn" trigger: the end step "doesn't back up", so it legitimately
+    // A `WhenNextEvent` one-shot that didn't fire expires ONLY when its lifetime
+    // is `ThisTurn` (CR 603.7b "stated duration, such as 'this turn'") — its
+    // "this turn" duration means it must not carry over. A `Persistent`
+    // `WhenNextEvent` (CR 603.7b, no stated duration — open-ended re-entry, The
+    // Pandorica's "when ~ becomes untapped or leaves the battlefield") has NO
+    // "this turn" limit and must survive.
+    // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is likewise NOT
+    // a "this turn" trigger: the end step "doesn't back up", so it legitimately
     // persists to the next turn's end step — it must survive this retain.
     state.delayed_triggers.retain(|dt| {
         dt.one_shot
             && !matches!(
                 dt.condition,
-                crate::types::ability::DelayedTriggerCondition::WhenNextEvent { .. }
+                crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+                    ..
+                }
             )
     });
 

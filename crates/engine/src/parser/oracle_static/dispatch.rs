@@ -1,4 +1,5 @@
 // CR 604 — `parse_static_line_inner` category dispatch.
+use super::super::oracle_nom::error::oracle_err;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
@@ -8,6 +9,56 @@ use super::{
     restriction::*, type_change::*,
 };
 use crate::types::statics::ProhibitionScope;
+
+/// CR 201.5: Consume a self-reference subject — `~` (produced by
+/// `normalize_card_name_refs` for "text that refers to the object it's on by
+/// name") or a typed self-reference phrase ("this creature", "this permanent",
+/// …). Used by dynamic referent parsing where the subject is the static's own
+/// source ("where X is ~'s power").
+fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("~").parse(input) {
+        return Ok((rest, ()));
+    }
+    for phrase in SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
+
+/// CR 208.1 + CR 113.7: Parse the dynamic referent of a "{X} … less to activate,
+/// where X is [source]'s {power|toughness|mana value}" activated-ability cost
+/// reduction (Agatha of the Vile Cauldron — "where X is Agatha's power", which
+/// `normalize_card_name_refs` rewrites to "where X is ~'s power"). Returns the
+/// typed `QuantityRef` scoped to the static's source object (`ObjectScope::Source`),
+/// so the reduction reads the source's post-layer characteristic at
+/// cost-determination time (CR 113.7).
+fn parse_where_x_is_self_stat(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag(", where x is ").parse(input)?;
+    let (input, _) = parse_self_reference_subject(input)?;
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+            tag("'s power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+            tag("'s toughness"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Source,
+            },
+            tag("'s mana value"),
+        ),
+    ))
+    .parse(input)
+}
 
 /// Whether the inverted `"As long as <cond>, <effect>"` detector may fire.
 ///
@@ -37,6 +88,36 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     ))
     .parse(lower)
     .is_ok()
+}
+
+/// CR 305.2: static land-play permissions with an explicit additional-drop
+/// count greater than the ordinary +1 grant. `u8::MAX` represents "any
+/// number"; runtime summing saturates so it stays effectively unbounded when
+/// combined with ordinary extra drops.
+fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> {
+    all_consuming(terminated(
+        preceded(
+            (opt(tag("you may ")), tag("play ")),
+            alt((
+                value(u8::MAX, tag("any number of lands")),
+                value(2, tag("two additional lands")),
+            )),
+        ),
+        (
+            opt((
+                space1,
+                alt((
+                    tag("on each of your turns"),
+                    tag("on each of their turns"),
+                    tag("during each of your turns"),
+                    tag("during each of their turns"),
+                )),
+            )),
+            opt(tag(".")),
+            space0,
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 502.3: Trailing "during their untap step(s)" clause of the
@@ -618,6 +699,25 @@ pub(crate) fn parse_static_line_inner(
                     .description(text.to_string()),
             );
         }
+    }
+
+    // CR 702.170f: "You may plot [filter] cards from the top of your library."
+    // Plot-from-library permission (Fblthp, Lost on the Range). Dispatched
+    // BEFORE the cast-permission arm so plot lines are claimed by the plot
+    // parser. The cast arm anchors on "you may play"/"you may cast" while this
+    // anchors on "you may plot", so there is no real collision — ordering
+    // documents intent and guards against future drift. Plot is a CR 702.170
+    // special action (Library → Exile, later Exile → Stack), categorically
+    // distinct from the cast permission's CR 601.2a Library → Stack cast.
+    if let Some(result) = try_parse_top_of_library_plot_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 702.170f + CR 702.170a: "The top card of your library has plot[. The
+    // plot cost is equal to its mana cost]." Mechanic-establishing plot grant
+    // for the top library card (Fblthp). Also claimed ahead of the cast arm.
+    if let Some(result) = try_parse_top_of_library_has_plot(&text, &lower) {
+        return Some(result);
     }
 
     // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
@@ -2226,6 +2326,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- CR 121.1 / CR 613.11: Draw-source redirection ("draw cards from the
+    // bottom of your library rather than the top") — River Song, "Meet in
+    // Reverse". ---
+    if let Some(def) = parse_draw_from_bottom(tp.lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
     // CR 502.3: Effects can keep permanents from untapping during the untap step.
     if nom_primitives::scan_contains(tp.lower, "doesn't untap during")
@@ -2492,39 +2599,79 @@ pub(crate) fn parse_static_line_inner(
     // abilities of sources with the chosen name cost {2} more to activate").
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount, mode, subject_filter), _)) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("activated abilities of ").parse(i)?;
-        let (i, subject) = take_until(" cost ").parse(i)?;
-        let (i, _) = tag(" cost ").parse(i)?;
-        let (i, amount) =
-            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
-        let (i, _) = tag(" ").parse(i)?;
-        let (i, mode) = alt((
-            value(CostModifyMode::Reduce, tag("less to activate")),
-            value(CostModifyMode::Raise, tag("more to activate")),
-        ))
-        .parse(i)?;
-        Ok((i, (amount, mode, subject.to_string())))
-    }) {
-        // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
-        // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
-        let affected = parse_chosen_name_source_filter(&subject_filter)
-            .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
-        // CR 118.7: a one-mana floor only applies to reductions.
-        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
-            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
-            .flatten();
-        return Some(
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode,
-                keyword: "activated".to_string(),
-                amount,
-                minimum_mana,
-                dynamic_count: None,
-            })
-            .affected(affected)
-            .description(text.to_string()),
-        );
+    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = tag("activated abilities of ").parse(i)?;
+            let (i, subject) = take_until(" cost ").parse(i)?;
+            let (i, _) = tag(" cost ").parse(i)?;
+            // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds)
+            // or the variable `{X}` (Agatha), whose value is supplied by the
+            // trailing "where X is …" referent parsed below.
+            let (i, (amount_n, is_x)) = nom::sequence::delimited(
+                tag("{"),
+                alt((
+                    map(nom_primitives::parse_number, |n| (n, false)),
+                    value((0u32, true), tag("x")),
+                )),
+                tag("}"),
+            )
+            .parse(i)?;
+            let (i, _) = tag(" ").parse(i)?;
+            let (i, mode) = alt((
+                value(CostModifyMode::Reduce, tag("less to activate")),
+                value(CostModifyMode::Raise, tag("more to activate")),
+            ))
+            .parse(i)?;
+            // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
+            // ("where X is ~'s power", Agatha).
+            let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+            Ok((
+                i,
+                (amount_n, is_x, mode, subject.to_string(), dynamic_count),
+            ))
+        })
+    {
+        // CR 601.2f: A fixed `{N}` reduces by exactly `N`; a `{X}` reduces by
+        // `1 × resolve_quantity(dynamic_count)` (Agatha: X = ~'s power). A bare
+        // `{X}` with no recognized referent is unresolvable — leave it for a
+        // later branch (ultimately unsupported) rather than emit a wrong amount.
+        let resolved: Option<(u32, Option<QuantityRef>)> = if is_x {
+            dynamic_count.map(|qty| (1u32, Some(qty)))
+        } else {
+            Some((amount_n, None))
+        };
+        if let Some((amount, dynamic_count)) = resolved {
+            // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
+            // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
+            let affected = parse_chosen_name_source_filter(&subject_filter)
+                .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+            // CR 118.7: a one-mana floor only applies to reductions.
+            let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+                .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+                .flatten();
+            return Some(
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode,
+                    keyword: "activated".to_string(),
+                    amount,
+                    minimum_mana,
+                    dynamic_count,
+                })
+                .affected(affected)
+                .description(text.to_string()),
+            );
+        }
+    }
+
+    // --- CR 116.2 + CR 118.7a: special-action (plot/unlock) cost reduction ---
+    // "Plotting cards from your hand costs {N} less" (Doc Aurlock, CR 116.2k) /
+    // "Unlock costs you pay cost {N} less" (Inquisitive Glimmer, CR 116.2m). A
+    // dedicated `SpecialAction` axis, NOT the generic activated-ability reducer
+    // above — plot/unlock payments carry no `AbilityTag`, so routing them
+    // through `ReduceAbilityCost { keyword: "activated" }` would never fire and
+    // would wrongly let "activated abilities cost less" reduce plot costs.
+    if let Some(def) = parse_action_cost_reduction(&text, &lower) {
+        return Some(def);
     }
 
     // --- CR 601.2f: Cost-floor statics (Trinisphere class) ---
@@ -2636,17 +2783,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "play an additional land" / "play two additional lands" ---
-    // CR 305.2: Determine the count at parse time and carry it as typed data.
-    if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
+    // --- "play any number of lands" / counted additional land-drop grants ---
+    // The ordinary +1 phrase ("play an additional land") is handled by the
+    // rule-static subject/predicate shell so embedded subjects such as
+    // "Each player who last chose green anchor ..." keep their affected filter.
+    if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "play an additional land") {
-        return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }

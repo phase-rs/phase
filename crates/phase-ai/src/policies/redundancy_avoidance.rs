@@ -588,6 +588,11 @@ fn redundancy_delta(
         // later occurs — no static redundancy signal, same as the target
         // replacement above.
         | Effect::CreateDamageReplacement { .. }
+        // CR 614.11 + CR 614.6: CreateDrawReplacement installs a one-shot draw
+        // "shield" ("the next time you would draw a card this turn, [effect]
+        // instead"). Its value depends on whether a draw later occurs — no
+        // static redundancy signal, same as the damage replacement above.
+        | Effect::CreateDrawReplacement { .. }
         // CR 614.12 + CR 303.4: ReturnAsAura installs an Aura conversion +
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
@@ -624,6 +629,7 @@ fn redundancy_delta(
         | Effect::Heist { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
+        | Effect::RememberCard { .. }
         | Effect::HeistExile => None,
     }
 }

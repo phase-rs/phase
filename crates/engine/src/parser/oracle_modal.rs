@@ -1499,18 +1499,38 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
     split_short_label_prefix(line, 4).map(|(name, rest)| (name.to_lowercase(), rest.to_string()))
 }
 
-/// CR 207.2c: flavor words (Universes Beyond) are italic ability-word prefixes
+/// CR 207.2d: flavor words (Universes Beyond) are italic ability-word prefixes
 /// with no rules meaning; unlike the in-game ability words enumerated by CR
 /// 207.2c (which are <=2 words), flavor-word names routinely run 5-6 words
 /// ("Woman Who Walked the Earth", "Deal with the Black Guardian"). At the 4-word
-/// cap these never strip, so the trigger body behind them never reaches the
-/// trigger parser. Only the Priority-6b trigger-dispatch path (oracle.rs:2837)
-/// uses this wider cap: its activated branch is gated on
+/// cap these never strip, so the body behind them never reaches the relevant
+/// sub-parser.
+///
+/// This heuristic cap governs the Priority-6b trigger-dispatch path (oracle.rs),
+/// where the post-strip remainder is re-validated structurally rather than by a
+/// length-independent guard: its activated branch is gated on
 /// `ability_word_to_condition` (known ability words, <=2 words) and its trigger
-/// branch re-validates via `has_trigger_prefix`, so an over-long strip that
-/// yields no trigger body is rejected and the original line falls through. All
-/// other consumers keep the 4-word `strip_ability_word*` cap.
-const FLAVOR_WORD_MAX_WORDS: usize = 6;
+/// branch re-validates via `has_trigger_prefix`. The 6-word ceiling bounds how
+/// far an em-dash sentence may be treated as a label on that path.
+///
+/// The activated-ability cost-label path uses the wider
+/// `FLAVOR_WORD_COST_LABEL_MAX_WORDS` instead — see that constant for why a word
+/// count is the wrong guard there.
+///
+/// All other consumers keep the 4-word `strip_ability_word*` cap.
+pub(super) const FLAVOR_WORD_MAX_WORDS: usize = 6;
+
+/// CR 207.2d: the activated-ability cost-label path
+/// (`oracle::strip_activated_cost_label`) re-validates the stripped remainder
+/// through `cost_prefix_is_activated`, a length-independent guard requiring mana
+/// symbols or a cost-starter verb. Because that guard — not the word count — is
+/// what distinguishes a genuine flavor-word cost label from an ordinary em-dash
+/// line, the word count is the wrong filter here: capping it merely drops valid
+/// labels whose names happen to be long. Universes Beyond flavor names run
+/// arbitrarily long ("I've Come Up with a New Recipe!", 7 words — Ignis
+/// Scientia; "The Most Important Punch in History", 6 words — Duggan), so this
+/// path is uncapped and leans entirely on `cost_prefix_is_activated`.
+pub(super) const FLAVOR_WORD_COST_LABEL_MAX_WORDS: usize = usize::MAX;
 
 pub(super) fn strip_flavor_word_with_name(line: &str) -> Option<(String, String)> {
     split_short_label_prefix(line, FLAVOR_WORD_MAX_WORDS)

@@ -163,18 +163,18 @@ pub fn detect_loop(
     }
     // CR 732.2a: and a resource must have strictly advanced without an
     // unsustainable consumed-axis deficit for the loop's controller — otherwise
-    // nothing goes unbounded. This is controller-aware (see `is_progress`):
+    // nothing goes unbounded. This is controller-aware (see `net_progress_for`):
     // PR-0's `ResourceVector::is_net_progress` treats *any* player's life/mana
     // going negative as disqualifying, which is correct for a self-sustainability
     // question but wrongly rejects a damage/drain/mill loop whose entire point is
     // to drive an OPPONENT's life or library down. The caller supplies the loop's
     // `controller`, so the consumed-axis constraint is scoped to that player and
     // opponent depletion is treated as progress.
-    if !is_progress(delta, controller) {
+    if !delta.net_progress_for(controller) {
         return None;
     }
 
-    let unbounded = unbounded_axes_for(delta, controller);
+    let unbounded = delta.unbounded_axes_for(controller);
     // `is_progress` guarantees ≥1 unbounded axis, but guard the empty case
     // defensively so a returned certificate always names ≥1 axis.
     if unbounded.is_empty() {
@@ -276,58 +276,6 @@ pub(crate) fn live_mandatory_loop_winner(
     matches!(cert.win_kind, WinKind::LethalDamage).then_some(winner)
 }
 
-/// CR 732.2a: controller-scoped net-progress. Returns true iff the cycle makes
-/// unbounded progress on ≥1 axis without leaving the loop's controller(s) with an
-/// unsustainable net deficit on a *consumed* axis (their own life or mana).
-///
-/// Distinct from [`ResourceVector::is_net_progress`] (PR-0) only in *who* the
-/// consumed-axis constraint applies to:
-/// - **Controller life/mana net-negative ⇒ not sustainable ⇒ false** (a loop that
-///   bleeds its own controller stops on its own).
-/// - **Opponent life net-negative ⇒ progress** (the drain/damage win). Opponent
-///   library net-negative ⇒ progress (the mill win).
-/// - All other axes (damage, tokens, draws, casts, counters, triggers, combats,
-///   turns, the controller's gained mana) count as progress when strictly up.
-fn is_progress(delta: &ResourceVector, controller: PlayerId) -> bool {
-    // CR 106.1: a loop that net-spends mana across the whole pool is not
-    // sustainable. Mana is not attributed per player in the summed `mana` array,
-    // so any net-negative color is a controller-side deficit.
-    if delta.mana.iter().any(|&n| n < 0) {
-        return false;
-    }
-    // CR 119: the controller losing life across the cycle is unsustainable.
-    for (pid, &n) in &delta.life {
-        if *pid == controller && n < 0 {
-            return false;
-        }
-    }
-    !unbounded_axes_for(delta, controller).is_empty()
-}
-
-/// The unbounded axes of `delta`, with the opponent-vs-controller sign rules a
-/// win classifier needs. Builds on [`ResourceVector::unbounded_components`] (which
-/// reports every strictly-positive axis plus any nonzero library) and additionally
-/// surfaces an **opponent's life loss** (negative life on a non-controller) as the
-/// drain win axis — `unbounded_components` only reports positive life (lifegain),
-/// so a pure drain loop would otherwise name no axis.
-fn unbounded_axes_for(delta: &ResourceVector, controller: PlayerId) -> Vec<ResourceAxis> {
-    let mut out: Vec<ResourceAxis> = delta
-        .unbounded_components()
-        .into_iter()
-        .map(|(axis, _)| axis)
-        .collect();
-    // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
-    for (pid, &n) in &delta.life {
-        if n < 0 && *pid != controller {
-            let axis = ResourceAxis::Life(*pid);
-            if !out.contains(&axis) {
-                out.push(axis);
-            }
-        }
-    }
-    out
-}
-
 /// Derive the [`WinKind`] from the measured per-cycle delta.
 ///
 /// Classification is by the **most decisive** unbounded axis, in CR loss-priority
@@ -340,7 +288,7 @@ fn unbounded_axes_for(delta: &ResourceVector, controller: PlayerId) -> Vec<Resou
 /// / life loss from / mill on a player who is *not* the loop's controller is an
 /// opponent loss condition; the corpus rows are two-player, so any non-controller
 /// player is the opponent.
-fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) -> WinKind {
+pub(crate) fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) -> WinKind {
     // CR 704.5a: a player at 0 life loses — so unbounded damage is a WIN only when
     // the damaged player is an OPPONENT (a non-controller). Damage to the loop's
     // own controller (self-ping offset by lifegain) is an advantage engine, not a

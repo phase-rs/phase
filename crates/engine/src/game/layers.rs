@@ -6,8 +6,9 @@ use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
     eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_recipient_attacking_owner_target,
-    eval_source_entered_this_turn, eval_source_has_dealt_damage, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    eval_shares_color_with_most_common_color, eval_source_entered_this_turn,
+    eval_source_has_dealt_damage, eval_source_in_zone, eval_source_is_attacking,
+    eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -21,10 +22,10 @@ use crate::game::quantity::{
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    ChosenSubtypeKind, CommanderOwnership, ContinuousModification, CopiableValues, Duration,
-    Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
-    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
+    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
+    CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope,
+    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -665,6 +666,12 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
+        // color…" — the color check is on the recipient (the enchanted creature),
+        // not the Aura source, so it must route through the recipient-eval path.
+        // Like `RecipientAttackingOwnerTarget`, the `Not` wrapper above recurses,
+        // so the positive inner condition is what reports `true` here.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         // CR 509.1b + CR 506.2: the attacking creature (recipient) is the subject
         // of the owner-attack check, so this MUST route through the recipient-eval
         // path. The `Not` wrapper above already recurses, so the positive inner
@@ -718,6 +725,8 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         // Devotion is a sum of mana symbols across permanents you control — pure
         // board composition.
         StaticCondition::DevotionGE { .. } => true,
+        // Reads the color histogram over every battlefield permanent.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         // "you control [filter]" / "a [filter] is on the battlefield" — membership
         // is battlefield population. `IsPresent` has no zone field (always a
         // battlefield-presence check), so it is unconditionally population
@@ -856,6 +865,8 @@ fn entered_object_perturbs_static_condition(
         // Commander presence — conservatively perturb (a commander entering can
         // flip it; not worth a precise commander membership test here).
         StaticCondition::ControlsCommander { .. } => true,
+        // A colored permanent entering can shift the most-common-color histogram.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
             .iter()
             .any(|c| entered_object_perturbs_static_condition(state, entered_id, ctx, c)),
@@ -1105,7 +1116,12 @@ fn evaluate_condition_with_context(
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        // CR 400.7: True when the source permanent entered the battlefield this turn.
+        // CR 105.2 + CR 611.3a: the subject is the recipient (the enchanted
+        // creature, "it"), not the Aura source; fall back to the source only when
+        // evaluated without a recipient (the source gate defers to per-recipient).
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            eval_shares_color_with_most_common_color(state, recipient_id.unwrap_or(source_id))
+        }
         StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
         // damage since entering the battlefield (sticky). The "hasn't dealt damage
@@ -2711,8 +2727,28 @@ fn active_continuous_effects_from_static_definitions(
             // set is recomputed each pass and reuses the existing GrantAbility
             // apply + dedup. The meta-effect itself has no standalone layer-6
             // behaviour, so skip pushing it.
-            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source } = modification {
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } =
+                modification
+            {
                 effects.extend(expand_granted_activated_abilities(
+                    state,
+                    source_id,
+                    timestamp,
+                    &affected_filter,
+                    source,
+                    cap.as_ref(),
+                ));
+                continue;
+            }
+            // CR 613.1f + CR 603.1: "~ has all triggered abilities of [source]"
+            // (Koh, the Face Stealer). Triggered-ability mirror of the activated
+            // expansion above: expand into one `GrantTrigger` per triggered ability
+            // of each object matching `source`, recomputed each pass and reusing the
+            // existing `GrantTrigger` apply + dedup. No `cap` — triggered abilities
+            // carry no activation use-restriction (CR 602.5b is activated-only). The
+            // meta-effect itself has no standalone layer-6 behaviour, so skip it.
+            if let ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = modification {
+                effects.extend(expand_granted_triggered_abilities(
                     state,
                     source_id,
                     timestamp,
@@ -2842,12 +2878,19 @@ fn expand_granted_static_effects(
 /// are granted. Synthesized effects target the recipient via `SelfRef`, reusing
 /// the layer-6 `GrantAbility` apply and its structural dedup, and are recomputed
 /// each pass so the granted set tracks the current `source` membership.
+///
+/// CR 602.5b + CR 602.5c: When `cap` is `Some`, that use-restriction is injected
+/// into each donated ability's `activation_restrictions` before it is granted, so
+/// the acquired ability carries (and is enforced under) the granting card's
+/// frequency limit (Locus of Enlightenment's "once each turn"). `None` leaves the
+/// donated abilities uncapped — the required default for every other grant.
 fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
     host_timestamp: u64,
     host_affected_filter: &TargetFilter,
     source: &TargetFilter,
+    cap: Option<&ActivationRestriction>,
 ) -> Vec<ActiveContinuousEffect> {
     let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
     let mut out = Vec::new();
@@ -2921,6 +2964,19 @@ fn expand_granted_activated_abilities(
                 if ability.kind != crate::types::ability::AbilityKind::Activated {
                     continue;
                 }
+                // CR 602.5b + CR 602.5c: A granting card's use-restriction (Locus
+                // of Enlightenment's "activate only once each turn") travels with
+                // the acquired ability. Inject it into the donated def's
+                // `activation_restrictions` so the existing per-(recipient,
+                // ability_index) enforcement in `game/restrictions.rs` applies it.
+                // Guard against duplicating an identical restriction the provider
+                // already prints. `None` (every other grant) leaves it uncapped.
+                let mut donated = ability.clone();
+                if let Some(restriction) = cap {
+                    if !donated.activation_restrictions.contains(restriction) {
+                        donated.activation_restrictions.push(restriction.clone());
+                    }
+                }
                 out.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
@@ -2930,7 +2986,104 @@ fn expand_granted_activated_abilities(
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
                     modification: ContinuousModification::GrantAbility {
-                        definition: Box::new(ability.clone()),
+                        definition: Box::new(donated),
+                    },
+                    affected_filter: TargetFilter::SelfRef,
+                    condition: None,
+                    mode: StaticMode::Continuous,
+                    characteristic_defining: false,
+                });
+                next_mod_index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// CR 613.1f + CR 603.1 + CR 603.2: Triggered-ability mirror of
+/// [`expand_granted_activated_abilities`]. Expands a
+/// `GrantAllTriggeredAbilitiesOf { source }` host modification into one
+/// `GrantTrigger` effect per triggered ability of each object matching `source`
+/// (Koh, the Face Stealer — "all activated and triggered abilities of the last
+/// chosen card"). Providers are scanned across all zones (the granted-from card
+/// is typically in exile) in deterministic `ObjectId` order, and each provider's
+/// LIVE `trigger_definitions` is read — reset from `base_trigger_definitions`
+/// every layer pass exactly like `abilities` (layers.rs reset loop), so an exiled
+/// provider's printed triggers are present at expansion time, identical to how
+/// the activated mirror reads live `abilities`. Synthesized effects target the
+/// recipient via `SelfRef`, reusing the layer-6 `GrantTrigger` apply and its
+/// structural dedup, and are recomputed each pass so the granted set tracks the
+/// current `source` membership. No `cap`: triggered abilities carry no activation
+/// use-restriction (CR 602.5b is activated-only). The `source` filter resolves
+/// against the host id with each recipient's controller, memoized per controller
+/// — mirroring the activated expander exactly; the recipient-equality self-skip
+/// (CR 613.1f) stays per-recipient at emission.
+fn expand_granted_triggered_abilities(
+    state: &GameState,
+    host_source_id: ObjectId,
+    host_timestamp: u64,
+    host_affected_filter: &TargetFilter,
+    source: &TargetFilter,
+) -> Vec<ActiveContinuousEffect> {
+    let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
+    let mut out = Vec::new();
+    let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+    provider_ids.sort_unstable_by_key(|id| id.0);
+    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
+        std::collections::HashMap::new();
+    for &recipient_id in &state.battlefield {
+        if !crate::game::filter::matches_target_filter(
+            state,
+            recipient_id,
+            host_affected_filter,
+            &host_ctx,
+        ) {
+            continue;
+        }
+        let recipient_controller = match state.objects.get(&recipient_id) {
+            Some(obj) => obj.controller,
+            None => continue,
+        };
+        let matching = providers_by_controller
+            .entry(recipient_controller)
+            .or_insert_with(|| {
+                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    host_source_id,
+                    recipient_controller,
+                );
+                provider_ids
+                    .iter()
+                    .copied()
+                    .filter(|&provider_id| {
+                        crate::game::perf_counters::record_granted_ability_provider_scan();
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            provider_id,
+                            source,
+                            &provider_ctx,
+                        )
+                    })
+                    .collect()
+            });
+        let mut next_mod_index = 0usize;
+        for &provider_id in matching.iter() {
+            if provider_id == recipient_id {
+                continue;
+            }
+            let Some(provider) = state.objects.get(&provider_id) else {
+                continue;
+            };
+            for trigger in provider.trigger_definitions.iter_all() {
+                out.push(ActiveContinuousEffect {
+                    source_id: recipient_id,
+                    controller: recipient_controller,
+                    def_index: None,
+                    transient_id: None,
+                    mod_index: next_mod_index,
+                    layer: Layer::Ability,
+                    timestamp: host_timestamp,
+                    modification: ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger.clone()),
                     },
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
@@ -4328,6 +4481,10 @@ fn apply_continuous_effect_filtered(
             // read access to the provider objects, which the per-object apply
             // borrow cannot give). No direct per-object mutation here.
             ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
+            // CR 613.1f: Mirror of the activated case above — expanded into one
+            // `GrantTrigger` per matching trigger at collection time
+            // (`expand_granted_triggered_abilities`). No direct per-object mutation.
+            ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
@@ -8999,6 +9156,7 @@ mod tests {
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9036,6 +9194,155 @@ mod tests {
             host_obj.abilities.iter().any(|a| a == &granted),
             "Myr Welder must gain the exiled card's activated ability; got {:?}",
             host_obj.abilities
+        );
+    }
+
+    /// CR 702.167c + CR 613.1f: Locus of Enlightenment — "Locus of Enlightenment
+    /// has each activated ability of the exiled cards used to craft it." Built
+    /// end-to-end through the real parser (`parse_oracle_text` →
+    /// `GrantAllActivatedAbilitiesOf { ExiledBySource }`) and the real
+    /// `evaluate_layers` expansion, with the craft pile modeled as persistent
+    /// `ExileLinkKind::CraftMaterial` links (CR 702.167c).
+    ///
+    /// Discriminating along the `ExiledBySource` source axis: a card exiled to
+    /// craft Locus donates its activated ability, while a card exiled by a
+    /// DIFFERENT source does not (proving the grant is scoped to Locus's own
+    /// craft pile, not any exiled card). Reverting the parser's source-set arm so
+    /// the grant no longer routes to `ExiledBySource` would strand the positive
+    /// assertion.
+    #[test]
+    fn locus_grants_craft_pile_activated_abilities() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect,
+            QuantityExpr,
+        };
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Locus carries the parser-produced craft-pile grant static.
+        let locus = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Locus of Enlightenment".to_string(),
+            Zone::Battlefield,
+        );
+        let parsed = parse_oracle_text(
+            "Locus of Enlightenment has each activated ability of the exiled cards \
+             used to craft it. You may activate each of those abilities only once \
+             each turn.",
+            "Locus of Enlightenment",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Locus L1 parses to exactly one grant static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&locus).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // A card exiled to craft Locus (CraftMaterial link to Locus), with a
+        // {T}: gain 2 life ability — its ability SHOULD be granted to Locus.
+        let material = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Craft Material".to_string(),
+            Zone::Exile,
+        );
+        let material_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&material).unwrap().abilities)
+            .push(material_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: material,
+            source_id: locus,
+            kind: ExileLinkKind::CraftMaterial,
+        });
+
+        // A card exiled by a DIFFERENT source (not Locus) with a {T}: gain 9
+        // life ability — excluded by the `ExiledBySource` scoping (host = Locus).
+        let other_source = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(0),
+            "Other Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_exiled = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Other Exiled".to_string(),
+            Zone::Exile,
+        );
+        let other_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 9 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&other_exiled).unwrap().abilities)
+            .push(other_ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: other_exiled,
+            source_id: other_source,
+            kind: ExileLinkKind::CraftMaterial,
+        });
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // CR 602.5b + CR 602.5c: the parsed grant carries the once-per-turn rider,
+        // so the donated ability is the craft material's ability WITH
+        // `OnlyOnceEachTurn` injected into its `activation_restrictions` — not the
+        // bare original. The capped form proves the cap travels end-to-end through
+        // the real parser → `evaluate_layers` expansion.
+        let mut capped_material_ability = material_ability.clone();
+        capped_material_ability
+            .activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+
+        let locus_obj = state.objects.get(&locus).unwrap();
+        assert!(
+            locus_obj
+                .abilities
+                .iter()
+                .any(|a| a == &capped_material_ability),
+            "Locus must gain the craft material's activated ability capped at \
+             once-per-turn; got {:?}",
+            locus_obj.abilities
+        );
+        // Discriminating: the UNCAPPED original must NOT appear — if the cap
+        // injection were dropped, the donated ability would equal the bare
+        // `material_ability` and this assertion would flip.
+        assert!(
+            !locus_obj.abilities.iter().any(|a| a == &material_ability),
+            "Locus must NOT gain the UNCAPPED craft-material ability — the \
+             once-per-turn cap must be injected (CR 602.5b)"
+        );
+        assert!(
+            !locus_obj.abilities.iter().any(|a| a == &other_ability),
+            "Locus must NOT gain an ability of a card exiled by a different \
+             source (ExiledBySource is scoped to Locus's own craft pile)"
         );
     }
 
@@ -9451,6 +9758,7 @@ mod tests {
                 ))
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9499,7 +9807,7 @@ mod tests {
         // is unambiguous (evaluate_layers re-runs the expansion each pass; this
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
@@ -9554,6 +9862,7 @@ mod tests {
                 .affected(TargetFilter::Typed(TypedFilter::creature()))
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::ExiledBySource,
+                    cap: None,
                 }])]
             .into();
         }
@@ -9592,7 +9901,7 @@ mod tests {
         // Single deterministic invocation: two distinct recipient controllers ⟹
         // two cache entries ⟹ two full provider sweeps (2×M scans).
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans,
@@ -13484,6 +13793,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
+                tapped: false,
             },
         );
 

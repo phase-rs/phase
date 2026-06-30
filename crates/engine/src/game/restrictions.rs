@@ -1155,6 +1155,17 @@ pub(crate) fn evaluate_condition(
             }) == 0
         }
         ParsedCondition::YouAttackedThisTurn => state.players_attacked_this_turn.contains(&player),
+        // CR 508.6 + CR 508.5 + CR 109.5: "you attacked [the source's controller]
+        // or a planeswalker they control this turn". `has_attacked` reads
+        // `attacked_defenders_this_turn`, whose entries are the CR-508.5-collapsed
+        // defending player (planeswalker/battle → controller), so both disjuncts
+        // resolve to one membership check. The defender is the SOURCE controller
+        // (CR 109.5 "you" on the static), resolved from `source_id` — never a
+        // hardcoded player. Sandswirl Wanderglyph.
+        ParsedCondition::YouAttackedSourceControllerThisTurn => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|src| state.has_attacked(player, src.controller)),
         // CR 508.1a: "you attacked with N+ [filter] this turn". Unfiltered uses
         // the fast per-player count; filtered scans declaration-time snapshots so
         // attackers that have left the battlefield still count.

@@ -39,6 +39,7 @@ import {
 interface PermanentCardProps {
   objectId: number;
   attachmentsLiftedByAncestor?: boolean;
+  attachmentRenderPath?: readonly number[];
   onPrimaryClickOverride?: () => void;
   /** When this card is the visible representative of a collapsed identical-permanent
    *  group (see GroupedPermanent collapsed mode), the full list of object ids it
@@ -171,7 +172,13 @@ function boardChoiceBadgeClass(intent: BoardChoiceIntent): string {
   }
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride, coveredIds }: PermanentCardProps) {
+export const PermanentCard = memo(function PermanentCard({
+  objectId,
+  attachmentsLiftedByAncestor = false,
+  attachmentRenderPath = [],
+  onPrimaryClickOverride,
+  coveredIds,
+}: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const canHover = useCanHover();
@@ -377,6 +384,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected || attachmentsActionable);
   const attachmentsExpanded = obj.attachments.length <= 1 || attachmentsLifted;
   const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
+  const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
+  const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
   const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
   const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
   const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
@@ -630,7 +639,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           face. While the host or one of its attachment descendants is
           hovered, lift only the outer permanent tree above sibling
           permanents; internal host/attachment ordering stays unchanged. */}
-      {visibleAttachmentIds.map((attachId, i) => {
+      {renderableAttachmentIds.map((attachId, i) => {
         const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
         return (
           <div
@@ -642,7 +651,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
               zIndex: 5 - i,
             }}
           >
-            <PermanentCard objectId={attachId} attachmentsLiftedByAncestor={attachmentsLifted} />
+            <PermanentCard
+              objectId={attachId}
+              attachmentsLiftedByAncestor={attachmentsLifted}
+              attachmentRenderPath={[...attachmentRenderPath, objectId]}
+            />
             <AttachmentTypeBadge attachId={attachId} />
           </div>
         );

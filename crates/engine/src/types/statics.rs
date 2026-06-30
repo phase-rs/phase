@@ -10,7 +10,7 @@ use super::ability::{
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, StepEndManaAction};
+use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -154,6 +154,16 @@ pub enum SuppressedTriggerEvent {
     /// CR 700.4: "Dies" means moving from the battlefield to the graveyard.
     /// Narrower than "leaves the battlefield" — does not catch exile or bounce.
     Dies,
+    /// CR 702.21a + CR 611.3 + CR 613.11: A permanent becoming the target of a
+    /// spell or ability — the ward trigger event (CR 702.21a). Used to suppress
+    /// the becomes-target *ward* triggered ability (Nowhere to Run: "Ward
+    /// abilities of those creatures don't trigger") via a continuous effect that
+    /// turns the ability off (CR 611.3 / 613.11), NOT a CR 603.2g event
+    /// prevention — the event still occurs. Consumed at the inline ward-trigger
+    /// creation gate in `triggers.rs`, not the ETB/Dies
+    /// `event_is_suppressed_by_static_triggers` path, so non-ward becomes-target
+    /// triggers on the same creature are unaffected.
+    BecomesTargeted,
 }
 
 impl fmt::Display for SuppressedTriggerEvent {
@@ -161,6 +171,7 @@ impl fmt::Display for SuppressedTriggerEvent {
         match self {
             SuppressedTriggerEvent::EntersBattlefield => write!(f, "EntersBattlefield"),
             SuppressedTriggerEvent::Dies => write!(f, "Dies"),
+            SuppressedTriggerEvent::BecomesTargeted => write!(f, "BecomesTargeted"),
         }
     }
 }
@@ -634,6 +645,28 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
 }
 
+/// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
+/// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
+fn special_action_registry_str(action: SpecialAction) -> &'static str {
+    match action {
+        SpecialAction::Plot => "Plot",
+        SpecialAction::UnlockDoor => "UnlockDoor",
+        SpecialAction::TurnFaceUp => "TurnFaceUp",
+        SpecialAction::RollPlanarDie => "RollPlanarDie",
+    }
+}
+
+/// Inverse of [`special_action_registry_str`].
+fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
+    match s {
+        "Plot" => Some(SpecialAction::Plot),
+        "UnlockDoor" => Some(SpecialAction::UnlockDoor),
+        "TurnFaceUp" => Some(SpecialAction::TurnFaceUp),
+        "RollPlanarDie" => Some(SpecialAction::RollPlanarDie),
+        _ => None,
+    }
+}
+
 /// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
 /// Distinct from [`CostModifyMode`], which only adjusts the mana component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -907,6 +940,28 @@ pub enum StaticMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
+    /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
+    /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
+    /// direction given by `mode`. Doc Aurlock ("Plotting cards from your hand
+    /// costs {2} less") and Inquisitive Glimmer ("Unlock costs you pay cost {1}
+    /// less").
+    ///
+    /// Parameterized over [`SpecialAction`] rather than proliferating one variant
+    /// per action — any future "[special action] costs you pay cost {N} less"
+    /// lands without a new variant. Distinct from [`StaticMode::ReduceAbilityCost`]
+    /// (which keys on an `AbilityTag` and never matches a special action, since
+    /// plot/unlock payments carry no tag) and from [`StaticMode::ModifyCost`]
+    /// (spell costs, CR 601.2f). `amount` is generic mana only (CR 118.7a — a
+    /// generic cost reduction can't touch colored/colorless components).
+    /// `Minimum` is not meaningful here — only `Reduce` and `Raise` are
+    /// emitted/applied.
+    ReduceActionCost {
+        action: SpecialAction,
+        /// CR 118.7: Direction of the adjustment.
+        mode: CostModifyMode,
+        /// Generic mana adjustment per the special action (CR 118.7a).
+        amount: u32,
+    },
     /// CR 702.142b: Modifies the per-turn activation limit for abilities matching
     /// a keyword tag. E.g., "Creatures you control can boast twice during each of
     /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
@@ -969,6 +1024,15 @@ pub enum StaticMode {
         attacker: ObjectId,
     },
     CantDraw {
+        who: ProhibitionScope,
+    },
+    /// CR 121.1 + CR 613.11: Rule-modifying continuous effect — affected players
+    /// draw cards from the BOTTOM of their library rather than the top (River
+    /// Song, "Meet in Reverse"). Data-carrying / non-registry; the top-vs-bottom
+    /// decision is enforced by `game/effects/draw.rs::select_cards_to_draw`,
+    /// which EVERY draw-delivery path consults. `who` scopes the affected
+    /// players via `ProhibitionScope` (River Song = `Controller`).
+    DrawFromBottom {
         who: ProhibitionScope,
     },
     /// CR 603.2d: "If [cause], a triggered ability of a permanent you control
@@ -1058,6 +1122,49 @@ pub enum StaticMode {
         /// `pay_additional_cost` (mirrors the `ExileWithAltAbilityCost` flow).
         alt_cost: Option<AbilityCost>,
     },
+    /// CR 702.170a + CR 702.170f: GRANT half of plot-from-library — "The top
+    /// card of your library has plot." The top card of the controller's library
+    /// *has* the plot ability (with plot cost equal to its mana cost). This is
+    /// only the grant that the card carries plot; it does NOT by itself permit
+    /// plotting from the library — per CR 702.170a a plot ability functions in
+    /// the hand, so a separate `TopOfLibraryPlotPermission` (the CR 702.170f
+    /// "function in a zone other than hand" effect) is required to actually take
+    /// the special action from the library. `affected` scopes which top cards are
+    /// granted plot (`TargetFilter::Any` for Fblthp's L3).
+    ///
+    /// The plot cost ("equal to its mana cost") needs no stored parameter: it is
+    /// the live top card's `mana_cost`, computed at activation synthesis time
+    /// (the defining invariant of the mechanic), not data carried on the static.
+    ///
+    /// Categorically distinct from `TopOfLibraryCastPermission` (CR 601.2a:
+    /// `Library → Stack` cast, NO exile, one zone change). Plot is CR 702.170 — a
+    /// special action (CR 702.170b) that moves `Library → Exile` face up now,
+    /// then `Exile → Stack` free on a later turn (two zone changes, a different
+    /// CR section). Unifying them at the leaf reference layer would conflate the
+    /// two against the categorical-boundary rule.
+    ///
+    /// Class specimen: Fblthp, Lost on the Range ("The top card of your library
+    /// has plot. The plot cost is equal to its mana cost.").
+    TopOfLibraryHasPlot,
+    /// CR 702.170f: PERMISSION half of plot-from-library — "You may plot [filter]
+    /// cards from the top of your library." This is the CR 702.170f effect that
+    /// allows a plot ability to function in a zone other than the hand (here, the
+    /// top of the library), and authorizes the player to take the plot special
+    /// action there for cards matching `affected` ("nonland" for Fblthp's L4).
+    ///
+    /// Split from `TopOfLibraryHasPlot` because the two encode distinct CR roles:
+    /// the grant says the card *has* plot; this permission says the player *may
+    /// plot it from the library*. The runtime requires BOTH (an active grant
+    /// matching the top card AND an active permission matching it), so the
+    /// eligible set is `(union of grant filters) ∩ (union of permission
+    /// filters)`. Modeling each line as its own static means two INDEPENDENT
+    /// plot-from-top sources UNION correctly (each independently authorizes its
+    /// own eligibility), which a single conflated static could not express.
+    ///
+    /// The nonland scope rides `StaticDefinition.affected` (Fblthp's printed L4
+    /// text — CR 702.170f itself has no land/nonland clause), exactly as
+    /// `TopOfLibraryHasPlot` carries its grant scope.
+    TopOfLibraryPlotPermission,
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
     /// spells without paying their mana costs. `Unlimited` = Omniscience,
     /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
@@ -1418,6 +1525,17 @@ pub enum StaticMode {
     },
     /// CR 702.122d: This creature can't crew Vehicles.
     CantCrew,
+    /// CR 702.26a + CR 101.2: A continuous restriction that prevents the named
+    /// permanent from phasing in (The Pandorica: "It can't phase in for as long
+    /// as ~ remains tapped"). CR 702.26a makes phasing-in a turn-based action at
+    /// the controller's untap step; this restriction is the CR 101.2 "can't"
+    /// that overrides it. Consulted by `execute_untap_step_phasing` (the
+    /// CR 702.26a TBA) and by `resolve_phase_in` (an explicit "phase in" effect
+    /// can't override an active "can't"). Granted as a `SpecificObject` transient
+    /// continuous effect carrying the rules-text `ForAsLongAs { SourceIsTapped }`
+    /// duration, so it self-expires (CR 611.2b) exactly when the source untaps or
+    /// leaves the battlefield (CR 110.5d).
+    CantPhaseIn,
     /// CR 702.122a / CR 702.171a / CR 702.184c: This creature contributes to a
     /// crew/saddle/station cost as though its power were modified (Reckoner
     /// Bankbuster: "as though its power were 2 greater") or using its toughness
@@ -1807,6 +1925,7 @@ impl Hash for StaticMode {
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
@@ -1819,6 +1938,10 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 116.2 + CR 118.7a: data-carrying (SpecialAction is not Hash);
+            // consumed by direct match in the special-action cost-reduction
+            // resolver, never used as a HashMap key.
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1861,6 +1984,7 @@ impl StaticMode {
             | StaticMode::ModifyCost { .. }
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ReduceActionCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::CantPayCost { .. }
@@ -1872,6 +1996,7 @@ impl StaticMode {
             | StaticMode::MustBlock
             | StaticMode::MustBlockAttacker { .. }
             | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
             | StaticMode::DoubleTriggers { .. }
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
@@ -1879,6 +2004,8 @@ impl StaticMode {
             | StaticMode::RevealHand { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CountersPersistAcrossZones { .. }
@@ -1907,6 +2034,7 @@ impl StaticMode {
             | StaticMode::Goaded
             | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
+            | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayLookAtFaceDown
@@ -2019,6 +2147,23 @@ impl fmt::Display for StaticMode {
                     write!(f, "ReduceAbilityCost({sign}{keyword},{amount})")
                 }
             }
+            StaticMode::ReduceActionCost {
+                action,
+                mode,
+                amount,
+            } => {
+                // CR 118.7: Encode direction lossless ("+"/"-"); legacy default
+                // is Reduce in `from_str`.
+                let sign = match mode {
+                    CostModifyMode::Raise => "+",
+                    _ => "-",
+                };
+                write!(
+                    f,
+                    "ReduceActionCost({},{sign}{amount})",
+                    special_action_registry_str(*action)
+                )
+            }
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
             }
@@ -2040,6 +2185,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBlockAttacker({attacker:?})")
             }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
+            StaticMode::DrawFromBottom { who } => write!(f, "DrawFromBottom({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
             StaticMode::GraveyardCastPermission {
@@ -2082,6 +2228,11 @@ impl fmt::Display for StaticMode {
                     write!(f, "TopOfLibraryCastPermission({play_mode}{freq_seg})")
                 }
             }
+            // CR 702.170a grant + CR 702.170f permission markers; both nullary —
+            // the grant/permission scope rides `StaticDefinition.affected`, not
+            // the Display payload.
+            StaticMode::TopOfLibraryHasPlot => write!(f, "TopOfLibraryHasPlot"),
+            StaticMode::TopOfLibraryPlotPermission => write!(f, "TopOfLibraryPlotPermission"),
             StaticMode::CastFromHandFree { frequency, origin } => {
                 if matches!(origin, CastFreeOrigin::Hand) {
                     write!(f, "CastFromHandFree({frequency})")
@@ -2206,6 +2357,7 @@ impl fmt::Display for StaticMode {
             // Tier 2
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
+            StaticMode::CantPhaseIn => write!(f, "CantPhaseIn"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
@@ -2386,6 +2538,31 @@ impl FromStr for StaticMode {
                     StaticMode::Other(s.to_string())
                 }
             }
+            s if s.starts_with("ReduceActionCost(") => {
+                // CR 116.2 + CR 118.7: Parse "ReduceActionCost(Action,[+|-]amount)".
+                // A leading "+"/"-" on the amount marks Raise/Reduce; legacy
+                // strings without a marker default to Reduce.
+                let parsed = s
+                    .strip_prefix("ReduceActionCost(")
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .and_then(|inner| inner.split_once(','))
+                    .and_then(|(action_str, amt_str)| {
+                        let action = special_action_from_registry_str(action_str)?;
+                        let (mode, amount_str) = if let Some(rest) = amt_str.strip_prefix('+') {
+                            (CostModifyMode::Raise, rest)
+                        } else if let Some(rest) = amt_str.strip_prefix('-') {
+                            (CostModifyMode::Reduce, rest)
+                        } else {
+                            (CostModifyMode::Reduce, amt_str)
+                        };
+                        Some(StaticMode::ReduceActionCost {
+                            action,
+                            mode,
+                            amount: amount_str.parse().ok()?,
+                        })
+                    });
+                parsed.unwrap_or_else(|| StaticMode::Other(s.to_string()))
+            }
             s if s.starts_with("ModifyActivationLimit(") => {
                 let inner = s
                     .strip_prefix("ModifyActivationLimit(")
@@ -2518,6 +2695,11 @@ impl FromStr for StaticMode {
                     alt_cost: None,
                 }
             }
+            // CR 702.170a grant + CR 702.170f permission markers; both nullary —
+            // the scope rides `StaticDefinition.affected`, so there is no Display
+            // payload to parse.
+            "TopOfLibraryHasPlot" => StaticMode::TopOfLibraryHasPlot,
+            "TopOfLibraryPlotPermission" => StaticMode::TopOfLibraryPlotPermission,
             "CastFromHandFree" => StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
                 origin: CastFreeOrigin::Hand,
@@ -2629,6 +2811,7 @@ impl FromStr for StaticMode {
             // Tier 2
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
+            "CantPhaseIn" => StaticMode::CantPhaseIn,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
@@ -2689,6 +2872,14 @@ impl FromStr for StaticMode {
                 {
                     if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantDraw { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("DrawFromBottom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::DrawFromBottom { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
@@ -3181,6 +3372,7 @@ mod tests {
             // Tier 2: rule-mod statics
             StaticMode::CantTap,
             StaticMode::CantUntap,
+            StaticMode::CantPhaseIn,
             StaticMode::MustBeBlocked,
             StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,
@@ -3196,6 +3388,11 @@ mod tests {
             },
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
+            // CR 702.170a grant + CR 702.170f permission — nullary plot-from-
+            // library markers (Fblthp). Scope rides `StaticDefinition.affected`,
+            // not the Display payload, so the bare markers round-trip cleanly.
+            StaticMode::TopOfLibraryHasPlot,
+            StaticMode::TopOfLibraryPlotPermission,
             StaticMode::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp,
             // Tier 3: parser-produced statics

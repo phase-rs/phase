@@ -640,6 +640,24 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         map(tag("it's not your turn"), |_| StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         }),
+        // CR 102.1 + CR 102.2: there is always exactly one active player, so
+        // "it's an opponent's turn" is exactly "it's not your turn" — the active
+        // player is any non-controller. Maps to the same Not(DuringYourTurn).
+        // Both apostrophe forms are accepted at each position (U+0027 straight
+        // and U+2019 curly — Scryfall English oracle text uses the curly form).
+        // The surface permutations are composed from two small `alt`s rather than
+        // enumerated as full strings (compose combinators, don't enumerate).
+        map(
+            (
+                alt((tag("it's"), tag("it\u{2019}s"), tag("it is"))),
+                tag(" an opponent"),
+                alt((tag("'s"), tag("\u{2019}s"))),
+                tag(" turn"),
+            ),
+            |_| StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        ),
         parse_day_night_condition,
     ))
     .parse(input)
@@ -3729,24 +3747,35 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_youve_life_history_condition,
         parse_youve_combat_history_condition,
         parse_youve_player_action_history_condition,
-        // CR 305.2a + CR 603.4: "you've played a land [this turn]" — land-play
-        // history condition. Backs intervening-if predicates like Spider-Man
-        // 2099's "if you've played a land or cast a spell this turn from
-        // anywhere other than your hand".
-        // The " this turn" suffix is optional so the combinator also serves as
-        // the LHS of `parse_condition_disjunction` when "played a land" is
-        // followed by " or" rather than " this turn".
-        map((tag("played a land"), opt(tag(" this turn"))), |_| {
-            make_quantity_ge(
-                QuantityRef::LandsPlayedThisTurn {
-                    player: PlayerScope::Controller,
-                    from_zones: None,
-                },
-                1,
-            )
-        }),
+        // CR 305.1 + CR 305.2a: "you've played a land [this turn]" — present-
+        // perfect land-play history. Shares `parse_played_a_land_this_turn_body`
+        // with the simple-past / "you have" dispatcher. Backs intervening-if
+        // predicates like Spider-Man 2099's "if you've played a land or cast a
+        // spell this turn from anywhere other than your hand"; the optional
+        // " this turn" suffix keeps it usable as the disjunction LHS.
+        parse_played_a_land_this_turn_body,
     ))
     .parse(rest)
+}
+
+/// CR 305.1 (playing a land is a special action) + CR 305.2a (count of lands a
+/// player has already played this turn): "[…]played a land [this turn]" body.
+/// "played" is identical across simple-past and present-perfect, so one body
+/// serves every subject prefix. The " this turn" suffix is optional so the
+/// combinator can also serve as the LHS of `parse_condition_disjunction`
+/// ("played a land or cast …"). `from_zones: None` selects the scalar
+/// `Player::lands_played_this_turn` counter (no zone-origin restriction).
+fn parse_played_a_land_this_turn_body(input: &str) -> OracleResult<'_, StaticCondition> {
+    map((tag("played a land"), opt(tag(" this turn"))), |_| {
+        make_quantity_ge(
+            QuantityRef::LandsPlayedThisTurn {
+                player: PlayerScope::Controller,
+                from_zones: None,
+            },
+            1,
+        )
+    })
+    .parse(input)
 }
 
 fn parse_youve_played_land_or_cast_spell_this_turn(
@@ -3912,6 +3941,7 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_combat_history_condition,
         parse_no_attacked_this_turn,
         parse_player_action_this_turn,
+        parse_played_a_land_this_turn,
         parse_spell_history_condition,
         parse_counter_history_condition,
         parse_board_state_condition,
@@ -4399,10 +4429,36 @@ fn parse_player_action_this_turn_body(input: &str) -> OracleResult<'_, StaticCon
     .parse(input)
 }
 
+/// Ordering is load-bearing: `preceded(alt(...))` does NOT backtrack into the
+/// alt once the body fails, so the non-contracted "you have " MUST precede the
+/// bare "you " — otherwise "you have surveilled…" consumes "you ", leaves
+/// "have surveilled…", the body fails, and there is no retry. Longest/most-
+/// specific prefixes first. (`"you've "` cannot be confused with `"you "`
+/// because the apostrophe follows `you` directly, but it is ordered first for
+/// consistency.)
 fn parse_player_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     preceded(
-        alt((tag("you "), tag("you've "), tag("you have "))),
+        alt((tag("you've "), tag("you have "), tag("you "))),
         parse_player_action_this_turn_body,
+    )
+    .parse(input)
+}
+
+/// CR 305.1 + CR 305.2a: "you[ have] played a land this turn" — the simple-past
+/// surface form printed on River of Tears (whose mana ability swaps {U}→{B}
+/// once the controller has played a land), plus the non-contracted "you have"
+/// sibling. The present-perfect "you've played a land this turn" is owned by
+/// `parse_youve_this_turn`; all three share `parse_played_a_land_this_turn_body`.
+///
+/// Ordering is load-bearing: `preceded(alt(...))` does NOT backtrack into the
+/// alt once the body fails, so "you have " MUST precede "you " — otherwise
+/// "you have played…" consumes "you ", leaves "have played…", the body fails,
+/// and there is no retry. (`parse_player_action_this_turn` uses the same
+/// longest-prefix-first ordering for the same reason.)
+fn parse_played_a_land_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    preceded(
+        alt((tag("you have "), tag("you "))),
+        parse_played_a_land_this_turn_body,
     )
     .parse(input)
 }
@@ -6994,6 +7050,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_condition_opponents_turn() {
+        // CR 102.1 + CR 102.2: there is always exactly one active player, so
+        // "it's an opponent's turn" is exactly "it's not your turn" — the active
+        // player is any non-controller. Represented as `Not(DuringYourTurn)`,
+        // mirroring the existing "it's not your turn" arm. Both apostrophe forms
+        // (U+0027 straight, U+2019 curly — Scryfall uses the curly form) parse at
+        // each position, so the contraction/possessive permutations all hold.
+        let expected = StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        };
+        for input in [
+            "if it's an opponent's turn, do",
+            "if it is an opponent's turn, do",
+            "if it\u{2019}s an opponent\u{2019}s turn, do",
+            "if it's an opponent\u{2019}s turn, do",
+            "if it\u{2019}s an opponent's turn, do",
+            "if it is an opponent\u{2019}s turn, do",
+        ] {
+            let (rest, c) = parse_condition(input).unwrap();
+            assert_eq!(rest, ", do", "remainder for {input:?}");
+            assert_eq!(c, expected, "condition for {input:?}");
+        }
+    }
+
+    #[test]
     fn parse_inner_condition_put_fewer_than_n_onto_battlefield_this_way() {
         // CR 608.2c: Expand the Sphere's resolution-context comparison — gates
         // a follow-up effect on how many objects the preceding effect placed
@@ -7472,6 +7553,56 @@ mod tests {
         assert!(!zones.contains(&Zone::Hand));
         assert!(zones.contains(&Zone::Exile));
         assert!(zones.contains(&Zone::Graveyard));
+    }
+
+    /// Helper: assert a condition is `LandsPlayedThisTurn{Controller, None} >= 1`.
+    /// CR 305.1 + CR 305.2a — the scalar `lands_played_this_turn` counter shape
+    /// shared by River of Tears's simple-past form and the present-perfect form.
+    fn assert_played_a_land_ge1(condition: &StaticCondition) {
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::LandsPlayedThisTurn {
+                            player: PlayerScope::Controller,
+                            from_zones: None,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = condition
+        else {
+            panic!("expected LandsPlayedThisTurn{{Controller, None}} >= 1, got {condition:?}");
+        };
+    }
+
+    /// CR 305.1 + CR 305.2a: River of Tears's printed simple-past surface form
+    /// "you played a land this turn" must parse to the scalar land-play count.
+    #[test]
+    fn parse_inner_condition_simple_past_played_a_land_this_turn() {
+        let (rest, condition) = parse_inner_condition("you played a land this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_played_a_land_ge1(&condition);
+    }
+
+    /// CR 305.1 + CR 305.2a: non-contracted "you have played a land this turn"
+    /// sibling — exercises the longer-prefix-first `alt` ordering (must not be
+    /// mis-consumed by the bare "you " arm).
+    #[test]
+    fn parse_inner_condition_non_contracted_played_a_land_this_turn() {
+        let (rest, condition) = parse_inner_condition("you have played a land this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_played_a_land_ge1(&condition);
+    }
+
+    /// Regression guard: the present-perfect "you've played a land this turn"
+    /// (Spider-Man 2099 path) still parses to the same shape after the
+    /// `parse_played_a_land_this_turn_body` extraction (behavior-preserving).
+    #[test]
+    fn parse_inner_condition_present_perfect_played_a_land_this_turn() {
+        let (rest, condition) = parse_inner_condition("you've played a land this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_played_a_land_ge1(&condition);
     }
 
     #[test]
@@ -11253,6 +11384,40 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             }
         );
+    }
+
+    /// Regression: the non-contracted "you have <action> this turn" surface
+    /// form must parse for every player-action variant. Before the longest-
+    /// prefix-first reorder of `parse_player_action_this_turn`, the bare
+    /// "you " alt arm consumed "you ", left "have surveilled…", and the body
+    /// failed with no backtrack into the alt.
+    #[test]
+    fn you_have_player_action_this_turn_parses_for_all_variants() {
+        for (text, action) in [
+            ("you have surveilled this turn", PlayerActionKind::Surveil),
+            ("you have scried this turn", PlayerActionKind::Scry),
+            (
+                "you have collected evidence this turn",
+                PlayerActionKind::CollectEvidence,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "unparsed remainder for {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerActionsThisTurn {
+                            player: PlayerScope::Controller,
+                            action,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                "wrong condition for {text:?}"
+            );
+        }
     }
 
     #[test]

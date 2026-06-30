@@ -43,9 +43,10 @@ python3 scripts/pr_review.py compact
 ## Sweep Protocol
 
 1. Resolve the acting identity from GitHub. Do not review PRs authored by the acting login.
-2. Run `scan`. Treat its result as a triage packet, not a final approval gate.
+2. Run `scan`. Use `action_counts` / `candidates_by_action` for routing; do not infer legacy bucket names. Treat its result as a triage packet, not a final approval gate.
 3. For each candidate:
    - `hard_stop` / `request_changes` — surface the precise blocker; do not enqueue.
+   - `blocked` — current head already has blocking maintainer feedback; wait for a new head or author follow-up.
    - `defer` — record the deferral event; do not approve, label, enqueue, or merge.
    - `hold_ci` — record a non-terminal hold and wait for exact-head CI to finish.
    - `dequeue_stale_for_handler` / `update_branch_for_handler` / `approve_ready_for_handler` — advisory only; delegate execution to `pr-contribution-handler` in authorized mode.
