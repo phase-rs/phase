@@ -5,8 +5,10 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
+use engine::database::legality_inference::{self, InferenceContext};
 use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
 use engine::database::removed_cards::is_removed_offensive_card;
+use engine::database::set_catalog::{load_set_catalog, SetCatalog};
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
@@ -49,6 +51,28 @@ struct CardExportEntry {
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
+}
+
+/// Resolve MTGJSON legalities for export, synthesizing format legalities when
+/// AtomicCards has not yet populated them for a newly released set.
+fn resolve_export_legalities(
+    source: &AtomicCard,
+    set_catalog: &SetCatalog,
+    rarities: &BTreeSet<Rarity>,
+) -> BTreeMap<String, String> {
+    let normalized = normalize_legalities(&source.legalities);
+    let resolved = if legality_inference::needs_inference(&normalized) {
+        legality_inference::infer_missing_legalities(&InferenceContext {
+            printings: &source.printings,
+            catalog: set_catalog,
+            leadership_skills: source.leadership_skills.as_ref(),
+            type_line: source.type_line.as_deref(),
+            rarities,
+        })
+    } else {
+        normalized
+    };
+    legalities_to_export_map(&resolved)
 }
 
 /// A localized card face for the per-language content-i18n sidecars. Only display
@@ -667,6 +691,11 @@ fn main() {
     let rarity_map = build_rarity_map(&mtgjson_path);
     let token_source_metadata = build_token_source_metadata(&mtgjson_path);
 
+    let set_catalog = data_dir
+        .as_ref()
+        .map(|d| load_set_catalog(d))
+        .unwrap_or_default();
+
     // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
     // directly from MTGJSON `isGameChanger`; this file covers policy axes that
     // MTGJSON does not expose.
@@ -770,17 +799,16 @@ fn main() {
                 }
                 stamp_token_source_metadata(&mut face, &token_source_metadata);
                 let key = face.name.to_lowercase();
-                let legalities =
-                    legalities_to_export_map(&normalize_legalities(&source.legalities));
+                let rarities = rarity_map
+                    .get(&face.name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
+                let legalities = resolve_export_legalities(source, &set_catalog, &rarities);
 
                 if stats && card_face_has_unimplemented_parts(&face) {
                     cards_with_unimplemented += 1;
                 }
 
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 collect_localized(&mut sidecars, &key, source);
                 insert_face_with_priority(
@@ -803,9 +831,13 @@ fn main() {
             let mut legalities_by_face = BTreeMap::new();
             let layout = build_export_layout(faces, oracle_id, layout_kind);
             for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
+                let face_rarities = rarity_map
+                    .get(&face.name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 legalities_by_face.insert(
                     face.name.to_lowercase(),
-                    legalities_to_export_map(&normalize_legalities(&source.legalities)),
+                    resolve_export_legalities(source, &set_catalog, &face_rarities),
                 );
             }
 
@@ -874,16 +906,16 @@ fn main() {
             }
             stamp_token_source_metadata(&mut face, &token_source_metadata);
             let key = face.name.to_lowercase();
-            let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
+            let rarities = rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            let legalities = resolve_export_legalities(&faces[0], &set_catalog, &rarities);
 
             if stats && card_face_has_unimplemented_parts(&face) {
                 cards_with_unimplemented += 1;
             }
 
-            let rarities = rarity_map
-                .get(&face.name.to_lowercase())
-                .cloned()
-                .unwrap_or_default();
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             collect_localized(&mut sidecars, &key, &faces[0]);
             insert_face(
@@ -921,9 +953,10 @@ fn main() {
     // they are excluded from every format-scoped deck-builder pool. The gated
     // sets are separately hidden from the draft/picker/deck-builder UIs below
     // (the `is_set_gated` filter on the set list), so the sets remain
-    // un-draftable. Reprint-aware. No-op when GATED_SETS is unset/empty. See
+    // un-draftable. Reprint-aware. Sets past their MTGJSON release date are
+    // auto-unlocked even when still listed in `GATED_SETS`. See
     // `database::set_gating`.
-    let gated_sets = set_gating::gated_sets_from_env();
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
     if !gated_sets.is_empty() {
         let banned = legalities_to_export_map(&set_gating::all_formats_banned());
         let mut gated_count = 0usize;
@@ -1188,8 +1221,9 @@ fn run_set_list(remaining_args: &[String]) {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", input.display()));
 
     // Release-gate: hide gated sets from the picker / draft / deck-builder UIs.
-    // No-op when GATED_SETS is unset/empty. See `database::set_gating`.
-    let gated_sets = set_gating::gated_sets_from_env();
+    // Sets past their release date are auto-unlocked. See `database::set_gating`.
+    let set_catalog = load_set_catalog(Path::new(data_dir));
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
     let projected: BTreeMap<String, SetListEntry> = raw
         .data
         .into_iter()
