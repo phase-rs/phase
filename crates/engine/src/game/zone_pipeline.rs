@@ -1649,7 +1649,19 @@ pub(crate) fn deliver_replaced_zone_change(
         // Library/Hand -> Battlefield manifest never hits the face_down-clearing
         // reset branches (those key on `from` == Exile/Battlefield/Stack), so the
         // flag survives until the profile is applied.
-        if to == Zone::Battlefield && face_down_profile.is_some() {
+        // Snapshot the pre-move `face_down` so the preflight flag set below can be
+        // rolled back if the battlefield entry is ultimately rejected: a
+        // `CantEnterBattlefieldFrom` static such as Grafdigger's Cage makes
+        // `move_to_zone` early-return WITHOUT moving the object (CR 614.1d), and a
+        // blocked manifest/morph entry must not strand the card face down in its
+        // origin zone.
+        let face_down_preflight = to == Zone::Battlefield && face_down_profile.is_some();
+        let prior_face_down = if face_down_preflight {
+            state.objects.get(&object_id).map(|obj| obj.face_down)
+        } else {
+            None
+        };
+        if face_down_preflight {
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.face_down = true;
             }
@@ -1682,6 +1694,25 @@ pub(crate) fn deliver_replaced_zone_change(
         // unrelated move. Purely synchronous lifetime (set → consumed → cleared in
         // this one delivery), so it never crosses a pause.
         state.merged_card_component_route = None;
+        // CR 614.1d: determine whether the object actually entered the battlefield.
+        // `move_to_zone` rejects a battlefield entry without moving the object when
+        // a `CantEnterBattlefieldFrom` static (e.g. Grafdigger's Cage) matches, so
+        // a `to == Battlefield` request can leave the object in its origin zone.
+        let entered_battlefield = to == Zone::Battlefield
+            && state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        // Roll back the face-down preflight flag when the entry was rejected, so a
+        // blocked manifest/morph leaves the card unchanged in its origin zone
+        // rather than stranded face down (corrupting hidden state for a move that
+        // never happened). On a successful entry the flag is re-asserted by
+        // `apply_face_down_entry_profile` below, so this restore is inert.
+        if face_down_preflight && !entered_battlefield {
+            if let (Some(prior), Some(obj)) = (prior_face_down, state.objects.get_mut(&object_id)) {
+                obj.face_down = prior;
+            }
+        }
         // CR 400.7d: restore the cast link immediately after the entry reset —
         // BEFORE the face-down / counter blocks, so a counter-replacement pause
         // (CR 616.1) cannot strand the resumed permanent without its kicker /
@@ -1718,7 +1749,13 @@ pub(crate) fn deliver_replaced_zone_change(
         // state. Shared single authority with the replacement-choice resume arm
         // (`engine_replacement::handle_replacement_choice`), so a paused
         // face-down entry cannot resume face-up.
-        if to == Zone::Battlefield {
+        //
+        // Gated on `entered_battlefield` (not merely `to == Battlefield`): if a
+        // `CantEnterBattlefieldFrom` static rejected the entry, the object is still
+        // in its origin zone, and applying the face-down profile there would morph
+        // a card that never moved (CR 614.1d). Combined with the preflight rollback
+        // above, a blocked manifest/morph leaves the card fully unchanged.
+        if entered_battlefield {
             if let Some(profile) = &face_down_profile {
                 apply_face_down_entry_profile(state, object_id, profile);
             }
@@ -2958,6 +2995,100 @@ mod face_down_exile_entry_tests {
         assert!(
             obj.back_face.is_some(),
             "the real (hidden) card must be preserved in back_face for turn-face-up"
+        );
+    }
+
+    /// CR 614.1d regression: a face-down (manifest/morph) entry BLOCKED by a
+    /// `CantEnterBattlefieldFrom` static (Grafdigger's Cage) must leave the card
+    /// completely unchanged in its origin zone — never stranded face down.
+    ///
+    /// `deliver_replaced_zone_change` flags the object face down up front so the
+    /// instant/sorcery battlefield-entry guard accepts a manifested non-permanent.
+    /// But `move_to_zone` separately rejects the entry (returning without moving)
+    /// when Grafdigger's Cage blocks a creature card in a graveyard/library. The
+    /// preflight flag must then be rolled back AND the face-down profile must not
+    /// be applied — otherwise a blocked manifest would corrupt the hidden card
+    /// left behind in the library (it would be marked face down / morphed in place
+    /// for a move that never happened).
+    #[test]
+    fn blocked_battlefield_entry_does_not_strand_card_face_down() {
+        use crate::types::ability::{
+            FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(70101),
+            PlayerId(0),
+            "Manifest Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Grafdigger's Cage: "Creature cards in graveyards and libraries can't
+        // enter the battlefield." Affected = creature cards in graveyard/library.
+        let cage = create_object(
+            &mut state,
+            CardId(70102),
+            PlayerId(0),
+            "Grafdigger's Cage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&cage).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantEnterBattlefieldFrom).affected(
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Library],
+                            }]),
+                    ),
+                ),
+            );
+        }
+
+        // A creature card in the library — the manifest target the Cage blocks.
+        let card = create_object(
+            &mut state,
+            CardId(70103),
+            PlayerId(0),
+            "Caged Creature".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Battlefield, source)
+                .face_down(FaceDownProfile::vanilla_2_2()),
+            &mut events,
+        );
+
+        let obj = state.objects.get(&card).expect("blocked card still exists");
+        assert_eq!(
+            obj.zone,
+            Zone::Library,
+            "a CantEnterBattlefieldFrom static must keep the card in its origin zone"
+        );
+        assert!(
+            !obj.face_down,
+            "a blocked manifest must roll back the face-down preflight flag, not \
+             strand the card face down (CR 614.1d)"
+        );
+        assert!(
+            obj.back_face.is_none(),
+            "the face-down profile must not be applied to a card whose entry was \
+             rejected — the hidden card must be left unchanged"
         );
     }
 }
