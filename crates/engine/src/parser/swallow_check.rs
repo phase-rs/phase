@@ -5186,6 +5186,54 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "ActivateLimit"));
     }
 
+    /// CR 605.1c: direct-call contract for `detect_activate_only_during`. A
+    /// restricted-timing phrase ("Activate only during ...") with no activation
+    /// constraint represented on any parsed ability must fire `ActivateOnlyDuring`
+    /// for each accepted marker form, while text with no such phrase stays silent.
+    /// Pins the marker set at the detector boundary.
+    #[test]
+    fn activate_only_during_fires_per_marker_and_silent_without_marker() {
+        let parsed = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+
+        for marker in [
+            "activate only during your turn.",
+            "activate this ability only during combat.",
+        ] {
+            let mut diags = Vec::new();
+            super::detect_activate_only_during(marker, marker, &parsed, &mut diags);
+            assert!(
+                diags.iter().any(|d| matches!(
+                    d,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "ActivateOnlyDuring"
+                )),
+                "timing-restriction marker {marker:?} with no constraint must fire \
+                 ActivateOnlyDuring: {diags:?}"
+            );
+        }
+
+        let mut silent = Vec::new();
+        super::detect_activate_only_during("{t}: add {g}.", "{T}: Add {G}.", &parsed, &mut silent);
+        assert!(
+            silent.is_empty(),
+            "a mana ability with no timing-restriction phrase must not fire \
+             ActivateOnlyDuring: {silent:?}"
+        );
+    }
+
     // ── Optional_MayHave regressions (#2237) ───────────────────────────────
 
     #[test]
