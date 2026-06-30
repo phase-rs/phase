@@ -4930,7 +4930,15 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             (
                 alt((tag("equipped"), tag("enchanted"))),
                 space1,
-                alt((tag("creature"), tag("land"), tag("permanent"))),
+                // CR 303.4m: "enchanted planeswalker" is a valid Aura host noun
+                // (Elspeth's Talent, Rowan's Talent). Purely additive to the
+                // existing creature/land/permanent set.
+                alt((
+                    tag("creature"),
+                    tag("land"),
+                    tag("planeswalker"),
+                    tag("permanent"),
+                )),
             ),
         )
         .parse(input)
@@ -4953,6 +4961,48 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         def.mode = TriggerMode::AbilityActivated;
         def.valid_card = Some(source_filter);
         return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    // CR 606.2 + CR 606.1: "Whenever you activate a loyalty ability of <pw>"
+    // (Chandra's Regulator, Keral Keep Disciples → "a Chandra planeswalker";
+    // Elspeth's Talent, Rowan's Talent → "enchanted planeswalker"). The
+    // planeswalker scope rides on `valid_card`:
+    //   * "enchanted planeswalker" → `TargetFilter::AttachedTo` (Aura host).
+    //   * "a <subtype> planeswalker" → typed Planeswalker + Subtype filter
+    //     (CR 205.3j: planeswalker subtypes are the planeswalker's name).
+    fn parse_loyalty_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+        // "a <subtype> planeswalker" — `parse_subtype` is the single subtype
+        // authority and canonicalizes casing ("chandra" → "Chandra").
+        fn parse_subtyped_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+            let (rest, _) = tag("a ").parse(input)?;
+            let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
+            let after_subtype = &rest[consumed..];
+            let (rest, _) = (space1, tag("planeswalker")).parse(after_subtype)?;
+            Ok((
+                rest,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).subtype(subtype)),
+            ))
+        }
+        // "enchanted planeswalker" reuses the shared Aura-host noun combinator.
+        alt((parse_subtyped_planeswalker, parse_attached_to_subject)).parse(input)
+    }
+
+    fn parse_loyalty_line(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            preceded(
+                tag("you activate a loyalty ability of "),
+                parse_loyalty_planeswalker,
+            ),
+        )
+        .parse(input)
+    }
+
+    if let Ok((_, pw_filter)) = all_consuming(parse_loyalty_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LoyaltyAbilityActivated;
+        def.valid_card = Some(pw_filter);
+        return Some((TriggerMode::LoyaltyAbilityActivated, def));
     }
 
     None
@@ -27663,6 +27713,103 @@ mod tests {
             def.condition,
             Some(TriggerCondition::ActivatedAbilityIsNonMana)
         );
+    }
+
+    // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
+
+    /// CR 606.2 + CR 205.3j: Chandra's Regulator — "a Chandra planeswalker"
+    /// parses to a typed Planeswalker + Subtype("Chandra") filter on
+    /// `valid_card`, mode `LoyaltyAbilityActivated`, and the effect is not
+    /// `Unimplemented`.
+    #[test]
+    fn loyalty_ability_trigger_chandra_subtype_regulator() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of a Chandra planeswalker, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+            "Chandra's Regulator",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).subtype("Chandra".to_string()),
+            ))
+        );
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Chandra's Regulator effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2: Keral Keep Disciples — same "a Chandra planeswalker" filter,
+    /// different (damage) effect.
+    #[test]
+    fn loyalty_ability_trigger_chandra_subtype_keral_keep() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of a Chandra planeswalker, this creature deals 1 damage to each opponent.",
+            "Keral Keep Disciples",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).subtype("Chandra".to_string()),
+            ))
+        );
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Keral Keep Disciples effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2 + CR 303.4m: Elspeth's Talent — "enchanted planeswalker" parses
+    /// to `TargetFilter::AttachedTo` (the Aura host) on `valid_card`.
+    #[test]
+    fn loyalty_ability_trigger_enchanted_elspeth() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.",
+            "Elspeth's Talent",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Elspeth's Talent effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2 + CR 303.4m: Rowan's Talent — "enchanted planeswalker" + the
+    /// copy effect.
+    #[test]
+    fn loyalty_ability_trigger_enchanted_rowan() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of enchanted planeswalker, copy that ability. You may choose new targets for the copy.",
+            "Rowan's Talent",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Rowan's Talent effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// Negative: the additive "planeswalker" host noun in `parse_attached_to_subject`
+    /// must not change the generic non-loyalty activation trigger class.
+    #[test]
+    fn loyalty_ability_trigger_does_not_capture_generic_activation() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability that isn't a mana ability, draw a card.",
+            "Generic Activation",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---

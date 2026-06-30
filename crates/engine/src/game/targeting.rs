@@ -4436,6 +4436,7 @@ mod tests {
         let event = crate::types::events::GameEvent::AbilityActivated {
             player_id: PlayerId(1),
             source_id: ObjectId(99),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

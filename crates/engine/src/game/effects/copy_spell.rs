@@ -1880,6 +1880,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1956,6 +1957,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: basalt,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2028,6 +2030,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(

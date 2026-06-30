@@ -6281,6 +6281,7 @@ mod tests {
         let ev = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }
