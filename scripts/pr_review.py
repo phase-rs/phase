@@ -1132,6 +1132,7 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "reviewDecision": pr.get("reviewDecision"),
         "isInMergeQueue": pr.get("isInMergeQueue"),
         "mergeQueueEntry": pr.get("mergeQueueEntry"),
+        "autoMergeRequest": pr.get("autoMergeRequest"),
         "labels": [label.get("name") for label in pr.get("labels", [])],
         "assignees": [assignee.get("login") for assignee in pr.get("assignees", [])],
         "body_hash": text_hash(pr.get("body")),
@@ -1162,15 +1163,26 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
 def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     pr = packet["pr"]
     head = pr.get("headRefOid")
-    checks = packet.get("ci", {})
     classification = packet.get("classification", {})
     latest_commit = packet.get("latest_maintainer_review_commit")
     review_decision = pr.get("reviewDecision")
-    queue = bool(pr.get("isInMergeQueue"))
+    queue = bool(
+        pr.get("isInMergeQueue") or pr.get("mergeQueueEntry") or pr.get("autoMergeRequest")
+    )
     local_event = packet.get("local_current_event") or {}
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
     author_policy = packet.get("author_policy", {})
+    local_block_event = local_outcome != "ci_failed" and local_event_type in {
+        "review_blocked",
+        "changes_requested",
+        "blocked",
+    }
+    local_block_outcome = local_outcome in {
+        "changes_requested",
+        "reviewed_request_changes",
+        "blocked",
+    }
 
     if pr.get("state") == "MERGED":
         action = "merged_prune"
@@ -1187,15 +1199,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_outcome == "DEFER-FE":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif local_event_type in {
-        "review_blocked",
-        "changes_requested",
-        "blocked",
-    } or local_outcome in {
-        "changes_requested",
-        "reviewed_request_changes",
-        "blocked",
-    }:
+    elif local_block_event or local_block_outcome:
         action = "blocked"
         reason = "local_block_current_head"
     elif latest_commit and latest_commit != head and review_decision == "APPROVED":
@@ -1203,13 +1207,11 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         reason = "stale_approval"
     elif queue and review_decision == "APPROVED":
         action = "queued"
-        reason = "already_in_merge_queue"
-    elif checks.get("state") == "failed":
-        action = "request_changes"
-        reason = "ci_failed"
-    elif checks.get("state") in {"pending", "unknown"}:
-        action = "hold_ci"
-        reason = "ci_not_green"
+        reason = (
+            "already_in_merge_queue"
+            if (pr.get("isInMergeQueue") or pr.get("mergeQueueEntry"))
+            else "auto_merge_enabled"
+        )
     elif classification.get("surface") == "frontend" and not author_policy.get(
         "frontend_review_allowed"
     ):
@@ -1305,7 +1307,7 @@ def gh_queue_state(repo: str, pr_number: int) -> dict[str, Any]:
         "query($owner:String!,$repo:String!,$number:Int!){"
         "repository(owner:$owner,name:$repo){"
         "pullRequest(number:$number){"
-        "isInMergeQueue mergeQueueEntry{position state}"
+        "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt}"
         "}}}"
     )
     try:
@@ -1325,11 +1327,12 @@ def gh_queue_state(repo: str, pr_number: int) -> dict[str, Any]:
             ]
         )
     except subprocess.CalledProcessError:
-        return {"isInMergeQueue": None, "mergeQueueEntry": None}
+        return {"isInMergeQueue": None, "mergeQueueEntry": None, "autoMergeRequest": None}
     pull = result.get("data", {}).get("repository", {}).get("pullRequest", {})
     return {
         "isInMergeQueue": pull.get("isInMergeQueue"),
         "mergeQueueEntry": pull.get("mergeQueueEntry"),
+        "autoMergeRequest": pull.get("autoMergeRequest"),
     }
 
 
@@ -1389,6 +1392,7 @@ def command_scan(args: argparse.Namespace) -> int:
                 "review_decision": pr.get("reviewDecision"),
                 "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
                 "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
+                "auto_merge_request": packet["pr"].get("autoMergeRequest"),
                 "advisory_action": packet["recommendation"]["advisory_action"],
                 "reason": packet["recommendation"]["reason"],
                 "policy_trace": packet["policy_trace"],
