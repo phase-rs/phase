@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
 use engine::database::removed_cards::is_removed_offensive_card;
-use engine::database::set_catalog::{load_set_catalog, SetCatalog};
+use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
