@@ -12,7 +12,8 @@ use super::counter::{
     try_parse_multiply_pt_effect, try_parse_put_counter, try_parse_remove_counter,
 };
 use super::lower::{
-    parse_for_each_multiplier_prefix, parse_where_x_quantity_expression, strip_trailing_where_x,
+    parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
+    parse_where_x_quantity_expression, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
@@ -4432,12 +4433,18 @@ pub(super) fn parse_utility_imperative_ast(
     // CR 400.7j + CR 608.2h: Zack Fair — "attach an Equipment that was attached
     // to ~ to that creature". The attachment is battlefield Equipment whose
     // host was the ability source (including LKI after self-sacrifice).
-    if let Some(((), recipient_text)) = nom_on_lower(text, lower, |input| {
+    if let Some((multi_target, recipient_text)) = nom_on_lower(text, lower, |input| {
         let (input, _) = tag("attach ").parse(input)?;
-        let (input, _) = opt(alt((tag("an "), tag("up to one ")))).parse(input)?;
+        let (input, _) = opt(tag("an ")).parse(input)?;
+        let (input, multi_target) = opt(value(
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }),
+            tag("up to one "),
+        ))
+        .parse(input)?;
         let (input, _) = tag("equipment that was attached to ").parse(input)?;
         let (input, _) = alt((tag("~"), tag("this equipment"))).parse(input)?;
-        value((), tag(" to ")).parse(input)
+        let (input, _) = tag(" to ").parse(input)?;
+        Ok((input, multi_target))
     }) {
         let (target, _target_rem) = parse_attach_recipient(recipient_text, ctx);
         #[cfg(debug_assertions)]
@@ -4450,6 +4457,7 @@ pub(super) fn parse_utility_imperative_ast(
                         .properties(vec![FilterProp::AttachedToSource]),
                 ),
                 target,
+                multi_target,
             });
         }
     }
@@ -4457,10 +4465,14 @@ pub(super) fn parse_utility_imperative_ast(
         preceded(tag("attach "), parse_attach_anaphor_to_token).parse(input)
     }) {
         if rem.trim().is_empty() {
-            return Some(UtilityImperativeAst::Attach { attachment, target });
+            return Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target: None,
+            });
         }
     }
-    if let Some(((attachment_text, target_text), rem)) =
+    if let Some(((attachment_text, target_text, multi_target), rem)) =
         nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
         if rem.trim().is_empty() {
@@ -4470,7 +4482,11 @@ pub(super) fn parse_utility_imperative_ast(
             assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_target_rem, text);
-            return Some(UtilityImperativeAst::Attach { attachment, target });
+            return Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target,
+            });
         }
     }
     if let Some((_, rest)) =
@@ -4485,6 +4501,7 @@ pub(super) fn parse_utility_imperative_ast(
         return Some(UtilityImperativeAst::Attach {
             attachment: TargetFilter::SelfRef,
             target,
+            multi_target: None,
         });
     }
     None
@@ -4550,19 +4567,44 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
 
 fn parse_explicit_targeted_attach(
     input: &str,
-) -> nom::IResult<&str, (String, String), OracleError<'_>> {
+) -> nom::IResult<&str, (String, String, Option<MultiTargetSpec>), OracleError<'_>> {
     let (input, _) = tag("attach ").parse(input)?;
-    let (input, _) = opt(alt((
-        tag("up to one "),
-        tag("up to two "),
-        tag("up to three "),
-        tag("any number of "),
-    )))
-    .parse(input)?;
+    let (input, multi_target) = parse_attach_target_quantifier(input)?;
     let (input, attachment) = take_until(" to ").parse(input)?;
     let (input, _) = tag(" to ").parse(input)?;
     let (input, target) = rest.parse(input)?;
-    Ok((input, (attachment.to_string(), target.to_string())))
+    Ok((
+        input,
+        (attachment.to_string(), target.to_string(), multi_target),
+    ))
+}
+
+fn parse_attach_target_quantifier(
+    input: &str,
+) -> nom::IResult<&str, Option<MultiTargetSpec>, OracleError<'_>> {
+    let any_number = |input| {
+        let (input, _) = tag("any number of ").parse(input)?;
+        let (_, _) = peek(alt((
+            tag("target "),
+            tag("other target "),
+            tag("another target "),
+        )))
+        .parse(input)?;
+        Ok((input, MultiTargetSpec::unlimited(0)))
+    };
+    let up_to = |input| {
+        let (input, _) = tag("up to ").parse(input)?;
+        let (input, max) = parse_multi_target_count_expr(input)?;
+        let (input, _) = space1.parse(input)?;
+        let (_, _) = peek(alt((
+            tag("target "),
+            tag("other target "),
+            tag("another target "),
+        )))
+        .parse(input)?;
+        Ok((input, MultiTargetSpec::up_to(max)))
+    };
+    opt(alt((any_number, up_to))).parse(input)
 }
 
 fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
@@ -4633,9 +4675,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
-        UtilityImperativeAst::Attach { attachment, target } => {
-            Effect::Attach { attachment, target }
-        }
+        UtilityImperativeAst::Attach {
+            attachment, target, ..
+        } => Effect::Attach { attachment, target },
         UtilityImperativeAst::UnattachAll { attachment, target } => {
             Effect::UnattachAll { attachment, target }
         }
@@ -9714,6 +9756,15 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // — intercepted here so `distribute` and `multi_target` propagate to
         // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
         // cannot carry these fields. Mirrors the ZoneCounter { unless_pay } intercept above.
+        ImperativeFamilyAst::Structured(ImperativeAst::Utility(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        })) => {
+            let mut clause = parsed_clause(Effect::Attach { attachment, target });
+            clause.multi_target = multi_target;
+            clause
+        }
         ImperativeFamilyAst::Structured(ImperativeAst::Utility(
             UtilityImperativeAst::Prevent { ref text },
         )) => {
@@ -11411,11 +11462,17 @@ mod tests {
     fn parse_attach_triggering_object_to_last_created_token() {
         let input = "attach it to the token";
         let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(attachment, TargetFilter::TriggeringSource);
         assert_eq!(target, TargetFilter::LastCreated);
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11423,7 +11480,12 @@ mod tests {
         let input = "attach up to one target Equipment you control to her";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(
@@ -11435,6 +11497,38 @@ mod tests {
             )
         );
         assert_eq!(target, TargetFilter::SelfRef);
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+    }
+
+    #[test]
+    fn parse_attach_up_to_one_other_target_preserves_other_filter() {
+        let input = "attach up to one other target Equipment you control to her";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        let TargetFilter::Typed(typed) = attachment else {
+            panic!("expected typed Equipment filter, got {attachment:?}");
+        };
+        assert!(typed.type_filters.iter().any(
+            |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Equipment")
+        ));
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]
@@ -11442,7 +11536,12 @@ mod tests {
         let input = "attach an Equipment that was attached to ~ to that creature";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         match attachment {
@@ -11456,6 +11555,7 @@ mod tests {
             other => panic!("expected typed Equipment filter, got {other:?}"),
         }
         assert!(matches!(target, TargetFilter::ParentTarget));
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11463,7 +11563,12 @@ mod tests {
         let input = "attach target Equipment you control to target creature you control";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(
@@ -11478,6 +11583,7 @@ mod tests {
             target,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11519,7 +11625,12 @@ mod tests {
         let input = "attach one of them to a Samurai you control";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert!(
@@ -11539,6 +11650,7 @@ mod tests {
             ),
             "expected Samurai you control attach target, got {target:?}"
         );
+        assert_eq!(multi_target, None);
     }
 
     /// CR 608.2k regression — issue #319 sibling.
@@ -11570,11 +11682,13 @@ mod tests {
             let Some(UtilityImperativeAst::Attach {
                 attachment: _,
                 target,
+                multi_target,
             }) = result
             else {
                 panic!("{input}: expected Attach, got {result:?}");
             };
             assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+            assert_eq!(multi_target, None);
         }
     }
 

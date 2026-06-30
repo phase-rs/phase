@@ -1,4 +1,4 @@
-use crate::types::ability::TargetRef;
+use crate::types::ability::{Effect, EffectKind, QuantityExpr, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PublicStateDirty, WaitingFor};
@@ -21,6 +21,7 @@ pub fn finalize_rules_state(state: &mut GameState) {
     // post-replacement-continuation slot fold. Idempotent on already-migrated
     // states; cheap on every other invocation.
     state.migrate_post_replacement_continuation();
+    normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);
 }
@@ -39,7 +40,52 @@ pub fn finalize_public_state(state: &mut GameState) {
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
+    normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
+}
+
+fn normalize_legacy_attach_waiting_for(state: &mut GameState) {
+    let WaitingFor::EffectZoneChoice {
+        effect_kind: EffectKind::Attach,
+        count: 1,
+        min_count: 1,
+        up_to: false,
+        cards,
+        ..
+    } = &state.waiting_for
+    else {
+        return;
+    };
+
+    let Some(cont) = state.pending_continuation.as_ref() else {
+        return;
+    };
+    if !matches!(&cont.chain.effect, Effect::Attach { .. }) || !cont.chain.targeting_is_optional() {
+        return;
+    }
+
+    let normalized_count = cont
+        .chain
+        .multi_target
+        .as_ref()
+        .map(|spec| match &spec.max {
+            Some(QuantityExpr::Fixed { value }) if *value >= 0 => *value as usize,
+            Some(_) | None => cards.len(),
+        })
+        .unwrap_or(1)
+        .min(cards.len().max(1));
+
+    if let WaitingFor::EffectZoneChoice {
+        count,
+        min_count,
+        up_to,
+        ..
+    } = &mut state.waiting_for
+    {
+        *count = normalized_count;
+        *min_count = 0;
+        *up_to = true;
+    }
 }
 
 fn sync_priority_player_from_waiting_for(state: &mut GameState) {
@@ -437,7 +483,7 @@ pub fn clear_public_state_dirty(state: &mut GameState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::game_state::CastOfferKind;
+    use crate::types::game_state::{CastOfferKind, PendingContinuation};
     use crate::types::identifiers::ObjectId;
 
     #[test]
@@ -490,6 +536,67 @@ mod tests {
         finalize_public_state(&mut state);
 
         assert_eq!(state.priority_player, PlayerId(0));
+    }
+
+    #[test]
+    fn finalize_rules_state_normalizes_legacy_optional_attach_choice() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(crate::types::ability::ControllerRef::You),
+                ),
+                target: TargetFilter::TriggeringSource,
+            },
+            vec![],
+            ObjectId(19),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability)));
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![ObjectId(5), ObjectId(11)],
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: ObjectId(19),
+            effect_kind: EffectKind::Attach,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            is_cost_payment: false,
+        };
+
+        finalize_rules_state(&mut state);
+
+        match state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                count,
+                min_count,
+                up_to,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(effect_kind, EffectKind::Attach);
+                assert_eq!(count, 2);
+                assert_eq!(min_count, 0);
+                assert!(up_to);
+            }
+            other => panic!("expected normalized Attach choice, got {other:?}"),
+        }
     }
 
     // ── Event-driven dirty-marking (perf fix) ────────────────────────────────

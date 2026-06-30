@@ -973,6 +973,7 @@
       "manifest": "Manifestieren",
       "untap": "Enttappen",
       "tap": "Tappen",
+      "attach": "Attach",
       "crew": "Bemannen ({{power}})",
       "saddle": "Satteln ({{power}})",
       "station": "Stationieren (+{{power}})"
@@ -1080,6 +1081,7 @@
       "titleHand": "Zurückgeben",
       "titleUntap": "Enttappen",
       "titleTap": "Tappen",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Wähle {{count}} bleibende Karte zum Opfern",
       "subtitleSacrificeExact_other": "Wähle {{count}} bleibende Karten zum Opfern",
       "subtitleSacrificeUpTo_one": "Wähle bis zu {{count}} bleibende Karte zum Opfern",
@@ -1116,6 +1118,12 @@
       "subtitleTapUpTo_other": "Wähle bis zu {{count}} bleibende Karten zum Tappen",
       "subtitleTapRange_one": "Wähle {{min}}-{{count}} bleibende Karte zum Tappen",
       "subtitleTapRange_other": "Wähle {{min}}-{{count}} bleibende Karten zum Tappen",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
@@ -1123,6 +1131,7 @@
       "labelTop": "Oben ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Oben"
     },
     "drawnThisTurn": {

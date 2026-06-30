@@ -2670,6 +2670,16 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            let legacy_optional_attach_empty = chosen.is_empty()
+                && matches!(effect_kind, EffectKind::Attach)
+                && !up_to
+                && min_count == 1
+                && count == 1
+                && state.pending_continuation.as_ref().is_some_and(|cont| {
+                    cont.chain.targeting_is_optional()
+                        && matches!(&cont.chain.effect, Effect::Attach { .. })
+                });
+
             if up_to {
                 if chosen.len() < min_count {
                     return Err(EngineError::InvalidAction(format!(
@@ -2685,7 +2695,7 @@ pub(super) fn handle_resolution_choice(
                         chosen.len()
                     )));
                 }
-            } else if chosen.len() != count {
+            } else if !legacy_optional_attach_empty && chosen.len() != count {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select exactly {} card(s), got {}",
                     count,
@@ -2741,6 +2751,16 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                 });
                 set_priority(state, player);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
+            if chosen.is_empty() && matches!(effect_kind, EffectKind::Attach) {
+                state.pending_continuation.take();
+                state.last_effect_count = Some(0);
+                set_priority(state, player);
+                resume_with_error_propagation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -2988,7 +3008,7 @@ pub(super) fn handle_resolution_choice(
                     effects::attach::complete_resolution_attachment_choice(
                         &mut *state,
                         *cont.chain,
-                        chosen[0],
+                        &chosen,
                         events,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;

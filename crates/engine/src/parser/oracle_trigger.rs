@@ -1035,12 +1035,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    // CR 601.2c: An optional-targeting quantifier ("up to one target …" /
-    // "any number of target …") permits a variable number of targets down to
-    // zero, so the execute ability must surface `optional_targeting` and let the
-    // player decline. Without this, "attach any number of target Equipment you
-    // control to it" (Super-Soldier Serum) forces a mandatory target and
-    // softlocks when every Equipment is already attached.
+    // CR 115.1d: Pre-lowered vote blocks do not flow through clause-level
+    // multi-target extraction, so keep their legacy optional-targeting marker
+    // local to that PreLowered path. Normal effect chains carry this metadata on
+    // the specific parsed clause.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
@@ -1170,9 +1168,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // CR 702.179c-d: fold trailing speed-floor sentences into the
             // preceding `ChangeSpeed` effect and drop the orphan node.
             crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
-            if modifiers.has_up_to {
-                ability.optional_targeting = true;
-            }
             if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
                 && matches!(
                     ability.effect.as_ref(),
@@ -1180,6 +1175,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 )
             {
                 ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            // CR 115.1d: Singleton "up to one target ..." effects that lower
+            // without a `multi_target` spec still permit choosing zero targets.
+            // Do not stamp this onto non-target head clauses in chains like
+            // "draw a card. Attach any number of target Equipment ..."
+            if modifiers.has_up_to
+                && ability.multi_target.is_none()
+                && ability
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+            {
+                ability.optional_targeting = true;
             }
             // CR 609.3: Propagate optional to execute ability.
             if modifiers.optional {
@@ -15253,13 +15261,14 @@ mod tests {
         }
     }
 
-    /// CR 601.2c: "attach any number of target Equipment you control to it"
+    /// CR 115.1d: "attach any number of target Equipment you control to it"
     /// (Super-Soldier Serum) is a variable-count target down to zero. The execute
-    /// ability must carry `optional_targeting` so the player can decline — without
-    /// it the trigger forces a mandatory Equipment target and softlocks when every
-    /// Equipment is already attached to the creature.
+    /// ability must carry a `multi_target` spec so the player can decline or
+    /// choose multiple Equipment.
     #[test]
     fn trigger_attacks_or_blocks_attach_any_number_optional_targeting() {
+        use crate::types::ability::MultiTargetSpec;
+
         let def = parse_trigger_line(
             "Whenever enchanted creature attacks or blocks, attach any number of target Equipment you control to it.",
             "Super-Soldier Serum",
@@ -15274,9 +15283,42 @@ mod tests {
             "expected Attach effect, got {:?}",
             execute.effect
         );
+        assert_eq!(
+            execute.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "\"any number of target\" must surface an unlimited zero-min target spec"
+        );
+    }
+
+    #[test]
+    fn trigger_attach_any_number_in_chain_stays_on_attach_node() {
+        use crate::types::ability::MultiTargetSpec;
+
+        let def = parse_trigger_line(
+            "Whenever enchanted creature attacks or blocks, draw a card. Attach any number of target Equipment you control to it.",
+            "Serum Chain Test",
+        );
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("trigger body must lower to an execute ability");
         assert!(
-            execute.optional_targeting,
-            "\"any number of target\" must surface optional_targeting=true so the player can decline"
+            execute.multi_target.is_none(),
+            "head ability must not inherit attach target cardinality"
+        );
+        let attach = execute
+            .sub_ability
+            .as_deref()
+            .expect("attach must be chained after draw");
+        assert!(
+            matches!(attach.effect.as_ref(), Effect::Attach { .. }),
+            "expected Attach sub-ability, got {:?}",
+            attach.effect
+        );
+        assert_eq!(
+            attach.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "Attach sub-ability must carry the any-number target spec"
         );
     }
 
@@ -33460,10 +33502,13 @@ mod tests {
             }
             other => panic!("expected PutCounter sub_ability, got {other:?}"),
         }
-        // Optional targeting: "up to one" must surface optional_targeting=true.
+        // CR 115.1d: This singleton "up to one" copy target still uses the
+        // legacy optional-targeting flag; multi-target specs are required for
+        // variable-count attach choices such as "any number of target Equipment."
+        assert!(execute.multi_target.is_none());
         assert!(
             execute.optional_targeting,
-            "up to one target must mark the execute as optional_targeting=true"
+            "up to one target must remain optional on the parsed ability"
         );
     }
 
