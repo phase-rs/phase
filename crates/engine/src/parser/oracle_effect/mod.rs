@@ -23811,6 +23811,20 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
             // controller (Stench of Evil, Fade Away) rather than a player
             // target (Flay).
             value(TargetFilter::Player, tag("they pay ")),
+            // CR 115.1 + CR 118.12a: declared-target payer "target opponent/target
+            // player pays {cost}" (resolution-side parity with the trigger-side
+            // arm). Distinct from the anaphoric "they pay" (-> Player) above: the
+            // payer is the player declared as a target inside the unless clause,
+            // resolved from `ability.targets`. The `Typed` shape passes through the
+            // caller's `payer == Player` remap unmodified.
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("target opponent pays "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                tag("target player pays "),
+            ),
             // CR 118.12a: "unless any player pays ..." — every player is polled
             // in APNAP order; the first to pay prevents the effect (Cleansing,
             // the Rhystic cycle, Soul Strings).

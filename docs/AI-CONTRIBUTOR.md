@@ -13,7 +13,7 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
 - **Model (load-bearing):** §0.1 routes you to either the full pipeline (Frontier tier) or the same pipeline with mandatory pre-PR gates (Standard tier). Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
-- **Thinking (advisory):** Medium or higher. On Claude Code this is the default for Opus; on Codex CLI pass `--reasoning medium` or higher. Report on a `Thinking:` line in the PR body.
+- **Thinking (advisory):** High or higher. On Claude Code this is available for Opus; on Codex CLI pass `--reasoning high` or higher. Report on a `Thinking:` line in the PR body.
 - **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
 
@@ -292,7 +292,7 @@ Adds engine support for **<Card Name>**.
 
 ## LLM
 Model: <claude-opus-4-7 | claude-sonnet-4-6 | codex-5.4 | …>
-Thinking: <medium | high | max>
+Thinking: <high | max>
 
 ## Verification
 <Developer track — checklist confirming each Step 6 command ran clean:
@@ -354,7 +354,7 @@ Paste one of these into your LLM. That is the entire interaction.
 ```
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Developer track end-to-end to implement the card {CARD_NAME, or
-say "pick one" and let the LLM choose}. Use medium thinking. Do not stop for
+say "pick one" and let the LLM choose}. Use high thinking. Do not stop for
 my input. Apply the §0.1 tier routing — if you are Standard tier, BOTH §0.1.2
 gates must pass before opening the PR. Open a PR when done.
 ```
@@ -365,7 +365,7 @@ gates must pass before opening the PR. Open a PR when done.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Non-developer track end-to-end to implement the card {CARD_NAME,
 or say "pick one"}. Skip local verification — GitHub Actions will run CI on the
-PR. Use medium thinking. Do not stop for my input. Apply the §0.1 tier routing
+PR. Use high thinking. Do not stop for my input. Apply the §0.1 tier routing
 — if you are Standard tier, BOTH §0.1.2 gates must pass before opening the PR.
 Open a PR when done.
 ```
@@ -376,7 +376,7 @@ Open a PR when done.
 You are going to implement one Magic: The Gathering card in the phase-rs/phase
 repository end-to-end and open a pull request. Do not pause to ask me anything.
 
-Requirements: Best results with Claude Opus 4.7+ or Codex 5.4+ at medium+
+Requirements: Best results with Claude Opus 4.7+ or Codex 5.4+ at high+
 thinking, but proceed even if your runtime is below that — just report your
 actual model on a single canonical "Model:" line in the PR body (e.g.
 "Model: claude-sonnet-4-6"). Do NOT editorialize that line. Hard requirements:

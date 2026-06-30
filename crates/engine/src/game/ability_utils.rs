@@ -1532,6 +1532,27 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     .cloned()
                     .collect()
             }
+            Some(filter) if ability_needs_companion_target_player_slot(&validated) => {
+                let mut kept = Vec::new();
+                let primary_targets = match validated.targets.split_first() {
+                    Some((companion, rest))
+                        if companion_target_player_legal_targets(state, &validated)
+                            .contains(companion) =>
+                    {
+                        kept.push(companion.clone());
+                        rest
+                    }
+                    Some((_, rest)) => rest,
+                    None => &[],
+                };
+                kept.extend(targeting::validate_targets_for_ability(
+                    state,
+                    primary_targets,
+                    filter,
+                    &validated,
+                ));
+                kept
+            }
             Some(filter) => targeting::validate_targets_for_ability(
                 state,
                 &validated.targets,
@@ -1698,6 +1719,19 @@ fn companion_target_player_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
+    // CR 115.1 + CR 118.12a: a payer declared as a target inside the unless clause
+    // ("unless target opponent/target player pays") drives this slot directly — the
+    // payer's own filter (opponent-only vs all players) determines who is legal,
+    // taking precedence over the damage-to-player constraint (the unless clause has
+    // its own declared target, independent of any triggering damage event).
+    if let Some(payer) = ability
+        .unless_pay
+        .as_ref()
+        .map(|m| &m.payer)
+        .filter(|&payer| payer_is_declared_target(payer))
+    {
+        return targeting::find_legal_targets(state, payer, ability.controller, ability.source_id);
+    }
     ability
         .source_incarnation
         .and_then(|_| damaged_player_targets_for_companion_slot(state))
@@ -2486,6 +2520,13 @@ fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool
         return false;
     }
     effect_references_target_player(&ability.effect)
+        // CR 115.1 + CR 118.12a: a targeted unless-payer declared inside the unless
+        // clause surfaces its own player target slot even when the primary effect
+        // references no target player (e.g. Athreos, God of Passage).
+        || ability
+            .unless_pay
+            .as_ref()
+            .is_some_and(|m| payer_is_declared_target(&m.payer))
 }
 
 /// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
@@ -2620,6 +2661,27 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => filter_references_target_player(filter),
         _ => false,
     }
+}
+
+/// CR 115.1 + CR 118.12a: True when an `UnlessPayModifier` payer was DECLARED as a
+/// target inside the unless clause ("unless target opponent/target player pays"),
+/// as opposed to an anaphoric payer ("they pay" -> `Player`, "that player pays" ->
+/// `TriggeringPlayer`). The declared-target forms are the only player-typed `Typed`
+/// payers with empty type filters/properties and a None/Opponent controller; no
+/// anaphoric path emits that shape, so the match is unambiguous.
+///
+/// Single authority for the declared-target shape: slot creation here, the
+/// payer resolver in `effects::resolve_unless_payer`, and the `Typed` arm in
+/// `targeting::resolve_effect_player_ref` all gate on this one predicate so the
+/// structural guard cannot drift as new parser shapes are added.
+pub(crate) fn payer_is_declared_target(payer: &TargetFilter) -> bool {
+    matches!(
+        payer,
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.properties.is_empty()
+                && matches!(tf.controller, None | Some(ControllerRef::Opponent))
+    )
 }
 
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
@@ -6137,6 +6199,104 @@ mod tests {
             slot1.current_legal_targets,
             vec![TargetRef::Object(hydra)],
             "goad target must be the damaged player's creature only"
+        );
+    }
+
+    /// CR 115.1 + CR 118.12a (V3): a declared-target unless-payer surfaces its
+    /// own player target slot even when the primary effect references no target
+    /// player. Athreos's body is a return-to-hand (`Draw`-shape here stands in
+    /// for any no-target-player primary effect); the `Typed { Opponent }` payer
+    /// is what makes the slot necessary.
+    #[test]
+    fn declared_target_unless_payer_needs_companion_player_slot() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Baseline: a no-target-player effect with no unless-pay needs no slot.
+        assert!(
+            !ability_needs_companion_target_player_slot(&ability),
+            "baseline: a Draw effect references no target player"
+        );
+
+        // A declared-target opponent payer (Athreos) surfaces the slot.
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            payer: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        });
+        assert!(
+            ability_needs_companion_target_player_slot(&ability),
+            "a declared-target opponent unless-payer must surface a companion player slot"
+        );
+    }
+
+    /// CR 118.12a (V3 regression): a bare anaphoric `Player` payer (Tergrid's
+    /// Lantern shape) must NOT, by itself, add a companion player slot — the
+    /// effect that references the target player owns that slot. With a
+    /// no-target-player effect, the anaphoric `Player` payer adds nothing.
+    #[test]
+    fn anaphoric_player_unless_payer_adds_no_companion_slot() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            payer: TargetFilter::Player,
+        });
+        assert!(
+            !ability_needs_companion_target_player_slot(&ability),
+            "an anaphoric Player payer must not add a slot on a no-target-player effect"
+        );
+    }
+
+    /// CR 115.1 + CR 118.12a (V4): the companion player slot for a declared-
+    /// target opponent payer offers only the controller's opponents — in a
+    /// 3-player game with P0 as controller, that's {P1, P2}, never P0.
+    #[test]
+    fn declared_target_opponent_companion_slot_lists_opponents_only() {
+        let state = GameState::new(FormatConfig::duel_commander(), 3, 7);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            payer: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        });
+
+        let targets = companion_target_player_legal_targets(&state, &ability);
+        assert_eq!(
+            targets.len(),
+            2,
+            "exactly the two opponents are legal payers, got {targets:?}"
+        );
+        assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(2))));
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(0))),
+            "the controller (P0) must never be a legal opponent payer"
         );
     }
 
