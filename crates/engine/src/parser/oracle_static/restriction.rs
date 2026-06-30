@@ -477,6 +477,47 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
     )
 }
 
+/// CR 701.23f + CR 614.1a: Parse the top-N library-search restriction class —
+/// "If an opponent would search a library, that player searches the top N cards
+/// of that library instead." (Aven Mindcensor). Parameterized by SEARCHER scope
+/// (`who`) and the visible-portion `count`. Lowers to
+/// `StaticMode::RestrictLibrarySearchToTop`; runtime enforcement lives in
+/// game/effects/search_library.rs.
+///
+/// Supported Oracle classes:
+/// - "If an opponent would search a library, that player searches the top N
+///   cards of that library instead." (`who = Opponents`)
+/// - "If a player would search a library, that player searches the top N cards
+///   of that library instead." (`who = AllPlayers`)
+pub(crate) fn parse_restrict_search_to_top(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    fn parse_restrict_clause(input: &str) -> OracleResult<'_, (ProhibitionScope, u32)> {
+        let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
+        // Searcher scope: "an opponent" → Opponents, "a player" → AllPlayers.
+        let (input, who) = alt((
+            value(ProhibitionScope::Opponents, tag("an opponent")),
+            value(ProhibitionScope::AllPlayers, tag("a player")),
+        ))
+        .parse(input)?;
+        let (input, _) =
+            tag(" would search a library, that player searches the top ").parse(input)?;
+        let (input, count) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" cards of that library instead").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof(input)?;
+        Ok((input, (who, count)))
+    }
+
+    let (who, count) =
+        nom_on_lower(tp.original, tp.lower, parse_restrict_clause).map(|(parsed, _rest)| parsed)?;
+    Some(
+        StaticDefinition::new(StaticMode::RestrictLibrarySearchToTop { who, count })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 603.2 + CR 609.3: Parse "Triggered abilities <scope> can't cause you to
 /// sacrifice or exile <affected>." statics (The Master, Multiplied class).
 ///
