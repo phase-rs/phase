@@ -2521,8 +2521,10 @@ pub(crate) fn inject_catalog_token_abilities(
     }
 
     if !static_definitions.is_empty() {
-        Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.clone());
-        obj.static_definitions.extend(static_definitions);
+        Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.iter().cloned());
+        for static_def in static_definitions {
+            obj.static_definitions.push(static_def);
+        }
     }
 
     let mut static_mods = Vec::new();
