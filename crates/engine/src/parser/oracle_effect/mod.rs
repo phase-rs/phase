@@ -2897,17 +2897,30 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     })?;
     let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
 
-    // Duration: "during their next turn" / "during that player's next turn".
-    // REQUIRED — this is the discriminator that gates the whole recognizer, so a
-    // generic "can't attack you" static line never reaches it.
-    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
-        value(
-            (),
-            alt((
-                tag(" during their next turn"),
-                tag(" during that player's next turn"),
-            )),
-        )
+    // Duration: REQUIRED discriminator — gates the whole recognizer so a generic
+    // permanent "can't attack you" static line (no duration) never reaches here.
+    // Two CR-distinct branches, captured as the resolved `Option<Duration>`:
+    //   - "during their next turn" / "during that player's next turn"
+    //     → `UntilEndOfNextTurnOf` (CR 514.2 + CR 500.7), the restricted player's
+    //       NEXT turn (Willie Lumpkin).
+    //   - "this turn" → no duration override; the `RestrictionExpiry::EndOfTurn`
+    //     below cleans the restriction up at the END OF THE CURRENT TURN (CR 514.2 —
+    //     Sandswirl Wanderglyph "they can't attack you … this turn").
+    // The two are NOT interchangeable: swapping them changes which turn the ban
+    // covers (a discriminating duration test must distinguish the two).
+    let (duration, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                alt((
+                    tag(" during their next turn"),
+                    tag(" during that player's next turn"),
+                )),
+            ),
+            value(None, tag(" this turn")),
+        ))
         .parse(input)
     })?;
     let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
@@ -2920,15 +2933,15 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
+                // CR 514.2: end-of-current-turn cleanup for the "this turn" branch.
+                // For the "next turn" branch this is a placeholder — `duration`
+                // below re-anchors the expiry to the restricted player's next turn
+                // in `add_restriction`.
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack { defended },
             },
         },
-        // CR 514.2 + CR 500.7: pre-armed end-of-next-turn anchor. The expiry is
-        // lowered in `add_restriction` to the RESTRICTED player's next turn.
-        duration: Some(Duration::UntilEndOfNextTurnOf {
-            player: PlayerScope::Controller,
-        }),
+        duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -17116,8 +17129,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
             min: n + 1,
             max: 20,
         })
-    } else if rest == "a number" || tag::<_, _, E>("a number ").parse(rest).is_ok() {
-        // Generic "choose a number" — default range 0-20
+    } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
+        // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
+        // mirroring the "a color" branch above, so a sentence-ending clause such
+        // as "As ~ enters, choose a number." parses (Squall, Gunblade Duelist,
+        // #722). The previous exact/trailing-space match dropped the period and
+        // produced no choice. The bounded "a number between" / "a number greater
+        // than" forms are consumed by the earlier branches, so this arm is reached
+        // only for a bare "a number".
         Some(ChoiceType::NumberRange { min: 0, max: 20 })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
         .parse(rest)
@@ -48557,6 +48576,57 @@ mod tests {
 
         let draw = sub.sub_ability.expect("expected trailing draw clause");
         assert!(matches!(*draw.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn that_player_cant_attack_branches_on_duration_phrase() {
+        use crate::types::triggers::AttackTargetFilter;
+        // Sandswirl Wanderglyph trigger child (after the trigger strips "they"):
+        // "can't attack you or planeswalkers you control this turn" → end-of-CURRENT-
+        // turn ban (no next-turn duration), defended = you OR your planeswalkers.
+        let this_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "can't attack you or planeswalkers you control this turn",
+            "can't attack you or planeswalkers you control this turn",
+        ))
+        .expect("'... this turn' must parse");
+        assert!(
+            this_turn.duration.is_none(),
+            "the 'this turn' branch must NOT carry a next-turn duration (got {:?})",
+            this_turn.duration
+        );
+        assert!(
+            matches!(
+                this_turn.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::Attack {
+                            defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "got {:?}",
+            this_turn.effect
+        );
+        // Willie Lumpkin: "... during their next turn" → next-turn duration. This is
+        // the DISCRIMINATOR — swapping the two duration branches flips this assertion
+        // (revert-probe: a swap makes exactly one of these two asserts fail).
+        let next_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "that player can't attack you during their next turn",
+            "that player can't attack you during their next turn",
+        ))
+        .expect("'... during their next turn' must parse");
+        assert!(
+            matches!(
+                next_turn.duration,
+                Some(Duration::UntilEndOfNextTurnOf { .. })
+            ),
+            "the 'next turn' branch must carry UntilEndOfNextTurnOf (got {:?})",
+            next_turn.duration
+        );
     }
 
     #[test]

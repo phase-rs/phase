@@ -824,6 +824,21 @@ pub(crate) fn parse_per_player_conditional_prohibition(
             ParsedCondition::YouAttackedThisTurn,
             tag::<_, _, OracleError<'_>>("attacked with a creature this turn"),
         ),
+        // CR 508.6: "attacked you or a planeswalker you control this turn" — the
+        // attacked-defender is the source's controller (CR 109.5 "you"), distinct
+        // from `YouAttackedThisTurn`'s attacked-anyone. Longer disjunctive form
+        // first; the bare "attacked you this turn" is the same predicate (the
+        // planeswalker disjunct collapses to the controller via CR 508.5).
+        // Sandswirl Wanderglyph.
+        value(
+            ParsedCondition::YouAttackedSourceControllerThisTurn,
+            alt((
+                tag::<_, _, OracleError<'_>>(
+                    "attacked you or a planeswalker you control this turn",
+                ),
+                tag("attacked you this turn"),
+            )),
+        ),
         value(
             ParsedCondition::YouCastSpellThisTurn { filter: None },
             tag::<_, _, OracleError<'_>>("cast a spell this turn"),

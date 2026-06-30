@@ -10314,6 +10314,36 @@ mod tests {
     }
 
     #[test]
+    fn as_enters_choose_a_number_sentence_ending_period() {
+        // #722: "As Squall enters, choose a number." ends the sentence, so the
+        // "choose a number" clause reaches the parser as "a number." (trailing
+        // period). The as-enters-choose replacement must still be produced so the
+        // player is prompted to pick a number on ETB; the prior exact/space-only
+        // match dropped the period and yielded no choice.
+        let def = parse_replacement_line(
+            "As Squall enters, choose a number.",
+            "Squall, Gunblade Duelist",
+        )
+        .expect("choose-a-number ETB must produce a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let execute = def.execute.as_ref().unwrap();
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::NumberRange { min: 0, max: 20 },
+                    persist: true,
+                    ..
+                }
+            ),
+            "expected a persisted NumberRange(0,20) choice, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
     fn enters_tapped_then_choose_color_composes_tap_and_choice() {
         // CR 614.1c + CR 614.1d: Thriving land text ("This land enters
         // tapped. As it enters, choose a color other than green.") must compose
