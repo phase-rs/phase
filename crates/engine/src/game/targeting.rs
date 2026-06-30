@@ -56,6 +56,34 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     )
 }
 
+/// Enumerate object targets for per-opponent fanout where filter membership is
+/// bound to the opponent named by the effect (for example, "that player
+/// controls"), while CR 115.1 + CR 702.11b targeting restrictions are still
+/// checked against the actual spell or ability controller and source.
+///
+/// This intentionally does not solve player-filter controller binding:
+/// player-filter enumeration still uses `source_controller`. It is only for
+/// object/permanent fanout helpers.
+pub(crate) fn find_legal_object_targets_for_ability_with_filter_controller(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    filter_controller: PlayerId,
+) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_ability_with_controller(ability, filter_controller);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+    .into_iter()
+    .filter(|target| matches!(target, TargetRef::Object(_)))
+    .collect()
+}
+
 fn find_legal_targets_with_context(
     state: &GameState,
     filter: &TargetFilter,
@@ -1716,7 +1744,7 @@ fn can_target(
     let ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller)
             || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
-    // CR 702.11a: Hexproof prevents targeting by opponents.
+    // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
         && obj.controller != source_controller
