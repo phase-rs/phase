@@ -1331,6 +1331,9 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
             .iter()
             .flat_map(|ids| ids.iter().copied())
             .collect(),
+        WaitingFor::KeepWithinTotalPowerChoice {
+            player, eligible, ..
+        } if *player == viewer => eligible.iter().copied().collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             destinations,
@@ -1915,6 +1918,26 @@ mod tests {
                 PlayerId(0),
             ),
             HashSet::from([ObjectId(23), ObjectId(24)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::KeepWithinTotalPowerChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    eligible: vec![ObjectId(25), ObjectId(26)],
+                    cap: 4,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    source_id: ObjectId(1),
+                    source_controller: PlayerId(0),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(25), ObjectId(26)])
         );
         assert_eq!(
             choosable_objects(
