@@ -4020,6 +4020,62 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
     }
 
+    /// CR 614: direct-call contract for `detect_replacement_instead`. An
+    /// " instead" replacement clause that produces no `ReplacementDefinition` and
+    /// is not captured by any of the structural exemptions (target-replacement
+    /// rider, exile-parent rider, instead-condition sub_ability, or an "instead"
+    /// text field) must fire `Replacement_Instead`; text with no " instead" marker
+    /// stays silent. Pins the marker + final-push contract at the detector
+    /// boundary, companion to the full-pipeline exemption fixtures above.
+    #[test]
+    fn replacement_instead_fires_on_unrepresented_clause_and_silent_without_marker() {
+        let parsed = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+
+        // Fire: an unrepresented "... instead" replacement clause.
+        let mut fire = Vec::new();
+        super::detect_replacement_instead(
+            "if a creature would die, exile it instead.",
+            "If a creature would die, exile it instead.",
+            &parsed,
+            &mut fire,
+        );
+        assert!(
+            fire.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. }
+                    if detector == "Replacement_Instead"
+            )),
+            "unrepresented '... instead' replacement clause must fire \
+             Replacement_Instead: {fire:?}"
+        );
+
+        // Silent: no " instead" marker at all.
+        let mut silent = Vec::new();
+        super::detect_replacement_instead(
+            "draw a card.",
+            "Draw a card.",
+            &parsed,
+            &mut silent,
+        );
+        assert!(
+            silent.is_empty(),
+            "text with no ' instead' marker must not fire Replacement_Instead: {silent:?}"
+        );
+    }
+
     #[test]
     fn condition_if_accepts_graveyard_cast_exile_rider() {
         let parsed = parse_named(
