@@ -5186,6 +5186,53 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "ActivateLimit"));
     }
 
+    /// CR 605 + CR 602.5e: direct-call contract for `detect_activate_limit`. A
+    /// usage-limit phrase with no AST limit representation must fire `ActivateLimit`
+    /// for each accepted marker form, while text carrying no usage-limit phrase
+    /// stays silent. This pins the marker set at the detector boundary, companion
+    /// to the full-pipeline cadence fixture above.
+    #[test]
+    fn activate_limit_fires_per_marker_and_silent_without_marker() {
+        let parsed = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+
+        for marker in [
+            "activate this ability only once each turn.",
+            "activate this ability no more than twice each turn.",
+            "activate only twice each turn.",
+        ] {
+            let mut diags = Vec::new();
+            super::detect_activate_limit(marker, marker, &parsed, &mut diags);
+            assert!(
+                diags.iter().any(|d| matches!(
+                    d,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "ActivateLimit"
+                )),
+                "usage-limit marker {marker:?} with no AST limit must fire ActivateLimit: {diags:?}"
+            );
+        }
+
+        let mut silent = Vec::new();
+        super::detect_activate_limit("{t}: add {g}.", "{T}: Add {G}.", &parsed, &mut silent);
+        assert!(
+            silent.is_empty(),
+            "a mana ability with no usage-limit phrase must not fire ActivateLimit: {silent:?}"
+        );
+    }
+
     // ── Optional_MayHave regressions (#2237) ───────────────────────────────
 
     #[test]
