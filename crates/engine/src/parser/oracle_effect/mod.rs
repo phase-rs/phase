@@ -842,6 +842,56 @@ fn build_when_next_delayed_trigger(
     }
 }
 
+/// CR 122.1 + CR 608.2c: "it enters with an additional +1/+1 counter on it" rider
+/// after a zone-change-this-way gate (Winter Soldier, Reborn Avenger).
+fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+
+    let (rest, count) =
+        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
+            (r, 1u32)
+        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ").parse(r).ok()?;
+            (r, n)
+        } else {
+            return None;
+        };
+
+    let (rest, counter_type) = alt((
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" counter on it"),
+        tag(" counters on it"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    if !rest.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        target: TargetFilter::ParentTarget,
+    })
+}
+
 /// CR 603.7: Parse "when you next cast a [type] spell [post-spell modifier] this turn, [effect]"
 /// delayed triggers. Creates a one-shot delayed trigger that fires once on the next matching
 /// SpellCast event.
@@ -1163,6 +1213,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -1241,6 +1292,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ));
@@ -1548,6 +1600,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -1805,9 +1858,12 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
 fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
     // "that creature enters with an additional +1/+1 counter on it"
     // "that creature enters with N additional +1/+1 counters on it"
-    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature enters with ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower)
+    .ok()?;
 
     // Parse "an additional" or "N additional"
     let (rest, count) =
@@ -2972,6 +3028,7 @@ fn try_parse_self_name_exile(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }));
     }
@@ -3044,6 +3101,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }
     };
@@ -3125,6 +3183,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -4614,6 +4673,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))),
@@ -5606,6 +5666,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_cast_this_way_enters_with_counter(&lower) {
         return parsed_clause(effect);
     }
+    if let Some(effect) = try_parse_enters_this_way_additional_counter(&lower) {
+        return parsed_clause(effect);
+    }
     // CR 701.26b + CR 614.6 + CR 611.2b: "That creature can't become untapped
     // [for as long as you control ~]" rider following a tap-target clause
     // (Spider-Woman). Installs the broad untap prohibition on the chosen target.
@@ -5775,6 +5838,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     if let Some(clause) = try_parse_random_card_perpetual_gain_quoted_ability(tp) {
         return clause;
+    }
+
+    // Digital-only Alchemy (CR 601.2f + CR 611.2c): "[type] cards in [your/that
+    // player's] hand perpetually gain \"This spell costs {N} less/more to
+    // cast\"" — a latched self-spell cost modifier applied to each matching hand
+    // card (Blooming Cactusfolk, Charged Conjuration, Fearsome Whelp,
+    // Fountainport Charmer). Disjoint from the singular random-card arm above
+    // (plural "cards"/"gain" vs "card"/"gains") and from the self-subject arms
+    // (which require a "~"/"this …"/"that …" prefix).
+    if let Some(effect) = try_parse_typed_cards_in_hand_perpetual_gain_cost(tp) {
+        return parsed_clause(effect);
     }
 
     if let Some(clause) = try_parse_gain_energy(tp, ctx) {
@@ -6319,6 +6393,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/that X] perpetually gains \"This spell costs {N}
+    // less/more to cast\"" — persistent self-spell cost modifier (CR 601.2f).
+    // Tried before the keyword grant: disjoint (this requires a quoted body, the
+    // keyword grant a bare keyword list), but the quote guard keeps it explicit.
+    if let Some(effect) = try_parse_perpetual_modify_cost(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/that X] perpetually gains [keyword(s)]" — persistent
     // keyword grant (Monoist Gravliner station trigger).
     if let Some(effect) = try_parse_perpetual_grant_keywords(tp) {
@@ -6684,15 +6766,20 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
     })
 }
 
-/// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
-/// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
-fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
-    fn tail_done(tail: &str) -> bool {
-        tail.is_empty() || tail == "."
-    }
-
-    let lower = tp.lower;
-
+/// Shared self-subject prefix for the perpetual self-grant arms
+/// (`try_parse_perpetual_grant_keywords`, `try_parse_perpetual_modify_cost`).
+///
+/// Strips `<subject> perpetually gain(s) ` and reports which target the grant
+/// resolves against:
+/// - the anaphoric `"that <type> perpetually gains ..."` form back-references the
+///   parent target ([`TargetFilter::ParentTarget`]);
+/// - the self forms (`~`, `this creature/artifact/…`) target the source itself
+///   ([`TargetFilter::Any`], resolved to the source by the perpetual resolver).
+///
+/// Returns the remainder after `gain(s) ` plus the resolved target; the caller
+/// parses the grant body.
+fn parse_perpetual_self_subject(lower: &str) -> Option<(&str, TargetFilter)> {
+    // Anaphoric back-reference: "that <type> perpetually gains ...".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
             .parse(after_that)
@@ -6706,11 +6793,7 @@ fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
         ))
         .parse(rest)
         .ok()?;
-        let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
-        return tail_done(rest).then_some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
-        });
+        return Some((rest, TargetFilter::ParentTarget));
     }
 
     let after_subject = [
@@ -6738,10 +6821,228 @@ fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
     ))
     .parse(rest)
     .ok()?;
+    Some((rest, TargetFilter::Any))
+}
+
+/// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
+/// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
+fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let (rest, target) = parse_perpetual_self_subject(tp.lower)?;
     let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
     tail_done(rest).then_some(Effect::ApplyPerpetual {
-        target: TargetFilter::Any,
+        target,
         modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
+    })
+}
+
+/// Shared quoted-body parser for the self-spell cost modifier: the inner text of
+/// `"this spell costs {N} less/more to cast[.,]"` → `(ManaCost, CostModifyMode)`.
+///
+/// Single authority for the quoted clause, used by BOTH the self-grant arm
+/// ([`try_parse_perpetual_modify_cost`]) and the mass-hand arm
+/// ([`try_parse_typed_cards_in_hand_perpetual_gain_cost`]). The leading `char('"')`
+/// and the consumption of the closing `char('"')` are the caller's responsibility;
+/// this combinator runs from just after the opening quote to just before the
+/// closing quote.
+///
+/// CR 601.2f: Oracle prints terminal punctuation INSIDE the quote on these grants
+/// (e.g. `"This spell costs {1} less to cast."`), so an optional trailing `.`/`,`
+/// is consumed before the closing quote is matched.
+fn parse_quoted_self_spell_cost_body(
+    inner: &str,
+) -> OracleResult<'_, (ManaCost, crate::types::statics::CostModifyMode)> {
+    let (inner, _) = alt((tag("this spell costs "), tag("this card costs "))).parse(inner)?;
+    let (inner, amount) = nom_primitives::parse_mana_cost(inner)?;
+    let (inner, mode) = alt((
+        value(crate::types::statics::CostModifyMode::Reduce, tag(" less")),
+        value(crate::types::statics::CostModifyMode::Raise, tag(" more")),
+    ))
+    .parse(inner)?;
+    let (inner, _) = tag(" to cast").parse(inner)?;
+    // CR 601.2f: terminal punctuation is printed inside the quote.
+    let (inner, _) = opt(alt((tag("."), tag(",")))).parse(inner)?;
+    Ok((inner, (amount, mode)))
+}
+
+/// Digital-only Alchemy (CR 601.2f cost change): parse
+/// "[card] perpetually gains \"This spell costs {N} less/more to cast\"" into a
+/// [`PerpetualModification::ModifyCost`]. The quoted self-spell cost modifier is
+/// realized at resolution by injecting a synthetic [`StaticMode::ModifyCost`]
+/// into the card's persistent static baseline.
+fn try_parse_perpetual_modify_cost(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let (rest, target) = parse_perpetual_self_subject(tp.lower)?;
+
+    // Quoted body: "this spell costs {N} less/more to cast[.,]".
+    let ((amount, mode), rest) = nom_on_lower(rest, rest, |input| {
+        use nom::character::complete::char;
+        use nom::sequence::delimited;
+        delimited(char('"'), parse_quoted_self_spell_cost_body, char('"')).parse(input)
+    })?;
+
+    // Honest-red: reject any unconsumed tail (a rider clause inside or after the
+    // quote that this leaf cannot model) so it falls through to Unimplemented.
+    tail_done(rest).then_some(Effect::ApplyPerpetual {
+        target,
+        // CR 601.2f: perpetual self-spell cost modifier (digital-only "perpetually" grant).
+        modification: crate::types::ability::PerpetualModification::ModifyCost { mode, amount },
+    })
+}
+
+/// Peek the `card(s) in ` head that follows the type axis (without consuming),
+/// so the type-axis arms can confirm they sit in the "[type] card(s) in … hand"
+/// slot and leave the head for the caller's number-agreement `alt()`. Matches
+/// both the plural ("cards in") and the singular-`each` ("card in") forms.
+fn peek_card_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        peek(pair(alt((tag("cards "), tag("card "))), tag("in "))),
+    )
+    .parse(input)
+}
+
+/// Type-axis sub-combinator for the mass-hand perpetual arm: maps the leading
+/// type word(s) of "[type] card(s) in [your/that player's] hand" to a
+/// [`TypeFilter`], consuming the type word AND its trailing space so the caller
+/// can match the shared `card(s) ` head next. The bare-`"card(s)"` form (no
+/// leading type word) consumes nothing and yields [`TypeFilter::Card`].
+///
+/// STRICT `tag()` arms only — never a full-sentence tag — so the remainder
+/// ("card(s) in …") is matched separately and any rider after the type axis
+/// (e.g. Absorb Energy's "cards in your hand that share a card type with that
+/// spell") is left unconsumed and rejected upstream. A single subtype word
+/// (e.g. "dragon") is taken as a [`TypeFilter::Subtype`] via the dedicated
+/// subtype combinator.
+fn parse_hand_card_type_axis(input: &str) -> OracleResult<'_, TypeFilter> {
+    alt((
+        // "nonland card(s)" → Non(Land).
+        value(TypeFilter::Non(Box::new(TypeFilter::Land)), tag("nonland ")),
+        // "instant and/or sorcery card(s)" → AnyOf([Instant, Sorcery]).
+        value(
+            TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery]),
+            alt((tag("instant and sorcery "), tag("instant or sorcery "))),
+        ),
+        value(TypeFilter::Creature, tag("creature ")),
+        value(TypeFilter::Instant, tag("instant ")),
+        value(TypeFilter::Sorcery, tag("sorcery ")),
+        value(TypeFilter::Artifact, tag("artifact ")),
+        value(TypeFilter::Enchantment, tag("enchantment ")),
+        // A single subtype word (e.g. "dragon") directly preceding "card(s) in …".
+        nom_subtype_word,
+        // Bare "card(s) in …" → Card (any card); consume nothing.
+        value(TypeFilter::Card, peek_card_head),
+    ))
+    .parse(input)
+}
+
+/// Parse a single subtype word that directly precedes "card(s) in … hand"
+/// (e.g. "dragon" in "each Dragon card in your hand"). Consumes the word and its
+/// trailing space. Capitalizes the first letter so it matches the canonical
+/// subtype casing (`get_subtype`/database subtypes are PascalCase).
+fn nom_subtype_word(input: &str) -> OracleResult<'_, TypeFilter> {
+    use nom::bytes::complete::take_while1;
+    let (rest, word) = take_while1(|c: char| c.is_ascii_alphabetic()).parse(input)?;
+    // The subtype word must be the type slot directly before "card(s) in " — peek
+    // (don't consume) so the caller matches the shared `card(s) ` head.
+    let (rest, _) = pair(tag(" "), peek_card_head).parse(rest)?;
+    let mut chars = word.chars();
+    let canonical = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => return Err(oracle_err(input)),
+    };
+    Ok((rest, TypeFilter::Subtype(canonical)))
+}
+
+/// Shared tail for the mass-hand cost arm: `"in <your/that player's> hand
+/// perpetually gain(s) \"<body>\""` → `(controller, ManaCost, CostModifyMode)`.
+///
+/// Single authority for the clause body shared by the PLURAL form ("nonland
+/// cards in your hand perpetually GAIN …") and the SINGULAR-with-`each` form
+/// ("each Dragon card in your hand perpetually GAINS …"). Number agreement on
+/// the verb is one `alt()` (`gain` / `gains`); the caller has already consumed
+/// the `card(s) ` head, so the tail begins at `in `.
+#[allow(clippy::type_complexity)]
+fn parse_in_whose_hand_perpetually_gain_body(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        Option<ControllerRef>,
+        ManaCost,
+        crate::types::statics::CostModifyMode,
+    ),
+> {
+    use nom::character::complete::char;
+    use nom::sequence::delimited;
+
+    let (input, _) = tag("in ").parse(input)?;
+    // Only "your hand" is modeled (controller = the spell's controller).
+    // "that player's hand" is a scoped reference to a specific player, but the
+    // hand-card filter has no scoped-player axis here — `controller: None` would
+    // mean ANY controller, so the hand-zone resolver would enumerate EVERY
+    // player's hand and wrongly modify both players' matching cards. Leave
+    // "that player's hand" honest-red (no parse → Unimplemented) until the
+    // referent is bound to a scoped player axis.
+    let (input, _) = tag("your").parse(input)?;
+    let controller = Some(ControllerRef::You);
+    let (input, _) = tag(" hand perpetually ").parse(input)?;
+    // Number agreement: plural "gain" / singular-each "gains".
+    let (input, _) = alt((tag("gains "), tag("gain "))).parse(input)?;
+    let (input, (amount, mode)) =
+        delimited(char('"'), parse_quoted_self_spell_cost_body, char('"')).parse(input)?;
+    Ok((input, (controller, amount, mode)))
+}
+
+/// Digital-only Alchemy (CR 601.2f + CR 611.2c): parse the mass-hand self-spell
+/// cost grant in BOTH printed number forms →
+/// [`Effect::ApplyPerpetual`] over a [`cards_in_hand_filter`]:
+/// - PLURAL: "[type] cards in [your/that player's] hand perpetually gain
+///   \"This spell costs {N} less/more to cast[.,]\"" (Blooming Cactusfolk,
+///   Charged Conjuration, Fountainport Charmer);
+/// - SINGULAR + `each`: "each [type] card in [your/that player's] hand
+///   perpetually gains \"…\"" (Fearsome Whelp). "each [type] card" = every
+///   matching card in hand — the same all-matching deterministic set the filter
+///   already yields.
+///
+/// STRICT nom sequencing (no `take_until`): the optional `each ` prefix, the type
+/// axis (discrete `tag()` arms), the `card(s) ` head (number-agreement `alt()`),
+/// then the shared `in <whose> hand perpetually gain(s) <body>` tail. Any
+/// unconsumed tail — a rider after the type axis (Absorb Energy's "that share a
+/// card type with that spell"), an `{X}` body the cost-body parser rejects, or a
+/// trailing clause ("…and draws a card") — returns `None` so the card falls to
+/// `Unimplemented` rather than installing a subtly-wrong effect.
+fn try_parse_typed_cards_in_hand_perpetual_gain_cost(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let ((type_filter, controller, amount, mode), rest) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            // Optional "each " distributive prefix (the singular form).
+            let (input, _) = opt(tag("each ")).parse(input)?;
+            let (input, type_filter) = parse_hand_card_type_axis(input)?;
+            // Number-agreement head: "cards " (plural) or "card " (singular-each).
+            let (input, _) = alt((tag("cards "), tag("card "))).parse(input)?;
+            let (input, (controller, amount, mode)) =
+                parse_in_whose_hand_perpetually_gain_body(input)?;
+            Ok((input, (type_filter, controller, amount, mode)))
+        })?;
+
+    // Honest-red: any unconsumed tail (a rider after the quote like
+    // "…and draws a card") means this leaf cannot faithfully model the clause —
+    // return None so it falls through to Unimplemented.
+    tail_done(rest).then_some(Effect::ApplyPerpetual {
+        // CR 601.2f + CR 611.2c: latched self-spell cost modifier applied to each
+        // matching card in the named hand.
+        target: cards_in_hand_filter(type_filter, controller),
+        modification: crate::types::ability::PerpetualModification::ModifyCost { mode, amount },
     })
 }
 
@@ -7843,6 +8144,7 @@ fn try_parse_owner_of_target_shuffle(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     }))
 }
@@ -10070,12 +10372,25 @@ fn parse_energy_gain_base(input: &str, multiplier: QuantityExpr) -> Option<Effec
     parse_energy_symbols_gain(rest, multiplier)
 }
 
-fn nonland_card_in_hand_filter(controller: Option<ControllerRef>) -> TargetFilter {
+/// "[type] cards in [your/that player's] hand" → a card-style
+/// [`TargetFilter::Typed`] carrying `type_filter` + `InZone { Hand }` + the given
+/// controller scope. Single authority for the hand-card filter shared by the
+/// random-card grant, the mass-hand perpetual cost arm, and their callers.
+pub(crate) fn cards_in_hand_filter(
+    type_filter: TypeFilter,
+    controller: Option<ControllerRef>,
+) -> TargetFilter {
     let mut filter = TypedFilter::card()
-        .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+        .with_type(type_filter)
         .properties(vec![FilterProp::InZone { zone: Zone::Hand }]);
     filter.controller = controller;
     TargetFilter::Typed(filter)
+}
+
+/// Thin wrapper preserving the original "nonland card in hand" filter so existing
+/// callers and tests are untouched.
+fn nonland_card_in_hand_filter(controller: Option<ControllerRef>) -> TargetFilter {
+    cards_in_hand_filter(TypeFilter::Non(Box::new(TypeFilter::Land)), controller)
 }
 
 fn try_parse_random_card_perpetual_gain_quoted_ability(
@@ -11016,6 +11331,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     )));
@@ -12775,6 +13091,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
@@ -12792,6 +13109,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     };
 
@@ -19377,6 +19695,7 @@ fn try_parse_for_each_attacker_copy_blocker(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
@@ -19434,6 +19753,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -22917,6 +23237,7 @@ fn try_parse_put_zone_change_parts(
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 choice_count,
@@ -52639,6 +52960,382 @@ mod tests {
     }
 
     #[test]
+    fn perpetual_parser_maps_modify_cost() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+
+        // Reduce: "~ perpetually gains \"This spell costs {2} less to cast\"."
+        let e = parse_effect("~ perpetually gains \"This spell costs {2} less to cast\".");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(2)
+            ),
+            "expected Reduce generic(2), got {e:?}"
+        );
+
+        // Raise: "{1} more to cast".
+        let e = parse_effect("~ perpetually gains \"This spell costs {1} more to cast\".");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Raise,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(1)
+            ),
+            "expected Raise generic(1), got {e:?}"
+        );
+
+        // Anaphoric "that creature ..." form back-references the parent target.
+        let e =
+            parse_effect("that creature perpetually gains \"This spell costs {2} less to cast\".");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::ParentTarget,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(2)
+            ),
+            "expected ParentTarget Reduce generic(2), got {e:?}"
+        );
+
+        // "this card costs" synonym.
+        let e = parse_effect("~ perpetually gains \"This card costs {3} less to cast\".");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                    ..
+                } if *amount == ManaCost::generic(3)
+            ),
+            "expected Reduce generic(3) via 'this card costs', got {e:?}"
+        );
+
+        // CR 601.2f: terminal PERIOD printed INSIDE the quote (the real Oracle
+        // form). Was failing before Step A's `opt(alt(("."/","))).` punctuation
+        // consume — the closing `"` would not match after the trailing period.
+        let e = parse_effect("~ perpetually gains \"This spell costs {1} less to cast.\"");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(1)
+            ),
+            "period-inside-quote must parse as Reduce generic(1), got {e:?}"
+        );
+
+        // Comma-inside-quote variant.
+        let e = parse_effect("~ perpetually gains \"This spell costs {1} less to cast,\"");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "comma-inside-quote must parse as Reduce, got {e:?}"
+        );
+
+        // `more`-inside-quote-with-period variant.
+        let e = parse_effect("~ perpetually gains \"This spell costs {2} more to cast.\"");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Raise,
+                        amount,
+                    },
+                    ..
+                } if *amount == ManaCost::generic(2)
+            ),
+            "more-inside-quote-with-period must parse as Raise generic(2), got {e:?}"
+        );
+    }
+
+    /// Anaphoric "that card perpetually gains …" — the EXACT clause printed on
+    /// Paths of Tuinvale and Talion's Throneguard. Back-references the parent
+    /// target ([`TargetFilter::ParentTarget`]).
+    #[test]
+    fn perpetual_modify_cost_anaphor_that_card() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+
+        let e = parse_effect("that card perpetually gains \"This spell costs {1} less to cast.\"");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::ParentTarget,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(1)
+            ),
+            "'that card' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
+        );
+    }
+
+    /// Mass-hand arm: the EXACT real Oracle clauses (verified against
+    /// `data/mtgjson/AtomicCards.json`) for the four covered cards →
+    /// `ApplyPerpetual` over `cards_in_hand_filter`:
+    /// - Blooming Cactusfolk: "nonland cards in your hand perpetually gain …";
+    /// - Charged Conjuration: "instant and sorcery cards in your hand perpetually gain …";
+    /// - Fountainport Charmer: "creature cards in your hand perpetually gain …";
+    /// - Fearsome Whelp: "each Dragon card in your hand perpetually gains …"
+    ///   (the SINGULAR + `each` form).
+    ///
+    /// Plus a "that player's" controller-scope variant. Each effect clause is the
+    /// post-trigger-split remainder the parser actually receives.
+    #[test]
+    fn perpetual_mass_hand_cost_arm_parses_typed_hand_filter() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+
+        // Blooming Cactusfolk: "Nonland cards in your hand perpetually gain …".
+        let e = parse_effect(
+            "Nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(1)
+                    && *target
+                        == cards_in_hand_filter(
+                            TypeFilter::Non(Box::new(TypeFilter::Land)),
+                            Some(ControllerRef::You),
+                        )
+            ),
+            "Blooming Cactusfolk must map to nonland-hand ApplyPerpetual, got {e:?}"
+        );
+
+        // Charged Conjuration: "Instant and sorcery cards in your hand perpetually gain …".
+        let e = parse_effect(
+            "Instant and sorcery cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target,
+                    modification: PerpetualModification::ModifyCost { mode: CostModifyMode::Reduce, .. },
+                } if *target
+                    == cards_in_hand_filter(
+                        TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery]),
+                        Some(ControllerRef::You),
+                    )
+            ),
+            "Charged Conjuration must map to instant/sorcery-hand ApplyPerpetual, got {e:?}"
+        );
+
+        // Fountainport Charmer: "creature cards in your hand perpetually gain …".
+        let e = parse_effect(
+            "creature cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual { target, .. }
+                    if *target
+                        == cards_in_hand_filter(TypeFilter::Creature, Some(ControllerRef::You))
+            ),
+            "Fountainport Charmer must map to creature-hand ApplyPerpetual, got {e:?}"
+        );
+
+        // Fearsome Whelp: the REAL SINGULAR + `each` Oracle form — "each Dragon
+        // card in your hand perpetually gains …" (singular `card`/`gains`). Must
+        // route to the SAME ApplyPerpetual over a Subtype("Dragon") hand filter
+        // as the plural forms ("each Dragon card" = every Dragon card in hand).
+        let e = parse_effect(
+            "each Dragon card in your hand perpetually gains \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target,
+                    modification: PerpetualModification::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount,
+                    },
+                } if *amount == ManaCost::generic(1)
+                    && *target
+                        == cards_in_hand_filter(
+                            TypeFilter::Subtype("Dragon".to_string()),
+                            Some(ControllerRef::You),
+                        )
+            ),
+            "Fearsome Whelp's 'each Dragon card … perpetually gains' must map to \
+             Subtype(\"Dragon\")-hand ApplyPerpetual Reduce generic(1), got {e:?}"
+        );
+
+        // "that player's hand" is honest-red: `controller: None` would mean ANY
+        // controller (both players' hands), so this scoped-player form is NOT
+        // parsed — it must fall through to Unimplemented rather than apply to
+        // every player's matching cards.
+        let e = parse_effect(
+            "Nonland cards in that player's hand perpetually gain \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            !matches!(&e, Effect::ApplyPerpetual { .. }),
+            "'that player's hand' must be honest-red (not ApplyPerpetual), got {e:?}"
+        );
+    }
+
+    /// Honest-red: the mass-hand arm MUST reject clauses it cannot faithfully
+    /// model and fall through (NOT ApplyPerpetual::ModifyCost):
+    /// - Absorb Energy's "that share a card type with that spell" rider;
+    /// - an `{X}` body the cost-body parser cannot interpret;
+    /// - a trailing rider "…and draws a card";
+    /// - the "It perpetually gains …" form (subject not in the mass-arm list).
+    #[test]
+    fn perpetual_mass_hand_cost_arm_honest_red() {
+        use crate::types::ability::PerpetualModification;
+
+        fn is_modify_cost(e: &Effect) -> bool {
+            matches!(
+                e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::ModifyCost { .. },
+                    ..
+                }
+            )
+        }
+
+        // Absorb Energy: the "that share a card type with that spell" rider after
+        // the type axis is unconsumed → reject.
+        let e = parse_effect(
+            "Cards in your hand that share a card type with that spell perpetually gain \"This spell costs {1} less to cast.\"",
+        );
+        assert!(
+            !is_modify_cost(&e),
+            "Absorb Energy rider must not parse as ModifyCost, got {e:?}"
+        );
+
+        // {X} body: the cost-body parser rejects a variable amount → reject.
+        let e = parse_effect(
+            "Nonland cards in your hand perpetually gain \"This spell costs {X} less to cast.\"",
+        );
+        assert!(!is_modify_cost(&e), "{{X}} body must not parse, got {e:?}");
+
+        // Trailing rider after the quote → unconsumed tail → reject.
+        let e = parse_effect(
+            "Nonland cards in your hand perpetually gain \"This spell costs {1} less to cast\" and draws a card.",
+        );
+        assert!(
+            !is_modify_cost(&e),
+            "trailing rider must not parse as ModifyCost, got {e:?}"
+        );
+
+        // "It perpetually gains …" — the subject is not in the mass-arm class.
+        let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
+        assert!(
+            !is_modify_cost(&e),
+            "'It perpetually gains' is not a mass-hand subject, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn perpetual_modify_cost_honest_red_on_unconsumed_tail() {
+        use crate::types::ability::PerpetualModification;
+
+        // An unmodeled rider inside the quote must NOT parse as ModifyCost — it
+        // must fall through (Unimplemented), not silently drop the rider.
+        let e = parse_effect(
+            "~ perpetually gains \"This spell costs {2} less to cast and draws a card\".",
+        );
+        assert!(
+            !matches!(
+                e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::ModifyCost { .. },
+                    ..
+                }
+            ),
+            "unconsumed quoted tail must not parse as ModifyCost, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn perpetual_modify_cost_serde_round_trip() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+
+        for modification in [
+            PerpetualModification::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(2),
+            },
+            PerpetualModification::ModifyCost {
+                mode: CostModifyMode::Raise,
+                amount: ManaCost::generic(1),
+            },
+        ] {
+            let json = serde_json::to_string(&modification).unwrap();
+            let back: PerpetualModification = serde_json::from_str(&json).unwrap();
+            assert_eq!(modification, back, "round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn perpetual_gains_keyword_still_routes_to_grant_keywords() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::keywords::Keyword;
+
+        // Regression: the cost arm (tried first) must not steal the bare-keyword
+        // grant form; it requires a quoted body, so this still routes to GrantKeywords.
+        let e = parse_effect("~ perpetually gains flying.");
+        assert!(
+            matches!(
+                &e,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::GrantKeywords { keywords },
+                } if *keywords == vec![Keyword::Flying]
+            ),
+            "expected GrantKeywords flying, got {e:?}"
+        );
+    }
+
+    #[test]
     fn intensify_parser_maps_source_and_owned_scopes() {
         let e = parse_effect("This creature intensifies by 2.");
         assert!(matches!(
@@ -60740,6 +61437,7 @@ mod snapshot_tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         };
         // Non-delayed top-level ParentTarget return.
@@ -60793,6 +61491,7 @@ mod snapshot_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );

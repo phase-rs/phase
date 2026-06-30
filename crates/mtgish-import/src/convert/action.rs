@@ -2362,6 +2362,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ])
@@ -2392,6 +2393,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
@@ -2407,6 +2409,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 Effect::CreateDelayedTrigger {
@@ -2846,6 +2849,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
@@ -2859,6 +2863,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -2878,6 +2883,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -2900,6 +2906,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             }
         }
@@ -3006,6 +3013,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -3026,6 +3034,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -3055,6 +3064,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             }
         }
@@ -3080,6 +3090,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             }
         }
@@ -3264,6 +3275,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -3480,6 +3492,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             }
         }
@@ -3500,6 +3513,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
 
@@ -3711,6 +3725,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             }
         }
@@ -6207,6 +6222,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
         enter_with_counters: enter_repls.enter_with_counters,
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     });
     if shuffle {
@@ -6271,6 +6287,7 @@ fn convert_multi_filter_search_library(
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
             enter_with_counters: enter_repls.enter_with_counters.clone(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         });
     }

@@ -14457,6 +14457,52 @@ mod tests {
     }
 
     #[test]
+    fn winter_soldier_reborn_avenger_attack_reanimation_trigger() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypeFilter};
+        use crate::types::counter::CounterType;
+        let def = parse_trigger_line(
+            "Whenever Winter Soldier attacks, return target creature card with mana value less than or equal to Winter Soldier's power from your graveyard to the battlefield. If a Hero enters this way, it enters with an additional +1/+1 counter on it.",
+            "Winter Soldier, Reborn Avenger",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.expect("execute");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::ChangeZone { .. }),
+            "expected ChangeZone reanimation, got {:?}",
+            execute.effect
+        );
+        assert!(execute.forward_result);
+        let Effect::ChangeZone {
+            conditional_enter_with_counters,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected ChangeZone head");
+        };
+        assert_eq!(
+            conditional_enter_with_counters.len(),
+            1,
+            "Hero counter rider must fold into conditional_enter_with_counters"
+        );
+        let (filter, counter_type, count) = &conditional_enter_with_counters[0];
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(
+            matches!(count, QuantityExpr::Fixed { value: 1 }),
+            "expected one additional +1/+1 counter, got {count:?}"
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Hero filter, got {filter:?}");
+        };
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Hero".into())));
+        assert!(
+            execute.sub_ability.is_none(),
+            "counter rider must not remain as a PutCounter sub-ability"
+        );
+    }
+
+    #[test]
     fn parses_phases_in_trigger_as_phase_in_mode() {
         let def = parse_trigger_line(
             "Whenever Warping Wurm phases in, put a +1/+1 counter on it.",
@@ -16883,6 +16929,7 @@ mod tests {
                 enters_attacking: true,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
@@ -16899,6 +16946,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         )));

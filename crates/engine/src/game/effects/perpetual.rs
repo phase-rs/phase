@@ -85,6 +85,22 @@ fn perpetual_target_object_ids(
         }
     }
 
+    // Mass perpetual over a non-battlefield zone (CR 601.2f hand-card cost grants:
+    // "[type] cards in [your/that player's] hand perpetually gain …"). When the
+    // filter pins an `InZone` other than the battlefield, enumerate that zone and
+    // keep every object matching the filter — NOT a single declared target and
+    // NOT the source fallback (the grant edits a set of cards, possibly empty, in
+    // a hidden zone). Mirrors `layers::apply_continuous_effect_filtered`.
+    if let Some(zone) = target.extract_in_zone() {
+        if zone != crate::types::zones::Zone::Battlefield {
+            let ctx = crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            return crate::game::targeting::zone_object_ids(state, zone)
+                .into_iter()
+                .filter(|&id| crate::game::filter::matches_target_filter(state, id, target, &ctx))
+                .collect();
+        }
+    }
+
     if ids.is_empty() {
         ids.push(ability.source_id);
     }

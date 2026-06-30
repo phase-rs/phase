@@ -2758,6 +2758,7 @@ pub(super) fn apply_clause_continuation(
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             );
@@ -3246,6 +3247,7 @@ pub(super) fn apply_clause_continuation(
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
+                                conditional_enter_with_counters: vec![],
                                 face_down_profile,
                             },
                         );
@@ -3383,6 +3385,7 @@ pub(super) fn apply_clause_continuation(
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 );
@@ -3399,6 +3402,7 @@ pub(super) fn apply_clause_continuation(
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 );
@@ -6379,6 +6383,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         };
         let result =

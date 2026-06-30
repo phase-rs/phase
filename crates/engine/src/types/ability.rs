@@ -7998,7 +7998,8 @@ impl FaceDownProfile {
 ///
 /// Increment 1 covers base power/toughness setting; the enum is extensible to the
 /// other perpetual forms (`ModifyPowerToughness` for "perpetually gets +N/+N",
-/// `GrantAbility` for "perpetually gains ...", `Become` for type changes).
+/// `GrantAbility` for "perpetually gains ...", `Become` for type changes,
+/// `ModifyCost` for "perpetually gains \"This spell costs {N} less/more to cast\"").
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(tag = "kind")]
 pub enum PerpetualModification {
@@ -8027,6 +8028,16 @@ pub enum PerpetualModification {
         toughness: i32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keywords: Vec<crate::types::keywords::Keyword>,
+    },
+    /// Digital-only Alchemy (no CR entry for "perpetually"; the cost change itself
+    /// is CR 601.2f): "[card] perpetually gains \"This spell costs {N} less/more to
+    /// cast\"" — records a permanent self-referential cast-cost modifier, realized
+    /// by injecting a synthetic self-spell `StaticMode::ModifyCost` into the card's
+    /// persistent static baseline so the existing self-spell cost collector consumes
+    /// it unchanged and it survives every layer/zone reset.
+    ModifyCost {
+        mode: crate::types::statics::CostModifyMode,
+        amount: ManaCost,
     },
 }
 
@@ -8438,6 +8449,13 @@ pub enum Effect {
         /// with three egg counters on it" (Darigaaz Reincarnated).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 122.1 + CR 614.1c: Entry-time counters gated on the entering
+        /// object's characteristics (e.g. Winter Soldier's "If a Hero enters
+        /// this way, it enters with an additional +1/+1 counter on it").
+        /// Applied inside the zone-change entry pipeline when the moved object
+        /// matches `filter`, not via a post-move `PutCounter` sub-ability.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
         /// CR 708.2a + CR 708.3: when `Some`, the object that enters the
         /// battlefield via this move is turned face down (before entry, CR
         /// 708.3) with these characteristics. `None` = normal face-up entry.
@@ -19371,6 +19389,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
@@ -19453,6 +19472,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
@@ -19596,6 +19616,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }
     }

@@ -21517,6 +21517,423 @@ mod tests {
         }
     }
 
+    /// Apply an Alchemy "perpetually gains \"This spell costs {N} less/more to
+    /// cast\"" grant to `spell_id` through the REAL resolution path
+    /// (`parse_effect_chain` → `build_resolved_from_def` → `resolve_ability_chain`),
+    /// exactly as the `ApplyPerpetual` effect runs in production. Returns nothing;
+    /// the synthetic self-spell `ModifyCost` static is injected onto the object.
+    fn grant_perpetual_cost_mod(state: &mut GameState, spell_id: ObjectId, oracle: &str) {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::AbilityKind;
+        let def = parse_effect_chain(oracle, AbilityKind::Activated);
+        let ability = build_resolved_from_def(&def, spell_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(state, &ability, &mut events, 0).unwrap();
+    }
+
+    /// Build a generic {N}-cost sorcery in hand for the perpetual-cost tests.
+    fn create_generic_sorcery_in_hand(
+        state: &mut GameState,
+        card_id: u64,
+        name: &str,
+        generic: u32,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic,
+        };
+        obj_id
+    }
+
+    fn self_cost_generic(state: &GameState, spell_id: ObjectId) -> u32 {
+        let mut mana_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        apply_self_spell_cost_modifiers(state, PlayerId(0), spell_id, &mut mana_cost);
+        match mana_cost {
+            ManaCost::Cost { generic, .. } => generic,
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    /// Reduce: a {4}-cost card granted `Reduce {2}` casts for {2}; without the
+    /// grant the same card costs {4} (revert).
+    #[test]
+    fn perpetual_cost_reduce_lowers_self_cast_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_generic_sorcery_in_hand(&mut state, 4_001, "Reduce Test", 4);
+
+        // Revert baseline: no grant → full {4}.
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            4,
+            "ungranted cost is {{4}}"
+        );
+
+        grant_perpetual_cost_mod(
+            &mut state,
+            spell,
+            "~ perpetually gains \"This spell costs {2} less to cast\".",
+        );
+        // CR 601.2f: {4} − {2} = {2}.
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            2,
+            "Reduce {{2}} lowers {{4}} to {{2}}"
+        );
+    }
+
+    /// Raise: a {4}-cost card granted `Raise {2}` casts for {6}.
+    #[test]
+    fn perpetual_cost_raise_increases_self_cast_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_generic_sorcery_in_hand(&mut state, 4_002, "Raise Test", 4);
+
+        grant_perpetual_cost_mod(
+            &mut state,
+            spell,
+            "~ perpetually gains \"This spell costs {2} more to cast\".",
+        );
+        // CR 601.2f: {4} + {2} = {6}.
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            6,
+            "Raise {{2}} raises {{4}} to {{6}}"
+        );
+    }
+
+    /// Floor: a {1}-cost card granted `Reduce {3}` floors at {0} (not negative).
+    #[test]
+    fn perpetual_cost_reduce_floors_at_zero() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_generic_sorcery_in_hand(&mut state, 4_003, "Floor Test", 1);
+
+        grant_perpetual_cost_mod(
+            &mut state,
+            spell,
+            "~ perpetually gains \"This spell costs {3} less to cast\".",
+        );
+        // CR 601.2f: a cost reduction cannot reduce generic mana below {0}.
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            0,
+            "Reduce {{3}} on {{1}} floors at {{0}}, not negative"
+        );
+    }
+
+    /// Persists across a zone change: the perpetual cost reduction survives a
+    /// hand → library → hand round-trip (the static lives in
+    /// `self_spell_cost_mod_active_zones`, which includes Library and Hand). This
+    /// is the perpetual-claim discriminator — a transient-only injection would
+    /// fail it.
+    #[test]
+    fn perpetual_cost_reduce_persists_across_zone_change() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_generic_sorcery_in_hand(&mut state, 4_004, "Persist Test", 4);
+
+        grant_perpetual_cost_mod(
+            &mut state,
+            spell,
+            "~ perpetually gains \"This spell costs {2} less to cast\".",
+        );
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            2,
+            "reduced to {{2}} in hand"
+        );
+
+        // Move hand → library → hand. The perpetual record and the injected
+        // static must both survive (no zone reset clears base/live statics here).
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, spell, Zone::Library, &mut events);
+        zones::move_to_zone(&mut state, spell, Zone::Hand, &mut events);
+
+        // The perpetual modification is still recorded on the object.
+        assert!(
+            state
+                .objects
+                .get(&spell)
+                .unwrap()
+                .perpetual_mods
+                .iter()
+                .any(|m| matches!(
+                    m,
+                    crate::types::ability::PerpetualModification::ModifyCost { .. }
+                )),
+            "perpetual ModifyCost record must persist across the zone change"
+        );
+        // And the cost is still reduced after the round-trip.
+        assert_eq!(
+            self_cost_generic(&state, spell),
+            2,
+            "cost still reduced to {{2}} after hand→library→hand"
+        );
+    }
+
+    /// Multi-authority net: two grants on one card stack. `Reduce {2}` + `Raise
+    /// {1}` on a {3} base nets {2} (raise-before-reduce ordering), and a floor
+    /// case `Reduce {3}` + `Raise {2}` on a {1} base floors at {0}.
+    #[test]
+    fn perpetual_cost_multiple_grants_stack_and_floor() {
+        let mut state = setup_game_at_main_phase();
+
+        // Net case: {3} base, Reduce {2} + Raise {1} → {2}.
+        let net = create_generic_sorcery_in_hand(&mut state, 4_005, "Net Test", 3);
+        grant_perpetual_cost_mod(
+            &mut state,
+            net,
+            "~ perpetually gains \"This spell costs {2} less to cast\".",
+        );
+        grant_perpetual_cost_mod(
+            &mut state,
+            net,
+            "~ perpetually gains \"This spell costs {1} more to cast\".",
+        );
+        // CR 601.2f: raises apply before reductions: {3} + {1} − {2} = {2}.
+        assert_eq!(
+            self_cost_generic(&state, net),
+            2,
+            "Reduce {{2}} + Raise {{1}} on {{3}} nets {{2}}"
+        );
+
+        // Floor case: {1} base, Reduce {3} + Raise {2} → {0}.
+        let floor = create_generic_sorcery_in_hand(&mut state, 4_006, "Net Floor Test", 1);
+        grant_perpetual_cost_mod(
+            &mut state,
+            floor,
+            "~ perpetually gains \"This spell costs {3} less to cast\".",
+        );
+        grant_perpetual_cost_mod(
+            &mut state,
+            floor,
+            "~ perpetually gains \"This spell costs {2} more to cast\".",
+        );
+        // CR 601.2f: {1} + {2} − {3} = {0}, floored (not negative).
+        assert_eq!(
+            self_cost_generic(&state, floor),
+            0,
+            "Reduce {{3}} + Raise {{2}} on {{1}} floors at {{0}}"
+        );
+    }
+
+    /// End-to-end through the real cast pipeline: a {4}-cost card granted `Reduce
+    /// {2}`, funded with exactly {2} in pool, commits to the stack and resolves —
+    /// proving the reduced cost is actually PAYABLE from the pool (not merely a
+    /// computed number). A transient-only or unapplied injection would leave the
+    /// pool short and the cast would fail to commit.
+    #[test]
+    fn perpetual_cost_reduce_payable_through_cast_pipeline() {
+        use crate::game::scenario::GameRunner;
+
+        let mut state = setup_game_at_main_phase();
+        let spell = create_generic_sorcery_in_hand(&mut state, 4_007, "Pipeline Test", 4);
+        grant_perpetual_cost_mod(
+            &mut state,
+            spell,
+            "~ perpetually gains \"This spell costs {2} less to cast\".",
+        );
+        // Fund exactly the reduced cost: {2} generic (two colorless).
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let mut runner = GameRunner::from_state(state);
+        let outcome = runner.cast(spell).resolve();
+
+        // CR 608.2n: a resolved sorcery goes to its owner's graveyard. Reaching
+        // the graveyard (not staying stranded in hand) proves the {2} pool
+        // covered the reduced cost and the spell actually committed + resolved —
+        // i.e. the reduction applied on the real payment path, not just to the
+        // computed cost. (Were the full {4} still required, the {2} pool could
+        // not pay it and the spell would remain in hand.)
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+    }
+
+    /// Build a {N}-generic creature in `owner`'s hand for the mass-hand tests.
+    fn create_generic_creature_in_hand(
+        state: &mut GameState,
+        card_id: u64,
+        owner: PlayerId,
+        name: &str,
+        generic: u32,
+    ) -> ObjectId {
+        let obj_id = create_object(state, CardId(card_id), owner, name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic,
+        };
+        obj_id
+    }
+
+    /// Build a basic-land card in `owner`'s hand — the negative control; the
+    /// mass-hand cost grant's filter excludes Land.
+    fn create_land_in_hand(
+        state: &mut GameState,
+        card_id: u64,
+        owner: PlayerId,
+        name: &str,
+    ) -> ObjectId {
+        let obj_id = create_object(state, CardId(card_id), owner, name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj_id
+    }
+
+    fn self_cost_generic_for(state: &GameState, player: PlayerId, spell_id: ObjectId) -> u32 {
+        let mut mana_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        apply_self_spell_cost_modifiers(state, player, spell_id, &mut mana_cost);
+        match mana_cost {
+            ManaCost::Cost { generic, .. } => generic,
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    /// Resolve `ApplyPerpetual { cards_in_hand_filter(Creature, You),
+    /// ModifyCost{Reduce,{1}} }` through the REAL perpetual resolver and assert
+    /// the per-card outcome: the matching Creature hand card's self-cast cost
+    /// drops by {1}, the Land (filtered out) is unchanged, and an OPPONENT's
+    /// Creature (controller-scope mismatch) is unchanged.
+    #[test]
+    fn perpetual_mass_hand_cost_reduces_only_matching_cards() {
+        use crate::game::effects::perpetual;
+        use crate::parser::oracle_effect::cards_in_hand_filter;
+        use crate::types::ability::{PerpetualModification, ResolvedAbility};
+        use crate::types::statics::CostModifyMode;
+
+        let mut state = setup_game_at_main_phase();
+        let creature = create_generic_creature_in_hand(&mut state, 5_001, PlayerId(0), "Bear", 4);
+        let land = create_land_in_hand(&mut state, 5_002, PlayerId(0), "Forest");
+        // Controller-scope sibling: a Creature in the OPPONENT's hand.
+        let opp_creature =
+            create_generic_creature_in_hand(&mut state, 5_003, PlayerId(1), "Opp Bear", 4);
+
+        // Revert baseline: BEFORE resolve, all three are at their printed cost.
+        assert_eq!(self_cost_generic_for(&state, PlayerId(0), creature), 4);
+        assert_eq!(self_cost_generic_for(&state, PlayerId(1), opp_creature), 4);
+
+        // A P0-controlled source anchors `ControllerRef::You` for the filter.
+        let source = create_object(
+            &mut state,
+            CardId(5_000),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: cards_in_hand_filter(TypeFilter::Creature, Some(ControllerRef::You)),
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(1),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        perpetual::resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 601.2f: the matching Creature hand card drops {1} ({4} → {3}).
+        assert_eq!(
+            self_cost_generic_for(&state, PlayerId(0), creature),
+            3,
+            "the matching Creature hand card should drop by {{1}}"
+        );
+        // The Land is excluded by the filter — no cost mod recorded.
+        assert!(
+            !state
+                .objects
+                .get(&land)
+                .unwrap()
+                .perpetual_mods
+                .iter()
+                .any(|m| matches!(m, PerpetualModification::ModifyCost { .. })),
+            "the Land must not receive the cost mod"
+        );
+        // Controller-scope: the OPPONENT's Creature is NOT reduced (filter is You).
+        assert_eq!(
+            self_cost_generic_for(&state, PlayerId(1), opp_creature),
+            4,
+            "an opponent's hand Creature must not be reduced by a 'your hand' grant"
+        );
+    }
+
+    /// Fearsome Whelp's SINGULAR + `each` subtype form, resolved through the REAL
+    /// perpetual resolver: a Dragon card and a non-Dragon card in P0's hand;
+    /// resolve `ApplyPerpetual { cards_in_hand_filter(Subtype("Dragon"), You),
+    /// ModifyCost{Reduce,{1}} }`; the Dragon card's self-cast cost drops by {1}
+    /// and the non-Dragon's is unchanged.
+    #[test]
+    fn perpetual_mass_hand_each_dragon_reduces_only_dragons() {
+        use crate::game::effects::perpetual;
+        use crate::parser::oracle_effect::cards_in_hand_filter;
+        use crate::types::ability::{PerpetualModification, ResolvedAbility};
+        use crate::types::statics::CostModifyMode;
+
+        let mut state = setup_game_at_main_phase();
+        // A Dragon creature card and a non-Dragon (Bear) creature card in hand.
+        let dragon = create_generic_creature_in_hand(&mut state, 6_001, PlayerId(0), "Whelp", 5);
+        state
+            .objects
+            .get_mut(&dragon)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Dragon".to_string());
+        let bear = create_generic_creature_in_hand(&mut state, 6_002, PlayerId(0), "Bear", 3);
+
+        // Revert baseline: BEFORE resolve, both at printed cost.
+        assert_eq!(self_cost_generic_for(&state, PlayerId(0), dragon), 5);
+        assert_eq!(self_cost_generic_for(&state, PlayerId(0), bear), 3);
+
+        let source = create_object(
+            &mut state,
+            CardId(6_000),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: cards_in_hand_filter(
+                    TypeFilter::Subtype("Dragon".to_string()),
+                    Some(ControllerRef::You),
+                ),
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(1),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        perpetual::resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 601.2f: only the Dragon card drops {1} ({5} → {4}); the Bear is
+        // untouched (subtype filter excludes it).
+        assert_eq!(
+            self_cost_generic_for(&state, PlayerId(0), dragon),
+            4,
+            "the Dragon hand card should drop by {{1}}"
+        );
+        assert_eq!(
+            self_cost_generic_for(&state, PlayerId(0), bear),
+            3,
+            "a non-Dragon hand card must be unchanged"
+        );
+    }
+
     fn create_black_sorcery_with_keywords(
         state: &mut GameState,
         card_id: u64,
@@ -24382,6 +24799,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ));
@@ -27826,6 +28244,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -31922,6 +32341,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 )
@@ -31939,6 +32359,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
                         },
                     )
@@ -32682,6 +33103,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ));
@@ -32846,6 +33268,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ));
@@ -32872,6 +33295,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ));
@@ -33255,6 +33679,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             );
@@ -33271,6 +33696,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             );
@@ -44892,6 +45318,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             );

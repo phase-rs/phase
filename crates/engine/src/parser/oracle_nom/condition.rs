@@ -2756,6 +2756,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_you_control_no,
         // "no opponent controls a/an [type]" → Not(IsPresent { Opponent })
         parse_no_opponent_controls_a,
+        // "your opponents control no [type]" → Not(IsPresent { Opponent })
+        parse_your_opponents_control_no,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -3227,6 +3229,36 @@ fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition
     // Require an article — reject the bare-plural count form ("no opponent
     // controls creatures") exactly as the affirmative control arms do.
     let (rest, _) = parse_article(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // CR 109.4: battlefield-scoped presence controlled by an opponent.
+    let filter = inject_controller(filter, ControllerRef::Opponent);
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsPresent {
+                filter: Some(filter),
+            }),
+        },
+    ))
+}
+
+/// Parse "your opponents control no [type]" → Not(IsPresent { Opponent }).
+///
+/// The collective-opponents bare-plural form (no article) of
+/// `parse_no_opponent_controls_a`; mirrors `parse_you_control_no` with the
+/// opponent controller axis. "your opponents control no creatures" means no
+/// opponent controls any creature, identical to "no opponent controls a
+/// creature". Chevill, Bane of Monsters (permanents); Erebos's Titan,
+/// Kezzerdrix (creatures).
+fn parse_your_opponents_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("your opponents control no ").parse(input)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -6727,6 +6759,16 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     // matches cleanly.
     let after_filter = after_filter.trim_start();
 
+    // Two surface forms:
+    //   * auxiliary + past participle / multi-word verb ("is put onto the battlefield this way")
+    //   * present-tense third-person singular without auxiliary ("enters this way" — Winter Soldier)
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(after_filter)
+    {
+        let (rest, _) = tag(" this way").parse(rest)?;
+        return Ok((rest, (filter, false)));
+    }
+
     // tense: singular "is"/"was" + plural "are"/"were". Verb number is
     // grammatically inert here — "one or more cards are milled" and "an X was
     // milled" produce the same existential condition. (Negations stay
@@ -7998,6 +8040,26 @@ mod tests {
                 zone: Zone::Battlefield
             }
         )));
+    }
+
+    /// CR 109.4: "your opponents control no <type>" → `Not(IsPresent { Opponent })`.
+    /// Plural-opponent sibling of "no opponent controls a <type>". Erebos's Titan,
+    /// Kezzerdrix (creatures); Chevill, Bane of Monsters (permanents).
+    #[test]
+    fn test_your_opponents_control_no_creatures() {
+        let (rest, c) = parse_inner_condition("your opponents control no creatures").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence_under_not(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+
+        // Chevill's "no permanents" variant parses through the same arm.
+        let (rest, c) = parse_inner_condition("your opponents control no permanents").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(c, StaticCondition::Not { .. }),
+            "expected Not(IsPresent), got {c:?}"
+        );
     }
 
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
@@ -13514,6 +13576,26 @@ mod tests {
                 assert_eq!(type_filters, vec![TypeFilter::Enchantment]);
             }
             other => panic!("expected Typed Enchantment, got {other:?}"),
+        }
+    }
+
+    /// CR 603.2 + CR 608.2c: present-tense "enters this way" — Winter Soldier,
+    /// Reborn Avenger's Hero rider after graveyard reanimation.
+    #[test]
+    fn test_zone_changed_this_way_hero_enters() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "a hero enters this way, it enters with an additional +1/+1 counter on it",
+        )
+        .unwrap();
+        assert_eq!(rest, ", it enters with an additional +1/+1 counter on it");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Hero"))
+                ));
+            }
+            other => panic!("expected Typed Hero, got {other:?}"),
         }
     }
 
