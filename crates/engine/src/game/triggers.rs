@@ -5908,6 +5908,9 @@ pub(crate) fn check_trigger_condition(
             // CR 506.2 + CR 508.6: a count-only attacked-opponents predicate is
             // set-valued — no single-player "whose turn" semantic. Fail-closed.
             | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+            // CR 102.2: opponents-of-the-caster is a set-valued recipient — no
+            // single-player "whose turn" semantic. Fail-closed.
+            | PlayerFilter::OpponentOfTriggeringPlayer
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.

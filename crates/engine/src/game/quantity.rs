@@ -4628,6 +4628,20 @@ pub(crate) fn resolve_player_count(
                                 triggering.is_none_or(|pid| pid != p.id)
                             }
                         }
+                        // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the
+                        // triggering (casting) player — count mirrors the
+                        // recipient set in `matches_player_scope`, including CR
+                        // 102.3 team-opponent handling via `players::is_opponent`.
+                        // Fail closed when no trigger event is in scope.
+                        PlayerFilter::OpponentOfTriggeringPlayer => state
+                            .current_trigger_event
+                            .as_ref()
+                            .and_then(|e| {
+                                crate::game::targeting::extract_player_from_event(e, state)
+                            })
+                            .is_some_and(|caster| {
+                                crate::game::players::is_opponent(state, caster, p.id)
+                            }),
                         // CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the
                         // triggering/attacking player who is NOT in that player's
                         // attacked-this-combat set (Suppressor Skyguard: "that

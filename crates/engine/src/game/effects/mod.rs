@@ -351,6 +351,20 @@ pub(crate) fn matches_player_scope(
                         });
                         triggering.is_none_or(|pid| pid != p.id)
                     }
+                    // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the
+                    // *triggering* (casting) player. The base anchor is the
+                    // caster, not the controller, so this legitimately includes
+                    // the source's controller as a recipient. Opponent-ness is
+                    // CR 102.3-aware (teammates in 2HG are not opponents) via
+                    // `players::is_opponent`. Fail closed when no trigger event
+                    // is in scope (caster anchor undefined).
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| {
+                            crate::game::players::is_opponent(state, caster, p.id)
+                        }),
                     // CR 109.4: the parent-object-target anchor requires the
                     // resolving `ResolvedAbility` (for `ability.targets`),
                     // which this generic scope predicate does not carry. The
@@ -7759,6 +7773,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::TriggeringPlayer
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
@@ -20143,5 +20158,123 @@ mod tests {
             creature_obj.casting_permissions.is_empty(),
             "illegal looked creature must not receive a cast permission"
         );
+    }
+
+    /// CR 102.2 + CR 603.2 (issue #4361): `PlayerFilter::OpponentOfTriggeringPlayer`
+    /// matches every player who is an opponent of the CASTER (the triggering
+    /// player), independent of the effect controller. With a SpellCast event by
+    /// B: A matches, B does not. With no trigger event: neither matches
+    /// (caster anchor undefined → fail closed).
+    #[test]
+    fn opponent_of_triggering_player_matches_casters_opponents() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Heartwood Storyteller".to_string(),
+            Zone::Battlefield,
+        );
+
+        // B (PlayerId(1)) is the caster; the effect controller is A (PlayerId(0)).
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(9000),
+            controller: PlayerId(1),
+            object_id: ObjectId(9000),
+        });
+
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(0),
+                &PlayerFilter::OpponentOfTriggeringPlayer,
+                PlayerId(0),
+                source,
+            ),
+            "A is an opponent of the caster B and must match (even as the controller)"
+        );
+        assert!(
+            !matches_player_scope(
+                &state,
+                PlayerId(1),
+                &PlayerFilter::OpponentOfTriggeringPlayer,
+                PlayerId(0),
+                source,
+            ),
+            "B (the caster) is not its own opponent"
+        );
+
+        // No trigger event in scope → fail closed (neither matches).
+        state.current_trigger_event = None;
+        for pid in [PlayerId(0), PlayerId(1)] {
+            assert!(
+                !matches_player_scope(
+                    &state,
+                    pid,
+                    &PlayerFilter::OpponentOfTriggeringPlayer,
+                    PlayerId(0),
+                    source,
+                ),
+                "without a trigger event the caster anchor is undefined; {pid:?} must not match"
+            );
+        }
+    }
+
+    /// CR 102.3 (issue #4361): in Two-Headed Giant, the caster's TEAMMATE is not
+    /// an opponent, so `PlayerFilter::OpponentOfTriggeringPlayer` must exclude
+    /// them. With a 2HG topology (seats 0,1 = team 0; seats 2,3 = team 1) and a
+    /// SpellCast by seat 0, only the two members of the OTHER team match — not
+    /// the caster and not the caster's teammate (seat 1). A `p.id != caster`
+    /// predicate would wrongly include the teammate; `players::is_opponent` does
+    /// not.
+    #[test]
+    fn opponent_of_triggering_player_excludes_two_headed_giant_teammate() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Heartwood Storyteller".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Seat 0 casts the spell (the triggering player).
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(9000),
+            controller: PlayerId(0),
+            object_id: ObjectId(9000),
+        });
+
+        // The caster (seat 0) and its teammate (seat 1) are NOT opponents.
+        for (pid, who) in [(PlayerId(0), "caster"), (PlayerId(1), "caster's teammate")] {
+            assert!(
+                !matches_player_scope(
+                    &state,
+                    pid,
+                    &PlayerFilter::OpponentOfTriggeringPlayer,
+                    PlayerId(0),
+                    source,
+                ),
+                "2HG: the {who} ({pid:?}) is not an opponent of the caster and must not match"
+            );
+        }
+
+        // The opposing team (seats 2 and 3) are both opponents and must match.
+        for pid in [PlayerId(2), PlayerId(3)] {
+            assert!(
+                matches_player_scope(
+                    &state,
+                    pid,
+                    &PlayerFilter::OpponentOfTriggeringPlayer,
+                    PlayerId(0),
+                    source,
+                ),
+                "2HG: opposing-team member {pid:?} is an opponent of the caster and must match"
+            );
+        }
     }
 }

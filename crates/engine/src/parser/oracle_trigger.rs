@@ -36263,4 +36263,104 @@ mod enchanted_player_controls_tests {
             }
         }
     }
+
+    /// CR 102.2 + CR 603.2 + CR 608.2d (issue #4361): Heartwood Storyteller —
+    /// "Whenever a player casts a noncreature spell, each of that player's
+    /// opponents may draw a card." The recipient is fanned out via
+    /// `player_scope = OpponentOfTriggeringPlayer` (each opponent of the CASTER,
+    /// not the controller); the body draw stays `Controller` (rebound per
+    /// opponent). The "may" is per-recipient (execute.optional), so the
+    /// trigger-level `def.optional` stays false (the whole trigger is mandatory
+    /// to put on the stack; each opponent independently chooses).
+    #[test]
+    fn heartwood_storyteller_opponents_of_caster_may_draw() {
+        use crate::types::ability::{Effect, PlayerFilter, QuantityExpr};
+
+        let def = parse_trigger_line(
+            "Whenever a player casts a noncreature spell, each of that player's opponents may draw a card.",
+            "Heartwood Storyteller",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+
+        // valid_card filters to noncreature spells (Non(Creature)).
+        match def.valid_card.as_ref().expect("valid_card") {
+            TargetFilter::Typed(tf) => assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+                "expected Non(Creature) in valid_card, got {tf:?}"
+            ),
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        }
+
+        // Trigger-level optional stays false (no leading "you may").
+        assert!(
+            !def.optional,
+            "trigger-level optional must be false; the 'may' is per-recipient"
+        );
+
+        let execute = def.execute.as_deref().expect("execute body");
+        // The per-recipient "may" lives on the execute body.
+        assert!(
+            execute.optional,
+            "execute.optional must be true (per-opponent \"may draw\")"
+        );
+        // Recipient SET fans out via player_scope = OpponentOfTriggeringPlayer.
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer),
+            "draw must fan out to each opponent of the casting player"
+        );
+        // The body draw is the per-opponent Controller (rebound per iteration).
+        let draw = collect_effects(execute)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Draw { count, target } => Some((count.clone(), target.clone())),
+                _ => None,
+            })
+            .expect("execute must contain a Draw effect");
+        assert_eq!(draw.0, QuantityExpr::Fixed { value: 1 }, "draws one card");
+        assert_eq!(
+            draw.1,
+            TargetFilter::Controller,
+            "body draw target stays Controller; player_scope rebinds it per opponent"
+        );
+    }
+
+    /// CR 102.2 (issue #4361): building-block coverage for the "each of that
+    /// player's opponents [may]" recipient + per-recipient optional, independent
+    /// of the card name. With "may" the execute body is optional; without it the
+    /// body is mandatory — both fan out via `OpponentOfTriggeringPlayer`.
+    #[test]
+    fn each_of_that_players_opponents_optional_building_block() {
+        use crate::types::ability::PlayerFilter;
+
+        let optional = parse_trigger_line(
+            "Whenever a player casts a noncreature spell, each of that player's opponents may draw a card.",
+            "Test Card",
+        );
+        let opt_exec = optional.execute.as_deref().expect("execute");
+        assert!(
+            opt_exec.optional,
+            "\"may\" makes the per-opponent draw optional"
+        );
+        assert_eq!(
+            opt_exec.player_scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer)
+        );
+
+        let mandatory = parse_trigger_line(
+            "Whenever a player casts a noncreature spell, each of that player's opponents draw a card.",
+            "Test Card",
+        );
+        let mand_exec = mandatory.execute.as_deref().expect("execute");
+        assert!(
+            !mand_exec.optional,
+            "without \"may\" the per-opponent draw is mandatory"
+        );
+        assert_eq!(
+            mand_exec.player_scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer)
+        );
+    }
 }
