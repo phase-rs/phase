@@ -21,7 +21,7 @@
 //! copy and silently no-opped.
 //!
 //! This test drives the real turn-based-action path that adds lore counters
-//! on the controller's precombat main phases (CR 714.3b) and resolves the
+//! on the controller's precombat main phases (CR 714.3c) and resolves the
 //! stack, verifying Chapter II actually creates a copy of the targeted token.
 
 use engine::game::scenario::GameScenario;
@@ -77,7 +77,7 @@ fn three_blind_mice_chapter_ii_copies_targeted_token_on_second_lore_counter() {
         saga.counters.insert(CounterType::Lore, 1);
 
         // Park at the end of P0's turn 1 so the next precombat main phase we
-        // drive through belongs to P0 again (turn 3), where CR 714.3b adds
+        // drive through belongs to P0 again (turn 3), where CR 714.3c adds
         // the Saga's second lore counter.
         state.turn_number = 1;
         state.active_player = P0;
@@ -88,7 +88,7 @@ fn three_blind_mice_chapter_ii_copies_targeted_token_on_second_lore_counter() {
 
     // Walk through the rest of turn 1, all of P1's turn 2, and into P0's
     // turn 3 precombat main -- the turn-based action that adds the Saga's
-    // second lore counter (CR 714.3b) and triggers Chapter II.
+    // second lore counter (CR 714.3c) and triggers Chapter II.
     runner.advance_to_phase(Phase::PreCombatMain); // lands on P1's PreCombatMain (turn 2)
     runner.pass_both_players();
     runner.advance_to_phase(Phase::PreCombatMain); // lands on P0's PreCombatMain (turn 3)
