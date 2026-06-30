@@ -6870,6 +6870,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
+    /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
+    /// at an empty library (`count == 0`) — distinct from "no Dig has run in
+    /// this chain link," which is `false`. A chained `ParentTarget` consumer
+    /// (e.g. `PutAtLibraryPosition` for "put up to one of them on top … the
+    /// rest on the bottom") reads this so it resolves to NO target instead of
+    /// the generic self-fallback, which would otherwise wrongly move the
+    /// Dig's own source (Thassa's Oracle reanimated with an empty library,
+    /// issue #1365) into the library it just found nothing in. Transient
+    /// resolution bookkeeping — not serialized.
+    #[serde(skip)]
+    pub last_dig_found_nothing: bool,
+
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
@@ -7840,6 +7852,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            last_dig_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),

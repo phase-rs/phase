@@ -573,6 +573,16 @@ pub fn resolved_targets(
             return vec![target];
         }
     }
+    // CR 401.5 + CR 608.2c (issue #1365): An empty-library `Dig` ("look at the
+    // top X cards … put up to one of them … the rest …") found nothing to
+    // place. The chained `ParentTarget` consumer must resolve to NO target —
+    // not the generic self-fallback below, which would otherwise move the
+    // Dig's own source (e.g. a reanimated Thassa's Oracle) into the library it
+    // just found empty, corrupting devotion and library-count reads for any
+    // trailing win condition.
+    if matches!(target_filter, TargetFilter::ParentTarget) && state.last_dig_found_nothing {
+        return Vec::new();
+    }
     // CR 608.2c: `None` and unresolved `ParentTarget` (no event referent, no
     // propagated targets) fall back to the source object.
     let use_self = matches!(

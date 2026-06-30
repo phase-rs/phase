@@ -4902,6 +4902,10 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
+        // CR 401.5 + CR 608.2c: An empty-library Dig earlier in an unrelated
+        // resolution must not suppress a legitimate `ParentTarget` self-fallback
+        // (e.g. Avenging Angel's LTB self-return) in this fresh resolution.
+        state.last_dig_found_nothing = false;
         // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
