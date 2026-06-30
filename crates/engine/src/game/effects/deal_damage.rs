@@ -1364,6 +1364,19 @@ fn collect_matching_players(
                 && match player_filter {
                     PlayerFilter::Controller => p.id == source_controller,
                     PlayerFilter::All => true,
+                    // CR 608.2c + CR 109.4: all players except the anchor's set.
+                    // The generic predicate authority is used here; ability-target
+                    // anchors are resolved by the player_scope driver, not by this
+                    // damage-population helper.
+                    PlayerFilter::AllExcept { ref exclude } => {
+                        !crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            exclude,
+                            source_controller,
+                            source_id,
+                        )
+                    }
                     PlayerFilter::Opponent => p.id != source_controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -1578,6 +1591,16 @@ pub fn resolve_each_player(
                 && match &player_filter {
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
+                    // CR 608.2c + CR 109.4: all players except the anchor's set.
+                    PlayerFilter::AllExcept { exclude } => {
+                        !crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            exclude,
+                            ability.controller,
+                            ability.source_id,
+                        )
+                    }
                     PlayerFilter::Opponent => p.id != ability.controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(

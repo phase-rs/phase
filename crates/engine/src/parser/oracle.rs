@@ -23114,6 +23114,77 @@ mod pipeline_snapshot_tests {
         );
     }
 
+    /// CR 707.2 + CR 608.2c + CR 109.4: Fractured Identity — exile target
+    /// nonland permanent, then each player OTHER THAN ITS CONTROLLER creates a
+    /// token that's a copy of it. The second sentence must lower to a
+    /// `player_scope`-iterated `CopyTokenOf` whose scope is
+    /// `AllExcept { ParentObjectTargetController }`, with the copy source being
+    /// the exiled permanent (`ParentTarget`). Zero `Effect::Unimplemented`.
+    #[test]
+    fn fractured_identity_each_player_other_than_controller_copies_exiled_permanent() {
+        use crate::types::ability::{Effect, PlayerFilter, TargetFilter};
+
+        let p = parse_oracle_text(
+            "Exile target nonland permanent. Each player other than its controller \
+             creates a token that's a copy of it.",
+            "Fractured Identity",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+
+        let spell = &p.abilities[0];
+        assert!(
+            !has_unimplemented(spell),
+            "no Unimplemented in Fractured Identity, got {:?}",
+            spell
+        );
+
+        // Head: exile the targeted nonland permanent.
+        assert!(
+            matches!(
+                &*spell.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "head clause must exile, got {:?}",
+            spell.effect
+        );
+
+        // Tail: per-player copy-token of the exiled permanent, scoped to every
+        // player except the exiled permanent's controller.
+        let sub = spell
+            .sub_ability
+            .as_ref()
+            .expect("Fractured Identity has a second-sentence sub-ability");
+        assert_eq!(
+            sub.player_scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            }),
+            "tail player_scope must exclude the exiled permanent's controller",
+        );
+        // The "it" anaphor links to the exiled permanent published by the head
+        // clause's `ChangeZone` as a tracked set (the standard cross-sentence
+        // exiled-object reference); `token_copy::resolve` resolves a
+        // `TrackedSet` copy source. The iterated player is the token owner.
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::CopyTokenOf {
+                    target: TargetFilter::TrackedSet { .. },
+                    owner: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "tail must copy the exiled permanent (tracked-set anaphor) with the iterated \
+             player as owner, got {:?}",
+            sub.effect
+        );
+    }
+
     /// CR 120.1 + CR 122.1 + CR 115.4: Red Hulk — the Enrage trigger puts a
     /// +1/+1 counter on the source, then a reflexive "when you do" deals damage
     /// equal to the number of +1/+1 counters on the source to any other target.

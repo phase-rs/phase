@@ -306,6 +306,18 @@ pub(crate) fn matches_player_scope(
                 && match scope {
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::All => true,
+                    // CR 608.2c + CR 109.4: predicate form — a player matches
+                    // unless it matches the `exclude` anchor. Exact for excludes
+                    // resolvable without ability targets (Controller, Opponent,
+                    // …); ability-target-dependent anchors
+                    // (ParentObjectTargetController) return `false` from this
+                    // generic predicate, so the player_scope driver routes
+                    // `AllExcept` through the ability-aware
+                    // `speed_effects::players_for_filter` instead, which is
+                    // authoritative for `AllExcept` effect-iteration.
+                    PlayerFilter::AllExcept { exclude } => {
+                        !matches_player_scope(state, p.id, exclude, controller, source_id)
+                    }
                     PlayerFilter::Opponent => p.id != controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -5387,14 +5399,29 @@ fn resolve_chain_body(
         let controller = ability.controller;
         // CR 101.4 + CR 800.4: Join Forces overrides the APNAP anchor with
         // "Starting with you"; otherwise this remains standard APNAP order.
-        let matching_players: Vec<PlayerId> = crate::game::players::apnap_order_from(
+        let apnap = crate::game::players::apnap_order_from(
             state,
             ability.starting_with.clone(),
             controller,
-        )
-        .into_iter()
-        .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
-        .collect();
+        );
+        let matching_players: Vec<PlayerId> = if matches!(scope, PlayerFilter::AllExcept { .. }) {
+            // CR 608.2c + CR 109.4 + CR 608.2h: the `AllExcept` anchor may be an
+            // ability-target reference (ParentObjectTargetController), which the
+            // generic `matches_player_scope` predicate cannot resolve (it carries
+            // no `ResolvedAbility`). Route through the ability-aware
+            // `speed_effects::players_for_filter`, then re-impose APNAP order by
+            // intersecting against the apnap sequence.
+            let set =
+                crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
+            apnap.into_iter().filter(|pid| set.contains(pid)).collect()
+        } else {
+            apnap
+                .into_iter()
+                .filter(|pid| {
+                    matches_player_scope(state, *pid, scope, controller, ability.source_id)
+                })
+                .collect()
+        };
         let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
@@ -7799,6 +7826,12 @@ fn scoped_player_matches_filter(
         PlayerFilter::Controller => candidate == controller,
         PlayerFilter::Opponent => candidate != controller,
         PlayerFilter::All => true,
+        // CR 608.2c + CR 109.4: candidate matches unless it matches the anchor.
+        // Recursive against the same printed-controller-relative predicate;
+        // ability-target anchors fall through to the fail-closed arm below.
+        PlayerFilter::AllExcept { exclude } => {
+            !scoped_player_matches_filter(state, ability, candidate, exclude)
+        }
         PlayerFilter::OpponentLostLife => {
             candidate != controller
                 && state

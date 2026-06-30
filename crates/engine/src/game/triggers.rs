@@ -5887,6 +5887,9 @@ pub(crate) fn check_trigger_condition(
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttacked { .. }
             | PlayerFilter::All
+            // CR 608.2c: a set-valued "all players except an anchor" population
+            // has no single-player "whose turn" semantic. Fail-closed.
+            | PlayerFilter::AllExcept { .. }
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
             | PlayerFilter::PerformedActionThisWay { .. }

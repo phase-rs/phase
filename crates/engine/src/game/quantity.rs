@@ -4585,6 +4585,15 @@ pub(crate) fn resolve_player_count(
                                 )
                         }
                         PlayerFilter::All => true,
+                        // CR 608.2c + CR 109.4: all players except the anchor's
+                        // set (count context). Uses the generic predicate
+                        // authority; ability-target anchors are resolved by the
+                        // player_scope driver, not by this count helper.
+                        PlayerFilter::AllExcept { exclude } => {
+                            !crate::game::effects::matches_player_scope(
+                                state, p.id, exclude, controller, source_id,
+                            )
+                        }
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
                                 .players

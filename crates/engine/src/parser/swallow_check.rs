@@ -3195,6 +3195,84 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
+    /// CR 611.3: equipment and creature statics that fold "as long as" qualifiers
+    /// into attached-subject filters must not trip Condition_AsLongAs warnings
+    /// (issue #2234).
+    #[test]
+    fn condition_as_long_as_accepts_bronze_horse_and_champions_helm() {
+        use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::ContinuousModification;
+
+        let bronze = parse_named(
+            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
+            "Bronze Horse",
+            &["Artifact", "Creature"],
+        );
+        assert!(
+            !bronze
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Bronze Horse replacement must parse without Unimplemented"
+        );
+        let as_long_as = "as long as";
+        assert!(
+            bronze.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && matches!(r.shield_kind, ShieldKind::Prevention { .. })
+                    && r.description
+                        .as_deref()
+                        .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
+            }),
+            "expected gated damage-prevention replacement, got {:#?}",
+            bronze.replacements
+        );
+        assert!(!has_swallowed_detector(&bronze, "Condition_AsLongAs"));
+
+        let helm = parse_named(
+            "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
+            "Champion's Helm",
+            &["Artifact", "Equipment"],
+        );
+        assert!(
+            !helm.abilities.iter().any(def_tree_has_unimplemented)
+                && !helm
+                    .triggers
+                    .iter()
+                    .any(|t| t.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Champion's Helm must parse without Unimplemented"
+        );
+        assert!(
+            helm.statics.iter().any(|s| {
+                matches!(s.mode, crate::types::statics::StaticMode::Continuous)
+                    && matches!(
+                        &s.affected,
+                        Some(TargetFilter::Typed(TypedFilter {
+                            properties,
+                            ..
+                        })) if properties.contains(&FilterProp::EquippedBy)
+                            && properties.contains(&FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary
+                            })
+                    )
+                    && s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Hexproof
+                            }
+                        )
+                    })
+            }),
+            "expected legendary-equipped hexproof static, got {:#?}",
+            helm.statics
+        );
+        assert!(!has_swallowed_detector(&helm, "Condition_AsLongAs"));
+    }
+
     #[test]
     fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
         // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
