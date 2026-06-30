@@ -1628,6 +1628,21 @@ pub(crate) fn deliver_replaced_zone_change(
         // `move_to_zone` — it differs only in placing at an index instead of
         // shuffling. A `Moved` redirect may have changed `to` away from Library,
         // in which case the placement is inert and the default mover runs.
+        // CR 708.2a + CR 304.4 / CR 400.4a: A card put onto the battlefield face
+        // down enters as a 2/2 creature, so the instant/sorcery battlefield-entry
+        // guard in `move_to_zone` must not reject it. The full face-down profile
+        // is applied just after the move (below), but that guard runs *inside*
+        // `move_to_zone` and only reads `face_down` — which is still false there.
+        // Flag the object face down up front so a non-permanent (instant/sorcery)
+        // manifest/morph entry isn't bounced back to its origin zone. A
+        // Library/Hand -> Battlefield manifest never hits the face_down-clearing
+        // reset branches (those key on `from` == Exile/Battlefield/Stack), so the
+        // flag survives until the profile is applied.
+        if to == Zone::Battlefield && face_down_profile.is_some() {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.face_down = true;
+            }
+        }
         match (to, library_placement.as_ref()) {
             (Zone::Library, Some(position)) => {
                 let index = match position {
