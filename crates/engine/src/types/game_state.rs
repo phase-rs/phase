@@ -31,6 +31,7 @@ use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSp
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -4930,6 +4931,46 @@ pub enum AutoPassMode {
     UntilEndOfTurn,
 }
 
+/// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
+///
+/// `Off` (the default) restores EXACT pre-detector behavior: the engine records
+/// no loop-detection samples (no per-resolution `normalize_for_loop` clone), never
+/// fires the mandatory-loop game-ending shortcut (CR 732.2a / CR 732.5 / CR 704.5a),
+/// and never marks `∞` unbounded resources from a detected loop. `On` enables the
+/// detector. New game-changing functionality is opt-in so it can be developed
+/// safely (issue #4603).
+///
+/// This is a game-wide setting (the gated shortcut ends the whole game, so a
+/// per-player flag would be meaningless). It is INTENTIONALLY a typed mode enum
+/// rather than a `bool`, matching the engine's `*Mode` idiom (`AutoPassMode`,
+/// `ConvokeMode`, `CastPaymentMode`) and leaving room for a future detect-only
+/// mode (display `∞` without the game-ending shortcut). The debug
+/// `DebugAction::SetInfiniteMana` toggle is a SEPARATE producer of
+/// `unbounded_resources` and is NOT gated by this flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LoopDetectionMode {
+    /// Pre-feature behavior: no loop sampling, no shortcut, no detector `∞`.
+    #[default]
+    Off,
+    /// Live combo-detector active: samples loops, fires the CR 732.2a mandatory-loop
+    /// shortcut, and marks `unbounded_resources` for a confirmed loop.
+    On,
+}
+
+impl LoopDetectionMode {
+    /// True when the live combo-detector is enabled.
+    pub fn is_on(self) -> bool {
+        matches!(self, LoopDetectionMode::On)
+    }
+
+    /// True when the detector is off (pre-feature behavior). Takes `&self` so it can
+    /// serve as a serde `skip_serializing_if` predicate on `MatchConfig.loop_detection`.
+    pub fn is_off(&self) -> bool {
+        matches!(self, LoopDetectionMode::Off)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionResult {
     pub events: Vec<GameEvent>,
@@ -6132,15 +6173,43 @@ pub struct GameState {
     #[serde(default)]
     pub debug_permitted: BTreeSet<PlayerId>,
 
-    /// Set of players for whom the "infinite mana" debug toggle is active. While
-    /// a player is in this set, their mana pool is topped up after every action
-    /// (`mana_payment::refill_infinite_mana`) and is NOT emptied at end of
-    /// step/phase — CR 500.5 is deliberately suppressed for this player only.
-    /// This is a debug-only departure from the rules, gated behind the same
-    /// debug-action permission as every other `DebugAction`. Toggled via
-    /// `DebugAction::SetInfiniteMana`; empty by default.
+    /// Per-controller set of resource axes a detected/forced unbounded loop pumps,
+    /// the engine-authoritative source for the `∞` HUD projection (`derive_views`)
+    /// and the byte-preserved infinite-mana refill/keep gates. The infinite-mana
+    /// debug toggle (`DebugAction::SetInfiniteMana`) is one producer: it records
+    /// the six `ResourceAxis::Mana(_)` axes (`INFINITE_MANA_AXES`) for the player,
+    /// which the `mana_payment::refill_infinite_mana` top-up and the
+    /// `turns` end-of-step keep gate read (CR 500.5 suppressed for that player
+    /// only — a debug-only departure from the rules). Written ONLY through
+    /// `mark_unbounded_loop` / `clear_unbounded_loop`.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `static_gate_truth` /
+    /// `devour_eligible_snapshot`): this is display/annotation state, not rules
+    /// state for equality. CR 104.4b/CR 732.2a loop detection (`loop_states_equal`)
+    /// and AI-search position dedup compare two states reached at different times;
+    /// a populated live state must still compare equal to the empty-`unbounded_resources`
+    /// ring snapshots, or loop detection yields false negatives. (`debug_infinite_mana`
+    /// relied on this same exclusion implicitly; it is now explicit.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+
+    /// CR 732.2a: per-game runtime gate for the live combo (infinite-loop) detector.
+    /// Default `Off` = exact pre-combo-detector behavior. This is the hot-path flag the
+    /// detector gates read; it is PROJECTED from the immutable [`MatchConfig::loop_detection`]
+    /// by [`GameState::set_match_config`] at game creation and is NOT mutated mid-game —
+    /// there is no `GameAction` that flips it, so no seat can opt the match in or out
+    /// during play. Game-wide because the gated shortcut ends the whole game; chosen at
+    /// match creation, whole-table by construction. See [`LoopDetectionMode`].
+    ///
+    /// INTENTIONALLY EXCLUDED from `impl PartialEq for GameState` and
+    /// `loop_fingerprint` (same family as `unbounded_resources`): this is
+    /// control/display state, not rules state for equality. It is invariant across
+    /// the snapshots CR 732.2a loop detection compares (a player cannot toggle it
+    /// mid-loop), and AI-search dedup ignores it (the AI never reads the detector),
+    /// so excluding it cannot cause a false loop match or a missed position dedup.
     #[serde(default)]
-    pub debug_infinite_mana: BTreeSet<PlayerId>,
+    pub loop_detection: LoopDetectionMode,
 
     #[serde(default)]
     pub match_config: MatchConfig,
@@ -7821,13 +7890,25 @@ impl GameState {
             objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
-            debug_infinite_mana: BTreeSet::new(),
+            unbounded_resources: BTreeMap::new(),
+            loop_detection: LoopDetectionMode::Off,
         }
     }
 
     /// Create a standard 2-player game (backward-compatible).
     pub fn new_two_player(seed: u64) -> Self {
         Self::new(FormatConfig::standard(), 2, seed)
+    }
+
+    /// CR 732.2a: adopt a match's immutable configuration, projecting the per-game
+    /// runtime gate(s) it controls. The combo-detector opt-in lives on [`MatchConfig`]
+    /// (chosen at match creation, whole-table, immutable during play); this is the
+    /// single authority that projects it onto [`GameState::loop_detection`] — the flag
+    /// the detector gates read. Called once per game at creation and at each
+    /// between-games rebuild so a multi-game match keeps a consistent detector setting.
+    pub fn set_match_config(&mut self, config: MatchConfig) {
+        self.match_config = config;
+        self.loop_detection = config.loop_detection;
     }
 
     /// Returns the current timestamp and increments for next use.
@@ -8029,6 +8110,32 @@ impl GameState {
         }
         let snapshot = std::sync::Arc::new(self.normalize_for_loop());
         self.loop_detect_ring.push_back(snapshot);
+    }
+
+    /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
+    /// pumps `axes`. The single write authority for `unbounded_resources` —
+    /// every producer routes through here, never mutating the map inline. Two
+    /// producers exist: the infinite-mana debug toggle
+    /// (`DebugAction::SetInfiniteMana`, ungated) and the live combo-detector at the
+    /// reconcile seam (`game::engine::reconcile_terminal_result`), which persists a
+    /// confirmed loop's `delta.unbounded_axes_for(winner)` — the same axes
+    /// `detect_loop` names in `LoopCertificate.unbounded` — but ONLY when the
+    /// user-controllable `GameState::loop_detection` gate is `On`. Idempotent
+    /// set-union: storing exactly the axes it is given
+    /// (so a mana toggle stores its six `Mana(_)` axes, a drain certificate stores
+    /// its `Life`/`DamageDealt` axes) without clobbering axes a prior producer
+    /// already recorded for the same controller.
+    pub fn mark_unbounded_loop(&mut self, controller: PlayerId, axes: &[ResourceAxis]) {
+        let entry = self.unbounded_resources.entry(controller).or_default();
+        entry.extend(axes.iter().copied());
+    }
+
+    /// CR 732.2a: clear every unbounded-resource axis recorded for `controller`.
+    /// Whole-player clear: with the infinite-mana toggle as the only PR-6 producer
+    /// this matches today's all-or-nothing disable; an axis-scoped clear can be
+    /// added when multiple producers coexist on one controller.
+    pub fn clear_unbounded_loop(&mut self, controller: PlayerId) {
+        self.unbounded_resources.remove(&controller);
     }
 }
 
@@ -8355,6 +8462,47 @@ mod tests {
         );
     }
 
+    /// PR-6 test 8 (B2 loop-equality guard): `unbounded_resources` is
+    /// display/annotation state, NOT rules state for equality. Two states
+    /// identical except one has a populated `unbounded_resources` (the
+    /// infinite-mana toggle's six `Mana(_)` axes via `mark_unbounded_loop`) MUST
+    /// compare EQUAL through every loop-detection comparator. Otherwise a populated
+    /// live state would stop matching the empty-`unbounded_resources` ring
+    /// snapshots and CR 104.4b / CR 732.2a loop detection would yield false
+    /// negatives (and AI-search position dedup would break).
+    ///
+    /// REVERT-PROBE: add `&& self.unbounded_resources == other.unbounded_resources`
+    /// to the manual `impl PartialEq for GameState` → `a == b`, `loop_states_equal`,
+    /// and `loop_states_equal_modulo_resources` all flip to false → every assertion
+    /// below fails.
+    #[test]
+    fn unbounded_resources_excluded_from_loop_equality() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+        use crate::game::mana_payment::INFINITE_MANA_AXES;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES);
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.unbounded_resources, b.unbounded_resources,
+            "fixture must actually differ in unbounded_resources"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude unbounded_resources (display state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude unbounded_resources"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude unbounded_resources"
+        );
+    }
+
     /// CR 104.4b confirmation: two states reached at different times (advancing
     /// the volatile counters PartialEq compares) but otherwise identical must
     /// confirm as equal — else a real loop could never be confirmed and drawn.
@@ -8399,6 +8547,36 @@ mod tests {
         assert!(
             !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
+
+    /// L1 / CR 104.4b: an object's `timestamp` is layer-ordering metadata
+    /// (CR 613.7) that `objects_content_eq` deliberately omits, like
+    /// `incarnation`. Two states differing ONLY in a per-object timestamp must
+    /// confirm as a repeat — otherwise a mandatory loop that re-stamps a
+    /// permanent every iteration (a repeated transform or re-attach) would never
+    /// draw. Revert-failing: adding `timestamp` to `objects_content_eq`'s
+    /// allow-list makes the two states differ and this assertion fail.
+    #[test]
+    fn loop_states_equal_ignores_object_timestamp() {
+        let mut a = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+
+        let mut b = a.clone();
+        let ts_a = b.objects[&ObjectId(500)].timestamp;
+        b.objects.get_mut(&ObjectId(500)).unwrap().timestamp = ts_a + 7;
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in an object's CR 613.7 timestamp must confirm as a repeat"
         );
     }
 

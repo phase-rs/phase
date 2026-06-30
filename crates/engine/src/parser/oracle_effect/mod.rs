@@ -16977,13 +16977,25 @@ fn is_choose_as_targeting(rest: &str) -> bool {
         // Must reference controller to be targeting-like.
         // "they control" covers "target opponent chooses a creature they control"
         // where "they" refers to the targeted player (CR 608.2d).
+        // CR 109.4 + CR 102.2: the NEGATED controller form "a creature you
+        // don't control" is equally a controller-scoped selection — only this
+        // exact phrase is admitted, because `parse_zone_controller`
+        // (`oracle_nom/filter.rs`) maps `"you don't control"` →
+        // `ControllerRef::Opponent` and nothing else. Broader negated forms
+        // ("they don't control", "an opponent doesn't control") are NOT
+        // consumed by `parse_target`, so admitting them here would route the
+        // choice as targeting-like while silently dropping the controller
+        // restriction — they stay out of the gate until the shared controller
+        // parser learns them. Without this arm "choose a creature you don't
+        // control" (Sadistic Shell Game, etc.) falls through to `Unimplemented`.
         // Exclude "from among" patterns (Cataclysm-family multi-category selection)
         // which require engine infrastructure not yet implemented.
         if !scan_contains_phrase(after_article, "from among")
             && (scan_contains_phrase(after_article, "you control")
                 || scan_contains_phrase(after_article, "opponent controls")
                 || scan_contains_phrase(after_article, "an opponent controls")
-                || scan_contains_phrase(after_article, "they control"))
+                || scan_contains_phrase(after_article, "they control")
+                || scan_contains_phrase(after_article, "you don't control"))
         {
             return true;
         }
@@ -16995,7 +17007,9 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     // Exclude "from among" patterns (Cataclysm-family multi-category selection)
     // which require engine infrastructure not yet implemented.
     if !scan_contains_phrase(rest, "from among")
-        && (scan_contains_phrase(rest, "they control") || scan_contains_phrase(rest, "you control"))
+        && (scan_contains_phrase(rest, "they control")
+            || scan_contains_phrase(rest, "you control")
+            || scan_contains_phrase(rest, "you don't control"))
     {
         return true;
     }
@@ -44266,6 +44280,61 @@ mod tests {
             ctx.diagnostics.is_empty(),
             "bare card choice should not emit target fallback diagnostics: {:?}",
             ctx.diagnostics
+        );
+    }
+
+    /// CR 109.4 + CR 115.1: "choose a creature you don't control" is a
+    /// controller-scoped selection just like "you control" — the negated
+    /// controller suffix must route through the targeting path (resolving to
+    /// `ControllerRef::Opponent`) instead of falling through to `Unimplemented`.
+    /// Covers the whole negated-controller `choose` class (Sadistic Shell Game,
+    /// Ticking Mime Bomb, et al.).
+    #[test]
+    fn choose_creature_you_dont_control_routes_to_opponent_target() {
+        let opponent_filter = |eff: &Effect| {
+            matches!(
+                eff,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(tf),
+                } if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::Opponent)
+            )
+        };
+        for text in [
+            "choose a creature you don't control",
+            "they choose a creature you don't control",
+        ] {
+            assert!(
+                opponent_filter(&parse_effect(text)),
+                "{text:?} must parse to a creature-you-don't-control target, got {:?}",
+                parse_effect(text)
+            );
+        }
+        // Only `"you don't control"` is admitted: `parse_zone_controller` maps
+        // that exact phrase to `ControllerRef::Opponent` and nothing else.
+        // Broader negated forms are NOT consumed by `parse_target`, so the gate
+        // must NOT route them as targeting (which would silently drop the
+        // controller restriction). They stay out until the shared controller
+        // parser learns them.
+        for unconsumed in [
+            "choose a creature they don't control",
+            "choose a creature an opponent doesn't control",
+        ] {
+            assert!(
+                !opponent_filter(&parse_effect(unconsumed)),
+                "{unconsumed:?} is not consumable by parse_target and must not \
+                 route to an Opponent target (restriction would be lost), got {:?}",
+                parse_effect(unconsumed)
+            );
+        }
+        // Affirmative form still binds `You` (no regression).
+        assert!(
+            matches!(
+                parse_effect("choose a creature you control"),
+                Effect::TargetOnly { target: TargetFilter::Typed(tf) }
+                    if tf.controller == Some(ControllerRef::You)
+            ),
+            "affirmative 'you control' must still bind You",
         );
     }
 

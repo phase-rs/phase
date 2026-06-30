@@ -44,6 +44,10 @@ pub fn resolve(
         Zone::Battlefield,
     );
 
+    // CR 613.7d: the Incubator token enters the battlefield, so it receives a
+    // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+    let entry_timestamp = state.next_timestamp();
+
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.is_token = true;
         obj.display_source = DisplaySource::Token;
@@ -57,7 +61,7 @@ pub fn resolve(
         obj.color = vec![];
         obj.base_color = vec![];
         // CR 400.7 + CR 302.6: Single authority for ETB state.
-        obj.reset_for_battlefield_entry(state.turn_number);
+        obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
     }
 
     // CR 701.53a: The Incubator enters with N +1/+1 counters.

@@ -341,7 +341,20 @@
     "pendingFlash": "La prossima magia può essere lanciata come se avesse lampo",
     "pendingFree": "La prossima magia senza pagare il suo costo di mana",
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
-    "companion": "Compagno"
+    "companion": "Compagno",
+    "unboundedTooltip": "{{resource}} illimitato (∞)",
+    "unboundedManaPoolMarker": "Mana illimitato (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "punti vita",
+    "unboundedDamage": "danni",
+    "unboundedMill": "macina",
+    "unboundedCounters": "segnalini",
+    "unboundedTokens": "pedine",
+    "unboundedCards": "carte",
+    "unboundedCasts": "lanci",
+    "unboundedCombats": "combattimenti",
+    "unboundedTurns": "turni",
+    "unboundedTriggers": "inneschi"
   },
   "avatar": {
     "underAttack": "{{name}} è sotto attacco"

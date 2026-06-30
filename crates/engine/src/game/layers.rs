@@ -1444,6 +1444,61 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
     }
 }
 
+/// CR 613.1 + CR 707.2 + CR 708.2: seed live characteristics from base_*; shared
+/// by Step-1 top-of-pass reset and the CR 613.2b Layer-1b face-down re-seed.
+///
+/// Assigns the live copiable-characteristic fields from their `base_*` baseline,
+/// exactly mirroring the Step-1 reset block field-for-field. Does NOT call
+/// `sync_missing_base_characteristics`, and does NOT touch controller, the
+/// combat-assignment flags, or `derive_suspected_abilities` — those stay inline
+/// in Step 1 (they are not part of the face-down CR 708.2a re-seed).
+fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
+    obj.name = obj.base_name.clone();
+    obj.power = obj.base_power;
+    obj.toughness = obj.base_toughness;
+    obj.loyalty = obj.base_loyalty;
+    obj.card_types = obj.base_card_types.clone();
+    obj.mana_cost = obj.base_mana_cost.clone();
+    obj.keywords = obj.base_keywords.clone();
+    // CR 613.1: Reset live ability fields to the printed-card baseline.
+    // Post Commit 2 of Arc-share migration: both sides are `Arc<Vec<T>>`
+    // (via `Definitions<T>`-holds-`Arc`), so this reset is a refcount
+    // bump — no deep copy of ability data per layer pass per permanent.
+    // Subsequent layer effects that mutate `obj.abilities` / definitions
+    // trigger copy-on-write via `Arc::make_mut`.
+    obj.abilities = Arc::clone(&obj.base_abilities);
+    obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
+    obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
+    obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
+    obj.color = obj.base_color.clone();
+    // Reset the display-identity pointer to its baseline; the Copy layer
+    // re-applies the copied source's `printed_ref` below for objects
+    // under a copy effect, so a temporary copy's art reverts on expiry.
+    obj.printed_ref = obj.base_printed_ref.clone();
+    // Reset display routing to the object's own derived baseline so a
+    // copy effect's override (set by `CopyValues` below) reverts on
+    // expiry. Display routing is derived state, not a copiable value
+    // (CR 707.2): a true token — created by a token-making effect
+    // (CR 111.1), so carrying no printed identity — routes to the token
+    // art database; everything else (a real card, or a token-copy *of a
+    // real card*, which carries `base_printed_ref`) routes to the card
+    // database. Deriving here (rather than storing a `base_display_source`)
+    // keeps tokens in pre-existing saved states correct on load.
+    obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
+        DisplaySource::Token
+    } else {
+        DisplaySource::Card
+    };
+    // A nontoken never has its own token-art pointer, so clear it to its
+    // baseline (`None`); a copy-of-token effect re-applies the source
+    // token's `token_image_ref` below while active. A true token keeps
+    // its own pointer (its baseline), which the copy layer overrides only
+    // while it is copying another object.
+    if !obj.is_token {
+        obj.token_image_ref = None;
+    }
+}
+
 /// Unconditional full layer evaluation (CR 613.1).
 ///
 /// Production code must NOT call this directly — go through [`flush_layers`],
@@ -1484,52 +1539,15 @@ pub fn evaluate_layers(state: &mut GameState) {
     // remains intact; they are frozen until phase-in marks layers dirty and
     // re-includes them.
     let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
+    // CR 613.2b: collect face-down permanents to re-apply their CR 708.2 profile
+    // after Layer 1a.
+    let mut face_down_ids: Vec<ObjectId> = Vec::new();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
-            obj.name = obj.base_name.clone();
-            obj.power = obj.base_power;
-            obj.toughness = obj.base_toughness;
-            obj.loyalty = obj.base_loyalty;
-            obj.card_types = obj.base_card_types.clone();
-            obj.mana_cost = obj.base_mana_cost.clone();
-            obj.keywords = obj.base_keywords.clone();
-            // CR 613.1: Reset live ability fields to the printed-card baseline.
-            // Post Commit 2 of Arc-share migration: both sides are `Arc<Vec<T>>`
-            // (via `Definitions<T>`-holds-`Arc`), so this reset is a refcount
-            // bump — no deep copy of ability data per layer pass per permanent.
-            // Subsequent layer effects that mutate `obj.abilities` / definitions
-            // trigger copy-on-write via `Arc::make_mut`.
-            obj.abilities = Arc::clone(&obj.base_abilities);
-            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
-            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
-            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
-            obj.color = obj.base_color.clone();
-            // Reset the display-identity pointer to its baseline; the Copy layer
-            // re-applies the copied source's `printed_ref` below for objects
-            // under a copy effect, so a temporary copy's art reverts on expiry.
-            obj.printed_ref = obj.base_printed_ref.clone();
-            // Reset display routing to the object's own derived baseline so a
-            // copy effect's override (set by `CopyValues` below) reverts on
-            // expiry. Display routing is derived state, not a copiable value
-            // (CR 707.2): a true token — created by a token-making effect
-            // (CR 111.1), so carrying no printed identity — routes to the token
-            // art database; everything else (a real card, or a token-copy *of a
-            // real card*, which carries `base_printed_ref`) routes to the card
-            // database. Deriving here (rather than storing a `base_display_source`)
-            // keeps tokens in pre-existing saved states correct on load.
-            obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
-                DisplaySource::Token
-            } else {
-                DisplaySource::Card
-            };
-            // A nontoken never has its own token-art pointer, so clear it to its
-            // baseline (`None`); a copy-of-token effect re-applies the source
-            // token's `token_image_ref` below while active. A true token keeps
-            // its own pointer (its baseline), which the copy layer overrides only
-            // while it is copying another object.
-            if !obj.is_token {
-                obj.token_image_ref = None;
+            seed_live_characteristics_from_base(obj);
+            if obj.face_down {
+                face_down_ids.push(id);
             }
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
@@ -1591,6 +1609,18 @@ pub fn evaluate_layers(state: &mut GameState) {
         // gather so those sticker-granted statics participate in this pass
         // without broadening the non-sticker top-of-pass rebuild contract.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
+    // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
+    // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
+    // permanent's characteristics to its CR 708.2a profile (persisted in base_*),
+    // overriding the copy/merge. A Mirrorweaved/cloned face-down permanent stays a
+    // face-down 2/2 (or its FaceDownProfile, e.g. disguise/cloak ward {2}). Scoped to
+    // the collected face-down set so the common (no face-down) case is free.
+    for &id in &face_down_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            seed_live_characteristics_from_base(obj);
+        }
     }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
@@ -2632,6 +2662,14 @@ pub(crate) fn active_continuous_effects_from_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
 ) -> Vec<ActiveContinuousEffect> {
+    // CR 613.7n: a static ability's continuous effect inherits `source.timestamp`,
+    // which is the object's battlefield-entry timestamp drawn in `move_to_zone`
+    // (zones.rs) when the object is put onto the battlefield. When a resolving
+    // spell/ability puts an object onto the battlefield and sets its
+    // characteristics (CR 611.2e), the entry timestamp is drawn first, then that
+    // same resolution emits its characteristic-setting transient, which draws a
+    // strictly later `next_timestamp()`. So the object's own static receives the
+    // earlier relative timestamp by construction — no explicit tiebreak needed.
     active_continuous_effects_from_static_definitions(
         state,
         source.id,
@@ -2824,8 +2862,8 @@ fn expand_granted_static_effects(
         ) {
             continue;
         }
-        let recipient_controller = match state.objects.get(&recipient_id) {
-            Some(obj) => obj.controller,
+        let (recipient_controller, recipient_timestamp) = match state.objects.get(&recipient_id) {
+            Some(obj) => (obj.controller, obj.timestamp),
             None => continue,
         };
         // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
@@ -2854,9 +2892,15 @@ fn expand_granted_static_effects(
                 transient_id: None,
                 mod_index,
                 layer: modification.layer(),
-                // Inherit the host's timestamp so ordering within a layer is
-                // stable and reproducible per CR 613.7.
-                timestamp: host_timestamp,
+                // CR 613.7a (1st sentence): a granted static ability's continuous
+                // effect uses the later of the recipient's timestamp and the
+                // granting effect's (host) timestamp. Because these effects are
+                // re-synthesized every layer pass, a recipient that later receives a
+                // new timestamp (transform/face-up/re-attach) automatically
+                // re-stamps here on the next pass. The cross-grant relative-order
+                // preservation clause (multiple granted statics on one recipient) is
+                // deferred — unobservable with current cards.
+                timestamp: host_timestamp.max(recipient_timestamp),
                 modification: modification.clone(),
                 affected_filter: inner_affected.clone(),
                 condition: retained_inner_condition.clone(),
@@ -3488,6 +3532,15 @@ fn order_with_dependencies(
         }
     }
 
+    // CR 613.8c (tracking): the rule requires the order of remaining effects to be
+    // RE-EVALUATED after each effect is applied (an unapplied effect may become
+    // dependent on / independent of other unapplied effects). This is NOT
+    // implemented: the dependency graph above is computed ONCE and the Kahn pass
+    // below consumes that fixed graph without re-running `depends_on` between
+    // applications. Impact is zero today because `depends_on` is state-blind (see
+    // its doc comment) — its answers cannot change mid-pass, so compute-once equals
+    // iterative re-evaluation. This re-evaluation MUST be added if/when `depends_on`
+    // becomes state-aware (the two are coupled).
     let mut ordered = Vec::with_capacity(sorted.len());
     let mut processed = vec![false; sorted.len()];
 
@@ -3495,6 +3548,13 @@ fn order_with_dependencies(
         let Some(next) = (0..sorted.len()).find(|&idx| !processed[idx] && in_degree[idx] == 0)
         else {
             // CR 613.8b: Dependency cycle — fall back to timestamp ordering.
+            // CR 613.8b (tracking): the rule reverts ONLY the effects that are IN
+            // the dependency loop to timestamp order, leaving non-loop dependent
+            // effects ordered normally. This implementation is coarser: on ANY
+            // cycle it reverts the WHOLE layer bucket (`sorted`) to timestamp
+            // order. Deferred and unreachable today — no current card forms a
+            // dependency loop under the state-blind `depends_on` (see its doc
+            // comment), so the loop-only-vs-whole-bucket distinction is unobservable.
             return sorted.iter().map(|effect| (*effect).clone()).collect();
         };
 
@@ -3523,6 +3583,23 @@ pub(crate) fn order_active_continuous_effects(
 
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
+///
+/// CR 613.8a (tracking): this is a SHAPE-based approximation of the rule's
+/// "depend on" relation, deliberately state-blind (note the unused `_state`). It
+/// keys off the static structure of `b`'s modification kind and `a`'s filter
+/// shape rather than asking whether applying `b` would actually change the text,
+/// existence, what-it-applies-to, or what-it-does of `a` in the current state.
+/// This makes it both over-broad (any type/ability/PT change is treated as a
+/// dependency whenever `a`'s filter merely references that axis, even if `b` can't
+/// change `a`'s membership) and under-broad (it ignores existence/value/color
+/// dependencies the rule covers). It is nonetheless correct for every current
+/// card because, being state-blind, the predicate is invariant across an apply
+/// pass, so the dependency order computed once equals the order an iterative
+/// re-evaluation would produce — i.e. it reduces to timestamp order with the same
+/// observable result. Upgrading this to a state-aware predicate REQUIRES the
+/// CR 613.8c re-evaluation fix in `order_with_dependencies` (the two are coupled):
+/// a state-aware `depends_on` would change its answers as effects are applied, so
+/// a single Kahn pass would no longer be sound.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
     // CR 613.7a + CR 613.8a: A single static ability's modifications share one
     // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
@@ -5559,6 +5636,122 @@ mod tests {
         // Both lords apply: 2 + 1 + 1 = 4
         assert_eq!(bear_obj.power, Some(4));
         assert_eq!(bear_obj.toughness, Some(4));
+    }
+
+    /// Creates an enchantment in hand whose static sets `victim`'s color. The
+    /// static is mirrored onto `base_static_definitions` so it survives the
+    /// layers reset once the enchantment enters. The returned ObjectId is
+    /// assigned at creation, BEFORE the enchantment enters the battlefield.
+    fn make_offboard_color_setter(
+        state: &mut GameState,
+        name: &str,
+        color: ManaColor,
+        victim: ObjectId,
+    ) -> ObjectId {
+        let id = create_object(state, CardId(0), PlayerId(0), name.to_string(), Zone::Hand);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: victim })
+            .modifications(vec![ContinuousModification::SetColor {
+                colors: vec![color],
+            }]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+        obj.static_definitions.push(def);
+        id
+    }
+
+    /// D1: two SAME-sublayer (layer 5 color-set) statics on permanents entered
+    /// in REVERSE ObjectId order through the real `move_to_zone` entry path. The
+    /// later-entering permanent's effect must win on its CR 613.7d timestamp,
+    /// NOT on the coincidental ObjectId tiebreak. Reverting the battlefield-entry
+    /// stamp (Step 1) leaves both timestamps at 0, collapsing the sort to
+    /// ObjectId order so the higher-id blue painter would win instead.
+    #[test]
+    fn entry_timestamp_orders_same_sublayer_color_set_by_chronology() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Lower ObjectId = red, higher ObjectId = blue.
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let painter_blue =
+            make_offboard_color_setter(&mut state, "Painter Blue", ManaColor::Blue, bear);
+        assert!(
+            painter_red.0 < painter_blue.0,
+            "red must have the lower ObjectId so chronology and ObjectId disagree"
+        );
+
+        // Enter in REVERSE ObjectId order: blue (higher id) first, red last.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_blue, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].color,
+            vec![ManaColor::Red],
+            "later-entering source must win same-sublayer color set (CR 613.7d)"
+        );
+    }
+
+    /// D1 negative sibling: entries in ObjectId order keep the higher-ObjectId
+    /// winner — chronology and ObjectId agree, so the result is unchanged.
+    #[test]
+    fn entry_timestamp_matches_objectid_order_when_aligned() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let painter_blue =
+            make_offboard_color_setter(&mut state, "Painter Blue", ManaColor::Blue, bear);
+
+        // Enter in ObjectId order: red (lower id) first, blue (higher id) last.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, painter_blue, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].color, vec![ManaColor::Blue]);
+    }
+
+    /// D2: a static continuous effect (CR 613.7d) and a resolution-generated
+    /// transient continuous effect (CR 613.7b) must interleave by true
+    /// timestamp. The transient blue is created FIRST (lower timestamp); the
+    /// static red permanent enters LATER (higher timestamp), so red wins.
+    /// Reverting Step 1 leaves the static permanent at timestamp 0, which sorts
+    /// BEFORE the transient (timestamp >= 1), so the transient blue would win.
+    #[test]
+    fn static_and_transient_color_interleave_by_true_timestamp() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let aux = make_creature(&mut state, "Aux", 1, 1, PlayerId(0));
+
+        // Transient SetColor blue created first -> lower timestamp.
+        state.add_transient_continuous_effect(
+            aux,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: bear },
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::Blue],
+            }],
+            None,
+        );
+
+        // Static SetColor red on a permanent entering later -> higher timestamp.
+        let painter_red =
+            make_offboard_color_setter(&mut state, "Painter Red", ManaColor::Red, bear);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, painter_red, Zone::Battlefield, &mut events);
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].color,
+            vec![ManaColor::Red],
+            "later-created static effect must win over the earlier transient (CR 613.7b/d chronology)"
+        );
     }
 
     #[test]
@@ -14205,6 +14398,97 @@ mod tests {
         );
     }
 
+    /// CR 613.7a (1st sentence): a granted static ability's continuous effect uses
+    /// the LATER of the host (granting effect) timestamp and the recipient's own
+    /// timestamp. This test drives the real `evaluate_layers` → `apply_layers` →
+    /// `expand_granted_static_effects` path and discriminates the fix: it is the
+    /// case where the recipient acquires a timestamp LATER than the host after the
+    /// grant is established, with a competing same-sublayer setter whose timestamp
+    /// falls strictly between them.
+    ///
+    /// Timestamps: host (grantor) = 10, competing setter = 20, recipient = 30
+    /// (re-stamped later than the host, as happens on transform/face-up/re-attach).
+    /// The host grants `SetPower {1}` to the recipient; the competing static sets
+    /// the recipient's power to 7. Both land in the SetPT (set) sublayer, so the
+    /// later timestamp wins (last-applied-wins on a value set).
+    ///
+    /// With the fix, the granted effect's timestamp is `max(10, 30) = 30 > 20`, so
+    /// it applies AFTER the competing setter and the recipient's power is 1.
+    /// REVERT-FAILING ASSERTION: `assert_eq!(recipient.power, Some(1))`. On revert
+    /// to `timestamp: host_timestamp`, the granted effect uses 10 < 20, applies
+    /// BEFORE the competing setter, and the recipient's power would be 7 — the
+    /// assertion flips.
+    #[test]
+    fn granted_static_timestamp_is_max_of_host_and_recipient() {
+        let mut state = setup();
+
+        // Recipient creature, re-stamped to a LATER timestamp (30) than the host —
+        // models a recipient that transforms / turns face up / is re-attached after
+        // the grant is established, so the recipient's timestamp exceeds the host's
+        // — the case CR 613.7a (1st sentence) "whichever is later" must resolve.
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, PlayerId(0));
+        state.objects.get_mut(&recipient).unwrap().timestamp = 30;
+
+        // Host (grantor) at the EARLIEST timestamp (10). Its static grants an inner
+        // `SetPower {1}` static targeting the recipient via the GrantStaticAbility
+        // path that flows through `expand_granted_static_effects`.
+        let host = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let inner = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: recipient })
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(inner),
+                    }]),
+            );
+        }
+
+        // Competing same-sublayer setter at the MIDDLE timestamp (20): sets the
+        // recipient's power to 7. Its timestamp falls strictly between the host (10)
+        // and the recipient (30).
+        let competing = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Competing Setter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&competing).unwrap();
+            obj.timestamp = 20;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: recipient })
+                    .modifications(vec![ContinuousModification::SetPower { value: 7 }]),
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let recipient_obj = state.objects.get(&recipient).unwrap();
+        // CR 613.7a (1st sentence): granted effect ts = max(host=10, recipient=30) =
+        // 30 > competing=20, so the granted `SetPower {1}` applies last and wins.
+        assert_eq!(
+            recipient_obj.power,
+            Some(1),
+            "granted SetPower must use max(host, recipient) timestamp (30) and win \
+             over the competing setter at ts=20; reverting to host_timestamp (10) \
+             would let the competing setter win with power=7"
+        );
+    }
+
     /// Adds a creature subtype to an object and re-snapshots its base card types so
     /// the layer reset preserves the printed subtype.
     fn add_subtype(state: &mut GameState, id: ObjectId, subtype: &str) {
@@ -14958,6 +15242,245 @@ mod tests {
         assert!(
             !r.has_keyword(&Keyword::Indestructible),
             "Mono-R creature must NOT gain indestructible"
+        );
+    }
+
+    // ── CR 613.2b Layer 1b: face-down characteristics override copy/merge ─────
+
+    use crate::game::effects::become_copy;
+    use crate::game::morph::apply_face_down_creature_characteristics;
+    use crate::game::printed_cards::intrinsic_copiable_values;
+    use crate::types::ability::{FaceDownProfile, ResolvedAbility, TargetRef};
+    use crate::types::keywords::WardCost;
+
+    fn make_face_down(
+        state: &mut GameState,
+        player: PlayerId,
+        profile: FaceDownProfile,
+        real_name: &str,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            real_name.to_string(),
+            Zone::Battlefield,
+        );
+        // Snapshot the real face BEFORE overwriting it, so the controller view
+        // can reveal the hidden card while observers see "Hidden Card".
+        let back = crate::game::printed_cards::snapshot_object_face(&state.objects[&id]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        apply_face_down_creature_characteristics(obj, &profile);
+        obj.back_face = Some(back);
+        id
+    }
+
+    fn become_copy_ability(
+        target: ObjectId,
+        source: ObjectId,
+        player: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            player,
+        )
+    }
+
+    // Plan test 1: Mirrorweave (BecomeCopy) onto a face-down morph must leave it a
+    // face-down 2/2 — its CR 708.2a profile overrides the Layer-1a copy at Layer 1b
+    // (CR 613.2b + CR 708.10).
+    #[test]
+    fn mirrorweave_onto_face_down_stays_2_2() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let beast = make_creature(&mut state, "Big Beast", 4, 5, player);
+        let morph = make_face_down(
+            &mut state,
+            player,
+            FaceDownProfile::vanilla_2_2(),
+            "Secret Bear",
+        );
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, morph, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        let m = &state.objects[&morph];
+        assert_eq!(
+            m.power,
+            Some(2),
+            "Layer 1b re-seeds the face-down 2/2 over the copy"
+        );
+        assert_eq!(m.toughness, Some(2));
+        assert_eq!(m.name, "", "a face-down permanent has no name (CR 708.2a)");
+        assert!(m.face_down);
+
+        // SIBLING: a face-up creature under the same BecomeCopy DOES become the copy.
+        let clone = make_creature(&mut state, "Plain Clone", 1, 1, player);
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, clone, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+        let c = &state.objects[&clone];
+        assert_eq!(
+            c.name, "Big Beast",
+            "a face-up creature still becomes the copy"
+        );
+        assert_eq!(c.power, Some(4));
+        assert_eq!(c.toughness, Some(5));
+    }
+
+    // Plan test 2: a cloaked (ward {2}) face-down permanent that becomes a copy of
+    // a creature with no ward retains ward {2} — Layer 1b re-seeds its CR 708.2a
+    // profile (CR 708.10).
+    #[test]
+    fn cloaked_face_down_retains_ward_under_copy() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let bear = make_creature(&mut state, "Bear", 2, 2, player);
+        let cloaked = make_face_down(
+            &mut state,
+            player,
+            FaceDownProfile::cloaked_2_2(),
+            "Secret Ace",
+        );
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::generic(2)));
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(bear, cloaked, player),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&cloaked].keywords.contains(&ward),
+            "Layer 1b re-seeds the cloak ward {{2}} over the copy (CR 708.10)"
+        );
+        // NEGATIVE: the copy source (Bear) has no ward — the ward comes from the
+        // face-down re-seed, not the copied creature.
+        assert!(!state.objects[&bear].keywords.contains(&ward));
+    }
+
+    // Plan test 3: a raw CopyValues transient on a face-down object is overridden
+    // by Layer 1b (live == base_*); the same copy on a non-face-down object still
+    // applies (Layer 1b is a no-op when nothing is face down).
+    #[test]
+    fn layer_1b_overrides_copy_for_face_down_object() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let donor = make_creature(&mut state, "Donor", 7, 7, player);
+        let donor_values = intrinsic_copiable_values(&state.objects[&donor]);
+        let fd = make_face_down(&mut state, player, FaceDownProfile::vanilla_2_2(), "Hidden");
+
+        state.add_transient_continuous_effect(
+            fd,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: fd },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(donor_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+
+        let o = &state.objects[&fd];
+        assert_eq!(o.power, o.base_power, "Layer 1b restores live to base_*");
+        assert_eq!(o.power, Some(2));
+        assert_eq!(o.name, "");
+
+        // EMPTY-SET: a fresh state with NO face-down objects — Layer 1b is a no-op
+        // and a normal copy applies unchanged.
+        let mut state2 = setup();
+        let donor2 = make_creature(&mut state2, "Donor", 7, 7, player);
+        let donor_values2 = intrinsic_copiable_values(&state2.objects[&donor2]);
+        let plain = make_creature(&mut state2, "Plain", 1, 1, player);
+        state2.add_transient_continuous_effect(
+            plain,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: plain },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(donor_values2),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state2);
+        assert_eq!(
+            state2.objects[&plain].power,
+            Some(7),
+            "non-face-down copy still applies (1b no-op)"
+        );
+        assert_eq!(state2.objects[&plain].name, "Donor");
+    }
+
+    // Plan test 7: after a Mirrorweave onto a face-down morph, an opponent sees a
+    // hidden 2/2 (not the copied identity), while the controller still sees the
+    // real back-face name. The redacted power must be the face-down 2/2, proving
+    // Layer 1b hid the copy from observers.
+    #[test]
+    fn opponent_sees_hidden_2_2_not_copied_identity() {
+        use crate::game::visibility::filter_state_for_viewer;
+
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let beast = make_creature(&mut state, "Big Beast", 4, 5, controller);
+        let morph = make_face_down(
+            &mut state,
+            controller,
+            FaceDownProfile::vanilla_2_2(),
+            "Secret Bear",
+        );
+
+        let mut events = Vec::new();
+        become_copy::resolve(
+            &mut state,
+            &become_copy_ability(beast, morph, controller),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        let opp_view = filter_state_for_viewer(&state, opponent);
+        let opp = opp_view.objects.get(&morph).unwrap();
+        assert_eq!(opp.name, "Hidden Card");
+        assert_eq!(
+            opp.power,
+            Some(2),
+            "opponent sees the face-down 2/2, not the copied 4/5"
+        );
+        assert!(opp.face_down);
+
+        let ctrl_view = filter_state_for_viewer(&state, controller);
+        let ctrl = ctrl_view.objects.get(&morph).unwrap();
+        assert_eq!(
+            ctrl.name, "Secret Bear",
+            "the controller still sees the real back-face identity"
         );
     }
 }

@@ -341,7 +341,20 @@
     "pendingFlash": "Następny czar można rzucić tak, jakby miał błysk",
     "pendingFree": "Następny czar bez płacenia jego kosztu many",
     "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
-    "companion": "Towarzysz"
+    "companion": "Towarzysz",
+    "unboundedTooltip": "Nieograniczone: {{resource}} (∞)",
+    "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "życie",
+    "unboundedDamage": "obrażenia",
+    "unboundedMill": "mielenie",
+    "unboundedCounters": "liczniki",
+    "unboundedTokens": "żetony",
+    "unboundedCards": "karty",
+    "unboundedCasts": "rzucenia",
+    "unboundedCombats": "walki",
+    "unboundedTurns": "tury",
+    "unboundedTriggers": "wyzwalacze"
   },
   "avatar": {
     "underAttack": "{{name}} jest atakowany"

@@ -293,6 +293,16 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // before 0). The `!GameOver` guard makes it idempotent across the :196/:200 calls.
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. }) // a player would get priority (CR 704.3)
+        // CR 732.2a: the mandatory-loop game-ending shortcut is gated behind the
+        // user-controllable combo-detector opt-in. With `loop_detection == Off` (the
+        // default) the engine NEVER resolves a mandatory loop to its determinate
+        // outcome — the game simply continues as it did before the combo-detector
+        // existed (the natural CR 704.5a SBA death still ends a real life drain, just
+        // not as a shortcut). This is an intentional opt-in departure: new
+        // game-changing functionality ships OFF so it can be developed safely
+        // (issue #4603). When OFF the ring is also never populated (the sampler is
+        // gated identically), so this conjunct is defense-in-depth, not the sole gate.
+        && state.loop_detection.is_on()
         && !state.stack.is_empty()
         && !state.loop_detect_ring.is_empty()
         // PR-3 Defect-2: loop-shortcut detection is TOP-LEVEL-ONLY. Inside a
@@ -312,17 +322,28 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         let priors: Vec<std::sync::Arc<GameState>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
-        if let Some(winner) = priors.iter().find_map(|prior| {
+        // Carry the matching cycle's `delta` out of `find_map` alongside the winner so
+        // the ∞ producer below can name the loop's unbounded axes without recomputing.
+        if let Some((winner, delta)) = priors.iter().find_map(|prior| {
             let delta = crate::analysis::resource::ResourceVector::delta(
                 &crate::analysis::resource::ResourceVector::snapshot(prior),
                 &cur,
             );
             crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)
+                .map(|winner| (winner, delta))
         }) {
             // CR 732.5: shortcut ONLY a loop NO living player can break. The gate runs
             // ONCE after find_map (not per prior). At the per-beat drive this is the
             // entire soundness firewall.
             if no_living_player_has_meaningful_priority_action(state) {
+                // CR 732.2a: persist the confirmed loop's unbounded axes so
+                // `derive_views` projects the `∞` HUD rows. `winner` is the loop's
+                // controller (the non-faller); `unbounded_axes_for(winner)` returns the
+                // same axes `detect_loop` records in `LoopCertificate.unbounded`. This is
+                // the live producer of `unbounded_resources` for a detected loop (the
+                // debug `SetInfiniteMana` toggle is the only other producer). It runs
+                // only inside this OFF-gated block, so a default-OFF game never marks ∞.
+                state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
                 result.events.push(GameEvent::GameOver {
                     winner: Some(winner),
                 });
@@ -589,7 +610,12 @@ fn pass_priority_once_with_pipeline(
     // samples only on a real resolution and touches the ring only then.
     let resolved_this_beat =
         stack_top_before.is_some() && state.stack.last().map(|e| e.id) != stack_top_before;
-    if resolved_this_beat && !in_simulation_probe() {
+    // CR 732.2a: sample the loop-detection ring ONLY when the user-controllable
+    // combo-detector is enabled. With `loop_detection == Off` (the default) the ring
+    // is never populated, so the engine pays none of the per-resolution
+    // `normalize_for_loop` clone cost and the reconcile-seam shortcut (which guards on
+    // a non-empty ring AND the same flag) can never fire — exact pre-detector behavior.
+    if resolved_this_beat && !in_simulation_probe() && state.loop_detection.is_on() {
         // REFILL gate: a self-refilling MANDATORY cascade holds the stack non-empty and
         // non-shrinking across the resolution, settling at a non-interactive priority
         // window reset to the active player (the canonical modulo-comparison point —

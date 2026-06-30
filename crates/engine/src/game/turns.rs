@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry, TargetFilter};
@@ -246,7 +247,10 @@ pub(super) fn drain_pending_phase_transition_progress(
         // `Keep` instead of `Drop` so the pool survives the step transition. This
         // is the partner of `mana_payment::refill_infinite_mana`; together they
         // keep a flagged player's pool continuously full.
-        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
+        let keep_for_infinite_mana = state
+            .unbounded_resources
+            .get(&player_id)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))));
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -2771,6 +2775,55 @@ mod tests {
         }
         assert_eq!(state.phase, Phase::Cleanup);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    /// PR-6: the infinite-mana keep gate is the partner of
+    /// `mana_payment::refill_infinite_mana`. CR 500.5 normally empties a player's
+    /// pool as a step/phase ends; while that player's `unbounded_resources` names
+    /// any `Mana(_)` axis the engine dispositions their non-expiry units `Keep`
+    /// instead of `Drop`, so the pool survives the transition. A player NOT flagged
+    /// drains normally. RUNTIME test driving the live `advance_phase` empty-pool
+    /// pipeline (the production end-of-step seam this PR rewired).
+    ///
+    /// REVERT-PROBE: break the keep gate's `matches!(a, ResourceAxis::Mana(_))`
+    /// (so `keep_for_infinite_mana` is false) → P0's Blue mana drains → the
+    /// retention assertion fails.
+    #[test]
+    fn advance_phase_keeps_mana_for_unbounded_mana_player() {
+        use crate::game::mana_payment::INFINITE_MANA_AXES;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+
+        // P0 has the infinite-mana toggle active (records the six Mana axes).
+        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+        // P1 is NOT flagged — their mana drains normally (the control).
+        state.players[1].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(12),
+            false,
+            Vec::new(),
+        ));
+
+        advance_phase(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Blue),
+            1,
+            "a Mana-unbounded player's pool must survive the CR 500.5 end-of-step empty"
+        );
+        assert_eq!(
+            state.players[1].mana_pool.total(),
+            0,
+            "an unflagged player's mana must drain normally at end of step"
+        );
     }
 
     #[test]
