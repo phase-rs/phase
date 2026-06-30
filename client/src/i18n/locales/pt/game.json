@@ -973,6 +973,7 @@
       "manifest": "Manifestar",
       "untap": "Desvirar",
       "tap": "Virar",
+      "attach": "Attach",
       "crew": "Tripular ({{power}})",
       "saddle": "Selar ({{power}})",
       "station": "Estação (+{{power}})"
@@ -1080,6 +1081,7 @@
       "titleHand": "Devolver",
       "titleUntap": "Desvirar",
       "titleTap": "Virar",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Escolha {{count}} permanente para sacrificar",
       "subtitleSacrificeExact_other": "Escolha {{count}} permanentes para sacrificar",
       "subtitleSacrificeUpTo_one": "Escolha até {{count}} permanente para sacrificar",
@@ -1116,6 +1118,12 @@
       "subtitleTapUpTo_other": "Escolha até {{count}} permanentes para virar",
       "subtitleTapRange_one": "Escolha {{min}}-{{count}} permanente para virar",
       "subtitleTapRange_other": "Escolha {{min}}-{{count}} permanentes para virar",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Pular",
       "labelDecline": "Recusar",
       "labelPutOnTop": "Colocar no topo ({{order}})",
@@ -1123,6 +1131,7 @@
       "labelTop": "Topo ({{selected}}/{{count}})",
       "labelPut": "Colocar ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Topo"
     },
     "drawnThisTurn": {

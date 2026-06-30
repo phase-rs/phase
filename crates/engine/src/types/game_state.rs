@@ -6657,6 +6657,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 608.2c: The single object whose move paused the active
+    /// `pending_change_zone_iteration` on a per-permanent replacement CHOICE
+    /// (`ZoneMoveResult::NeedsChoice`), paired with its pre-move zone. Unlike the
+    /// `remaining` members, this object is delivered out-of-band by the
+    /// replacement resume (not by the iteration drain), so the drain would
+    /// otherwise never count it toward `moved_count`. The drain consumes this at
+    /// its top and increments the carried count iff the object actually reached
+    /// the iteration's destination — so a downstream "that many" includes the
+    /// object that prompted the replacement. Pause/resume is strictly sequential,
+    /// so at most one object is ever in flight (set on the pause, taken on the
+    /// next drain pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_change_zone_in_flight: Option<(ObjectId, crate::types::zones::Zone)>,
+
     /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
     /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
     /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
@@ -7851,6 +7865,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
+            pending_change_zone_in_flight: None,
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,

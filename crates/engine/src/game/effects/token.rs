@@ -2515,14 +2515,16 @@ pub(crate) fn inject_catalog_token_abilities(
     // Classifying the whole blob lets the static splitter swallow the trailing equip
     // line, so classify per line and aggregate. A preset with no newline yields a
     // single segment — identical to the previous single-blob behavior (no regression).
-    let modifications: Vec<ContinuousModification> = rules_text
-        .split('\n')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .flat_map(crate::parser::oracle_static::classify_quoted_inner)
-        .collect();
-    if modifications.is_empty() {
+    let (static_definitions, modifications) = catalog_rules_text_abilities(rules_text);
+    if static_definitions.is_empty() && modifications.is_empty() {
         return;
+    }
+
+    if !static_definitions.is_empty() {
+        Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.iter().cloned());
+        for static_def in static_definitions {
+            obj.static_definitions.push(static_def);
+        }
     }
 
     let mut static_mods = Vec::new();
@@ -2561,11 +2563,43 @@ pub(crate) fn inject_catalog_token_abilities(
         Arc::make_mut(&mut obj.base_abilities).extend(abilities);
     }
     if !keywords.is_empty() {
-        obj.keywords.extend(keywords);
+        for keyword in keywords {
+            if !obj.base_keywords.contains(&keyword) {
+                obj.base_keywords.push(keyword.clone());
+            }
+            let already_live = obj.keywords.contains(&keyword); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+            if !already_live {
+                obj.keywords.push(keyword);
+            }
+        }
     }
     if obj.token_rules_text.is_none() {
         obj.token_rules_text = Some(rules_text.to_string());
     }
+}
+
+fn catalog_rules_text_abilities(
+    rules_text: &str,
+) -> (Vec<StaticDefinition>, Vec<ContinuousModification>) {
+    let mut static_definitions = Vec::new();
+    let mut modifications = Vec::new();
+    for line in rules_text
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parsed_statics = crate::parser::oracle_static::parse_static_line_multi(line);
+        if parsed_statics.is_empty() {
+            modifications.extend(crate::parser::oracle_static::classify_quoted_inner(line));
+        } else {
+            static_definitions.extend(
+                parsed_statics
+                    .into_iter()
+                    .map(normalized_token_static_definition),
+            );
+        }
+    }
+    (static_definitions, modifications)
 }
 
 pub(super) fn inject_predefined_token_abilities(
@@ -5312,6 +5346,84 @@ mod tests {
         }
         inject_catalog_token_abilities(state, obj_id);
         obj_id
+    }
+
+    #[test]
+    fn catalog_rules_text_routes_all_ability_kinds() {
+        let (statics, modifications) = catalog_rules_text_abilities(
+            "Flying\n\
+             This creature can't block.\n\
+             {T}: Add {G}.\n\
+             When this creature dies, you gain 1 life.",
+        );
+
+        assert!(
+            statics
+                .iter()
+                .any(|def| { matches!(def.mode, crate::types::statics::StaticMode::CantBlock) }),
+            "static rules text must parse as a full StaticDefinition, got {statics:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }
+            )),
+            "keyword rules text must route to AddKeyword, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if matches!(*definition.effect, Effect::Mana { .. })
+            )),
+            "activated rules text must route to GrantAbility, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { .. }
+            )),
+            "trigger rules text must route to GrantTrigger, got {modifications:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_pilot_preset_grants_crew_contribution_static() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id =
+            build_catalog_token(&mut state, "Pilot", "6c112277-fd0b-5566-a5f5-0f59216e0444");
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+
+        assert!(
+            state.objects[&obj_id]
+                .static_definitions
+                .iter_all()
+                .any(|def| matches!(
+                    def.mode,
+                    crate::types::statics::StaticMode::CrewContribution {
+                        kind: crate::types::statics::CrewContributionKind::PowerDelta { delta: 2 },
+                        ..
+                    }
+                )),
+            "Shorikai Pilot catalog rules_text must inject CrewContribution"
+        );
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                obj_id,
+                crate::types::statics::CrewAction::Crew,
+            ),
+            3,
+            "1/1 Shorikai Pilot must contribute 3 power toward crew"
+        );
     }
 
     #[test]

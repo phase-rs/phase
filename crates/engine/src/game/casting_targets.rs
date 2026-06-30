@@ -331,6 +331,13 @@ pub(crate) fn handle_select_targets(
         events.push(GameEvent::AbilityActivated {
             player_id: player,
             source_id: pending.object_id,
+            // CR 606.2: Compute from the source ability's cost; this path covers
+            // boast and other non-targeted activations, so it is normally `Normal`.
+            kind: super::planeswalker::activated_ability_kind(
+                state,
+                pending.object_id,
+                ability_index,
+            ),
         });
         // CR 702.142b: Emit additional event when a boast ability is activated.
         emit_keyword_ability_event_if_tagged(
@@ -439,6 +446,18 @@ pub(crate) fn handle_choose_target(
                 events.push(GameEvent::AbilityActivated {
                     player_id: player,
                     source_id: pending.object_id,
+                    // CR 606.2: Targeted activations (most loyalty abilities) finalize
+                    // here. Classify from the source ability's printed cost via
+                    // `activated_ability_kind` rather than `pending.activation_cost`:
+                    // the X-cost path clears `pending.activation_cost` before target
+                    // selection (casting_costs.rs), so a targeted `[-X]` loyalty
+                    // ability would otherwise lose its loyalty kind. The printed cost
+                    // is stable, mirroring the non-targeted path in `planeswalker.rs`.
+                    kind: super::planeswalker::activated_ability_kind(
+                        state,
+                        pending.object_id,
+                        ability_index,
+                    ),
                 });
                 // CR 702.142b: Emit additional event when a boast ability is activated.
                 emit_keyword_ability_event_if_tagged(

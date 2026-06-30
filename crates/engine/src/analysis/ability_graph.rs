@@ -1128,6 +1128,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(..)
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::Explored

@@ -38,9 +38,9 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
+    DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
     TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
     TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
@@ -1035,12 +1035,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    // CR 601.2c: An optional-targeting quantifier ("up to one target …" /
-    // "any number of target …") permits a variable number of targets down to
-    // zero, so the execute ability must surface `optional_targeting` and let the
-    // player decline. Without this, "attach any number of target Equipment you
-    // control to it" (Super-Soldier Serum) forces a mandatory target and
-    // softlocks when every Equipment is already attached.
+    // CR 115.1d: Pre-lowered vote blocks do not flow through clause-level
+    // multi-target extraction, so keep their legacy optional-targeting marker
+    // local to that PreLowered path. Normal effect chains carry this metadata on
+    // the specific parsed clause.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
@@ -1170,9 +1168,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // CR 702.179c-d: fold trailing speed-floor sentences into the
             // preceding `ChangeSpeed` effect and drop the orphan node.
             crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
-            if modifiers.has_up_to {
-                ability.optional_targeting = true;
-            }
             if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
                 && matches!(
                     ability.effect.as_ref(),
@@ -1180,6 +1175,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 )
             {
                 ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            // CR 115.1d: Singleton "up to one target ..." effects that lower
+            // without a `multi_target` spec still permit choosing zero targets.
+            // Do not stamp this onto non-target head clauses in chains like
+            // "draw a card. Attach any number of target Equipment ..."
+            if modifiers.has_up_to
+                && ability.multi_target.is_none()
+                && ability
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+            {
+                ability.optional_targeting = true;
             }
             // CR 609.3: Propagate optional to execute ability.
             if modifiers.optional {
@@ -4930,7 +4938,15 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             (
                 alt((tag("equipped"), tag("enchanted"))),
                 space1,
-                alt((tag("creature"), tag("land"), tag("permanent"))),
+                // CR 303.4m: "enchanted planeswalker" is a valid Aura host noun
+                // (Elspeth's Talent, Rowan's Talent). Purely additive to the
+                // existing creature/land/permanent set.
+                alt((
+                    tag("creature"),
+                    tag("land"),
+                    tag("planeswalker"),
+                    tag("permanent"),
+                )),
             ),
         )
         .parse(input)
@@ -4953,6 +4969,48 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         def.mode = TriggerMode::AbilityActivated;
         def.valid_card = Some(source_filter);
         return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    // CR 606.2 + CR 606.1: "Whenever you activate a loyalty ability of <pw>"
+    // (Chandra's Regulator, Keral Keep Disciples → "a Chandra planeswalker";
+    // Elspeth's Talent, Rowan's Talent → "enchanted planeswalker"). The
+    // planeswalker scope rides on `valid_card`:
+    //   * "enchanted planeswalker" → `TargetFilter::AttachedTo` (Aura host).
+    //   * "a <subtype> planeswalker" → typed Planeswalker + Subtype filter
+    //     (CR 205.3j: planeswalker subtypes are the planeswalker's name).
+    fn parse_loyalty_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+        // "a <subtype> planeswalker" — `parse_subtype` is the single subtype
+        // authority and canonicalizes casing ("chandra" → "Chandra").
+        fn parse_subtyped_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+            let (rest, _) = tag("a ").parse(input)?;
+            let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
+            let after_subtype = &rest[consumed..];
+            let (rest, _) = (space1, tag("planeswalker")).parse(after_subtype)?;
+            Ok((
+                rest,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).subtype(subtype)),
+            ))
+        }
+        // "enchanted planeswalker" reuses the shared Aura-host noun combinator.
+        alt((parse_subtyped_planeswalker, parse_attached_to_subject)).parse(input)
+    }
+
+    fn parse_loyalty_line(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            preceded(
+                tag("you activate a loyalty ability of "),
+                parse_loyalty_planeswalker,
+            ),
+        )
+        .parse(input)
+    }
+
+    if let Ok((_, pw_filter)) = all_consuming(parse_loyalty_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LoyaltyAbilityActivated;
+        def.valid_card = Some(pw_filter);
+        return Some((TriggerMode::LoyaltyAbilityActivated, def));
     }
 
     None
@@ -9109,7 +9167,7 @@ fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     .ok()?;
 
     let (rest, valid_target) = parse_die_roll_actor(rest).ok()?;
-    let (rest, (mode, batched, die_sides)) = parse_die_roll_object(rest).ok()?;
+    let (rest, (mode, batched, die_sides, die_result)) = parse_die_roll_object(rest).ok()?;
     if !rest.is_empty() {
         return None;
     }
@@ -9119,6 +9177,7 @@ fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     def.valid_target = Some(valid_target);
     def.batched = batched;
     def.die_sides = die_sides;
+    def.die_result = die_result;
     Some((mode, def))
 }
 
@@ -9134,16 +9193,62 @@ fn parse_die_roll_actor(input: &str) -> OracleResult<'_, TargetFilter> {
     .parse(input)
 }
 
-fn parse_die_roll_object(input: &str) -> OracleResult<'_, (TriggerMode, bool, Option<u8>)> {
+fn parse_die_roll_object(
+    input: &str,
+) -> OracleResult<'_, (TriggerMode, bool, Option<u8>, Option<DieResultFilter>)> {
     alt((
         value(
-            (TriggerMode::RolledDie, true, None),
+            (TriggerMode::RolledDie, true, None, None),
             tag("one or more dice"),
         ),
-        value((TriggerMode::RolledDieOnce, false, Some(20)), tag("a d20")),
-        value((TriggerMode::RolledDieOnce, false, None), tag("a die")),
+        value(
+            (TriggerMode::RolledDieOnce, false, Some(20), None),
+            tag("a d20"),
+        ),
+        value(
+            (TriggerMode::RolledDieOnce, false, None, None),
+            tag("a die"),
+        ),
+        // CR 706.2: "a [result]" — single face, disjunction, or GE threshold.
+        // Placed after the literal "a d20"/"a die" arms; `parse_number` declines
+        // on the leading "d" of "d20"/"die", so those arms always win their text.
+        map(parse_die_roll_result, |filter| {
+            (TriggerMode::RolledDieOnce, false, None, Some(filter))
+        }),
     ))
     .parse(input)
+}
+
+/// CR 706.2: "Whenever you roll a [result]" — the rolled-face filter. Tries the
+/// GE threshold ("N or higher"/"N or more") before the disjunction ("N or M")
+/// so the shared "or" keyword is never mis-claimed by the disjunction arm, then
+/// falls back to a single exact face. `u8::try_from` guards the d100 ceiling and
+/// declines (via `oracle_err`) on any face that overflows a single byte.
+fn parse_die_roll_result(input: &str) -> OracleResult<'_, DieResultFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a ").parse(input)?;
+    let (rest, first_raw) = nom_primitives::parse_number.parse(rest)?;
+    let first = u8::try_from(first_raw).map_err(|_| oracle_err(input))?;
+
+    // GE threshold special case: "N or higher" / "N or more" → AtLeast(N).
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>(" or higher"), tag(" or more"))).parse(rest)
+    {
+        return Ok((rest, DieResultFilter::AtLeast(first)));
+    }
+
+    // Disjunction: "N or M" → Exact([N, M]).
+    if let Ok((rest, second_raw)) = preceded(
+        tag::<_, _, OracleError<'_>>(" or "),
+        nom_primitives::parse_number,
+    )
+    .parse(rest)
+    {
+        let second = u8::try_from(second_raw).map_err(|_| oracle_err(input))?;
+        return Ok((rest, DieResultFilter::Exact(vec![first, second])));
+    }
+
+    // Single exact face: "N" → Exact([N]).
+    Ok((rest, DieResultFilter::Exact(vec![first])))
 }
 
 /// CR 120.1 + CR 120.3 + CR 603.2: "Whenever a source [you control] deals
@@ -15253,13 +15358,14 @@ mod tests {
         }
     }
 
-    /// CR 601.2c: "attach any number of target Equipment you control to it"
+    /// CR 115.1d: "attach any number of target Equipment you control to it"
     /// (Super-Soldier Serum) is a variable-count target down to zero. The execute
-    /// ability must carry `optional_targeting` so the player can decline — without
-    /// it the trigger forces a mandatory Equipment target and softlocks when every
-    /// Equipment is already attached to the creature.
+    /// ability must carry a `multi_target` spec so the player can decline or
+    /// choose multiple Equipment.
     #[test]
     fn trigger_attacks_or_blocks_attach_any_number_optional_targeting() {
+        use crate::types::ability::MultiTargetSpec;
+
         let def = parse_trigger_line(
             "Whenever enchanted creature attacks or blocks, attach any number of target Equipment you control to it.",
             "Super-Soldier Serum",
@@ -15274,9 +15380,42 @@ mod tests {
             "expected Attach effect, got {:?}",
             execute.effect
         );
+        assert_eq!(
+            execute.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "\"any number of target\" must surface an unlimited zero-min target spec"
+        );
+    }
+
+    #[test]
+    fn trigger_attach_any_number_in_chain_stays_on_attach_node() {
+        use crate::types::ability::MultiTargetSpec;
+
+        let def = parse_trigger_line(
+            "Whenever enchanted creature attacks or blocks, draw a card. Attach any number of target Equipment you control to it.",
+            "Serum Chain Test",
+        );
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("trigger body must lower to an execute ability");
         assert!(
-            execute.optional_targeting,
-            "\"any number of target\" must surface optional_targeting=true so the player can decline"
+            execute.multi_target.is_none(),
+            "head ability must not inherit attach target cardinality"
+        );
+        let attach = execute
+            .sub_ability
+            .as_deref()
+            .expect("attach must be chained after draw");
+        assert!(
+            matches!(attach.effect.as_ref(), Effect::Attach { .. }),
+            "expected Attach sub-ability, got {:?}",
+            attach.effect
+        );
+        assert_eq!(
+            attach.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "Attach sub-ability must carry the any-number target spec"
         );
     }
 
@@ -24925,6 +25064,70 @@ mod tests {
     }
 
     #[test]
+    fn trigger_rolled_die_result_exact_single() {
+        let def = parse_trigger_line(
+            "Whenever you roll a 1, create a Treasure token.",
+            "Complaints Clerk",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.die_sides, None);
+        assert_eq!(def.die_result, Some(DieResultFilter::Exact(vec![1])));
+    }
+
+    #[test]
+    fn trigger_rolled_die_result_exact_disjunction() {
+        // Atomwheel Acrobats: "Whenever you roll a 1 or 2, ...".
+        let def = parse_trigger_line(
+            "Whenever you roll a 1 or 2, put that many +1/+1 counters on this creature.",
+            "Atomwheel Acrobats",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.die_result, Some(DieResultFilter::Exact(vec![1, 2])));
+    }
+
+    #[test]
+    fn trigger_rolled_die_result_at_least_higher() {
+        // Monoxa, Midway Manager: "Whenever you roll a 3 or higher, ...".
+        let def = parse_trigger_line(
+            "Whenever you roll a 3 or higher, Monoxa gains first strike until end of turn.",
+            "Monoxa, Midway Manager",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.die_result, Some(DieResultFilter::AtLeast(3)));
+    }
+
+    #[test]
+    fn trigger_rolled_die_result_at_least_more() {
+        // "N or more" is the alternate GE phrasing; folds to AtLeast like "N or higher".
+        let def = parse_trigger_line(
+            "Whenever you roll a 4 or more, draw a card.",
+            "Die Roll GE Phrasing",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.die_result, Some(DieResultFilter::AtLeast(4)));
+    }
+
+    #[test]
+    fn trigger_rolled_die_no_result_filter_is_none() {
+        // Regression: the bare "a die" form classifies as RolledDieOnce with no
+        // result filter, and the batched "one or more dice" form is RolledDie.
+        let single = parse_trigger_line(
+            "Whenever you roll a die, put a +1/+1 counter on ~.",
+            "The Space Family Goblinson",
+        );
+        assert_eq!(single.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(single.die_result, None);
+
+        let batch = parse_trigger_line(
+            "Whenever you roll one or more dice, put a +1/+1 counter on ~.",
+            "Vrondiss, Rage of Ancients",
+        );
+        assert_eq!(batch.mode, TriggerMode::RolledDie);
+        assert_eq!(batch.die_result, None);
+    }
+
+    #[test]
     fn trigger_turn_face_up_mode() {
         let def = parse_trigger_line(
             "When this creature is turned face up, draw a card.",
@@ -27663,6 +27866,103 @@ mod tests {
             def.condition,
             Some(TriggerCondition::ActivatedAbilityIsNonMana)
         );
+    }
+
+    // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
+
+    /// CR 606.2 + CR 205.3j: Chandra's Regulator — "a Chandra planeswalker"
+    /// parses to a typed Planeswalker + Subtype("Chandra") filter on
+    /// `valid_card`, mode `LoyaltyAbilityActivated`, and the effect is not
+    /// `Unimplemented`.
+    #[test]
+    fn loyalty_ability_trigger_chandra_subtype_regulator() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of a Chandra planeswalker, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+            "Chandra's Regulator",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).subtype("Chandra".to_string()),
+            ))
+        );
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Chandra's Regulator effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2: Keral Keep Disciples — same "a Chandra planeswalker" filter,
+    /// different (damage) effect.
+    #[test]
+    fn loyalty_ability_trigger_chandra_subtype_keral_keep() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of a Chandra planeswalker, this creature deals 1 damage to each opponent.",
+            "Keral Keep Disciples",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).subtype("Chandra".to_string()),
+            ))
+        );
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Keral Keep Disciples effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2 + CR 303.4m: Elspeth's Talent — "enchanted planeswalker" parses
+    /// to `TargetFilter::AttachedTo` (the Aura host) on `valid_card`.
+    #[test]
+    fn loyalty_ability_trigger_enchanted_elspeth() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.",
+            "Elspeth's Talent",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Elspeth's Talent effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 606.2 + CR 303.4m: Rowan's Talent — "enchanted planeswalker" + the
+    /// copy effect.
+    #[test]
+    fn loyalty_ability_trigger_enchanted_rowan() {
+        let def = parse_trigger_line(
+            "Whenever you activate a loyalty ability of enchanted planeswalker, copy that ability. You may choose new targets for the copy.",
+            "Rowan's Talent",
+        );
+        assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_ref().expect("execute ability present");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "Rowan's Talent effect should parse, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// Negative: the additive "planeswalker" host noun in `parse_attached_to_subject`
+    /// must not change the generic non-loyalty activation trigger class.
+    #[test]
+    fn loyalty_ability_trigger_does_not_capture_generic_activation() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability that isn't a mana ability, draw a card.",
+            "Generic Activation",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---
@@ -33460,10 +33760,13 @@ mod tests {
             }
             other => panic!("expected PutCounter sub_ability, got {other:?}"),
         }
-        // Optional targeting: "up to one" must surface optional_targeting=true.
+        // CR 115.1d: This singleton "up to one" copy target still uses the
+        // legacy optional-targeting flag; multi-target specs are required for
+        // variable-count attach choices such as "any number of target Equipment."
+        assert!(execute.multi_target.is_none());
         assert!(
             execute.optional_targeting,
-            "up to one target must mark the execute as optional_targeting=true"
+            "up to one target must remain optional on the parsed ability"
         );
     }
 

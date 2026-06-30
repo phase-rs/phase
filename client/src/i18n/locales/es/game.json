@@ -973,6 +973,7 @@
       "manifest": "Manifestar",
       "untap": "Enderezar",
       "tap": "Girar",
+      "attach": "Attach",
       "crew": "Tripular ({{power}})",
       "saddle": "Ensillar ({{power}})",
       "station": "Estación (+{{power}})"
@@ -1080,6 +1081,7 @@
       "titleHand": "Devolver",
       "titleUntap": "Enderezar",
       "titleTap": "Girar",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Elige {{count}} permanente para sacrificar",
       "subtitleSacrificeExact_other": "Elige {{count}} permanentes para sacrificar",
       "subtitleSacrificeUpTo_one": "Elige hasta {{count}} permanente para sacrificar",
@@ -1116,6 +1118,12 @@
       "subtitleTapUpTo_other": "Elige hasta {{count}} permanentes para girar",
       "subtitleTapRange_one": "Elige {{min}}-{{count}} permanente para girar",
       "subtitleTapRange_other": "Elige {{min}}-{{count}} permanentes para girar",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Omitir",
       "labelDecline": "Rechazar",
       "labelPutOnTop": "Poner encima ({{order}})",
@@ -1123,6 +1131,7 @@
       "labelTop": "Superior ({{selected}}/{{count}})",
       "labelPut": "Poner ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Superior"
     },
     "drawnThisTurn": {

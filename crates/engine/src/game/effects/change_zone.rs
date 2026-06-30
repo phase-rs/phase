@@ -662,6 +662,12 @@ pub fn resolve(
         state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
     }
 
+    // CR 608.2c: "that many" in a later instruction refers back to the number
+    // of objects this targeted move actually relocated (e.g. Vengeful Regrowth:
+    // "Return up to three target land cards ... Create that many ... tokens").
+    // Tracked the same way the mass `resolve_all` path counts, so the chained
+    // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
+    let mut moved_count: i32 = 0;
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
             let acting_player = state
@@ -679,6 +685,19 @@ pub fn resolve(
             }
         }
 
+        // CR 608.2c: snapshot the pre-move zone so the post-move check below
+        // counts only objects this move actually relocated to the destination
+        // (a no-op or replacement-prevented move returns `Done` without moving).
+        // Mirrors the mass path's `departed`/`moved_count` accounting and the
+        // drain's resume-side increment.
+        let before_zone = state.objects.get(obj_id).map(|object| object.zone);
+        let moved_to_dest = |state: &GameState| {
+            before_zone != Some(dest_zone)
+                && state
+                    .objects
+                    .get(obj_id)
+                    .is_some_and(|object| object.zone == dest_zone)
+        };
         let per_obj_ctx = ChangeZoneIterationCtx {
             enter_with_counters: enter_with_counters_for_object(
                 state,
@@ -690,8 +709,15 @@ pub fn resolve(
             ..ctx.clone()
         };
         match process_one_zone_move(state, &per_obj_ctx, *obj_id, events) {
-            ZoneMoveResult::Done => {}
+            ZoneMoveResult::Done => {
+                if moved_to_dest(state) {
+                    moved_count += 1;
+                }
+            }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                if moved_to_dest(state) {
+                    moved_count += 1;
+                }
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         remaining: targeted_objects[i + 1..].to_vec(),
@@ -709,7 +735,10 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
-                        moved_count: None,
+                        // CR 608.2c: carry the running count so the drain stamps
+                        // `last_effect_count` with the full targeted-move total
+                        // when the resumed iteration completes.
+                        moved_count: Some(moved_count),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // the resumed members of a paused face-down return still
                         // enter face down.
@@ -742,7 +771,10 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
-                        moved_count: None,
+                        // CR 608.2c: carry the running count so the drain stamps
+                        // `last_effect_count` with the full targeted-move total
+                        // when the resumed iteration completes.
+                        moved_count: Some(moved_count),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // the resumed members of a paused face-down return still
                         // enter face down.
@@ -750,6 +782,14 @@ pub fn resolve(
                         library_placement: ctx.library_placement,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
+                // CR 608.2c: this object is paused mid-move on a replacement choice
+                // and will be delivered by the replacement resume (NOT by the drain's
+                // `remaining` loop). Record it as in-flight, with its pre-move zone, so
+                // the drain counts it toward `moved_count` once it reaches the
+                // destination — otherwise a downstream "that many" undercounts by one.
+                if let Some(before) = before_zone {
+                    state.pending_change_zone_in_flight = Some((*obj_id, before));
+                }
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
                 crate::game::replacement::park_waiting_for(state, player);
@@ -763,6 +803,13 @@ pub fn resolve(
     // CR 614.13a: targeted multi-ChangeZone co-entry completed without pausing —
     // clear the pre-entry Devour snapshot (its lifetime = this entry event).
     let _ = state.devour_eligible_snapshot.take();
+
+    // CR 608.2c: record how many objects this targeted move relocated so a
+    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
+    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
+    // single-object branches above. (The paused path defers this stamp to the
+    // drain, which owns the trailing `EffectResolved`.)
+    state.last_effect_count = Some(moved_count);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -1329,6 +1376,11 @@ pub fn resolve_all(
                         library_placement: effect_library_position.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
+                // CR 608.2c: record the replacement-paused member as in-flight (with
+                // its pre-move zone) so the drain counts it once delivered — mirrors
+                // the targeted loop, keeping "that many" correct across a mass-move
+                // replacement pause.
+                state.pending_change_zone_in_flight = Some((obj_id, per_object_origin));
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
@@ -5319,6 +5371,66 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: A *targeted* multi-object `ChangeZone` must set
+    /// `last_effect_count` to the number of objects it moved, exactly like the
+    /// mass `resolve_all` path and the single-object branches — so a chained
+    /// "that many" sub-ability (`QuantityRef::EventContextAmount`) resolves
+    /// correctly. Vengeful Regrowth class: "Return up to three target land cards
+    /// from your graveyard to the battlefield tapped. Create that many ...
+    /// tokens." (Regression: this path previously left `last_effect_count`
+    /// unstamped, so "that many" read a stale count — issue #1093.)
+    #[test]
+    fn targeted_multi_change_zone_records_moved_count_for_event_context_amount() {
+        let mut state = GameState::new_two_player(42);
+        let g1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land A".into(),
+            Zone::Graveyard,
+        );
+        let g2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Land B".into(),
+            Zone::Graveyard,
+        );
+        // A stale prior count must not survive: the targeted move overwrites it.
+        state.last_effect_count = Some(99);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(g1), TargetRef::Object(g2)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&g1));
+        assert!(state.battlefield.contains(&g2));
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "targeted multi-object ChangeZone must record moved-object count for \
+             EventContextAmount consumers (Vengeful Regrowth 'create that many')"
+        );
+    }
+
     /// CR 110.2a + CR 400.7: Mass graveyard-to-battlefield effects that state
     /// "under your control" must override the default controller for every
     /// entering permanent, including cards owned by opponents. Rise of the Dark
@@ -7043,6 +7155,192 @@ mod tests {
             assert!(state.objects[&shock].tapped);
         }
         assert!(state.pending_change_zone_iteration.is_none());
+    }
+
+    /// CR 608.2c (issue #1093 review): every member of a targeted multi-object
+    /// `ChangeZone` that pauses on a per-permanent replacement CHOICE is
+    /// delivered by the replacement resume, NOT by the iteration drain's
+    /// `remaining` loop. The moved count must still include each such in-flight
+    /// member so a downstream `QuantityRef::EventContextAmount` ("create/draw
+    /// that many") sees the full total. Three shocks each pause then enter the
+    /// battlefield (declined → tapped); `last_effect_count` must be `Some(3)` —
+    /// without the in-flight accounting the paused members are uncounted (the
+    /// move never returns `Done` in `remaining`), undercounting to `Some(0)`.
+    #[test]
+    fn targeted_multi_change_zone_counts_replacement_paused_members() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let s1 = add_shock_in_library_for_test(&mut state, 901, PlayerId(0));
+        let s2 = add_shock_in_library_for_test(&mut state, 902, PlayerId(0));
+        let s3 = add_shock_in_library_for_test(&mut state, 903, PlayerId(0));
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![
+                TargetRef::Object(s1),
+                TargetRef::Object(s2),
+                TargetRef::Object(s3),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Each shock pauses on its `Moved` replacement; decline (index 1) so it
+        // still enters the battlefield (tapped) — i.e. it reaches the destination.
+        for _ in 0..3 {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "expected a ReplacementChoice pause for each member"
+            );
+            let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline shock");
+        }
+
+        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.pending_change_zone_in_flight.is_none());
+        for shock in [s1, s2, s3] {
+            assert_eq!(state.objects[&shock].zone, Zone::Battlefield);
+        }
+        // CR 608.2c: all three relocated members counted, despite each being
+        // delivered by the replacement resume rather than the iteration drain.
+        assert_eq!(
+            state.last_effect_count,
+            Some(3),
+            "moved count must include every replacement-paused member"
+        );
+    }
+
+    /// CR 608.2c (issue #1093 review, [HIGH]): a production `ChangeZone -> create
+    /// that many` chain whose returns each pause on a per-target replacement
+    /// CHOICE must still create the correct number of tokens. The chained
+    /// `Token { count: EventContextAmount }` consumer is drained only AFTER the
+    /// ChangeZone iteration completes and stamps `last_effect_count`, so it reads
+    /// the full post-resume moved count (3), not the stale pre-pause count (0).
+    /// Mirrors Vengeful Regrowth ("Return up to three target land cards ... Create
+    /// that many ... tokens") when a per-permanent replacement intervenes.
+    #[test]
+    fn change_zone_then_create_that_many_counts_across_replacement_pause() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let s1 = add_shock_in_library_for_test(&mut state, 911, PlayerId(0));
+        let s2 = add_shock_in_library_for_test(&mut state, 912, PlayerId(0));
+        let s3 = add_shock_in_library_for_test(&mut state, 913, PlayerId(0));
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Build the chain exactly as the parser produces Vengeful Regrowth:
+        //   ChangeZone{Library->Battlefield, [s1,s2,s3]}
+        //     └─ Token{name:"Plant", count: EventContextAmount}
+        let create_tokens = ResolvedAbility::new(
+            Effect::Token {
+                name: "Plant".to_string(),
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![
+                TargetRef::Object(s1),
+                TargetRef::Object(s2),
+                TargetRef::Object(s3),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // Pause the ChangeZone on the first returned card's replacement — the
+        // targeted `resolve` installs the `ReplacementChoice` + the paused
+        // iteration carrier — then stash the "create that many" continuation
+        // exactly as `resolve_ability_chain` does when a parent effect pauses
+        // mid-resolution. The resume path (`drain_pending_continuation`) then
+        // exercises the fix: the ChangeZone iteration drains and stamps the count
+        // BEFORE this continuation runs.
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "first returned card must pause on its replacement"
+        );
+        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            Box::new(create_tokens),
+        ));
+
+        // Decline each replacement; each returned card still enters (tapped).
+        for _ in 0..3 {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "expected a ReplacementChoice pause per returned member"
+            );
+            let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline shock");
+        }
+
+        // CR 608.2c: the chained "create that many" ran AFTER the ChangeZone
+        // iteration completed and stamped the count, so it created one token per
+        // returned card. Pre-fix (continuation drained before the iteration) it
+        // would have read a stale count and created the wrong number.
+        let plant_tokens = state
+            .objects
+            .values()
+            .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
+            .count();
+        assert_eq!(
+            plant_tokens, 3,
+            "create-that-many must see the full post-resume moved count (3), not the stale pre-pause count"
+        );
     }
 
     /// CR 614.12b: covers the parallel fix at

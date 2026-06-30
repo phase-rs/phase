@@ -624,22 +624,31 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if state.pending_per_player_zone_choice.is_some() {
         return;
     }
-    if let Some(cont) = state.pending_continuation.take() {
-        let PendingContinuation { chain, parent_kind } = cont;
-        let source_id = chain.source_id;
-        let _ = resolve_ability_chain(state, &chain, events, 1);
-        if let Some(kind) = parent_kind {
-            events.push(GameEvent::EffectResolved { kind, source_id });
-        }
-    }
-    // CR 614.12b + CR 614.1c + CR 614.13: Resume a paused multi-target
-    // `ChangeZone` iteration (issue #535). Drained FIRST — before
-    // `pending_repeat_iteration` — because the outer `repeat_for` loop may
-    // have stashed a chain that contains this inner ChangeZone iteration, and
-    // the outer loop must not advance until the inner ChangeZone completes
-    // and emits its `EffectResolved` event.
+    // CR 608.2c (issue #1093 review) + CR 614.12b + CR 614.1c + CR 614.13:
+    // Resume a paused multi-target `ChangeZone` iteration (issue #535) BEFORE the
+    // continuation. A chained "create/draw that many" consumer
+    // (`QuantityRef::EventContextAmount`) must read the FINAL moved count —
+    // stamped when the iteration completes — not the stale pre-pause count. This
+    // mirrors the non-pause path, where `change_zone::resolve` stamps
+    // `last_effect_count` and emits the ChangeZone `EffectResolved` BEFORE the
+    // chained sub-ability runs. (Also kept before `pending_repeat_iteration`
+    // below: the outer `repeat_for` loop must not advance until the inner
+    // ChangeZone completes and emits its `EffectResolved`.)
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_change_zone_iteration(state, events);
+    }
+    // The continuation — the completed ChangeZone's chained downstream, or any
+    // other parked chain — runs only once the inner iteration finished without
+    // re-pausing on a further per-target replacement choice.
+    if !waits_for_resolution_choice(&state.waiting_for) {
+        if let Some(cont) = state.pending_continuation.take() {
+            let PendingContinuation { chain, parent_kind } = cont;
+            let source_id = chain.source_id;
+            let _ = resolve_ability_chain(state, &chain, events, 1);
+            if let Some(kind) = parent_kind {
+                events.push(GameEvent::EffectResolved { kind, source_id });
+            }
+        }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
     // choice resolves. Must run after change_zone_iteration (which may be
@@ -784,6 +793,25 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             library_placement,
             effect_kind,
         } = pending;
+        // CR 608.2c: the object that paused this iteration on a replacement CHOICE
+        // (`pending_change_zone_in_flight`) was delivered out-of-band by the
+        // replacement resume, NOT by the `remaining` loop below. Count it now — iff
+        // it actually reached this iteration's destination (a same-zone no-op or a
+        // prevented/redirected move is excluded by the `before != destination` and
+        // post-move zone checks) — so a downstream `QuantityRef::EventContextAmount`
+        // ("that many") includes the member that prompted the replacement.
+        if let Some((in_flight_id, before)) = state.pending_change_zone_in_flight.take() {
+            if let Some(count) = moved_count.as_mut() {
+                if before != destination
+                    && state
+                        .objects
+                        .get(&in_flight_id)
+                        .is_some_and(|object| object.zone == destination)
+                {
+                    *count += 1;
+                }
+            }
+        }
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and
         // their observer triggers collected. NOTE (no-field DEFERRED residual):
@@ -901,6 +929,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             library_placement: ctx.library_placement.clone(),
                             effect_kind,
                         });
+                    // CR 608.2c: a further member paused mid-move on a replacement
+                    // choice; it will be delivered by the resume, not this drain's
+                    // `remaining` loop. Record it as in-flight (with its pre-move zone)
+                    // so the NEXT drain pass counts it once it reaches the destination.
+                    if let Some(before) = before_zone {
+                        state.pending_change_zone_in_flight = Some((*obj_id, before));
+                    }
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                     // may already have surfaced its own `EffectZoneChoice` during the
                     // resumed member's entry.
