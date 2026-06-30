@@ -185,7 +185,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Keep"
     }
   },
   "boardChoice": {
@@ -198,7 +199,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Keep"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -208,14 +210,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: power {{selected}} / {{max}} or less"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirm ({{selected}}/{{max}} power)"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -1475,10 +1479,6 @@
     "title": "Choose a Protector",
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
-  },
-  "keepWithinTotalPower": {
-    "title": "Choose Creatures to Keep",
-    "subtitle": "Keep creatures with total power {{cap}} or less; the rest are sacrificed."
   },
   "clashOpponent": {
     "title": "Choose Clash Opponent",

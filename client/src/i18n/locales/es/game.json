@@ -185,7 +185,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Mant."
     }
   },
   "player": {
@@ -1442,10 +1443,6 @@
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
   },
-  "keepWithinTotalPower": {
-    "title": "Elige criaturas para conservar",
-    "subtitle": "Conserva criaturas con fuerza total {{cap}} o menos; el resto se sacrifica."
-  },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
@@ -1831,7 +1828,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Conservar"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1841,14 +1839,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: poder {{selected}} / {{max}} o menos"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirmar ({{selected}}/{{max}} de poder)"
   },
   "planechase": {
     "active": "Active plane",

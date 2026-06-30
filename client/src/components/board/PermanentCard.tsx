@@ -130,6 +130,7 @@ function selectedBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "ring-2 ring-sky-300 shadow-[0_0_14px_4px_rgba(125,211,252,0.55)]";
   }
 }
@@ -149,6 +150,7 @@ function availableBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "ring-2 ring-sky-300/80 shadow-[0_0_10px_3px_rgba(125,211,252,0.35)]";
   }
 }
@@ -168,6 +170,7 @@ function boardChoiceBadgeClass(intent: BoardChoiceIntent): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-400 text-sky-950";
   }
 }

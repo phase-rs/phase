@@ -196,13 +196,17 @@ export type BoardChoiceIntent =
   | "saddle"
   | "station"
   | "blight"
-  | "ringBearer";
+  | "ringBearer"
+  | "keep";
 
 export type BoardChoiceSelection =
   | { type: "single"; immediate: true }
   | { type: "exactCount"; count: number; immediate?: boolean }
   | { type: "rangeCount"; min: number; max: number }
-  | { type: "totalPowerAtLeast"; power: number };
+  | { type: "totalPowerAtLeast"; power: number }
+  // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
+  // combined power is at most `power`; selecting beyond it blocks confirm.
+  | { type: "totalPowerAtMost"; power: number };
 
 export type BoardChoiceResponse =
   | { type: "SelectCards" }
@@ -210,7 +214,8 @@ export type BoardChoiceResponse =
   | { type: "ActivateStation"; spacecraftId: ObjectId }
   | { type: "SaddleMount"; mountId: ObjectId }
   | { type: "ChooseRingBearer" }
-  | { type: "HarmonizeTap" };
+  | { type: "HarmonizeTap" }
+  | { type: "ChooseKeptCreatures" };
 
 export interface BoardChoiceView {
   player: PlayerId;
@@ -276,6 +281,18 @@ export function getBoardChoiceView(
         sourceId: waitingFor.data.source_id,
       };
     }
+    // CR 107.1c + CR 701.21a (Slaughter the Strong): pick the creatures to keep
+    // directly on the battlefield, capped by combined power; the rest are
+    // sacrificed. Engine sends `eligible` + `cap`; dispatch is ChooseKeptCreatures.
+    case "KeepWithinTotalPowerChoice":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.eligible,
+        intent: "keep",
+        selection: { type: "totalPowerAtMost", power: waitingFor.data.cap },
+        response: { type: "ChooseKeptCreatures" },
+        sourceId: waitingFor.data.source_id,
+      };
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
       switch (waitingFor.data.kind.type) {
@@ -448,6 +465,8 @@ export function buildBoardChoiceAction(
       return { type: "ChooseRingBearer", data: { target: selectedIds[0] } };
     case "HarmonizeTap":
       return { type: "HarmonizeTap", data: { creature_id: selectedIds[0] } };
+    case "ChooseKeptCreatures":
+      return { type: "ChooseKeptCreatures", data: { kept: selectedIds } };
   }
 }
 
@@ -456,7 +475,12 @@ export function boardChoiceSelectedPower(
   selectedIds: ObjectId[],
   objects: Record<ObjectId, GameObject> | undefined,
 ): number {
-  if (choice.selection.type !== "totalPowerAtLeast") return 0;
+  if (
+    choice.selection.type !== "totalPowerAtLeast" &&
+    choice.selection.type !== "totalPowerAtMost"
+  ) {
+    return 0;
+  }
   return selectedIds.reduce((sum, id) => {
     const obj = objects?.[id];
     return sum + Math.max(obj?.power ?? 0, 0);
@@ -477,6 +501,8 @@ export function canConfirmBoardChoice(
       return selectedIds.length >= choice.selection.min && selectedIds.length <= choice.selection.max;
     case "totalPowerAtLeast":
       return boardChoiceSelectedPower(choice, selectedIds, objects) >= choice.selection.power;
+    case "totalPowerAtMost":
+      return boardChoiceSelectedPower(choice, selectedIds, objects) <= choice.selection.power;
   }
 }
 
@@ -489,6 +515,7 @@ export function boardChoiceMaxSelection(choice: BoardChoiceView): number | null 
     case "rangeCount":
       return choice.selection.max;
     case "totalPowerAtLeast":
+    case "totalPowerAtMost":
       return null;
   }
 }
@@ -501,6 +528,7 @@ export function isBoardChoiceImmediate(choice: BoardChoiceView): boolean {
       return choice.selection.immediate === true;
     case "rangeCount":
     case "totalPowerAtLeast":
+    case "totalPowerAtMost":
       return false;
   }
 }
@@ -534,6 +562,9 @@ export function getBattlefieldSacrificeChoice(
       upTo: false,
     };
   }
+  // `totalPowerAtMost` is only produced for the "keep" intent, which is filtered
+  // out above; narrow it off so the rangeCount fallback stays well-typed.
+  if (choice.selection.type === "totalPowerAtMost") return null;
   return {
     objectIds: choice.objectIds,
     count: choice.selection.max,
