@@ -6872,13 +6872,18 @@ pub struct GameState {
 
     /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
     /// at an empty library (`count == 0`) — distinct from "no Dig has run in
-    /// this chain link," which is `false`. A chained `ParentTarget` consumer
-    /// (e.g. `PutAtLibraryPosition` for "put up to one of them on top … the
-    /// rest on the bottom") reads this so it resolves to NO target instead of
-    /// the generic self-fallback, which would otherwise wrongly move the
-    /// Dig's own source (Thassa's Oracle reanimated with an empty library,
-    /// issue #1365) into the library it just found nothing in. Transient
-    /// resolution bookkeeping — not serialized.
+    /// this chain link," which is `false`. Consumed ONLY by the
+    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) for "put up to
+    /// one of them on top … the rest on the bottom" — deliberately NOT read by
+    /// the shared `resolved_targets` chokepoint, so it can never affect any
+    /// other `ParentTarget` consumer (e.g. Avenging Angel's unrelated LTB
+    /// self-return). `put_on_top.rs` clears it the moment it checks it,
+    /// whether or not it was set, so it cannot leak to a later, unrelated
+    /// `PutAtLibraryPosition` call in the same resolution either. Without this,
+    /// a reanimated Thassa's Oracle with an empty library (issue #1365) would
+    /// fall back to moving its own source into the library it just found
+    /// empty, corrupting devotion and library-count reads for the trailing win
+    /// condition. Transient resolution bookkeeping — not serialized.
     #[serde(skip)]
     pub last_dig_found_nothing: bool,
 

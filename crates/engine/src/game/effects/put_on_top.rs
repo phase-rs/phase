@@ -37,13 +37,40 @@ pub fn resolve(
         ),
     };
 
+    // CR 401.5 + CR 608.2c (issue #1365): This Dig-tail seam is the one place
+    // "put up to one of them on top … the rest on the bottom" can land with
+    // `target: ParentTarget` and no selection — when the Dig it follows looked
+    // at an empty library. There is nothing to place, and that must NOT fall
+    // back to `resolved_targets`'s generic self-fallback (below), which would
+    // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
+    // into the library it just found empty, corrupting devotion and
+    // library-count reads for any trailing win condition. Checked only here —
+    // not in the shared `resolved_targets` chokepoint — so every OTHER
+    // `ParentTarget` consumer (Avenging Angel's LTB self-return, etc.) keeps
+    // its ordinary self-fallback regardless of an unrelated Dig elsewhere in
+    // the same resolution.
+    let checking_parent_target_after_dig =
+        matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty();
+    let dig_found_nothing_for_parent_target =
+        checking_parent_target_after_dig && state.last_dig_found_nothing;
+    // Consume the signal the moment it's consulted, whether or not it ends up
+    // true — so a LATER, unrelated `PutAtLibraryPosition { ParentTarget }`
+    // call in the same top-level resolution (e.g. a second card's genuine LTB
+    // self-return) never inherits a stale flag from this Dig.
+    if checking_parent_target_after_dig {
+        state.last_dig_found_nothing = false;
+    }
+
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
     // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
     // This is the post-#323 SelfRef short-circuit applied uniformly.
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &target_filter, state);
+    let effective_targets = if dig_found_nothing_for_parent_target {
+        Vec::new()
+    } else {
+        crate::game::targeting::resolved_targets(ability, &target_filter, state)
+    };
     // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
@@ -658,6 +685,47 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(!state.players[0].graveyard.contains(&obj_id));
+        assert_eq!(state.players[0].library[0], obj_id);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Library);
+    }
+
+    /// Issue #1365 follow-up: `last_dig_found_nothing` must be scoped to the
+    /// ONE `PutAtLibraryPosition { ParentTarget }` call that consults it, not
+    /// leak forward to a later, unrelated one in the same resolution. Without
+    /// the consume-on-read fix, an empty-library Dig earlier in a chain would
+    /// wrongly suppress a completely unrelated Avenging Angel-class LTB
+    /// self-return that happens to resolve afterward.
+    #[test]
+    fn stale_dig_found_nothing_does_not_suppress_unrelated_ltb_self_return() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Avenging Angel".to_string(),
+            Zone::Graveyard,
+        );
+        // Simulate a stale flag left behind by an unrelated empty-library Dig
+        // earlier in the same top-level resolution.
+        state.last_dig_found_nothing = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.players[0].graveyard.contains(&obj_id),
+            "a stale Dig flag must not suppress this unrelated LTB self-return"
+        );
         assert_eq!(state.players[0].library[0], obj_id);
         assert_eq!(state.objects[&obj_id].zone, Zone::Library);
     }
