@@ -481,9 +481,14 @@ export function boardChoiceSelectedPower(
   ) {
     return 0;
   }
+  // `totalPowerAtMost` (Slaughter the Strong's keep set) mirrors the engine's
+  // CR 208.3 total, which sums raw power — a -1-power creature genuinely lowers
+  // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
+  // `totalPowerAtLeast` contributes positive power only.
+  const clampNegative = choice.selection.type === "totalPowerAtLeast";
   return selectedIds.reduce((sum, id) => {
-    const obj = objects?.[id];
-    return sum + Math.max(obj?.power ?? 0, 0);
+    const power = objects?.[id]?.power ?? 0;
+    return sum + (clampNegative ? Math.max(power, 0) : power);
   }, 0);
 }
 
