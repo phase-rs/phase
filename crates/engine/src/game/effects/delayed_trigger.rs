@@ -249,6 +249,7 @@ fn bind_contextual_filter_to_condition(
         DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } => {
             for filter in [
                 &mut trigger.valid_card,

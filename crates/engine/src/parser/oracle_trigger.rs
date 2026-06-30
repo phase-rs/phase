@@ -1035,7 +1035,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
+    // CR 601.2c: An optional-targeting quantifier ("up to one target …" /
+    // "any number of target …") permits a variable number of targets down to
+    // zero, so the execute ability must surface `optional_targeting` and let the
+    // player decline. Without this, "attach any number of target Equipment you
+    // control to it" (Super-Soldier Serum) forces a mandatory target and
+    // softlocks when every Equipment is already attached.
+    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
+        || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
         if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
             Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
@@ -1806,6 +1813,34 @@ fn extract_unless_pay_modifier(
         return (text.to_string(), None);
     };
 
+    // CR 603.7a + CR 118.12a (issue #4369): when the "unless you pay" lives in a
+    // DELAYED-trigger sentence ("At the beginning of [the/your] next ..., sacrifice
+    // it unless you pay {cost}" — Ashling, the Limitless; Satya, Aetherflux
+    // Genius), the alternative cost belongs to that delayed sacrifice, NOT the
+    // parent trigger. Hoisting it here makes the engine demand payment when the
+    // token is created (wrong time). Decline to hoist; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`, applied in `lower_effect_chain_ir`
+    // before wrapping in `CreateDelayedTrigger`) attaches the cost to the delayed
+    // trigger's inner def. Detected by reusing the canonical delayed-temporal-
+    // prefix recognizer on the start of the sentence that contains the "unless".
+    // Forward-scan past each sentence boundary preceding the "unless" (via the
+    // `split_once_on` combinator) so `enclosing` is just the sentence that
+    // directly contains it; the byte offset back into `text` preserves original
+    // case for `strip_temporal_prefix`.
+    let mut enclosing = &lower[..unless_pos];
+    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
+        enclosing = after;
+    }
+    let unless_sentence_start = unless_pos - enclosing.len();
+    if crate::parser::oracle_effect::lower::strip_temporal_prefix(
+        text[unless_sentence_start..].trim_start(),
+    )
+    .1
+    .is_some()
+    {
+        return (text.to_string(), None);
+    }
+
     let after_unless = &lower[unless_pos + 8..];
 
     // CR 608.2c: When the primary effect is itself a discard imperative
@@ -2168,6 +2203,33 @@ pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // "you pay N life" / "you pay N life." — life amount is bare integer.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
         if let Some(cost) = parse_unless_life_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    // CR 107.14 + CR 202.3 (issue #4369): "you pay an amount of {E} equal to ..."
+    // — a dynamic energy alternative (Satya, Aetherflux Genius's delayed
+    // "sacrifice that token unless you pay an amount of {E} equal to its mana
+    // value"). Must precede the brace-run mana arm below ("an amount of" is not a
+    // mana run). Reuses the shared dynamic-energy building block.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
+        if let Some(amount) = super::oracle_effect::parse_dynamic_energy_unless_cost(
+            rest.trim_end_matches('.').trim(),
+        ) {
+            return Some(AbilityCost::PayEnergy { amount });
+        }
+    }
+
+    // CR 118.12 + CR 202.1: "you pay {explicit mana}" — an explicit mana cost as
+    // the alternative (issue #4369, Ashling, the Limitless's delayed "sacrifice
+    // it unless you pay {W}{U}{B}{R}{G}"). The trigger-level caller reaches its
+    // own brace-run mana arm after this function returns None, but the per-clause
+    // resolution path (`extract_resolution_unless_pay_modifier`) relies solely on
+    // this single authority, so a delayed sub-clause's mana unless is invisible
+    // without it. Placed AFTER the "N life" arm so life keeps precedence; reuses
+    // the shared `parse_unless_mana_payment` building block.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
+        if let Some(cost) = parse_unless_mana_payment(rest.trim_end_matches('.').trim()) {
             return Some(cost);
         }
     }
@@ -14502,6 +14564,62 @@ mod tests {
         assert!(def.execute.is_some());
     }
 
+    /// CR 608.2c + CR 712.2 (issue #4543): Tamiyo, Inquisitive Student —
+    /// "When you draw your third card in a turn, exile Tamiyo, then return her
+    /// to the battlefield transformed under her owner's control." The exile
+    /// step targets the source (`~` → SelfRef); the "return her ... transformed"
+    /// sub-clause's bare "her" must ALSO bind to the source (SelfRef), not to
+    /// `TriggeringSource`. The trigger subject is the player ("you draw …"), so
+    /// the source has no entry in the CardDrawn event — before the fix the
+    /// return resolved to an empty target set and Tamiyo was stranded in exile.
+    /// The SelfRef-anaphor rewrite was gated on a typed trigger subject; it now
+    /// fires for player/event subjects too because the antecedent is the named
+    /// prior clause.
+    #[test]
+    fn tamiyo_flip_return_transformed_binds_to_self_ref() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "When you draw your third card in a turn, exile Tamiyo, then return her to the battlefield transformed under her owner's control.",
+            "Tamiyo, Inquisitive Student",
+        );
+        let exec = def.execute.as_deref().expect("Tamiyo trigger execute body");
+        // Exile step: source named via `~`.
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*exec.effect
+        else {
+            panic!("expected exile ChangeZone head, got {:?}", exec.effect);
+        };
+        assert_eq!(*destination, Zone::Exile);
+        assert_eq!(*target, TargetFilter::SelfRef);
+        // Return step: "her" must bind to the source and enter transformed.
+        let sub = exec.sub_ability.as_deref().expect("return sub_ability");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            enter_transformed,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected return ChangeZone sub, got {:?}", sub.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(
+            *enter_transformed,
+            "return must enter transformed (CR 712.2)"
+        );
+        assert_eq!(
+            *target,
+            TargetFilter::SelfRef,
+            "the 'return her transformed' anaphor must bind to the source (SelfRef), \
+             not TriggeringSource — otherwise the CardDrawn event has no source and \
+             Tamiyo is stranded in exile"
+        );
+    }
+
     /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
     /// Syr Konrad's disjunctive zone-change condition into separate triggers.
     #[test]
@@ -15057,6 +15175,33 @@ mod tests {
             }
             other => panic!("expected attachment intervening-if, got {other:?}"),
         }
+    }
+
+    /// CR 601.2c: "attach any number of target Equipment you control to it"
+    /// (Super-Soldier Serum) is a variable-count target down to zero. The execute
+    /// ability must carry `optional_targeting` so the player can decline — without
+    /// it the trigger forces a mandatory Equipment target and softlocks when every
+    /// Equipment is already attached to the creature.
+    #[test]
+    fn trigger_attacks_or_blocks_attach_any_number_optional_targeting() {
+        let def = parse_trigger_line(
+            "Whenever enchanted creature attacks or blocks, attach any number of target Equipment you control to it.",
+            "Super-Soldier Serum",
+        );
+        assert_eq!(def.mode, TriggerMode::AttacksOrBlocks);
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("attach body must lower to an execute ability");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Attach { .. }),
+            "expected Attach effect, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.optional_targeting,
+            "\"any number of target\" must surface optional_targeting=true so the player can decline"
+        );
     }
 
     #[test]
@@ -18917,6 +19062,111 @@ mod tests {
         }
     }
 
+    /// CR 603.7a + CR 118.12a (issue #4369): Ashling, the Limitless — "Whenever
+    /// you sacrifice a nontoken Elemental, create a token that's a copy of it.
+    /// The token gains haste until end of turn. At the beginning of your next
+    /// end step, sacrifice it unless you pay {W}{U}{B}{R}{G}." The "unless you
+    /// pay {W}{U}{B}{R}{G}" alternative cost belongs to the DELAYED end-step
+    /// sacrifice, not to the parent "Whenever you sacrifice" trigger. Before the
+    /// fix `extract_unless_pay_modifier` scanned the whole multi-sentence effect,
+    /// found the "unless" in the delayed sentence, and hoisted the cost onto the
+    /// parent trigger — so the engine demanded the 5-color payment when the token
+    /// copy was created (wrong time), letting the player keep the token without
+    /// the mana. The cost must ride the `CreateDelayedTrigger`'s inner sacrifice.
+    #[test]
+    fn ashling_delayed_end_step_unless_pay_rides_delayed_sacrifice() {
+        use crate::types::ability::{AbilityCost, Effect};
+
+        // Walk the execute chain into the CreateDelayedTrigger's inner def.
+        fn find_delayed(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                return Some(inner);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_delayed)
+                .or_else(|| def.else_ability.as_deref().and_then(find_delayed))
+        }
+
+        let def = parse_trigger_line(
+            "Whenever you sacrifice a nontoken Elemental, create a token that's a copy of it. \
+             The token gains haste until end of turn. At the beginning of your next end step, \
+             sacrifice it unless you pay {W}{U}{B}{R}{G}.",
+            "Ashling, the Limitless",
+        );
+
+        // (1) The parent sacrifice trigger must NOT carry the delayed unless-cost.
+        assert_eq!(
+            def.unless_pay, None,
+            "the delayed end-step unless-cost must not be hoisted onto the parent trigger"
+        );
+
+        // (2) The delayed trigger's inner sacrifice carries the {W}{U}{B}{R}{G} cost.
+        let exec = def
+            .execute
+            .as_deref()
+            .expect("Ashling trigger execute body");
+        let delayed = find_delayed(exec).expect("CreateDelayedTrigger in the effect chain");
+        let unless = delayed
+            .unless_pay
+            .as_ref()
+            .expect("the delayed sacrifice must carry the unless-cost");
+        match &unless.cost {
+            AbilityCost::Mana { cost } => assert_eq!(
+                cost.mana_value(),
+                5,
+                "the delayed unless-cost must be the 5-color {{W}}{{U}}{{B}}{{R}}{{G}}, got {cost:?}"
+            ),
+            other => panic!("delayed unless-cost must be AbilityCost::Mana, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7a + CR 118.12a + CR 107.14 (issue #4369): Satya, Aetherflux Genius
+    /// — the energy-cost sibling of the same class: "Whenever Satya attacks, ...
+    /// At the beginning of the next end step, sacrifice that token unless you pay
+    /// an amount of {E} equal to its mana value." The dynamic-energy unless-cost
+    /// must ride the delayed sacrifice (not the parent attack trigger), exactly
+    /// like Ashling's mana cost — proving the fix is class-general across cost
+    /// types, not a one-off for Ashling.
+    #[test]
+    fn satya_delayed_end_step_energy_unless_rides_delayed_sacrifice() {
+        use crate::types::ability::{AbilityCost, Effect};
+
+        fn find_delayed(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                return Some(inner);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_delayed)
+                .or_else(|| def.else_ability.as_deref().and_then(find_delayed))
+        }
+
+        let def = parse_trigger_line(
+            "Whenever Satya attacks, create a tapped and attacking token that's a copy of up to \
+             one other target nontoken creature you control. You get {E}{E}. At the beginning of \
+             the next end step, sacrifice that token unless you pay an amount of {E} equal to its \
+             mana value.",
+            "Satya, Aetherflux Genius",
+        );
+
+        assert_eq!(
+            def.unless_pay, None,
+            "the delayed end-step energy unless-cost must not be hoisted onto the parent trigger"
+        );
+        let exec = def.execute.as_deref().expect("Satya trigger execute body");
+        let delayed = find_delayed(exec).expect("CreateDelayedTrigger in the effect chain");
+        let unless = delayed
+            .unless_pay
+            .as_ref()
+            .expect("the delayed sacrifice must carry the energy unless-cost");
+        assert!(
+            matches!(unless.cost, AbilityCost::PayEnergy { .. }),
+            "delayed unless-cost must be AbilityCost::PayEnergy, got {:?}",
+            unless.cost
+        );
+    }
+
     #[test]
     fn non_token_enters_exile_it_stays_triggering_source() {
         // No-regression: a non-token ETB trigger "exile it" has NO token creator
@@ -18952,6 +19202,89 @@ mod tests {
             find_exile(exec),
             Some(TargetFilter::TriggeringSource),
             "non-token 'exile it' must stay TriggeringSource (no token creator → pass not entered)"
+        );
+    }
+
+    /// CR 608.2c + CR 603.7c (issue #4601): a PHASE-triggered token-copier —
+    /// Mishra, Eminent One: "At the beginning of combat on your turn, create a
+    /// token that's a copy of target noncreature artifact you control, … It
+    /// gains haste until end of turn. Sacrifice it at the beginning of the next
+    /// end step." Unlike the ETB copiers above, a Phase trigger has no
+    /// triggering object, so the bare-"it" in "Sacrifice it" lowers to `SelfRef`
+    /// (the source — Mishra) rather than `TriggeringSource`. The antecedent is
+    /// still the newly created TOKEN, so the delayed sacrifice must bind
+    /// `LastCreated` — otherwise Mishra sacrifices ITSELF at the end step.
+    #[test]
+    fn phase_trigger_token_copier_sacrifice_anaphor_binds_created_token() {
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+            "Mishra, Eminent One",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        let mut effs = Vec::new();
+        collect(exec, &mut effs);
+        let sac_target = effs.iter().find_map(|e| match e {
+            Effect::Sacrifice { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            sac_target,
+            Some(TargetFilter::LastCreated),
+            "the delayed 'Sacrifice it' must bind the created token (LastCreated), not \
+             Mishra itself (SelfRef) — otherwise Mishra sacrifices itself at the end step",
+        );
+    }
+
+    /// CR 603.7c + CR 608.2c (issue #4601 review): the same Phase-triggered
+    /// token-copier anaphor, but with a LIBRARY-POSITION cleanup instead of a
+    /// sacrifice — "… create a token that's a copy of target creature you
+    /// control. It gains haste until end of turn. Put it on the bottom of its
+    /// owner's library at the beginning of the next end step." A Phase trigger
+    /// has no triggering object, so the bare-"it" in the delayed "Put it …"
+    /// lowers to `SelfRef`; `Effect::PutAtLibraryPosition` is a token-cleanup
+    /// move just like the sacrifice form, so it must rebind to `LastCreated`.
+    #[test]
+    fn phase_trigger_token_copier_library_cleanup_anaphor_binds_created_token() {
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, create a token that's a copy of target creature you control. It gains haste until end of turn. Put it on the bottom of its owner's library at the beginning of the next end step.",
+            "Test Phase Library Copier",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        let mut effs = Vec::new();
+        collect(exec, &mut effs);
+        let lib_target = effs.iter().find_map(|e| match e {
+            Effect::PutAtLibraryPosition { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            lib_target,
+            Some(TargetFilter::LastCreated),
+            "the delayed 'Put it on the bottom of its owner's library' must bind the \
+             created token (LastCreated), not the source (SelfRef)",
         );
     }
 
@@ -34335,6 +34668,59 @@ mod snapshot_tests {
             panic!("expected Sacrifice, got {:?}", execute.effect);
         };
         assert_eq!(*target, TargetFilter::TriggeringSource);
+    }
+
+    // CR 701.21a: Morkrut Necropod's
+    // "Whenever ~ attacks or blocks, sacrifice another creature or land" — the
+    // source-exclusion "another" must land `FilterProp::Another` on the CREATURE
+    // leg only. A creature is never a land, so distributing the exclusion to the
+    // land leg is meaningless; more importantly, WITHOUT the exclusion on the
+    // creature leg the source could sacrifice ITSELF, a functional bug (#4513).
+    // Parsed end-to-end through the production trigger entry to lock in that the
+    // sacrifice imperative re-applies the exclusion the count word consumed.
+    #[test]
+    fn morkrut_necropod_sacrifice_another_creature_or_land_trigger() {
+        let def = parse_trigger_line(
+            "Whenever Morkrut Necropod attacks or blocks, sacrifice another creature or land.",
+            "Morkrut Necropod",
+        );
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        let Effect::Sacrifice { target, .. } = execute.effect.as_ref() else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected an Or target for 'creature or land', got {target:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs, got {filters:?}");
+        // Leg 0: creature — the source-exclusion MUST be present.
+        let TargetFilter::Typed(creature_leg) = &filters[0] else {
+            panic!("expected a typed creature leg, got {:?}", filters[0]);
+        };
+        assert!(
+            creature_leg.type_filters.contains(&TypeFilter::Creature),
+            "first leg should be the creature leg, got {creature_leg:?}"
+        );
+        assert!(
+            creature_leg.properties.contains(&FilterProp::Another),
+            "creature leg must carry FilterProp::Another so the source can't \
+             sacrifice itself (#4513), got {creature_leg:?}"
+        );
+        // Leg 1: land — the source-exclusion is present here too. "Another" is
+        // applied to every leg: it is vacuous on the land leg (a creature source
+        // is never a land) but the uniform rule is what keeps a source that
+        // matches a non-first leg (e.g. an artifact creature in "creature or
+        // artifact") from sacrificing itself.
+        let TargetFilter::Typed(land_leg) = &filters[1] else {
+            panic!("expected a typed land leg, got {:?}", filters[1]);
+        };
+        assert!(
+            land_leg.type_filters.contains(&TypeFilter::Land),
+            "second leg should be the land leg, got {land_leg:?}"
+        );
+        assert!(
+            land_leg.properties.contains(&FilterProp::Another),
+            "land leg should carry FilterProp::Another (vacuous but uniform), got {land_leg:?}"
+        );
     }
 
     // CR 701.3d: shorter form "becomes unattached" (future-proofing)

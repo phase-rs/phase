@@ -93,11 +93,11 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControllerRef, CopyRetargetPermission, DamageModification,
-    DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
-    GameRestriction, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, OriginConstraint,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime, DoubleTarget, Duration, Effect,
+    EffectScope, FilterProp, GameRestriction, IntensityScope, IterationKindBinding,
+    LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, OriginConstraint, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
     RoundingMode, SharedQuality, SharedQualityRelation, SkipScope, StaticCondition,
     StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
@@ -792,6 +792,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -826,6 +827,7 @@ fn build_when_next_delayed_trigger(
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -908,6 +910,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -972,6 +975,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
                 or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -1915,6 +1919,136 @@ fn try_parse_cast_this_way_enters_with_counter(lower: &str) -> Option<Effect> {
     })
 }
 
+/// CR 603.6 + CR 702.26a: One self-referential event verb of a delayed-trigger
+/// condition, mapped to the `TriggerMode` it fires on. The subject ("~") is
+/// stripped by the caller's word-boundary scan, so this matches only the bare
+/// verb phrase. Composed as a chained `alt` of leaf event verbs — adding a new
+/// self-event verb extends the disjunction class without enumerating
+/// permutations.
+fn parse_self_event_verb(input: &str) -> OracleResult<'_, crate::types::triggers::TriggerMode> {
+    use crate::types::triggers::TriggerMode;
+    alt((
+        // CR 702.26a context: "~ becomes untapped" (The Pandorica).
+        value(
+            TriggerMode::Untaps,
+            alt((
+                tag("becomes untapped"),
+                tag("become untapped"),
+                tag("untaps"),
+            )),
+        ),
+        // CR 603.6c: "~ leaves the battlefield". Only the full-phrase variants
+        // are accepted — bare `tag("leaves")` would match "leaves your
+        // graveyard" at a word boundary and silently classify a non-battlefield
+        // trigger as LeavesBattlefield. Every leaves-the-battlefield Oracle
+        // phrasing uses the complete phrase.
+        value(
+            TriggerMode::LeavesBattlefield,
+            alt((tag("leaves the battlefield"), tag("leave the battlefield"))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6 + CR 603.7c: Validate a single disjunct segment as a self-referential
+/// event phrase. Strips the optional self-subject prefix (`~ ` or `it `, present
+/// on the first disjunct, elided on subsequent disjuncts) and then requires
+/// `all_consuming` on the recognized self-event verb — so a qualified phrase
+/// like `becomes untapped during your upkeep` is rejected rather than matched
+/// as bare `Untaps`. `valid_card` is `SelfRef` so the trigger fires only on
+/// the source object's own event.
+fn scan_self_event_trigger(segment: &str) -> Option<crate::types::ability::TriggerDefinition> {
+    // Strip the optional self-subject prefix ("~ " or "it ") — present on the
+    // first disjunct, elided on subsequent disjuncts. opt() always succeeds.
+    let (verb_text, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("~ "),
+        tag::<_, _, OracleError<'_>>("it "),
+    )))
+    .parse(segment)
+    .ok()?;
+    // Require full consumption: a trailing qualifier (e.g., "becomes untapped
+    // during your upkeep") is rejected here, leaving unsupported qualified
+    // events as Unimplemented rather than silently matching a verb prefix.
+    let (_, mode) = all_consuming(parse_self_event_verb).parse(verb_text).ok()?;
+    Some(crate::types::ability::TriggerDefinition::new(mode).valid_card(TargetFilter::SelfRef))
+}
+
+/// CR 603.6 + CR 603.7c: Recognize a self-referential *disjunctive* delayed-trigger
+/// condition — "~ <eventA> or <eventB>" (The Pandorica: "When ~ becomes untapped
+/// or leaves the battlefield, …"). Returns the two embedded `TriggerDefinition`s
+/// for a `WhenNextEvent { trigger, or_trigger }`. Without this, the single-event
+/// `scan_delayed_condition_kind` path silently drops the second disjunct.
+///
+/// Generality: covers the whole "when ~ <eventA> or <eventB>" class built from
+/// the verbs in [`parse_self_event_verb`]; only fires when the subject is the
+/// source itself (`SelfRef`) and BOTH sides resolve to a recognized self-event
+/// verb, so single-event and non-self conditions fall through untouched.
+fn parse_self_disjunctive_event_trigger(
+    condition_text: &str,
+) -> Option<(
+    crate::types::ability::TriggerDefinition,
+    crate::types::ability::TriggerDefinition,
+)> {
+    // The condition must describe the source object itself.
+    if !matches!(
+        scan_delayed_subject(condition_text),
+        Some(TargetFilter::SelfRef)
+    ) {
+        return None;
+    }
+    // Split on the first " or " via a combinator (not string dispatch): the left
+    // side carries the subject + first verb, the right side the second verb.
+    use nom::bytes::complete::take_until;
+    let (right, left) = take_until::<_, _, OracleError<'_>>(" or ")
+        .parse(condition_text)
+        .ok()?;
+    let (right, _) = tag::<_, _, OracleError<'_>>(" or ").parse(right).ok()?;
+    // CR 603.7c: `WhenNextEvent` carries exactly two event slots (`trigger` +
+    // `or_trigger`). A three-or-more-way self-event disjunction ("A or B or C")
+    // can't be represented without silently dropping the tail, so reject it here
+    // rather than capturing only the first two — no current card pairs three
+    // self-events. The recognized self-event verbs never contain an inner " or ",
+    // so a residual " or " in `right` reliably marks a dropped third disjunct.
+    if take_until::<_, _, OracleError<'_>>(" or ")
+        .parse(right)
+        .is_ok()
+    {
+        return None;
+    }
+    let trigger = scan_self_event_trigger(left)?;
+    let or_trigger = scan_self_event_trigger(right)?;
+    Some((trigger, or_trigger))
+}
+
+/// CR 603.7c: In a self-referential disjunctive `WhenNextEvent` delayed trigger
+/// ("when ~ <eventA> or <eventB>, that permanent …"), the inner demonstrative
+/// ("that permanent") refers to the PARENT ability's chosen target — the
+/// permanent the parent ability acted on — never to the trigger source (~). The
+/// subject parser resolves that demonstrative through the trigger-subject anaphor
+/// path to `TriggeringSource`; rewrite it to `ParentTarget` so the
+/// `CreateDelayedTrigger` resolver snapshots the parent target at creation
+/// (CR 603.7c) instead of re-resolving the source object at firing time.
+///
+/// Build-for-the-class: the rebind walks *every* target-bearing effect arm via
+/// the shared [`each_target_filter_mut`] walker (not just the two phasing
+/// effects), so a future card pairing this condition with a non-phasing effect
+/// ("when ~ becomes untapped or leaves the battlefield, that permanent <X>")
+/// rebinds the inner demonstrative correctly. The Pandorica's `PhaseIn` is the
+/// only current instance.
+fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
+    each_target_filter_mut(ability.effect.as_mut(), &mut |target| {
+        if *target == TargetFilter::TriggeringSource {
+            *target = TargetFilter::ParentTarget;
+        }
+    });
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rebind_triggering_source_to_parent_target(sub);
+    }
+    if let Some(els) = ability.else_ability.as_deref_mut() {
+        rebind_triggering_source_to_parent_target(els);
+    }
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(
@@ -1933,12 +2067,35 @@ fn try_parse_inline_delayed_trigger(
     let condition_text = &tp.lower["when ".len()..comma];
     let effect_text = &tp.original[comma + 2..];
 
+    // CR 603.6 + CR 603.7c: A self-referential disjunctive condition ("when ~
+    // <eventA> or <eventB>, …") embeds two triggers; the demonstrative inner
+    // subject binds to the parent target (rebound below). Detect it before the
+    // single-event `scan_delayed_condition_kind` path, which would otherwise
+    // drop the second disjunct.
+    let mut self_disjunction = false;
     let condition = if let Some(trigger) =
         parse_dealt_damage_this_way_dies_trigger(condition_text, ctx)
     {
         DelayedTriggerCondition::WhenNextEvent {
             trigger: Box::new(trigger),
             or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        }
+    } else if let Some((trigger, or_trigger)) = parse_self_disjunctive_event_trigger(condition_text)
+    {
+        self_disjunction = true;
+        // CR 603.7b: A self-referential disjunctive re-entry clause ("when ~
+        // becomes untapped or leaves the battlefield, …", The Pandorica) is an
+        // open-ended delayed trigger with no stated duration — per CR 603.7b it
+        // "will trigger only once—the next time its trigger event occurs"—and
+        // carries NO "this turn" limit, so the qualifying event (the source's
+        // untap / departure) typically occurs on a later turn. Mark it
+        // `Persistent` so end-of-turn cleanup does not prune it before it can
+        // fire.
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(trigger),
+            or_trigger: Some(Box::new(or_trigger)),
+            lifetime: DelayedTriggerLifetime::Persistent,
         }
     } else {
         match scan_delayed_condition_kind(condition_text) {
@@ -1980,7 +2137,18 @@ fn try_parse_inline_delayed_trigger(
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => Some(filter.clone()),
         _ => None,
     };
-    let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    // CR 603.7c: For a self-referential disjunctive trigger, route the inner
+    // demonstrative ("that permanent") through the anaphor path (it resolves to
+    // `TriggeringSource`), then rebind to `ParentTarget` — the trigger source (~)
+    // is never the inner referent.
+    if self_disjunction {
+        inner_ctx.subject = Some(TargetFilter::SelfRef);
+    }
+    let mut inner =
+        parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    if self_disjunction {
+        rebind_triggering_source_to_parent_target(&mut inner);
+    }
 
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
@@ -2729,17 +2897,30 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     })?;
     let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
 
-    // Duration: "during their next turn" / "during that player's next turn".
-    // REQUIRED — this is the discriminator that gates the whole recognizer, so a
-    // generic "can't attack you" static line never reaches it.
-    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
-        value(
-            (),
-            alt((
-                tag(" during their next turn"),
-                tag(" during that player's next turn"),
-            )),
-        )
+    // Duration: REQUIRED discriminator — gates the whole recognizer so a generic
+    // permanent "can't attack you" static line (no duration) never reaches here.
+    // Two CR-distinct branches, captured as the resolved `Option<Duration>`:
+    //   - "during their next turn" / "during that player's next turn"
+    //     → `UntilEndOfNextTurnOf` (CR 514.2 + CR 500.7), the restricted player's
+    //       NEXT turn (Willie Lumpkin).
+    //   - "this turn" → no duration override; the `RestrictionExpiry::EndOfTurn`
+    //     below cleans the restriction up at the END OF THE CURRENT TURN (CR 514.2 —
+    //     Sandswirl Wanderglyph "they can't attack you … this turn").
+    // The two are NOT interchangeable: swapping them changes which turn the ban
+    // covers (a discriminating duration test must distinguish the two).
+    let (duration, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                alt((
+                    tag(" during their next turn"),
+                    tag(" during that player's next turn"),
+                )),
+            ),
+            value(None, tag(" this turn")),
+        ))
         .parse(input)
     })?;
     let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
@@ -2752,15 +2933,15 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
+                // CR 514.2: end-of-current-turn cleanup for the "this turn" branch.
+                // For the "next turn" branch this is a placeholder — `duration`
+                // below re-anchors the expiry to the restricted player's next turn
+                // in `add_restriction`.
                 expiry: RestrictionExpiry::EndOfTurn,
                 activity: ProhibitedActivity::Attack { defended },
             },
         },
-        // CR 514.2 + CR 500.7: pre-armed end-of-next-turn anchor. The expiry is
-        // lowered in `add_restriction` to the RESTRICTED player's next turn.
-        duration: Some(Duration::UntilEndOfNextTurnOf {
-            player: PlayerScope::Controller,
-        }),
+        duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -6104,6 +6285,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/this creature] perpetually becomes a [subtypes]
+    // with base power and toughness N/N [and gains [keyword(s)]]" — persistent
+    // type change + base P/T + keyword grant (Second Little Pig).
+    if let Some(effect) = try_parse_perpetual_become(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
     if let Some(effect) = try_parse_perpetual_base_pt(tp) {
@@ -6252,6 +6440,93 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::Intensify {
         scope: IntensityScope::Source,
         amount,
+    })
+}
+
+/// Digital-only Alchemy: parse the self-subject perpetual type-change form —
+/// "[~ / this creature / …] perpetually become(s) a [subtypes] with base power
+/// and toughness N/N [and gains [keyword(s)]]" → [`Effect::ApplyPerpetual`]
+/// with [`PerpetualModification::Become`] (Second Little Pig).
+///
+/// Self-subjects only; referenced-object forms ("the duplicate"/"it") are
+/// deferred. The clause tail must be fully consumed so compound riders that
+/// are not modeled (e.g. Heir to Dragonfire's ", gets +3/+3") fall through to
+/// `Unimplemented` rather than being silently dropped.
+fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
+    use crate::parser::oracle_util::parse_subtype;
+
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let lower = tp.lower;
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("becomes a "),
+        tag::<_, _, OracleError<'_>>("become a "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, subtype_part) =
+        take_until::<_, _, OracleError<'_>>(" with base power and toughness ")
+            .parse(rest)
+            .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" with base power and toughness ")
+        .parse(rest)
+        .ok()?;
+    let mut creature_subtypes = Vec::new();
+    let mut subtype_rest = subtype_part.trim();
+    while !subtype_rest.is_empty() {
+        let (canonical, consumed) = parse_subtype(subtype_rest)?;
+        creature_subtypes.push(canonical);
+        subtype_rest = subtype_rest[consumed..].trim_start();
+    }
+    if creature_subtypes.is_empty() {
+        return None;
+    }
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, keywords) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" and gains "),
+        tag::<_, _, OracleError<'_>>(" and gain "),
+    ))
+    .parse(rest)
+    {
+        let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
+        (rest, keywords)
+    } else {
+        (rest, Vec::new())
+    };
+    if !tail_done(rest) {
+        return None;
+    }
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::Become {
+            creature_subtypes,
+            power: power as i32,
+            toughness: toughness as i32,
+            keywords,
+        },
     })
 }
 
@@ -13065,6 +13340,11 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut; route its
+        // target through parent-anaphor replacement too so a future
+        // parent-bound PhaseIn ("untap target permanent, then phase it in")
+        // is not silently skipped.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
@@ -16838,8 +17118,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
             min: n + 1,
             max: 20,
         })
-    } else if rest == "a number" || tag::<_, _, E>("a number ").parse(rest).is_ok() {
-        // Generic "choose a number" — default range 0-20
+    } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
+        // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
+        // mirroring the "a color" branch above, so a sentence-ending clause such
+        // as "As ~ enters, choose a number." parses (Squall, Gunblade Duelist,
+        // #722). The previous exact/trailing-space match dropped the period and
+        // produced no choice. The bounded "a number between" / "a number greater
+        // than" forms are consumed by the earlier branches, so this arm is reached
+        // only for a bare "a number".
         Some(ChoiceType::NumberRange { min: 0, max: 20 })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
         .parse(rest)
@@ -17619,6 +17905,9 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn mirrors PhaseOut; expose its target to tracked-set
+        // rewrites for symmetry so a parent-bound PhaseIn is not skipped.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
@@ -17864,6 +18153,10 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
+        // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut above; expose
+        // its target filter too so generic anaphor/scope rewrites and the
+        // self-disjunctive delayed-trigger rebind (CR 603.7c) reach it.
+        | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
@@ -19518,6 +19811,35 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
+        // CR 702.143d: "Its foretell cost is [cost]." — an effect-defined
+        // foretell cost sentence (e.g. Ethereal Valkyrie: "its mana cost
+        // reduced by {2}"). Effect-defined foretell costs are not yet
+        // representable in `CastingPermission::Foretold`; suppress any
+        // preceding `BecomesForetold` continuation to avoid emitting a wrong
+        // {0} permission. The sentence then falls through to Unimplemented,
+        // honestly documenting unsupported coverage until effect-defined
+        // foretell cost expressions are implemented.
+        {
+            let foretell_lower = normalized_text.to_lowercase();
+            if sequence::is_foretell_cost_override_sentence(&foretell_lower) {
+                if let Some(absorbed) = clauses.iter_mut().rev().find(|c| {
+                    c.absorbed_by_followup
+                        && matches!(
+                            c.followup_continuation,
+                            Some(ContinuationAst::BecomesForetold)
+                        )
+                }) {
+                    // Suppress the grant: clear the BecomesForetold
+                    // continuation so lowering does not emit the wrong {0}
+                    // permission (strict failure until cost is representable).
+                    absorbed.followup_continuation = None;
+                }
+                // Fall through: parses as Unimplemented, accurately
+                // documenting that effect-defined foretell costs are
+                // unsupported.
+            }
+        }
+
         if let Some(expiry) = try_parse_mana_retention_rider(normalized_text) {
             if !clauses.is_empty() {
                 clauses.push(ClauseIr {
@@ -19726,6 +20048,92 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::RepeatProcessForKeywords(keywords)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
+        // CR 702.62a + CR 702.62b + CR 611.2a + CR 608.2c: "Cards exiled this
+        // way gain <kw>." — the plural / set-referencing sibling of the singular
+        // "If it doesn't have suspend, it gains suspend" keyword grant (Jhoira of
+        // the Ghitu, The Tenth Doctor). Emits a `GenericEffect` keyword grant
+        // bound to the chain's exiled-card tracked set via `ParentTarget`.
+        // NOTE: The "that don't have <kw>" restrictive clause form strict-fails
+        // (returns None here) — a correct per-card exclusion requires an
+        // object-scoped condition that does not yet exist in the engine. See
+        // `try_parse_exiled_this_way_keyword_grant` for the full explanation.
+        // Requires a prior exile clause to publish the tracked set it broadcasts
+        // to.
+        if !clauses.is_empty() {
+            if let Some(parsed) =
+                subject::try_parse_exiled_this_way_keyword_grant(normalized_text, ctx)
+            {
+                clauses.push(ClauseIr {
+                    parsed,
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
+        // CR 608.2c + CR 601.2c: "[then] target opponent does the same / does
+        // so." — replicate the immediately-preceding sibling effect for a
+        // targeted opponent (The Wedding of River Song). A correct runtime needs
+        // (a) the mid-chain `TargetOnly { Opponent }` to be collected as a
+        // cast-time target slot and (b) the opponent's resolution-time choice to
+        // route to the targeted player across the `EffectZoneChoice` continuation
+        // — cross-cutting engine targeting/continuation work tracked in the
+        // set-audit backlog. Until that lands, emit a *documented* strict-failure
+        // (`Unimplemented`) rather than a silently-degenerate exile-nothing
+        // misparse: a flagged gap beats a wrong parse (CLAUDE.md #1 hard rule).
+        // The `DoesTheSameSubject` typing is preserved so the eventual fix and
+        // the deferred "each opponent … does the same" fanout slot in cleanly.
+        if !clauses.is_empty() {
+            if let Some(subject) = sequence::try_parse_does_the_same_clause(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::unimplemented(
+                        sequence::does_the_same_unimplemented_name(subject),
+                        normalized_text.to_string(),
+                    )),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                     target_chooser: None,
@@ -20996,6 +21404,17 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(sub) = inner_clause.sub_ability {
                 inner_def.sub_ability = Some(sub);
             }
+            // CR 118.12a (issue #4369): a payment-unless on the delayed
+            // instruction itself ("...next end step, sacrifice it unless you pay
+            // {cost}" — Ashling, the Limitless; Satya, Aetherflux Genius) is
+            // extracted at chunk level into `unless_pay`, but it belongs to the
+            // DELAYED sacrifice, not the outer trigger. Move it onto the inner
+            // delayed def and consume it so it is not also applied to the outer
+            // CreateDelayedTrigger wrapper. The trigger-level
+            // `extract_unless_pay_modifier` declines to hoist the same clause.
+            if let Some(up) = unless_pay.take() {
+                inner_def.unless_pay = Some(up);
+            }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),
@@ -21482,7 +21901,45 @@ pub(crate) fn parse_effect_chain_ir(
         // *named clause*, not the trigger condition. The SelfRef prior-clause
         // test is structural over the parsed clause and its nested sub-ability
         // chain — no string heuristic.
-        if typed_trigger_subject
+        //
+        // CR 712.2 (issue #4543): the typed-subject branch covers the typed
+        // members of this class (Ajani). The transform-flip-from-exile cards
+        // (Tamiyo, Inquisitive Student: "When you draw your third card in a turn,
+        // exile Tamiyo, then return her to the battlefield transformed") have a
+        // PLAYER subject, so `typed_trigger_subject` is false and the bare "her"
+        // would default to `TriggeringSource` — but the CardDrawn event has no
+        // resolvable source, so the return fizzles and the permanent is stranded
+        // in exile. Detect that specific structural class — a prior "exile ~"
+        // (ChangeZone→Exile, SelfRef) followed by a TRANSFORMED return
+        // (ChangeZone→Battlefield, `enter_transformed`) — and bind to the source
+        // there too. The `enter_transformed` requirement keeps Cecil-style
+        // "untap ~. transform it" (ParentTarget) and plain "exile ~. return it"
+        // (Aetherling) untouched.
+        // Narrowly: only the BROKEN binding (`TriggeringSource`, which the
+        // CardDrawn/player-subject event cannot resolve — Tamiyo). Cards whose
+        // return already binds correctly (`TrackedSet`/`ParentTarget` — the
+        // saga and flip-walker classes like Azusa's Many Journeys, Jace, Vryn's
+        // Prodigy) are left untouched: they are bound by their own (working)
+        // rewrites and must not be re-pointed.
+        let exile_then_return_transformed = matches!(
+            &clause.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                enter_transformed: true,
+                ..
+            }
+        ) && clauses.last().is_some_and(|prev| {
+            matches!(
+                &prev.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        });
+        if (typed_trigger_subject || exile_then_return_transformed)
             && has_anaphoric_reference(&text_lower)
             && clauses
                 .last()
@@ -38840,6 +39297,117 @@ mod tests {
         );
     }
 
+    /// CR 603.6 + CR 603.7c + CR 702.26a: A self-referential *disjunctive* inline
+    /// delayed trigger ("when ~ <eventA> or <eventB>, that permanent …") must
+    /// capture BOTH disjuncts in `WhenNextEvent { trigger, or_trigger }` (the
+    /// single-event path silently dropped the second), with each disjunct scoped
+    /// to the source (`valid_card: SelfRef`), and bind the inner demonstrative
+    /// ("that permanent") to `ParentTarget` so the delayed trigger snapshots the
+    /// parent ability's target — not the trigger source. Building block for The
+    /// Pandorica's untap/leave re-entry clause.
+    #[test]
+    fn self_disjunctive_delayed_trigger_binds_both_events_and_parent_target() {
+        use crate::types::triggers::TriggerMode;
+        let e = parse_effect(
+            "When ~ becomes untapped or leaves the battlefield, that permanent phases in",
+        );
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &e
+        else {
+            panic!("Expected CreateDelayedTrigger, got {e:?}");
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            lifetime,
+        } = condition
+        else {
+            panic!("Expected WhenNextEvent condition, got {condition:?}");
+        };
+        // CR 603.7b: the re-entry trigger has no stated "this turn" duration, so
+        // per CR 603.7b it "will trigger only once—the next time its trigger
+        // event occurs" and must persist across turns; end-of-turn cleanup does
+        // not prune it before the source's later-turn untap / departure.
+        assert_eq!(
+            *lifetime,
+            DelayedTriggerLifetime::Persistent,
+            "open-ended re-entry trigger must be Persistent, not pruned at cleanup"
+        );
+        assert_eq!(trigger.mode, TriggerMode::Untaps);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let or_trigger = or_trigger
+            .as_ref()
+            .expect("the second disjunct must be captured");
+        assert_eq!(or_trigger.mode, TriggerMode::LeavesBattlefield);
+        assert_eq!(or_trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            matches!(
+                effect.effect.as_ref(),
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "inner phase-in must bind ParentTarget, got {:?}",
+            effect.effect
+        );
+    }
+
+    /// Regression guard: "when ~ leaves your graveyard or …" must NOT be
+    /// accepted as a LeavesBattlefield delayed trigger. The bare `tag("leaves")`
+    /// arm was removed from `parse_self_event_verb` because `scan_at_word_boundaries`
+    /// discards the remainder after a match — so "leaves your graveyard" would
+    /// have matched "leaves" and produced a false LeavesBattlefield trigger
+    /// (PR #4475 review comment by @matthewevans). The disjunctive parser must
+    /// fall through to `Effect::Unimplemented` for unsupported zone qualifiers.
+    #[test]
+    fn self_disjunctive_trigger_with_non_battlefield_leaves_is_unimplemented() {
+        let e = parse_effect(
+            "When ~ leaves your graveyard or becomes untapped, that permanent phases in",
+        );
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "graveyard-leaves disjunct must remain Unimplemented, got {e:?}"
+        );
+    }
+
+    /// Regression guard: a trailing qualifier after a recognized self-event verb
+    /// must NOT silently match as the bare verb. Before the `all_consuming` fix,
+    /// `scan_at_word_boundaries` would scan past `~ `, match `becomes untapped`,
+    /// discard `during your upkeep`, and return `TriggerMode::Untaps` — producing
+    /// `WhenNextEvent { Untaps, LeavesBattlefield }` for the whole disjunction.
+    /// After the fix, `scan_self_event_trigger` strips `~ ` and applies
+    /// `all_consuming(parse_self_event_verb)`, so the trailing qualifier causes
+    /// the first disjunct to fail and `parse_self_disjunctive_event_trigger`
+    /// returns `None`. The result must NOT be a `WhenNextEvent` with `Untaps` as
+    /// the first trigger — that was the false match the `all_consuming` guard
+    /// prevents. (PR #4475 round-2 review comment by @matthewevans.)
+    #[test]
+    fn self_disjunctive_trigger_trailing_qualifier_does_not_produce_false_untaps() {
+        use crate::types::triggers::TriggerMode;
+        let e = parse_effect(
+            "When ~ becomes untapped during your upkeep or leaves the battlefield, that permanent phases in",
+        );
+        // The old code produced WhenNextEvent { Untaps, LeavesBattlefield } by
+        // silently discarding " during your upkeep". The new all_consuming guard
+        // causes parse_self_disjunctive_event_trigger to return None for this
+        // input, so the result must NOT contain a WhenNextEvent with Untaps.
+        // Note: the fallback scan_delayed_condition_kind may still match
+        // "leaves the battlefield" within the condition text (a pre-existing
+        // issue with disjunctive condition texts), but the false Untaps match
+        // from scan_self_event_trigger is no longer produced.
+        assert!(
+            !matches!(
+                &e,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+                    ..
+                } if trigger.mode == TriggerMode::Untaps
+            ),
+            "qualified 'becomes untapped during ...' must NOT produce a false WhenNextEvent {{Untaps}} trigger, got {e:?}"
+        );
+    }
+
     /// Player-phasing parser plumbing: "you phase out" lifts the bare-pronoun
     /// "you" subject to `TargetFilter::Controller` so the resolver phases out
     /// the ability's controller player. This is the parser-side foundation
@@ -40437,6 +41005,109 @@ mod tests {
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0)
             }
+        );
+    }
+
+    /// CR 702.143d: The Foretold Soldier — "exile it face down. It becomes
+    /// foretold." The second sentence must chain a `GrantCastingPermission`
+    /// with `CastingPermission::Foretold` onto the exile (mirroring the plotted
+    /// path), not fall through to an unimplemented "become" gap.
+    #[test]
+    fn parse_exile_it_face_down_then_it_becomes_foretold() {
+        let def = parse_effect_chain(
+            "Exile it face down. It becomes foretold.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .expect("foretold grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        // `cost` is a parse-time placeholder filled at resolution from the
+        // card's own Foretell keyword; `turn_foretold` is stamped at resolution.
+        assert!(matches!(
+            permission,
+            CastingPermission::Foretold {
+                turn_foretold: 0,
+                ..
+            }
+        ));
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+
+        // No `Unimplemented` may remain anywhere in the resolved chain.
+        let mut cursor = Some(&def);
+        while let Some(node) = cursor {
+            assert!(
+                !matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "foretold chain must not contain Unimplemented: {:?}",
+                node.effect
+            );
+            cursor = node.sub_ability.as_deref();
+        }
+    }
+
+    /// CR 702.143d: Ethereal Valkyrie — "exile a card from your hand face down.
+    /// It becomes foretold. Its foretell cost is its mana cost reduced by {2}."
+    /// The effect-defined cost ("its foretell cost is...") is not yet
+    /// representable in `CastingPermission::Foretold`. The BecomesForetold
+    /// grant must be suppressed (strict failure) so the exiled card is never
+    /// castable from exile for the wrong {0} placeholder cost. The foretell
+    /// cost sentence should produce Unimplemented, accurately reflecting
+    /// unsupported coverage until effect-defined foretell cost expressions are
+    /// implemented.
+    #[test]
+    fn parse_becomes_foretold_with_cost_override_suppresses_grant() {
+        let def = parse_effect_chain(
+            "exile a card from your hand face down. It becomes foretold. Its foretell cost is its mana cost reduced by {2}.",
+            AbilityKind::Spell,
+        );
+        // Walk the entire def chain: GrantCastingPermission::Foretold must not appear.
+        fn has_foretold_grant(def: &AbilityDefinition) -> bool {
+            if matches!(
+                def.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Foretold { .. },
+                    ..
+                }
+            ) {
+                return true;
+            }
+            def.sub_ability.as_deref().is_some_and(has_foretold_grant)
+        }
+        assert!(
+            !has_foretold_grant(&def),
+            "effect-defined foretell cost must suppress GrantCastingPermission::Foretold; \
+             got: {:#?}",
+            def
+        );
+        // The chain must contain Unimplemented (honestly reflecting the gap).
+        fn has_unimplemented(def: &AbilityDefinition) -> bool {
+            if matches!(def.effect.as_ref(), Effect::Unimplemented { .. }) {
+                return true;
+            }
+            def.sub_ability.as_deref().is_some_and(has_unimplemented)
+        }
+        assert!(
+            has_unimplemented(&def),
+            "effect-defined foretell cost sentence must produce Unimplemented; \
+             got: {:#?}",
+            def
         );
     }
 
@@ -47897,6 +48568,57 @@ mod tests {
     }
 
     #[test]
+    fn that_player_cant_attack_branches_on_duration_phrase() {
+        use crate::types::triggers::AttackTargetFilter;
+        // Sandswirl Wanderglyph trigger child (after the trigger strips "they"):
+        // "can't attack you or planeswalkers you control this turn" → end-of-CURRENT-
+        // turn ban (no next-turn duration), defended = you OR your planeswalkers.
+        let this_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "can't attack you or planeswalkers you control this turn",
+            "can't attack you or planeswalkers you control this turn",
+        ))
+        .expect("'... this turn' must parse");
+        assert!(
+            this_turn.duration.is_none(),
+            "the 'this turn' branch must NOT carry a next-turn duration (got {:?})",
+            this_turn.duration
+        );
+        assert!(
+            matches!(
+                this_turn.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::Attack {
+                            defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "got {:?}",
+            this_turn.effect
+        );
+        // Willie Lumpkin: "... during their next turn" → next-turn duration. This is
+        // the DISCRIMINATOR — swapping the two duration branches flips this assertion
+        // (revert-probe: a swap makes exactly one of these two asserts fail).
+        let next_turn = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+            "that player can't attack you during their next turn",
+            "that player can't attack you during their next turn",
+        ))
+        .expect("'... during their next turn' must parse");
+        assert!(
+            matches!(
+                next_turn.duration,
+                Some(Duration::UntilEndOfNextTurnOf { .. })
+            ),
+            "the 'next turn' branch must carry UntilEndOfNextTurnOf (got {:?})",
+            next_turn.duration
+        );
+    }
+
+    #[test]
     fn figure_of_fable_source_matches_filter_condition() {
         // CR 608.2c: "If this creature is a Scout, ..." gates on source subtype.
         let def = parse_effect_chain(
@@ -51646,6 +52368,42 @@ mod tests {
     }
 
     #[test]
+    fn perpetual_parser_maps_become_type_change() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::keywords::Keyword;
+
+        let e = parse_effect(
+            "~ perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying.",
+        );
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::Become {
+                    creature_subtypes,
+                    power: 4,
+                    toughness: 4,
+                    keywords,
+                },
+                ..
+            } if creature_subtypes == vec!["Boar".to_string(), "Spirit".to_string()]
+                && keywords == vec![Keyword::Flying]
+        ));
+
+        let e = parse_effect("~ perpetually becomes a Dragon, gets +3/+3.");
+        assert!(
+            !matches!(
+                e,
+                Effect::ApplyPerpetual {
+                    modification: PerpetualModification::Become { .. },
+                    ..
+                }
+            ),
+            "compound P/T riders must not parse as Become, got {e:?}"
+        );
+    }
+
+    #[test]
     fn intensify_parser_maps_source_and_owned_scopes() {
         let e = parse_effect("This creature intensifies by 2.");
         assert!(matches!(
@@ -53200,6 +53958,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);
@@ -53246,6 +54005,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);
@@ -53299,6 +54059,7 @@ mod tests {
         let DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } = condition
         else {
             panic!("expected WhenNextEvent, got {:?}", condition);

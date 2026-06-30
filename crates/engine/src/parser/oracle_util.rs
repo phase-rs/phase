@@ -587,6 +587,64 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     Some((QuantityExpr::Fixed { value: base }, rest))
 }
 
+/// Typed signal distinguishing which count-word `parse_count_expr` consumed.
+///
+/// The numeric value of a count is the same whether the text said "a", "an",
+/// "1", "any", or "another" — all yield `QuantityExpr::Fixed { value: 1 }`. But
+/// "another" is not merely a quantity: it is the source-exclusion qualifier.
+/// Callers that build a target from the remainder need to re-apply that
+/// exclusion (`FilterProp::Another`) to the parsed filter, and they must
+/// distinguish the exclusion word from an ordinary article without re-matching
+/// the raw string at the call site (CLAUDE.md forbids stringly-typed dispatch).
+/// This enum is that typed signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountWord {
+    /// The count word was the source-exclusion "another" — the consuming caller
+    /// must re-apply `FilterProp::Another` to the target it builds.
+    SourceExclusion,
+    /// Any other count form (article "a"/"an", a digit/word number, "X", "any",
+    /// a fraction, an arithmetic offset, etc.) — no source exclusion implied.
+    Plain,
+}
+
+/// Sibling of [`parse_count_expr`] that additionally reports, via a typed
+/// [`CountWord`], whether the consumed count word was the source-exclusion
+/// "another" (as opposed to "a"/"an"/a number/"X"/"any"/a fraction).
+///
+/// Used by the sacrifice imperative path, where "sacrifice another creature or
+/// land" must re-apply `FilterProp::Another` to the parsed target so the source
+/// can't sacrifice itself (Morkrut Necropod, #4513). It dispatches the
+/// source-exclusion "another " via a nom `tag()` BEFORE delegating to
+/// `parse_count_expr` for every other count form, so the numeric result is
+/// identical to `parse_count_expr` and the only addition is the typed word
+/// signal. The remainder shape (leading whitespace trimmed) matches
+/// `parse_count_expr` exactly.
+pub(crate) fn parse_count_expr_with_exclusion(
+    text: &str,
+) -> Option<(QuantityExpr, &str, CountWord)> {
+    let text = text.trim_start();
+    let lower = text.to_lowercase();
+    // Source-exclusion "another " — implicit count of 1 that ALSO excludes
+    // the ability source from the matched set.
+    // Detected here as a typed `CountWord::SourceExclusion` so the caller can
+    // re-apply `FilterProp::Another` without re-matching the string.
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, OracleError<'_>>("another "),
+        )
+        .parse(i)
+    }) {
+        return Some((
+            QuantityExpr::Fixed { value: 1 },
+            rest.trim_start(),
+            CountWord::SourceExclusion,
+        ));
+    }
+    let (expr, rest) = parse_count_expr(text)?;
+    Some((expr, rest, CountWord::Plain))
+}
+
 /// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
 /// (already-lowercased) text following a bare `X`, returning the lowercase
 /// description that defines the variable. Shared by every count-position

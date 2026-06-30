@@ -14,6 +14,7 @@ use super::super::oracle_util::{contains_possessive, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
@@ -26,6 +27,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -389,7 +391,13 @@ fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     &cursor.effect
 }
 
-fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
+/// CR 608.2c: Resolve the grant target for an exile-zone cast-permission
+/// designation continuation ("it becomes plotted" / "it becomes foretold").
+/// Generic over the designation — a tracked-set exile binds the grant to the
+/// just-published set (`TrackedSetId(0)` sentinel); a single-object exile binds
+/// to the parent target (which falls back to the ability source for anaphoric
+/// "it" with no explicit target slot).
+fn exile_designation_grant_target(previous: &AbilityDefinition) -> TargetFilter {
     match deepest_effect(previous) {
         Effect::ChangeZone {
             destination: Zone::Exile,
@@ -439,6 +447,45 @@ fn parse_becomes_plotted_continuation(lower: &str) -> bool {
     ))
     .parse(text)
     .is_ok()
+}
+
+fn parse_becomes_foretold_continuation(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before all_consuming
+    let text = lower.trim().trim_end_matches('.').trim();
+    // CR 702.143d: Accept an optional "if you do," gate for symmetry with the
+    // plotted grammar (a future "you may exile a card. If you do, it becomes
+    // foretold." card slots in here). The continuation already attaches after
+    // the preceding exile instruction, so the gate prefix is part of the same
+    // become-foretold continuation grammar.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes foretold")),
+            value((), tag("that card becomes foretold")),
+            value((), tag("they become foretold")),
+        )),
+    ))
+    .parse(text)
+    .is_ok()
+}
+
+/// Detects "its foretell cost is <cost specification>" — an effect-defined
+/// foretell cost sentence (e.g. Ethereal Valkyrie: "Its foretell cost is its
+/// mana cost reduced by {2}."). When this sentence follows a
+/// `BecomesForetold` continuation, the cost-bearing form is not yet
+/// representable in `CastingPermission::Foretold`; the grant must be
+/// suppressed to avoid emitting a wrong zero-cost permission
+/// (CR 702.143d: effect-defined foretell costs are a separate class from
+/// printed `Keyword::Foretell` costs).
+pub(super) fn is_foretell_cost_override_sentence(lower: &str) -> bool {
+    // allow-noncombinator: punctuation cleanup before prefix check
+    let text = lower.trim().trim_end_matches('.').trim();
+    tag::<_, _, OracleError<'_>>("its foretell cost is ")
+        .parse(text)
+        .is_ok()
 }
 
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
@@ -549,6 +596,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chars = text.chars().peekable();
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
+    // CR 111.3 (issue #4605): a created token has the abilities defined in its
+    // creation effect. Tracks whether the currently-open single-quoted span is a
+    // genuine NESTED ability quote — the inner ability of a token/permanent
+    // created inside a double-quoted granted ability (Urza's Saga:
+    // `... gains "... create a token with 'X.'"`). Only an anchored opener
+    // (`with '` / `and '` / `or '` / `, '`) opens such a span; a possessive or
+    // contraction apostrophe (`~'s`, `can't`) does not. Inside a genuine ability
+    // quote a `.` is part of the quoted text, NOT a sentence boundary.
+    let mut single_quote_is_ability = false;
     let mut in_double_quote = false;
     // CR 109.5 + CR 115.1: once a compound-subject-each head ("you and" / "~ and"
     // followed by "<noun> each") is detected, keep the WHOLE distributed body
@@ -580,7 +636,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 if is_possessive_apostrophe(&current, chars.peek().copied()) {
                     current.push(ch);
                 } else {
-                    in_single_quote = !in_single_quote;
+                    if in_single_quote {
+                        in_single_quote = false;
+                        single_quote_is_ability = false;
+                    } else {
+                        in_single_quote = true;
+                        // Anchor mirrors `extract_token_static_abilities`'s
+                        // single-quote pass: only `with '` / `and '` / `or '` /
+                        // `, '` opens a genuine nested ability span.
+                        single_quote_is_ability = ends_with_single_quote_ability_anchor(&current);
+                    }
                     current.push(ch);
                 }
             }
@@ -631,8 +696,18 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             // split here and reset the phantom single-quote state.
             // `in_double_quote` (a genuine quoted ability) still suppresses the
             // split.
-            '.' if paren_depth == 0 && !in_double_quote => {
+            // CR 111.3 (issue #4605): inside a genuine nested ability quote
+            // (`single_quote_is_ability`) the `.` belongs to the quoted text
+            // (`... with 'This token gets +1/+1 for each artifact you control.'`)
+            // and must NOT close the clause — otherwise the span is bisected and
+            // the token-creation effect loses its inner ability (and dispatches
+            // to the inner `Pump` instead of `Token`).
+            '.' if paren_depth == 0
+                && !in_double_quote
+                && !(in_single_quote && single_quote_is_ability) =>
+            {
                 in_single_quote = false;
+                single_quote_is_ability = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
@@ -1759,6 +1834,33 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
     .parse(rest)
 }
 
+/// CR 608.2c + CR 122.1: "remove <quantity> <type> counter[s] [from it]" as a
+/// bare-`" and "` conjunct is an independent imperative instruction, not a
+/// noun-phrase continuation of the prior conjunct. Amy Pond: "choose a suspended
+/// card you own and remove that many time counters from it" — without this split
+/// the counter-removal clause is swallowed and never reaches the RemoveCounter
+/// dispatcher. The discriminator is a `counter` token within THIS conjunct's
+/// segment (bounded at the next `" and "` boundary so a later unrelated
+/// `counter`/`counter target` token can't trigger a false split), which keeps
+/// non-counter `remove ` conjuncts ("remove it from combat" — Gustcloak) on the
+/// un-split path. Mirrors the trailing `.or()` arms
+/// (`starts_target_continuous_clause_lower`) rather than expanding the verb-prefix
+/// `alt(...)` tuple, which is already at nom's arity limit.
+fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("remove ").parse(s)?;
+    // Bound the counter-token search to THIS conjunct segment only, so a
+    // "counter" token in a LATER conjunct ("remove it from combat and counter
+    // target spell") cannot trigger a false split.
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    // Check on the bounded segment but return `rest` (not the truncated segment
+    // remainder) as the remaining input — correct nom discipline.
+    let _ = value((), (take_until("counter"), tag("counter"))).parse(segment)?;
+    Ok((rest, ()))
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -2038,6 +2140,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
     // under nom's 21-arm limit.
     .or(value((), starts_each_player_predicate_clause_lower))
+    // CR 608.2c + CR 122.1: a bare "remove <quantity> <type> counter[s] …"
+    // conjunct is an independent counter-removal instruction (Amy Pond). Trailing
+    // `.or()` arm (mirroring `starts_target_continuous_clause_lower`) so the
+    // verb-prefix `alt(...)` cluster stays under nom's 21-arm limit.
+    .or(value((), starts_remove_counter_clause_lower))
     // CR 205.1a + CR 613.1d + CR 702.171b: a bare "becomes <descriptor>"
     // conjunct joined by " and " is a second animation/designation predicate whose
     // subject is carried over (anaphorically) from the prior conjunct — the same
@@ -2411,6 +2518,19 @@ fn starts_with_damage_clause(lower: &str) -> bool {
     } else {
         false
     }
+}
+
+/// CR 111.3 (issue #4605): true when the text accumulated right before an
+/// apostrophe ends at a phrase boundary that opens a nested quoted ability
+/// (`with '` / `and '` / `or '` / `, '`). Mirrors the opener anchors in
+/// `extract_token_static_abilities`'s single-quote pass, so a possessive
+/// (`~'s`) or contraction (`can't`) apostrophe is never treated as an
+/// ability-quote opener and a sentence-ending `.` keeps splitting normally.
+fn ends_with_single_quote_ability_anchor(current: &str) -> bool {
+    // allow-noncombinator: terminal suffix probe on the incremental chunk buffer during the char scan in `split_clause_sequence`, not parsing dispatch against raw oracle text (mirrors `current_ends_with_bare_and`).
+    ["with ", "and ", "or ", ", "]
+        .iter()
+        .any(|anchor| current.ends_with(anchor))
 }
 
 pub(super) fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
@@ -3327,7 +3447,29 @@ pub(super) fn apply_clause_continuation(
                 kind,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::Plotted { turn_plotted: 0 },
-                    target: plotted_grant_target(previous),
+                    target: exile_designation_grant_target(previous),
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+            );
+            append_definition_to_sub_chain(previous, grant_def);
+        }
+        ContinuationAst::BecomesForetold => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 702.143d: The card becomes foretold. `cost` is a placeholder
+            // filled at resolution from the card's own Foretell keyword
+            // (`casting::foretell_cost`, the single authority for "any foretell
+            // cost it has"); `turn_foretold` is stamped at resolution, mirroring
+            // Plotted's `turn_plotted: 0` placeholder.
+            let grant_def = AbilityDefinition::new(
+                kind,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Foretold {
+                        cost: ManaCost::zero(),
+                        turn_foretold: 0,
+                    },
+                    target: exile_designation_grant_target(previous),
                     grantee: PermissionGrantee::ObjectOwner,
                 },
             );
@@ -3674,6 +3816,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::BecomesPlotted => true,
+        ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -4670,6 +4813,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -4986,6 +5130,11 @@ pub(super) fn parse_followup_continuation_ast(
                 position: parse_put_chosen_cards_at_library_position(&lower)
                     .expect("guard parsed position"),
             })
+        }
+        Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
+            if parse_becomes_foretold_continuation(&lower) =>
+        {
+            Some(ContinuationAst::BecomesForetold)
         }
         Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
             if parse_becomes_plotted_continuation(&lower) =>
@@ -5934,10 +6083,96 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
     }
 }
 
+/// CR 608.2c + CR 601.2c: Parse "[then] target opponent does the same / does so."
+/// — an effect-replication directive (The Wedding of River Song). The clause has
+/// no effect of its own; it *would* replicate the immediately-preceding sibling
+/// clause for a targeted opponent. NOT YET IMPLEMENTED: there is no
+/// `SpecialClause::DoesTheSame` variant and no antecedent-cloning lowering. The
+/// chunk loop instead emits a *documented* `Effect::Unimplemented` (keyed by
+/// `does_the_same_unimplemented_name`) for a recognized match — a typed
+/// strict-failure, never a silent misparse. The future fix (a `DoesTheSame`
+/// special clause whose lowering clones the antecedent action and retargets it
+/// onto the opponent's own objects, CR 608.2d) is tracked as backlog work; the
+/// typed `DoesTheSameSubject` return is preserved so it can slot in cleanly.
+///
+/// Combinators only — `opt`/`value`/`tag`/`alt`. The whole chunk must be consumed
+/// (modulo a trailing period) so unrelated phrases ("… at the same time", "does
+/// the same for enchantment cards") fall through to normal dispatch rather than
+/// being silently swallowed. The "each opponent … does the same" player-set
+/// fanout is a deferred sibling of `DoesTheSameSubject` (see its doc comment).
+pub(super) fn try_parse_does_the_same_clause(text: &str) -> Option<DoesTheSameSubject> {
+    let lower = text.to_lowercase();
+    let (subject, rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, subject) =
+            value(DoesTheSameSubject::TargetOpponent, tag("target opponent")).parse(i)?;
+        // Prefix nesting (sum, not product): " do" + optional "es" +
+        // (" the same" | " so") covers does/do × the-same/so.
+        let (i, _) = tag(" do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag(" the same"), tag(" so"))).parse(i)?;
+        Ok((i, subject))
+    })?;
+    if rest.trim().trim_end_matches('.').trim().is_empty() {
+        Some(subject)
+    } else {
+        None
+    }
+}
+
+/// Stable `Effect::Unimplemented` name for a recognized-but-deferred "does the
+/// same" subject. The replication's runtime needs cross-cutting engine targeting
+/// work (mid-chain `TargetOnly` slot collection + opponent-choice routing), so
+/// the clause is emitted as a *documented* strict-failure keyed on the typed
+/// subject — never a silently-degenerate misparse.
+pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> String {
+    match subject {
+        DoesTheSameSubject::TargetOpponent => "target_opponent_does_the_same".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
+    // the preceding sibling effect for a targeted opponent. The recognizer must
+    // accept the "does the same", "does so", and leading-"then" phrasings.
+    #[test]
+    fn does_the_same_recognizes_target_opponent_phrasings() {
+        for phrasing in [
+            "target opponent does the same",
+            "Then target opponent does the same.",
+            "then target opponent does so",
+            "Target opponent does so.",
+        ] {
+            assert_eq!(
+                try_parse_does_the_same_clause(phrasing),
+                Some(DoesTheSameSubject::TargetOpponent),
+                "should recognize {phrasing:?}"
+            );
+        }
+    }
+
+    // Guard: the recognizer must NOT swallow unrelated "same" phrases or a
+    // "does the same for <category>" player-set/category fanout (deferred), so
+    // they fall through to normal dispatch instead of being silently dropped.
+    #[test]
+    fn does_the_same_rejects_unrelated_phrases() {
+        for phrasing in [
+            "all changes happen at the same time",
+            "target opponent does the same for enchantment cards",
+            "each opponent does the same",
+            "target opponent draws a card",
+        ] {
+            assert_eq!(
+                try_parse_does_the_same_clause(phrasing),
+                None,
+                "should reject {phrasing:?}"
+            );
+        }
+    }
 
     // CR 701.13 + CR 608.2c: verb-gapping in a conjoined exile — "exile a Human
     // you control and an artifact you control" splits into two clauses, the
@@ -9138,6 +9373,59 @@ mod tests {
         ));
         // Possessive noun phrase — not a predicate clause.
         assert!(!starts_bare_and_clause("each opponent's creatures"));
+    }
+
+    /// CR 608.2c + CR 122.1: a bare "remove <quantity> <type> counter[s] …"
+    /// conjunct is an independent clause start (Amy Pond's "choose a suspended
+    /// card you own and remove that many time counters from it"). The "counter"
+    /// token within the conjunct is the discriminator; a non-counter "remove …"
+    /// continuation (Gustcloak's "remove it from combat") is left un-split.
+    #[test]
+    fn bare_and_clause_starts_on_remove_counter() {
+        assert!(starts_bare_and_clause(
+            "remove that many time counters from it"
+        ));
+        assert!(starts_bare_and_clause("remove a +1/+1 counter"));
+        assert!(starts_bare_and_clause("remove two time counters from it"));
+        // NO-REGRESSION negatives: non-counter "remove …" conjuncts stay un-split.
+        assert!(!starts_bare_and_clause("remove it from combat"));
+        assert!(!starts_bare_and_clause(
+            "remove that creature from the game"
+        ));
+        // The counter token must be in THIS conjunct, not a later one: a
+        // non-counter "remove" segment whose downstream conjunct mentions a
+        // "counter" must not false-split.
+        assert!(!starts_bare_and_clause(
+            "remove it from combat and counter target spell"
+        ));
+    }
+
+    /// Regression evidence for the four cards flagged in the §C parse-diff
+    /// report (Magma Pummeler, Midnight Oil, Ventifact Bottle, Jumbo Imp).
+    /// Each card's "and remove … counter" conjunct IS a genuine independent
+    /// instruction in the Oracle text, so splitting it is semantically correct
+    /// and improves coverage — the pre-PR parse silently dropped the counter
+    /// removal from all four. These asserts document the INTENDED behavior and
+    /// serve as evidence that the drift is expected, not a regression.
+    #[test]
+    fn remove_counter_split_expected_drift_cards() {
+        // Magma Pummeler: "prevent that damage and remove that many +1/+1
+        // counters from it" — conjunct passed to starts_bare_and_clause.
+        assert!(starts_bare_and_clause(
+            "remove that many +1/+1 counters from it"
+        ));
+        // Midnight Oil: "draw an additional card and remove two hour counters
+        // from this enchantment" — counter-removal is a separate instruction.
+        assert!(starts_bare_and_clause(
+            "remove two hour counters from this enchantment"
+        ));
+        // Ventifact Bottle: "tap it and remove all charge counters from it".
+        assert!(starts_bare_and_clause("remove all charge counters from it"));
+        // Jumbo Imp: "roll a six-sided die and remove a number of +1/+1
+        // counters from this creature equal to the result".
+        assert!(starts_bare_and_clause(
+            "remove a number of +1/+1 counters from this creature equal to the result"
+        ));
     }
 
     /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each

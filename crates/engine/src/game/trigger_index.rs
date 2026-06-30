@@ -466,6 +466,10 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
         GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
+        // CR 702.143c: "becomes foretold" via an effect is NOT the foretell
+        // special action, so it produces no trigger key (a "whenever you
+        // foretell a card" trigger must not fire).
+        GameEvent::BecameForetold { .. } => {}
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
             if let Some(obj) = state.objects.get(object_id) {
@@ -831,6 +835,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ProcessRadCounters
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
+        | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
         | EffectKind::ChooseAndSacrificeRest
         | EffectKind::Exploit

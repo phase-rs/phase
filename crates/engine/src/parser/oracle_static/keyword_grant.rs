@@ -728,47 +728,71 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
     Some(TargetFilter::Typed(typed))
 }
 
-/// CR 613.1f + CR 113.3: Recognize "[~ has] all activated abilities of [source]"
-/// and return the provider `source` filter for `GrantAllActivatedAbilitiesOf`.
-///
-/// The source-set axis is parameterized as a `TargetFilter` and composed from
-/// nom combinators along three independent dimensions: the optional leading verb
-/// (`has`/`have`, present in the real card path `"~ has all activated abilities
-/// of …"` but absent in the bare-predicate building-block path), the
-/// "all activated abilities of" grant phrase, and the source-set noun phrase:
-///
-/// - `the exiled card` / `all [creature] cards exiled with it/~` →
-///   `ExiledBySource`, narrowed to `And { [Typed(creature), ExiledBySource] }`
-///   when a card-type qualifies the exiled cards (Agatha's Soul Cauldron grants
-///   only *creature* cards' abilities; Myr Welder / Territory Forge are untyped).
-/// - `creatures you control that don't have the same name as it/~` →
-///   `Typed(creature, controller=You, [Not { SameName }])` (Marvin, Murderous
-///   Mimic). `SameName` reads the recipient's name at expansion time, so
-///   `Not { SameName }` excludes same-named creatures per Marvin's wording.
-///
-/// Returns `None` for forms still needing extra infrastructure ("the last chosen
-/// card" — needs persistent chosen-object tracking; counter-gated exile sets) so
-/// they stay a loud gap rather than over-granting.
-fn parse_grant_all_activated_abilities_source(
-    lower: &str,
-) -> Option<crate::types::ability::TargetFilter> {
-    let p = lower.trim().trim_end_matches('.').trim();
-    all_consuming(preceded(
-        (
-            opt(alt((tag::<_, _, OracleError<'_>>("has "), tag("have ")))),
-            // CR 613.1f: plural ("all activated abilities of") and the singular
-            // distributive ("each activated ability of", Locus of Enlightenment)
-            // grant the same set — both leaves of the grant-phrase axis.
+/// CR 602.1 + CR 603.1: The set of ability categories a "[~ has] all
+/// [activated|triggered|activated and triggered] abilities of [source]" grant
+/// donates. Activated and triggered abilities land in different stores via
+/// different continuous modifications (`GrantAllActivatedAbilitiesOf` →
+/// `obj.abilities`; `GrantAllTriggeredAbilitiesOf` → `obj.trigger_definitions`),
+/// so the parser captures which categories the phrase named.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantedAbilityKinds {
+    Activated,
+    Triggered,
+    ActivatedAndTriggered,
+}
+
+/// CR 602.1 + CR 603.1: The grant-phrase category axis. The conjunction form
+/// ("activated and triggered" / "triggered and activated", order-insensitive) is
+/// tried before the single-category leaves so the longer phrase wins. The plural
+/// and the singular-distributive activated form ("each activated ability of",
+/// Locus of Enlightenment) map to the same activated set.
+fn parse_granted_ability_kinds(input: &str) -> OracleResult<'_, GrantedAbilityKinds> {
+    alt((
+        value(
+            GrantedAbilityKinds::ActivatedAndTriggered,
+            alt((
+                tag("all activated and triggered abilities of "),
+                tag("all triggered and activated abilities of "),
+            )),
+        ),
+        value(
+            GrantedAbilityKinds::Triggered,
+            tag("all triggered abilities of "),
+        ),
+        value(
+            GrantedAbilityKinds::Activated,
             alt((
                 tag("all activated abilities of "),
                 tag("each activated ability of "),
             )),
         ),
+    ))
+    .parse(input)
+}
+
+/// CR 613.1f + CR 113.3: Recognize "[~ has] all [category] abilities of [source]"
+/// and return the donated category set plus the provider `source` filter.
+///
+/// Composed from nom combinators along three independent axes: the optional
+/// leading verb (`has`/`have`), the category axis ([`parse_granted_ability_kinds`]),
+/// and the source-set noun phrase ([`grant_source_noun_phrase`]) —
+/// `ExiledBySource` (Myr Welder / Agatha), the same-name exclusion (Marvin),
+/// `ChosenCard` ("the last chosen card", Koh), etc.
+///
+/// Returns `None` for forms still needing extra infrastructure (counter-gated
+/// exile sets) so they stay a loud gap rather than over-granting.
+fn parse_grant_all_abilities_clause(
+    lower: &str,
+) -> Option<(GrantedAbilityKinds, crate::types::ability::TargetFilter)> {
+    let p = lower.trim().trim_end_matches('.').trim();
+    all_consuming((
+        opt(alt((tag::<_, _, OracleError<'_>>("has "), tag("have ")))),
+        parse_granted_ability_kinds,
         grant_source_noun_phrase,
     ))
     .parse(p)
     .ok()
-    .map(|(_, source)| source)
+    .map(|(_, (_, kinds, source))| (kinds, source))
 }
 
 /// CR 602.5b + CR 602.5c: The "you may activate each of those abilities only once
@@ -942,6 +966,11 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ])),
             tag("all artifact cards in your graveyard"),
         ),
+        // CR 613.1f + CR 611.2c: "the last chosen card" (Koh, the Face Stealer) —
+        // the single card most recently recorded on the host via
+        // `Effect::RememberCard` (`ChosenAttribute::Card`). Resolved live each
+        // layer pass by `TargetFilter::ChosenCard`.
+        value(TargetFilter::ChosenCard, tag("the last chosen card")),
     ))
     .parse(input)
 }
@@ -1071,16 +1100,37 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let unquoted_lower = unquoted_text.to_lowercase();
     let unquoted_tp = TextPair::new(&unquoted_text, &unquoted_lower);
 
-    // CR 613.1f + CR 113.3: "all activated abilities of [the exiled card | all
-    // cards exiled with it]" — grant the host all activated abilities of the
-    // cards exiled with it (Myr Welder, Territory Forge). First pass recognizes
-    // only the exact `ExiledBySource` forms; typed ("creature cards exiled with
-    // it"), counter-gated, and battlefield sources stay a gap (follow-ups).
-    if let Some(source) = parse_grant_all_activated_abilities_source(unquoted_tp.lower) {
+    // CR 613.1f + CR 113.3: "all [activated|triggered|activated and triggered]
+    // abilities of [the exiled card | all cards exiled with it | the last chosen
+    // card | …]" — grant the host the named ability categories of the source set
+    // (Myr Welder / Agatha activated; Koh, the Face Stealer activated AND
+    // triggered, source = the last chosen card). Typed/counter-gated sources stay
+    // a gap (follow-ups).
+    if let Some((kinds, source)) = parse_grant_all_abilities_clause(unquoted_tp.lower) {
+        // CR 602.1 + CR 603.1: emit one continuous modification per donated
+        // category. Activated and triggered land in different stores, so a
+        // conjunction grant produces BOTH mods over the same `source`.
         // CR 602.5b: the grant sentence itself carries no use-restriction — the
         // once-per-turn cap (Locus) is folded in separately by `fold_grant_cap_rider`
-        // when the trailing rider sentence is present, so this stays uncapped.
-        return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap: None }];
+        // when the trailing rider sentence is present, so the activated grant stays
+        // uncapped; triggered abilities take no cap.
+        let mut mods = Vec::new();
+        if matches!(
+            kinds,
+            GrantedAbilityKinds::Activated | GrantedAbilityKinds::ActivatedAndTriggered
+        ) {
+            mods.push(ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: source.clone(),
+                cap: None,
+            });
+        }
+        if matches!(
+            kinds,
+            GrantedAbilityKinds::Triggered | GrantedAbilityKinds::ActivatedAndTriggered
+        ) {
+            mods.push(ContinuousModification::GrantAllTriggeredAbilitiesOf { source });
+        }
+        return mods;
     }
 
     // CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" / "gain all

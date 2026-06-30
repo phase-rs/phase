@@ -601,6 +601,12 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             | StaticMode::MayPlayAdditionalLand
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: "The top card of your
+            // library has plot" / "You may plot [filter] cards from the top of
+            // your library" — opt-in plot-from-library (Fblthp). The plot special
+            // action (CR 702.170b) is taken at the player's discretion.
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             // CR 702.8: "You may cast this spell as though it had flash" —
             // opt-in cast-timing permission.
             | StaticMode::CastWithFlash
@@ -649,6 +655,14 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
             // activated abilities; the permission is opt-in by the "you may" surface.
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            // CR 118.9 + CR 118.9b: "You may cast [this] without paying its mana
+            // cost" / "you may pay {0} rather than pay the mana cost" is an
+            // alternative cost, and alternative costs are generally optional — the
+            // "you may" permission is the static's entire semantic content
+            // (Omniscience, As Foretold, Zaffai). Mirrors the sibling permission
+            // modes above; without it the swallow auditor false-positives an
+            // Optional_YouMay clause and demotes the card from "supported."
+            | StaticMode::CastFromHandFree { .. }
     )
 }
 
@@ -1442,6 +1456,13 @@ fn detect_dynamic_qty(
         "SelfManaCost",
         "SelfManaValue",
         "TargetManaCost",
+        // CR 702.170a: "The plot cost is equal to its mana cost" — the plot cost
+        // is intrinsic to the `TopOfLibraryHasPlot` static (computed at synthesis
+        // from the live top card's mana_cost), not a stored `QuantityExpr`. The
+        // static's presence in the AST is the coverage marker, mirroring the
+        // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
+        // cost" (Fblthp, Lost on the Range).
+        "TopOfLibraryHasPlot",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -4810,6 +4831,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
+    /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
+    /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
+    /// raise a DynamicQty swallow warning — the static's presence is the carrier
+    /// (mirrors the SelfManaCost precedent). Reverting the marker re-reds Fblthp.
+    #[test]
+    fn dynamic_qty_accepts_plot_cost_equal_to_mana_cost() {
+        let parsed = parse_named(
+            "You may look at the top card of your library any time.\n\
+             The top card of your library has plot. The plot cost is equal to its mana cost.\n\
+             You may plot nonland cards from the top of your library.",
+            "Fblthp, Lost on the Range",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

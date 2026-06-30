@@ -2297,6 +2297,17 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.170b: plot is a special action that never uses the stack — it is
+    // intercepted in `handle_activate_ability` before any stack push. No current
+    // plot cost can pause (mana auto-pays, the self-exile auto-moves), so this
+    // cost-pause resume path is unreachable for plot. If a future plot variant
+    // carries a pausing sub-cost it would reach here — relocate the special-action
+    // guard to this chokepoint then.
+    debug_assert!(
+        !super::casting::effect_is_plot_grant(&resolved.effect),
+        "plot special action reached the cost-pause resume path; relocate the CR 702.170b intercept to this chokepoint"
+    );
+
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.

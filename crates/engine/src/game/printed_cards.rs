@@ -703,10 +703,11 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf only holds a source `TargetFilter`; the
-        // granted abilities are pulled live from the provider objects at layer
-        // collection time, not nested here.
+        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
+        // source `TargetFilter`; the granted abilities/triggers are pulled live
+        // from the provider objects at layer collection time, not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
@@ -1071,6 +1072,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

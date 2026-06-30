@@ -1538,16 +1538,23 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 603.7b + CR 513.2: Remove "this turn" delayed triggers at cleanup.
     // WheneverEvent (multi-fire, one_shot=false) triggers persist until cleanup.
-    // WhenNextEvent (one-shot) triggers that didn't fire also expire — their
-    // "this turn" duration means they must not carry over to the next turn.
-    // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is NOT a
-    // "this turn" trigger: the end step "doesn't back up", so it legitimately
+    // A `WhenNextEvent` one-shot that didn't fire expires ONLY when its lifetime
+    // is `ThisTurn` (CR 603.7b "stated duration, such as 'this turn'") — its
+    // "this turn" duration means it must not carry over. A `Persistent`
+    // `WhenNextEvent` (CR 603.7b, no stated duration — open-ended re-entry, The
+    // Pandorica's "when ~ becomes untapped or leaves the battlefield") has NO
+    // "this turn" limit and must survive.
+    // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is likewise NOT
+    // a "this turn" trigger: the end step "doesn't back up", so it legitimately
     // persists to the next turn's end step — it must survive this retain.
     state.delayed_triggers.retain(|dt| {
         dt.one_shot
             && !matches!(
                 dt.condition,
-                crate::types::ability::DelayedTriggerCondition::WhenNextEvent { .. }
+                crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+                    ..
+                }
             )
     });
 

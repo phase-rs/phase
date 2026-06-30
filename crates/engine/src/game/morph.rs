@@ -276,11 +276,22 @@ pub fn turn_face_up(
         ));
     }
 
+    // CR 613.7f: a permanent receives a new timestamp when it turns face up.
+    // (Turning face DOWN in place is unreachable in the engine today — only
+    // archenemy scheme `turn_face_down` exists, which is not a permanent event —
+    // so stamping the turn-face-up path covers the reachable case.) All error
+    // early-returns above precede this, so a blocked turn-up draws no timestamp.
+    // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
+    let ts = state.next_timestamp();
+
     // Restore original characteristics
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.face_down = false;
     apply_back_face_to_object(obj, back_face);
     obj.back_face = None;
+    // Written after `apply_back_face_to_object` so the back-face application
+    // (which does not touch `timestamp`) cannot clobber the new stamp.
+    obj.timestamp = ts;
 
     crate::game::layers::mark_layers_full(state);
 
@@ -644,6 +655,41 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    /// F1: turning a permanent face up issues a new timestamp (CR 613.7f). The
+    /// error early-returns (wrong controller / not face down / off battlefield)
+    /// all precede the write, so a rejected turn-up draws no timestamp.
+    /// Reverting Step 3 leaves the timestamp unchanged across the successful
+    /// turn-up, so the strict-increase assert fails.
+    #[test]
+    fn turn_face_up_bumps_timestamp_only_on_success() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        let ts_before = state.objects[&id].timestamp;
+
+        // Wrong controller: error before the write -> no timestamp drawn.
+        assert!(turn_face_up(&mut state, PlayerId(1), id, &mut events).is_err());
+        assert_eq!(
+            state.objects[&id].timestamp, ts_before,
+            "a rejected turn-up (wrong controller) must not draw a timestamp"
+        );
+
+        // Successful turn-up: new timestamp (CR 613.7f).
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert!(
+            state.objects[&id].timestamp > ts_before,
+            "turning face up must issue a new timestamp (CR 613.7f)"
+        );
+
+        // Already face up: not-face-down error before the write -> no further bump.
+        let ts_after = state.objects[&id].timestamp;
+        assert!(turn_face_up(&mut state, player, id, &mut events).is_err());
+        assert_eq!(state.objects[&id].timestamp, ts_after);
     }
 
     /// CR 116.2b + CR 708.7: Karlov Watchdog — "Permanents your opponents

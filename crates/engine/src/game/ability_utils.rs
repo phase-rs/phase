@@ -1697,6 +1697,26 @@ fn companion_target_player_legal_targets(
         })
 }
 
+/// CR 115.7 + CR 109.4: Legal replacement *players* for retargeting a stack
+/// entry whose only target is a player derived from a mass-effect population
+/// filter — e.g. "tap all creatures target player controls"
+/// (`SetTapState { scope: All }`), "destroy all artifacts that player controls"
+/// (`DestroyAll`). Such effects surface a player target slot via
+/// `effect_references_target_player`, but their `Effect::target_filter()`
+/// returns `None` (the `target` field is a resolution-time population scan, not
+/// a targeting filter). Returns `Some(legal players)` for that class so
+/// Deflecting Swat / Bolt Bend / Redirect can offer a different player, and
+/// `None` otherwise (the caller falls back to the effect's declared target
+/// filter). Reuses the same companion-slot authority the cast path uses so
+/// retargeting and casting can never disagree about who is targetable.
+pub(crate) fn companion_target_player_retarget_options(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<TargetRef>> {
+    ability_needs_companion_target_player_slot(ability)
+        .then(|| companion_target_player_legal_targets(state, ability))
+}
+
 fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -4802,9 +4822,14 @@ fn assign_targets_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
+            // CR 601.2c + issue #3864: An inheriting rider (Solitude's life-gain)
+            // surfaces no slot of its own, so it reserves no minimum here. Mirror
+            // the filter in `minimum_targets_in_chain`'s `rest` term and the
+            // step-by-step `assign_selected_slots_recursive` path.
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
+                .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
                 .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
@@ -5093,9 +5118,18 @@ fn assign_selected_slots_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
+            // CR 601.2c + issue #3864: A rider that inherits the parent's chosen
+            // creature ("exile up to one target creature. That creature's
+            // controller gains life equal to its power." — Solitude) surfaces no
+            // target slot of its own, so it reserves no minimum here. Filtering
+            // it out mirrors `minimum_targets_in_chain`'s own `rest` term; without
+            // the filter its phantom `Power{Target}` companion minimum (1) cancels
+            // this node's slot, leaving the chosen target unassigned and hard-
+            // erroring with "Unused selected target slots".
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
+                .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
                 .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);

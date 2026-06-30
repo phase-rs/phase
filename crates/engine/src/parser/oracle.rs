@@ -6215,6 +6215,83 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// As Foretold (WHO/AKH): the once-per-turn "pay {0} rather than pay the mana
+    /// cost" free-cast line is correctly UNSUPPORTED. As Foretold places no zone
+    /// restriction on which spell the cost applies to, but the engine's
+    /// `CastFromHandFree` runtime path only covers hand and command-zone origins
+    /// (CR 601.2a). Implementing it correctly requires a general once-per-turn
+    /// alternative-cost modifier that composes with every cast-permission origin
+    /// (graveyard, exile, etc.) — a cross-cutting runtime refactor. Until that
+    /// work lands, the free-cast line must fall to `Effect::Unimplemented` rather
+    /// than falsely claiming coverage via the wrong zone-scoped path.
+    ///
+    /// The upkeep time-counter trigger is a separate Oracle line and must still
+    /// parse. The swallow auditor is suppressed when any ability is Unimplemented
+    /// (architecture rule: explicit Unimplemented beats swallow-detector noise), so
+    /// no spurious `Optional_YouMay` warning fires.
+    #[test]
+    fn as_foretold_free_cast_line_is_unsupported() {
+        let r = parse(
+            "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.",
+            "As Foretold",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&ability.effect);
+            if let Some(sub) = &ability.sub_ability {
+                walk(sub, out);
+            }
+        }
+        let mut effects = Vec::new();
+        for ability in &r.abilities {
+            walk(ability, &mut effects);
+        }
+        // The free-cast line is Unimplemented — zone-unrestricted "{0}" alternative
+        // cost cannot be lowered onto CastFromHandFree without misrepresenting scope.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "As Foretold free-cast line must remain Effect::Unimplemented until \
+             a zone-agnostic alternative-cost modifier is implemented; got {effects:#?}"
+        );
+
+        // No spurious CastFromHandFree static must appear.
+        assert!(
+            r.statics
+                .iter()
+                .all(|s| !matches!(s.mode, StaticMode::CastFromHandFree { .. })),
+            "As Foretold must NOT produce a CastFromHandFree static (wrong zone scope); \
+             got {:?}",
+            r.statics
+        );
+
+        // The upkeep time-counter trigger must still parse correctly.
+        assert!(
+            r.triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+            "As Foretold must keep its upkeep Phase trigger, got {:?}",
+            r.triggers
+        );
+
+        // Swallow auditor is suppressed when Unimplemented is present, so no
+        // Optional_YouMay warning fires despite "you may" appearing in the oracle text.
+        assert!(
+            !r.parse_warnings.iter().any(|w| matches!(
+                w,
+                OracleDiagnostic::SwallowedClause { detector, .. }
+                    if detector == "Optional_YouMay"
+            )),
+            "Optional_YouMay must not fire when Unimplemented suppresses swallow checks; \
+             got {:?}",
+            r.parse_warnings
+        );
+    }
+
     /// Cavernous Maw (std BATCH 12): the `{2}` activated ability animates the
     /// land into a 3/3 Elemental creature, and the confirmatory "It's still a
     /// Cave land" sentence (CR 205.1b, CR 305.7) must NOT remain

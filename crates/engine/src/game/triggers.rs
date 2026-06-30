@@ -5066,6 +5066,7 @@ fn reflexive_coin_flip_resolved_without_match(
     let DelayedTriggerCondition::WhenNextEvent {
         trigger,
         or_trigger: None,
+        ..
     } = condition
     else {
         return false;
@@ -5193,6 +5194,7 @@ fn delayed_trigger_event(
         DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
+            ..
         } => events.iter().rev().find_map(|event| {
             for t in std::iter::once(trigger.as_ref()).chain(or_trigger.iter().map(|b| b.as_ref()))
             {

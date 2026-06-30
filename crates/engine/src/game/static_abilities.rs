@@ -165,6 +165,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::Lifelink, handle_static_lifelink);
     registry.insert(StaticMode::CantTap, handle_rule_mod);
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
+    // CR 702.26a + CR 101.2: CantPhaseIn — a continuous restriction that
+    // overrides the phase-in turn-based action. Runtime enforcement lives in
+    // phasing.rs (untap-step TBA) and effects/phase_out.rs (explicit PhaseIn).
+    registry.insert(StaticMode::CantPhaseIn, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
     // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
@@ -832,6 +836,71 @@ pub(crate) fn transient_grants_static_mode_to_object(
         }
     }
     false
+}
+
+/// CR 702.26a + CR 101.2 + CR 611.2b: True iff `object_id` currently has an
+/// *active* `CantPhaseIn` restriction. The Pandorica grants this as a
+/// `SpecificObject` transient continuous effect (`AddStaticMode { CantPhaseIn }`)
+/// whose `ForAsLongAs { SourceIsTapped }` duration is re-evaluated on every query
+/// (CR 611.2b), so the lock lifts the instant the source untaps or leaves the
+/// battlefield (CR 110.5d). Mirrors the `cant_untap_ids` raw-id scan in
+/// `turns.rs`, but evaluates the duration/condition gate that the untap scan
+/// leaves to the per-permanent `check_static_ability` pass.
+///
+/// Three classes are covered: (1) the `SpecificObject`-pinned transient grant
+/// (the Pandorica path, which `transient_grants_static_mode_to_object`
+/// deliberately skips); (2) any filter-scoped transient grant; and (3) a printed
+/// static (parity with the `CantUntap` intrinsic path, future-proofing).
+pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: ObjectId) -> bool {
+    let condition_holds = |duration: &Duration,
+                           condition: &Option<crate::types::ability::StaticCondition>,
+                           controller: PlayerId,
+                           source_id: ObjectId|
+     -> bool {
+        if let Duration::ForAsLongAs { condition } = duration {
+            if !evaluate_condition(state, condition, controller, source_id) {
+                return false;
+            }
+        }
+        if let Some(condition) = condition {
+            if !evaluate_condition(state, condition, controller, source_id) {
+                return false;
+            }
+        }
+        true
+    };
+
+    // (1) SpecificObject-pinned transient grant — the Pandorica lock.
+    let pinned = state.transient_continuous_effects.iter().any(|tce| {
+        matches!(tce.affected, TargetFilter::SpecificObject { id } if id == object_id)
+            && tce.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }
+                )
+            })
+            && condition_holds(&tce.duration, &tce.condition, tce.controller, tce.source_id)
+    });
+    if pinned {
+        return true;
+    }
+
+    // (2) Filter-scoped transient grant (already condition-gated internally).
+    if transient_grants_static_mode_to_object(state, object_id, &StaticMode::CantPhaseIn) {
+        return true;
+    }
+
+    // (3) Printed static (parity with the CantUntap intrinsic path).
+    check_static_ability(
+        state,
+        StaticMode::CantPhaseIn,
+        &StaticCheckContext {
+            target_id: Some(object_id),
+            ..Default::default()
+        },
+    )
 }
 
 /// CR 609.4b: Check if a player has an unfiltered ("any spell/cost")

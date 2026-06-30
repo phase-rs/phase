@@ -117,6 +117,56 @@ fn runtime_granted_graveyard_activated_abilities(
         .collect()
 }
 
+/// CR 702.170f + CR 702.170a: synthesize the plot special action as a runtime-
+/// granted activated ability on the *authorized top card* of a player's library
+/// (Fblthp, Lost on the Range). CR 702.170f authorizes plot to function from a
+/// zone other than hand (here the library) and to exile from that zone; the
+/// nonland eligibility is Fblthp's printed L4 scope (NOT a CR 702.170f clause),
+/// enforced by the delegated `top_of_library_plot_source` predicate. Returns
+/// `vec![]` for every object that is not the current authorized top card, so no
+/// non-top library card can ever carry a plot ability. Mirrors
+/// `runtime_granted_graveyard_activated_abilities`.
+///
+/// `activation_zone = Some(Zone::Library)` (set by `build_plot_activation`) is a
+/// first-of-its-kind value. It is safe ONLY because this ability is present
+/// exclusively on the positional top card — `top_of_library_plot_source`
+/// re-derives `library.front()` each call, so the activation gate's
+/// `obj.zone == Library` check passes just that one card. A future change that
+/// grants an ability with `activation_zone = Library` by a NON-positional path
+/// would authorize every library card; do not copy this value blindly.
+fn runtime_granted_top_of_library_plot_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    // Cheap zone guard before the battlefield scan: plot-from-library functions
+    // only in the Library zone (CR 702.170f).
+    if obj.zone != Zone::Library {
+        return Vec::new();
+    }
+    // CR 702.170d: the plot grant belongs to the library's owner — the player
+    // who may later cast the plotted card. Delegate authorization to the
+    // single-authority predicate; it must return exactly this top card.
+    let player = obj.owner;
+    let Some((top_id, _src_id)) = top_of_library_plot_source(state, player) else {
+        return Vec::new();
+    };
+    if top_id != source_id {
+        return Vec::new();
+    }
+    // CR 702.170a: plot cost = the card's mana cost, computed live from the top
+    // card (not stored on the static). CR 702.170f: the ability functions in,
+    // and exiles from, the Library zone. `build_plot_activation` is the single
+    // authority for the cost/effect shape (shared verbatim with hand-Plot).
+    vec![crate::database::synthesis::build_plot_activation(
+        obj.mana_cost.clone(),
+        Zone::Library,
+        Zone::Library,
+    )]
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -131,6 +181,13 @@ pub fn activated_ability_definitions(
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
             .chain(runtime_granted_graveyard_activated_abilities(
+                state, source_id,
+            ))
+            // CR 702.170f: plot-from-library (Fblthp) chained LAST — must use
+            // the identical append order in `activation_ability_definition` so
+            // the `ability_index` stays consistent between enumeration and
+            // activation. Empty for every object except the authorized top card.
+            .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
             .enumerate()
@@ -151,10 +208,15 @@ fn activation_ability_definition(
         let offset = ability_index.checked_sub(obj.abilities.len())?;
         // Must match the append order in `activated_ability_definitions`: printed
         // abilities first, then runtime-granted cycling, then runtime-granted
-        // graveyard activated (Encore/Scavenge).
+        // graveyard activated (Encore/Scavenge), then runtime-granted
+        // plot-from-library (Fblthp). Identical order is REQUIRED for
+        // `ability_index` consistency.
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
             .chain(runtime_granted_graveyard_activated_abilities(
+                state, source_id,
+            ))
+            .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
             .nth(offset)?
@@ -898,7 +960,11 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
         })
 }
 
-fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
+/// CR 702.143d: the single authority for "any foretell cost it has" — reads
+/// the printed `Keyword::Foretell` cost off an object. Shared between the
+/// foretell special action (`handle_foretell`) and the effect-driven "becomes
+/// foretold" grant (`effects::grant_permission`).
+pub(crate) fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
     obj.keywords.iter().find_map(|keyword| match keyword {
         Keyword::Foretell(cost) => Some(cost.clone()),
         _ => None,
@@ -2846,6 +2912,93 @@ pub(crate) fn top_of_library_permission_source(
         }
     }
     selected.map(|(src_id, frequency, alt_cost)| (top_id, src_id, frequency, alt_cost))
+}
+
+/// CR 702.170a + CR 702.170f: Return the `(top_library_card, grant_source)` pair
+/// when the player may take the plot special action on the top card of their
+/// library. Fblthp, Lost on the Range is the type specimen ("The top card of
+/// your library has plot." + "You may plot nonland cards from the top of your
+/// library.").
+///
+/// Plot-from-library is two distinct CR roles, modeled as two statics, and BOTH
+/// must hold for the top card:
+/// - GRANT (`StaticMode::TopOfLibraryHasPlot`, CR 702.170a) — the top card *has*
+///   the plot ability. Eligible iff the top card matches the UNION of all active
+///   grants' `affected` filters (Fblthp L3 = `Any`).
+/// - PERMISSION (`StaticMode::TopOfLibraryPlotPermission`, CR 702.170f) — an
+///   effect lets the plot ability function from a zone other than hand and
+///   permits taking the action there. Eligible iff the top card matches the
+///   UNION of all active permissions' `affected` filters (Fblthp L4 = nonland).
+///
+/// Requiring both is rules-correct: a grant alone leaves a plot ability that
+/// (CR 702.170a) only functions in hand, so a library card can't be plotted
+/// without a CR 702.170f permission; a permission alone has no plot ability to
+/// act on. UNION within each role means two INDEPENDENT plot-from-top sources
+/// each authorize their own eligibility (no cross-source veto), while AND across
+/// the two roles enforces "has plot" ∧ "may plot it here". For Fblthp the net
+/// eligible set is `Any ∩ nonland = nonland`; the nonland restriction is purely
+/// the permission's filter (Fblthp's printed L4) — CR 702.170f itself has no
+/// land/nonland clause, so there is NO separate hard-gate (a future land-
+/// permitting plot-from-top card would correctly allow lands).
+///
+/// Categorically distinct from [`top_of_library_permission_source`] (CR 601.2a —
+/// a `Library → Stack` cast with no exile). This authorizes the CR 702.170 plot
+/// special action: `Library → Exile` face up now, then a free `Exile → Stack`
+/// cast on a later turn. The positional top-only restriction (CR 702.170f — "the
+/// card is exiled from the zone it is in") lives HERE, not in the activation-zone
+/// gate; the top of library is re-derived each call because it changes between
+/// priority windows. The returned source is an authorizing grant permanent.
+pub(crate) fn top_of_library_plot_source(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<(ObjectId, ObjectId)> {
+    let player_data = state.players.iter().find(|p| p.id == player)?;
+    let &top_id = player_data.library.front()?;
+
+    // Scan the player's battlefield once, classifying active plot statics into
+    // the two CR roles and UNION-matching each role's `affected` filter against
+    // the current top card.
+    let mut grant_source: Option<ObjectId> = None; // first grant whose filter matches
+    let mut has_permission = false; // any permission whose filter matches
+    for &src_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&src_id) else {
+            continue;
+        };
+        if obj.controller != player {
+            continue;
+        }
+        for s in active_static_definitions(state, obj) {
+            let role_is_grant = match s.mode {
+                StaticMode::TopOfLibraryHasPlot => true,
+                StaticMode::TopOfLibraryPlotPermission => false,
+                _ => continue,
+            };
+            // A `None` filter means no restriction (matches any top card).
+            let matches = s.affected.as_ref().is_none_or(|f| {
+                super::filter::matches_target_filter(
+                    state,
+                    top_id,
+                    f,
+                    &super::filter::FilterContext::from_source_with_controller(src_id, player),
+                )
+            });
+            if !matches {
+                continue;
+            }
+            if role_is_grant {
+                grant_source.get_or_insert(src_id);
+            } else {
+                has_permission = true;
+            }
+        }
+    }
+
+    // CR 702.170a grant ∧ CR 702.170f permission: the top card must both HAVE
+    // plot and be permitted to be plotted from the library.
+    match grant_source {
+        Some(src_id) if has_permission => Some((top_id, src_id)),
+        _ => None,
+    }
 }
 
 /// CR 401.5 + CR 305.1: Return the top-of-library land + source pair when a
@@ -12492,21 +12645,30 @@ pub fn can_activate_ability_now(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.5 + CR 603.2a: Consult active CantBeActivated statics — a player can't
-    // begin to activate an ability that's prohibited from being activated. Note this
-    // only affects activated abilities (CR 603.2a: triggered abilities are unaffected
-    // and use SuppressTriggers instead).
-    // CR 605.1a: The ability definition is passed through so the prohibition can apply
-    // its mana-ability exemption (Pithing Needle class) via the single classifier authority.
-    if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
-        return false;
-    }
-    // CR 602.5 + CR 117.1b: Time-axis activation prohibition (City of Solitude class).
-    if is_blocked_by_cant_activate_during(state, player, &ability_def) {
-        return false;
-    }
-    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
-        return false;
+    // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not an activated
+    // ability, so the activated-ability prohibition gates must not block it. Mirrors
+    // the guard in `handle_activate_ability` so the legality gate and the runtime
+    // activation path agree (otherwise `candidates.rs` would never offer plot under a
+    // Pithing-Needle / City-of-Solitude / Damping-Matrix-class static while
+    // `handle_activate_ability` still permits it). Plot's timing is enforced by
+    // AsSorcery in check_activation_restrictions below, outside this guard.
+    if !is_plot_special_action(&ability_def) {
+        // CR 602.5 + CR 603.2a: Consult active CantBeActivated statics — a player can't
+        // begin to activate an ability that's prohibited from being activated. Note this
+        // only affects activated abilities (CR 603.2a: triggered abilities are unaffected
+        // and use SuppressTriggers instead).
+        // CR 605.1a: The ability definition is passed through so the prohibition can apply
+        // its mana-ability exemption (Pithing Needle class) via the single classifier authority.
+        if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
+            return false;
+        }
+        // CR 602.5 + CR 117.1b: Time-axis activation prohibition (City of Solitude class).
+        if is_blocked_by_cant_activate_during(state, player, &ability_def) {
+            return false;
+        }
+        if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+            return false;
+        }
     }
     if restrictions::check_activation_restrictions(
         state,
@@ -12726,27 +12888,36 @@ pub fn handle_activate_ability(
         )));
     }
 
-    // CR 602.5 + CR 603.2a: Reject activation if any CantBeActivated static prohibits
-    // the player from activating this permanent's activated abilities.
-    // CR 605.1a: The exemption gate (Pithing Needle's "unless they're mana abilities")
-    // is applied inside `is_blocked_by_cant_be_activated` via `mana_abilities::is_mana_ability`.
-    if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
-        return Err(EngineError::ActionNotAllowed(
-            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
-        ));
-    }
-    // CR 602.5 + CR 117.1b: Reject activation if any CantActivateDuring static
-    // prohibits activation during the current turn condition (City of Solitude class).
-    if is_blocked_by_cant_activate_during(state, player, &ability_def) {
-        return Err(EngineError::ActionNotAllowed(
-            "Activated abilities can't be activated during this turn (CR 602.5 + CR 117.1b)"
-                .to_string(),
-        ));
-    }
-    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents activating this ability".to_string(),
-        ));
+    // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the
+    // activation of an ability. CR 602.5/603.2a prohibitions ("can't activate
+    // abilities") are typed to activated abilities only, so none of the three gates
+    // below may block plot. Plot's own-turn / main-phase / empty-stack timing is
+    // enforced separately by ActivationRestriction::AsSorcery via
+    // check_activation_restrictions (below), which stays outside this guard — so
+    // skipping these gates loses no timing protection.
+    if !is_plot_special_action(&ability_def) {
+        // CR 602.5 + CR 603.2a: Reject activation if any CantBeActivated static
+        // prohibits the player from activating this permanent's activated abilities.
+        // CR 605.1a: The exemption gate (Pithing Needle's "unless they're mana
+        // abilities") is applied inside `is_blocked_by_cant_be_activated`.
+        if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
+            return Err(EngineError::ActionNotAllowed(
+                "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+            ));
+        }
+        // CR 602.5 + CR 117.1b: Reject activation if any CantActivateDuring static
+        // prohibits activation during the current turn condition (City of Solitude class).
+        if is_blocked_by_cant_activate_during(state, player, &ability_def) {
+            return Err(EngineError::ActionNotAllowed(
+                "Activated abilities can't be activated during this turn (CR 602.5 + CR 117.1b)"
+                    .to_string(),
+            ));
+        }
+        if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents activating this ability".to_string(),
+            ));
+        }
     }
 
     // CR 601.2f: Apply self-referential cost reduction before any cost payment.
@@ -13337,6 +13508,16 @@ pub fn handle_activate_ability(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
+            // CR 702.170b: plot's grant targets SelfRef (a context-ref), so
+            // `build_target_slots` yields no slot and plot never takes this target
+            // branch — it is intercepted in the no-target path below. Guard the
+            // invariant: a future plot variant reaching here would silently revert
+            // to the on-stack model, so relocate the intercept if this ever fires.
+            debug_assert!(
+                !is_plot_special_action(&ability_def),
+                "plot special action reached the target branch; SelfRef should suppress its target slot"
+            );
+
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
 
@@ -13426,6 +13607,25 @@ pub fn handle_activate_ability(
             )));
             return Ok(state.waiting_for.clone());
         }
+    }
+
+    // CR 702.170b + CR 116.2k: Exiling a card using its plot ability is a
+    // SPECIAL ACTION that doesn't use the stack. The self-exile cost paid above
+    // already moved the card to exile (face up — CR 702.170 has no face-down
+    // clause). Apply the `Plotted` grant IMMEDIATELY via the same single-
+    // authority resolver the stack would otherwise have used on resolution, then
+    // keep priority. No stack entry is created, and crucially no
+    // `AbilityActivated` event is emitted: plot is a special action, not an
+    // activated ability (CR 702.170b), so "whenever you activate an ability"
+    // triggers must not fire and per-turn activation caps (`record_ability_
+    // activation`) do not apply. `resolve` cannot fail for the SelfRef grant, but
+    // the Result is mapped to `EngineError` rather than unwrapped.
+    if is_plot_special_action(&ability_def) {
+        super::effects::grant_permission::resolve(state, &resolved, events).map_err(|e| {
+            EngineError::ActionNotAllowed(format!("plot special action failed: {e}"))
+        })?;
+        priority::clear_priority_passes(state);
+        return Ok(WaitingFor::Priority { player });
     }
 
     // Push to stack
@@ -13731,13 +13931,26 @@ fn apply_cost_reduction(
         }
     }
 
-    apply_static_activated_ability_cost_reduction(state, ability_def, source_id);
+    // CR 702.170b + CR 116.2k: Plot is a SPECIAL ACTION, not the activation of an
+    // ability. The activated-ability reducer's `keyword == "activated"` blanket arm
+    // matches ANY ability regardless of tag and adjusts in BOTH directions, so it
+    // would wrongly change a plot cost. Skip it for the synthesized plot shape; plot's
+    // only cost adjustment is its dedicated special-action axis below
+    // (ReduceActionCost { action: Plot }). A tag-keyed reducer can never match plot
+    // anyway — the synthesized plot ability carries no `ability_tag`
+    // (active_keyword == None) — so skipping the whole function is equivalent to
+    // skipping just the "activated" arm, and clearer.
+    if !is_plot_special_action(ability_def) {
+        apply_static_activated_ability_cost_reduction(state, ability_def, source_id);
+    }
 
     // CR 116.2k + CR 702.170: Plot is taken as a special action via a synthesized
-    // hand activation whose effect grants the `Plotted` casting permission. Its
-    // mana cost is reduced by `ReduceActionCost { action: Plot }` statics (Doc
-    // Aurlock) — the dedicated special-action axis, distinct from the generic
-    // activated-ability reducer above (plot payments carry no `AbilityTag`).
+    // hand activation whose effect grants the `Plotted` casting permission. Its mana
+    // cost is adjusted ONLY by `ReduceActionCost { action: Plot }` statics (Doc
+    // Aurlock) — the dedicated special-action axis. The generic activated-ability
+    // reducer is skipped above for plot: its `keyword == "activated"` blanket arm
+    // would otherwise match (and adjust) a plot cost even though plot is not the
+    // activation of an ability (CR 702.170b).
     if is_plot_special_action(ability_def) {
         if let Some(cost) = ability_def.cost.as_mut() {
             reduce_special_action_in_ability_cost(state, player, SpecialAction::Plot, cost);
@@ -13870,18 +14083,28 @@ pub(crate) fn apply_special_action_cost_reduction(
     cost
 }
 
-/// CR 702.170a: True when `ability_def` is the synthesized plot special action —
-/// its effect grants the `Plotted` casting permission (see `synthesize_plot`).
-/// Used to apply `ReduceActionCost { action: Plot }` reductions to the plot
-/// mana cost without conflating plot with generic activated-ability reducers.
-fn is_plot_special_action(ability_def: &AbilityDefinition) -> bool {
+/// CR 702.170a: True when `effect` is the synthesized plot special action's
+/// effect — a `Plotted` casting-permission grant (see `synthesize_plot`). Shared
+/// predicate so both the `AbilityDefinition` shape (`is_plot_special_action`) and
+/// the `ResolvedAbility.effect` shape (the cost-pause resume-path invariant in
+/// `casting_costs::push_activated_ability_to_stack`) classify plot identically.
+pub(super) fn effect_is_plot_grant(effect: &Effect) -> bool {
     matches!(
-        &*ability_def.effect,
+        effect,
         Effect::GrantCastingPermission {
             permission: CastingPermission::Plotted { .. },
             ..
         }
     )
+}
+
+/// CR 702.170a: True when `ability_def` is the synthesized plot special action —
+/// its effect grants the `Plotted` casting permission (see `synthesize_plot`).
+/// Used to apply `ReduceActionCost { action: Plot }` reductions to the plot mana
+/// cost without conflating plot with generic activated-ability reducers, and to
+/// gate the CR 702.170b special-action intercept in `handle_activate_ability`.
+fn is_plot_special_action(ability_def: &AbilityDefinition) -> bool {
+    effect_is_plot_grant(&ability_def.effect)
 }
 
 /// CR 116.2 + CR 118.7a: Apply a special-action cost reduction to the mana
@@ -19794,6 +20017,166 @@ mod tests {
                 crate::types::keywords::KeywordKind::Suspend,
             ),
             "the exiled card must have suspend granted by Jhoira's sub-ability"
+        );
+    }
+
+    /// The Wedding of River Song (WHO) — runtime regression for the core chain.
+    /// Drives the real cast pipeline (CastSpell → resolution) and asserts:
+    /// (a) the controller draws two cards; (b) the controller's nonland card is
+    /// exiled with time counters = its mana value (CR 122.1).
+    ///
+    /// The "Cards exiled this way that don't have suspend gain suspend" clause
+    /// (Defect C) is a *documented strict-failure* — the "that don't have <kw>"
+    /// restrictive clause strict-fails to `Unimplemented` because the correct
+    /// per-card object-scoped condition (applying `SourceLacksKeyword` per exiled
+    /// card, not per spell source) does not yet exist in the engine. The exiled
+    /// card therefore does NOT gain suspend at runtime — this is expected, not a
+    /// regression. See `try_parse_exiled_this_way_keyword_grant` for details.
+    ///
+    /// "Then target opponent does the same" is also a documented strict-failure
+    /// (no opponent exile happens) pending cross-cutting engine targeting work.
+    #[test]
+    fn wedding_of_river_song_exiles_card_and_draws_two() {
+        use super::super::engine::apply_as_current;
+        use crate::game::keywords::object_has_effective_keyword_kind;
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{CastPaymentMode, WaitingFor};
+        use crate::types::identifiers::ObjectId;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let oracle = "Draw two cards, then you may exile a nonland card from your \
+                      hand with a number of time counters on it equal to its mana \
+                      value. Then target opponent does the same. Cards exiled this \
+                      way that don't have suspend gain suspend.\nTime travel. (For \
+                      each suspended card you own and each permanent you control \
+                      with a time counter on it, you may add or remove a time \
+                      counter.)";
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(p0, "The Wedding of River Song", false, oracle)
+            .id();
+
+        // Controller's nonland card to exile (mana value 2 → 2 time counters).
+        let p0_card = scenario.add_card_to_hand(p0, "Controller Nonland");
+        // P0 needs cards available to draw two.
+        scenario.with_library_top(p0, &["Top A", "Top B", "Top C"]);
+        // Mana for {2}{W}.
+        scenario.with_mana_pool(
+            p0,
+            vec![
+                ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&p0_card)
+            .unwrap()
+            .mana_cost = ManaCost::generic(2);
+
+        let library_before = runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == p0)
+            .unwrap()
+            .library
+            .len();
+
+        let card_id = runner.state().objects[&spell].card_id;
+        apply_as_current(
+            runner.state_mut(),
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("casting The Wedding of River Song must enter the pipeline");
+
+        // Manual driver: pass priority to resolve, and exile the controller's
+        // nonland card at the resolution-time hand-exile choice.
+        for _ in 0..80 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ManaPayment { .. } => {
+                    apply_as_current(runner.state_mut(), GameAction::PassPriority)
+                        .expect("finalizing auto mana payment must succeed");
+                }
+                WaitingFor::Priority { .. } => {
+                    if runner.state().stack.is_empty() {
+                        break;
+                    }
+                    if apply_as_current(runner.state_mut(), GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    apply_as_current(
+                        runner.state_mut(),
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .expect("accepting the optional exile must succeed");
+                }
+                WaitingFor::EffectZoneChoice { cards, .. } => {
+                    let selection = if cards.contains(&p0_card) {
+                        vec![p0_card]
+                    } else {
+                        Vec::new()
+                    };
+                    apply_as_current(
+                        runner.state_mut(),
+                        GameAction::SelectCards { cards: selection },
+                    )
+                    .expect("selecting the hand card to exile must succeed");
+                }
+                WaitingFor::OrderTriggers { .. } => {
+                    super::super::triggers::drain_order_triggers_with_identity(runner.state_mut());
+                }
+                // Time travel's add/remove-counter choice (or any later prompt) —
+                // the exile and the suspend grant have already resolved.
+                _ => break,
+            }
+        }
+
+        let state = runner.state();
+
+        // (a) The controller drew two cards (library shrank by two).
+        let library_after = state
+            .players
+            .iter()
+            .find(|p| p.id == p0)
+            .unwrap()
+            .library
+            .len();
+        assert_eq!(
+            library_before - library_after,
+            2,
+            "the controller must draw two cards"
+        );
+
+        // (b) The controller's nonland card was exiled.
+        assert_eq!(state.objects[&p0_card].zone, Zone::Exile);
+
+        // (c) The "that don't have suspend" restrictive clause is a documented
+        // strict-failure: the exiled card must NOT gain suspend (the grant
+        // produces Unimplemented, not GenericEffect{AddKeyword(Suspend)}).
+        // This assertion locks in the strict-failure boundary so we notice if
+        // the overgrant is accidentally reintroduced.
+        assert!(
+            !object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
+            "the exiled card must NOT gain suspend: the 'that don't have' clause \
+             is a strict-failure until object-scoped condition support exists"
         );
     }
 
@@ -49474,6 +49857,19 @@ mod tests {
             0,
             "the production path charged the reduced {{1}} plot cost"
         );
+        // CR 702.170b: printed hand-Plot is also a special action — the stack
+        // stays empty and the card is plotted immediately (no on-stack grant).
+        assert!(
+            state.stack.is_empty(),
+            "printed hand-Plot is a special action (CR 702.170b) — it must not use the stack"
+        );
+        assert!(
+            state.objects[&plot_card]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::Plotted { .. })),
+            "printed hand-Plot must grant Plotted immediately as part of the special action"
+        );
 
         // WITHOUT Doc Aurlock: the SAME {1} mana, but the full {3} is unaffordable.
         let (mut state, plot_card) = build(false);
@@ -49499,6 +49895,486 @@ mod tests {
             1,
             "a failed plot activation spends no mana"
         );
+    }
+
+    /// Build a P0 hand card carrying a synthesized `Plot {generic}` activation
+    /// (index 0) on P0's main phase with an empty stack. Mirrors the production
+    /// `build` closure in `doc_aurlock_reduced_plot_activates_via_production_path`
+    /// so the runtime activation seam (`GameAction::ActivateAbility` →
+    /// `handle_activate_ability`) and the legality gate (`can_activate_ability_now`)
+    /// both see the exact synthesized plot shape. Returns (state, plot card id);
+    /// the caller adds prohibiting statics / mana / timing changes.
+    fn build_p0_plot_card_in_hand(generic: u32) -> (GameState, ObjectId) {
+        use crate::database::synthesis::synthesize_plot;
+        use crate::types::card::CardFace;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Plot(ManaCost::Cost {
+            shards: vec![],
+            generic,
+        }));
+        synthesize_plot(&mut face);
+
+        let plot_card = create_object(
+            &mut state,
+            CardId(0x9701),
+            PlayerId(0),
+            "Plotted Card".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&plot_card).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords = face.keywords.clone();
+        obj.base_keywords = face.keywords.clone();
+        *Arc::make_mut(&mut obj.abilities) = face.abilities.clone();
+        *Arc::make_mut(&mut obj.base_abilities) = face.abilities.clone();
+
+        (state, plot_card)
+    }
+
+    /// CR 702.170b + CR 116.2k + CR 602.1c + CR 602.5 + CR 603.2a: Plot is a SPECIAL
+    /// ACTION, not the activation of an ability, so none of the three
+    /// activated-ability prohibition gates may block it — at EITHER the runtime
+    /// activation seam (`handle_activate_ability`, Edit 1) OR the legality/offer gate
+    /// (`can_activate_ability_now`, Edit 2 — the path `candidates.rs` consults to
+    /// offer plot to the AI/UI). Covers all three gate classes: CantBeActivated
+    /// (Pithing Needle), the ActivateAbilities prohibition (Damping Matrix class),
+    /// and CantActivateDuring active during P0's own main phase.
+    ///
+    /// Discriminating / non-vacuous:
+    ///   - Each sub-case first asserts the gate is LIVE against the plot source
+    ///     (`is_blocked_by_*` returns `true` for the plot ability) — so absent the
+    ///     guard the activation WOULD be blocked. The activation succeeds anyway,
+    ///     proving the guard is doing the work.
+    ///   - Revert-probe (Edit 1): unwrapping the `handle_activate_ability` gates
+    ///     makes `apply_as_current` return `Err(ActionNotAllowed)` and leaves the
+    ///     card in hand for all three sub-cases.
+    ///   - Revert-probe (Edit 2): unwrapping the `can_activate_ability_now` mirror
+    ///     gates makes the `can_activate_ability_now(..) == true` assertion fail
+    ///     (returns `false`), diverging the offer path from the runtime path.
+    #[test]
+    fn plot_special_action_bypasses_activated_ability_prohibitions() {
+        use crate::types::ability::{
+            ChosenAttribute, GameRestriction, ProhibitedActivity, RestrictionExpiry,
+            RestrictionPlayerScope, StaticDefinition, TargetFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::statics::{
+            ActivationExemption, CastingProhibitionCondition, ProhibitionScope, StaticMode,
+        };
+
+        // Given a state where the relevant gate is already LIVE for the plot source,
+        // assert plot succeeds at BOTH the legality gate (Edit 2) and the runtime
+        // seam (Edit 1). A {1} plot cost is funded by exactly {1} colorless mana.
+        let assert_plot_bypasses = |mut state: GameState, plot_card: ObjectId, label: &str| {
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), plot_card, 0),
+                "{label}: can_activate_ability_now must offer plot (Edit 2 mirror guard); \
+                 reverting Edit 2 makes this return false"
+            );
+
+            apply_as_current(
+                &mut state,
+                GameAction::ActivateAbility {
+                    source_id: plot_card,
+                    ability_index: 0,
+                },
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{label}: plot special action must activate (Edit 1 guard); \
+                     reverting Edit 1 yields Err: {e:?}"
+                )
+            });
+
+            assert_eq!(
+                state.objects[&plot_card].zone,
+                Zone::Exile,
+                "{label}: the plot self-exile cost moved the card Hand -> Exile"
+            );
+            assert!(
+                state.stack.is_empty(),
+                "{label}: plot is a special action (CR 702.170b) — it must not use the stack"
+            );
+            assert!(
+                state.objects[&plot_card]
+                    .casting_permissions
+                    .iter()
+                    .any(|p| matches!(p, CastingPermission::Plotted { .. })),
+                "{label}: plot must grant Plotted immediately"
+            );
+        };
+
+        // A1 — Pithing Needle naming the plot card (CantBeActivated, HasChosenName).
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            let needle = create_object(
+                &mut state,
+                CardId(0x9EED1E),
+                PlayerId(0),
+                "Pithing Needle".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&needle).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                obj.entered_battlefield_turn = Some(0);
+                obj.chosen_attributes
+                    .push(ChosenAttribute::CardName("Plotted Card".to_string()));
+                obj.static_definitions
+                    .push(StaticDefinition::new(StaticMode::CantBeActivated {
+                        who: ProhibitionScope::AllPlayers,
+                        source_filter: TargetFilter::HasChosenName,
+                        exemption: ActivationExemption::ManaAbilities,
+                    }));
+            }
+            let plot_def = state.objects[&plot_card].abilities[0].clone();
+            assert!(
+                is_blocked_by_cant_be_activated(&state, PlayerId(0), plot_card, &plot_def),
+                "A1 sanity: Pithing Needle naming the card blocks its (non-mana) activation \
+                 absent the plot guard — proves the gate is live"
+            );
+            assert_plot_bypasses(state, plot_card, "A1 Pithing Needle");
+        }
+
+        // A2 — Damping Matrix / Linvala class (ProhibitActivity::ActivateAbilities).
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            let matrix = create_object(
+                &mut state,
+                CardId(0xDA33),
+                PlayerId(0),
+                "Damping Matrix".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&matrix)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+            state.restrictions.push(GameRestriction::ProhibitActivity {
+                source: matrix,
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::ActivateAbilities {
+                    exemption: ActivationExemption::None,
+                    only_tag: None,
+                },
+            });
+            let plot_def = state.objects[&plot_card].abilities[0].clone();
+            assert!(
+                is_blocked_by_cant_activate_abilities(&state, PlayerId(0), &plot_def),
+                "A2 sanity: the ActivateAbilities prohibition blocks plot absent the guard \
+                 — proves the gate is live"
+            );
+            assert_plot_bypasses(state, plot_card, "A2 Damping Matrix");
+        }
+
+        // A3 — CantActivateDuring active during P0's OWN main phase. NOTE: this uses
+        // `DuringYourTurn`, NOT City of Solitude's `NotDuringAffectedPlayersTurn`.
+        // Plot is legal ONLY during the controller's own turn / main phase / empty
+        // stack (CR 702.170a via AsSorcery), and `NotDuringAffectedPlayersTurn` fires
+        // only on OTHER players' turns — so it can never overlap plot's window and a
+        // City-of-Solitude test would be VACUOUS (the gate never fires while plot is
+        // legal, so the guard would have nothing to bypass). `DuringYourTurn`
+        // (controlled by P0, AllPlayers scope) is the only `CantActivateDuring` shape
+        // whose active window coincides with plot's, making it the discriminating
+        // choice that genuinely exercises Edits 1/2.
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            add_cant_activate_during_permanent(
+                &mut state,
+                PlayerId(0),
+                ProhibitionScope::AllPlayers,
+                CastingProhibitionCondition::DuringYourTurn,
+                ActivationExemption::None,
+            );
+            let plot_def = state.objects[&plot_card].abilities[0].clone();
+            assert!(
+                is_blocked_by_cant_activate_during(&state, PlayerId(0), &plot_def),
+                "A3 sanity: a CantActivateDuring static active on P0's own turn blocks plot \
+                 absent the guard — proves the gate is live during plot's window"
+            );
+            assert_plot_bypasses(state, plot_card, "A3 CantActivateDuring");
+        }
+    }
+
+    /// CR 702.170b + CR 116.2k + CR 118.7a: Plot is a SPECIAL ACTION, so the generic
+    /// activated-ability cost reducer (`ReduceAbilityCost { keyword: "activated" }`,
+    /// whose blanket arm matches ANY ability regardless of tag and adjusts in BOTH
+    /// directions) must NOT change a plot cost. Only the dedicated special-action
+    /// axis (`ReduceActionCost { action: Plot }`, Doc Aurlock) may adjust it.
+    ///
+    /// Drives the production seam `apply_cost_reduction`. Discriminating /
+    /// non-vacuous (revert-probe Edit 3 — unguarding
+    /// `apply_static_activated_ability_cost_reduction`):
+    ///   - B1 Raise: with Edit 3 reverted the {3} plot cost would read {4}; B1 Reduce
+    ///     would read {2}. With the guard both stay {3}.
+    ///   - B2: Doc Aurlock's special-action axis still reduces {3} -> {1} (regression
+    ///     guard that Edit 3 did not disturb `reduce_special_action_in_ability_cost`).
+    ///   - B3 combined: net {1} (Plot −2, blanket +1 skipped), NOT {2} (+1 −2).
+    #[test]
+    fn plot_special_action_ignores_generic_activated_ability_cost_modifiers() {
+        use crate::types::ability::{
+            CastingPermission, Effect, PermissionGrantee, StaticDefinition, TargetFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let make_plot_def = |generic: u32| {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { turn_plotted: 0 },
+                    target: TargetFilter::SelfRef,
+                    grantee: PermissionGrantee::AbilityController,
+                },
+            );
+            def.cost = Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic,
+                        },
+                    },
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Hand),
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            });
+            def.activation_zone = Some(Zone::Hand);
+            def
+        };
+        let plot_generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .find_map(|c| match c {
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic, .. },
+                    } => Some(*generic),
+                    _ => None,
+                })
+                .expect("composite plot cost has a mana sub-cost"),
+            other => panic!("expected composite cost, got {other:?}"),
+        };
+
+        // A hand card supplies the plot source id (filter context for the reducer).
+        let setup = || -> (GameState, ObjectId) {
+            let mut state = setup_game_at_main_phase();
+            let plot_card = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Plotted Card".to_string(),
+                Zone::Hand,
+            );
+            (state, plot_card)
+        };
+        let blanket = |mode: CostModifyMode| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: "activated".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+            })
+        };
+        let doc_axis = || {
+            StaticDefinition::new(StaticMode::ReduceActionCost {
+                action: SpecialAction::Plot,
+                mode: CostModifyMode::Reduce,
+                amount: 2,
+            })
+        };
+
+        // B1 Raise — "activated abilities cost {1} more" must NOT touch plot.
+        {
+            let (mut state, plot_card) = setup();
+            let src = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Blanket Reducer".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&src).unwrap().static_definitions =
+                vec![blanket(CostModifyMode::Raise)].into();
+            let mut def = make_plot_def(3);
+            apply_cost_reduction(&state, &mut def, PlayerId(0), plot_card);
+            assert_eq!(
+                plot_generic_of(&def),
+                3,
+                "B1 Raise: a blanket activated-ability raise must not change plot \
+                 (reverting Edit 3 yields {{4}})"
+            );
+        }
+        // B1 Reduce — symmetric: a blanket activated reduce must not touch plot either.
+        {
+            let (mut state, plot_card) = setup();
+            let src = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Blanket Reducer".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&src).unwrap().static_definitions =
+                vec![blanket(CostModifyMode::Reduce)].into();
+            let mut def = make_plot_def(3);
+            apply_cost_reduction(&state, &mut def, PlayerId(0), plot_card);
+            assert_eq!(
+                plot_generic_of(&def),
+                3,
+                "B1 Reduce: a blanket activated-ability reduce must not change plot \
+                 (reverting Edit 3 yields {{2}})"
+            );
+        }
+        // B2 — Doc Aurlock's special-action axis STILL reduces plot {3} -> {1}.
+        {
+            let (mut state, plot_card) = setup();
+            let doc = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Doc Aurlock, Grizzled Genius".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&doc).unwrap().static_definitions = vec![doc_axis()].into();
+            let mut def = make_plot_def(3);
+            apply_cost_reduction(&state, &mut def, PlayerId(0), plot_card);
+            assert_eq!(
+                plot_generic_of(&def),
+                1,
+                "B2: Doc Aurlock's ReduceActionCost{{Plot}} still reduces plot {{3}} -> {{1}}"
+            );
+        }
+        // B3 — combined: blanket Raise{1} (skipped) + Doc Aurlock Reduce{2} = {1}, NOT {2}.
+        {
+            let (mut state, plot_card) = setup();
+            let doc = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Doc Aurlock, Grizzled Genius".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&doc).unwrap().static_definitions = vec![doc_axis()].into();
+            let blanketer = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Blanket Reducer".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&blanketer)
+                .unwrap()
+                .static_definitions = vec![blanket(CostModifyMode::Raise)].into();
+            let mut def = make_plot_def(3);
+            apply_cost_reduction(&state, &mut def, PlayerId(0), plot_card);
+            assert_eq!(
+                plot_generic_of(&def),
+                1,
+                "B3 combined: only the Plot axis (−2) applies, the blanket (+1) is skipped \
+                 -> {{1}} (a buggy build that applied the blanket reads {{2}})"
+            );
+        }
+    }
+
+    /// CR 702.170a + CR 116.2k: Negative control — plot's own-turn / main-phase /
+    /// empty-stack timing (CR 702.170a) is enforced by `ActivationRestriction::
+    /// AsSorcery` via `check_activation_restrictions`, which stays OUTSIDE the
+    /// prohibition guards added by Edits 1/2. So the guards must not have widened to
+    /// swallow timing: plot is still REJECTED when any timing dimension is wrong.
+    /// Proves no over-skip.
+    ///
+    /// Discriminating: a C0 positive baseline (correct timing, no prohibiting static)
+    /// SUCCEEDS, then C1/C2/C3 flip exactly one timing dimension and must each fail —
+    /// so the rejection is caused by the timing change, not unrelated setup. If a
+    /// future change folded `check_activation_restrictions` inside a guard, C1–C3
+    /// flip to `Ok` and this test catches it.
+    #[test]
+    fn plot_special_action_still_enforces_sorcery_speed_timing() {
+        let expect_rejected = |mut state: GameState, plot_card: ObjectId, label: &str| {
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+            let result = apply_as_current(
+                &mut state,
+                GameAction::ActivateAbility {
+                    source_id: plot_card,
+                    ability_index: 0,
+                },
+            );
+            assert!(
+                result.is_err(),
+                "{label}: plot must be rejected by AsSorcery timing (outside the prohibition guards)"
+            );
+            assert_eq!(
+                state.objects[&plot_card].zone,
+                Zone::Hand,
+                "{label}: a rejected plot leaves the card in hand (no self-exile)"
+            );
+        };
+
+        // C0 — positive baseline: correct timing, no prohibiting static → SUCCEEDS.
+        // Establishes that the only delta in C1/C2/C3 is the broken timing dimension.
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+            apply_as_current(
+                &mut state,
+                GameAction::ActivateAbility {
+                    source_id: plot_card,
+                    ability_index: 0,
+                },
+            )
+            .expect("C0 baseline: plot on own main phase with empty stack must succeed");
+            assert_eq!(state.objects[&plot_card].zone, Zone::Exile);
+        }
+
+        // C1 — opponent's turn: CR 702.170a requires the controller's own turn.
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            state.active_player = PlayerId(1);
+            expect_rejected(state, plot_card, "C1 opponent's turn");
+        }
+
+        // C2 — non-empty stack: CR 702.170a requires an empty stack.
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id: ObjectId(0xDEAD),
+                source_id: ObjectId(0xDEAD),
+                controller: PlayerId(0),
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: crate::types::identifiers::CardId(99),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            expect_rejected(state, plot_card, "C2 non-empty stack");
+        }
+
+        // C3 — wrong phase: CR 702.170a requires a main phase.
+        {
+            let (mut state, plot_card) = build_p0_plot_card_in_hand(1);
+            state.phase = Phase::BeginCombat;
+            expect_rejected(state, plot_card, "C3 begin-combat step");
+        }
     }
 
     /// CR 118.7 + CR 702.6a: Firion, Wild Rose Warrior's granted equip-cost
@@ -50528,5 +51404,668 @@ mod tests {
             cast_permission_constraint_allows_cast(&state, obj, &constraint, None),
             "offer-time check (resulting MV unknown) must be permissive"
         );
+    }
+
+    /// CR 702.170f end-to-end runtime: plot-from-library (Fblthp, Lost on the
+    /// Range). These tests drive the real legal-action / activation pipeline —
+    /// `top_of_library_plot_source` → runtime-granted plot ability →
+    /// `GameAction::ActivateAbility` → exile-from-library face up → Plotted →
+    /// (reused) later free cast — never the parser shape in isolation.
+    mod plot_from_library {
+        use super::*;
+        use crate::ai_support::legal_actions;
+        use crate::game::derived::derive_display_state;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::game::visibility::filter_state_for_viewer;
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+        // Fblthp's plot-from-library lines (Ward omitted — irrelevant here and
+        // needs a keyword hint to parse). Routed through the real PR-B parser by
+        // `from_oracle_text`, so this exercises parser → static → runtime.
+        const FBLTHP_ORACLE: &str = "You may look at the top card of your library any time.\n\
+             The top card of your library has plot. The plot cost is equal to its mana cost.\n\
+             You may plot nonland cards from the top of your library.";
+
+        fn blue_one_u() -> ManaCost {
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            }
+        }
+
+        /// Turn a generic library-top object into a nonland creature with a
+        /// {1}{U} cost (a colored pip distinct from any fixed Foretell-style
+        /// cost, so the EXECUTE test can prove cost = the card's mana cost).
+        fn make_nonland_blue(state: &mut GameState, id: ObjectId) {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.mana_cost = blue_one_u();
+        }
+
+        fn make_land(state: &mut GameState, id: ObjectId) {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Land];
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        /// Fblthp on P0's battlefield (statics parsed from Oracle text) + a
+        /// nonland {1}{U} creature on top of P0's library. Returns the runner,
+        /// Fblthp's id, and the top card's id. Phase = P0's precombat main,
+        /// empty stack, P0 priority.
+        fn fblthp_with_nonland_top() -> (GameRunner, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let fblthp = {
+                let mut b = scenario.add_creature(P0, "Fblthp, Lost on the Range", 1, 1);
+                b.from_oracle_text(FBLTHP_ORACLE);
+                b.id()
+            };
+            let top = scenario.add_card_to_library_top(P0, "Augury Owl");
+            let mut runner = scenario.build();
+            make_nonland_blue(runner.state_mut(), top);
+            derive_display_state(runner.state_mut());
+            (runner, fblthp, top)
+        }
+
+        fn plot_action_for(state: &GameState, top_id: ObjectId) -> Option<GameAction> {
+            legal_actions(state).into_iter().find(|a| {
+                matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == top_id)
+            })
+        }
+
+        /// Fund P0 generously so CR 601.2b affordability is never the gating
+        /// factor in the OFFER tests (which isolate GRANT / position / nonland /
+        /// authorizer conditions, not mana). Covers the {1}{U} top-card cost.
+        fn fund_for_plot(runner: &mut GameRunner) {
+            add_mana(runner.state_mut(), P0, ManaType::Blue, 2);
+            add_mana(runner.state_mut(), P0, ManaType::Colorless, 2);
+        }
+
+        fn plot_ability_index(state: &GameState, top_id: ObjectId) -> usize {
+            activated_ability_definitions(state, top_id)
+                .into_iter()
+                .find(|(_, def)| def.activation_zone == Some(Zone::Library))
+                .map(|(i, _)| i)
+                .expect("authorized top card must carry the runtime-granted plot ability")
+        }
+
+        /// Confirm Fblthp's Oracle text produced the split roles: exactly one
+        /// `TopOfLibraryHasPlot` GRANT (L3) and one `TopOfLibraryPlotPermission`
+        /// (L4) — not two of the same conflated mode (parser → runtime sanity).
+        fn assert_fblthp_statics(state: &GameState, fblthp: ObjectId) {
+            let grants = state.objects[&fblthp]
+                .static_definitions
+                .iter_all()
+                .filter(|s| matches!(s.mode, StaticMode::TopOfLibraryHasPlot))
+                .count();
+            let permissions = state.objects[&fblthp]
+                .static_definitions
+                .iter_all()
+                .filter(|s| matches!(s.mode, StaticMode::TopOfLibraryPlotPermission))
+                .count();
+            assert_eq!(grants, 1, "Fblthp L3 must be exactly one grant static");
+            assert_eq!(
+                permissions, 1,
+                "Fblthp L4 must be exactly one permission static"
+            );
+        }
+
+        /// test_plan #1: GRANT + OFFER, plus ABSENT off-turn / non-empty stack /
+        /// non-main phase. Also test_plan #12 (helper-level) for the Some case.
+        #[test]
+        fn plot_offered_for_nonland_top_only_on_own_empty_main() {
+            let (mut runner, fblthp, top) = fblthp_with_nonland_top();
+            fund_for_plot(&mut runner);
+            assert_fblthp_statics(runner.state(), fblthp);
+            assert_eq!(
+                runner.state().players[0].library.front().copied(),
+                Some(top)
+            );
+
+            // GRANT + OFFER on P0's main phase, empty stack.
+            assert!(
+                plot_action_for(runner.state(), top).is_some(),
+                "plot must be offered for the nonland top on P0's own empty main phase"
+            );
+            // Helper-level (test_plan #12): the source predicate authorizes it.
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                Some((top, fblthp)),
+                "top_of_library_plot_source must return (top, fblthp) for a nonland top"
+            );
+
+            // ABSENT during an opponent's turn (CR 116.2k — own turn only): P0
+            // still holds priority (instant window) but plot is sorcery-speed.
+            runner.state_mut().active_player = P1;
+            derive_display_state(runner.state_mut());
+            assert!(
+                plot_action_for(runner.state(), top).is_none(),
+                "plot must NOT be offered while it is the opponent's turn"
+            );
+            runner.state_mut().active_player = P0;
+
+            // ABSENT with a non-empty stack (CR 702.170a — empty stack only).
+            let filler = zones::create_object(
+                runner.state_mut(),
+                CardId(7777),
+                P0,
+                "Stack Filler".to_string(),
+                Zone::Stack,
+            );
+            runner.state_mut().stack.push_back(StackEntry {
+                id: filler,
+                source_id: filler,
+                controller: P0,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(7777),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            derive_display_state(runner.state_mut());
+            assert!(
+                plot_action_for(runner.state(), top).is_none(),
+                "plot must NOT be offered while the stack is non-empty"
+            );
+            runner.state_mut().stack.clear();
+
+            // ABSENT outside a main phase (CR 702.170a). can_activate_ability_now
+            // enforces the AsSorcery timing independently of the candidate guard.
+            runner.state_mut().phase = Phase::BeginCombat;
+            derive_display_state(runner.state_mut());
+            assert!(
+                plot_action_for(runner.state(), top).is_none(),
+                "plot must NOT be offered outside a main phase"
+            );
+        }
+
+        /// test_plan #2: positional discriminator — only `library.front()` is
+        /// plottable, never a deeper library card.
+        #[test]
+        fn plot_offered_only_for_the_top_card_not_second_from_top() {
+            let (mut runner, _fblthp, top) = fblthp_with_nonland_top();
+            fund_for_plot(&mut runner);
+            // Insert a second nonland card just under the top.
+            let second = {
+                let id = {
+                    let s = runner.state_mut();
+                    let card_id = CardId(s.next_object_id);
+                    zones::create_object(s, card_id, P0, "Second Card".to_string(), Zone::Library)
+                };
+                // Re-seat at index 1 (just under the current top).
+                let p = runner
+                    .state_mut()
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == P0)
+                    .unwrap();
+                p.library.retain(|&o| o != id);
+                p.library.insert(1, id);
+                id
+            };
+            make_nonland_blue(runner.state_mut(), second);
+            derive_display_state(runner.state_mut());
+
+            assert_eq!(
+                runner.state().players[0].library.front().copied(),
+                Some(top)
+            );
+            assert!(
+                plot_action_for(runner.state(), top).is_some(),
+                "the actual top card must be plottable"
+            );
+            assert!(
+                plot_action_for(runner.state(), second).is_none(),
+                "the second-from-top card must NOT be plottable — top-card-only"
+            );
+            // The runtime-granted ability is present ONLY on the top card.
+            assert!(
+                runtime_granted_top_of_library_plot_abilities(runner.state(), second).is_empty(),
+                "no non-top library card may carry the plot ability"
+            );
+        }
+
+        /// test_plan #3: nonland discriminator (non-vacuous flip). A land top is
+        /// never plottable; swapping it to a nonland makes it plottable.
+        #[test]
+        fn plot_requires_nonland_top() {
+            let (mut runner, _fblthp, top) = fblthp_with_nonland_top();
+            fund_for_plot(&mut runner);
+            // Land top → no offer: rejected purely by the permission's nonland
+            // filter (the hard-gate is gone). CR 702.170f covers the zone, not
+            // the land/nonland restriction.
+            make_land(runner.state_mut(), top);
+            derive_display_state(runner.state_mut());
+            assert!(
+                plot_action_for(runner.state(), top).is_none(),
+                "a land top must NOT be plottable"
+            );
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "top_of_library_plot_source must reject a land top"
+            );
+
+            // Swap the same top object to a nonland → now plottable.
+            make_nonland_blue(runner.state_mut(), top);
+            derive_display_state(runner.state_mut());
+            assert!(
+                plot_action_for(runner.state(), top).is_some(),
+                "swapping the top to a nonland must make it plottable"
+            );
+        }
+
+        /// test_plan #7: STATIC-GONE revert-probe (load-bearing). Remove Fblthp
+        /// from the battlefield and the plot offer vanishes — the authorizer is
+        /// the battlefield static, not an intrinsic property of the library card.
+        #[test]
+        fn plot_offer_vanishes_when_authorizer_leaves() {
+            let (mut runner, fblthp, top) = fblthp_with_nonland_top();
+            fund_for_plot(&mut runner);
+            assert!(plot_action_for(runner.state(), top).is_some());
+
+            // Fblthp leaves the battlefield.
+            zones::remove_from_zone(runner.state_mut(), fblthp, Zone::Battlefield, P0);
+            runner.state_mut().objects.get_mut(&fblthp).unwrap().zone = Zone::Graveyard;
+            zones::add_to_zone(runner.state_mut(), fblthp, Zone::Graveyard, P0);
+            derive_display_state(runner.state_mut());
+
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "with no authorizing static, the top must not be plottable"
+            );
+            assert!(
+                plot_action_for(runner.state(), top).is_none(),
+                "plot offer must vanish when Fblthp leaves the battlefield"
+            );
+        }
+
+        /// test_plan #8: INVARIANT — the cast-permission family is byte-untouched.
+        /// A `TopOfLibraryCastPermission` source (Future Sight class) is NOT a
+        /// plot authorizer: `top_of_library_plot_source` returns None even though
+        /// the top is castable Library→Stack. The two helpers are disjoint.
+        #[test]
+        fn cast_permission_source_is_not_a_plot_authorizer() {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let _future_sight = {
+                let mut b = scenario.add_creature(P0, "Future Sight Stand-in", 1, 1);
+                b.from_oracle_text(
+                    "You may play lands and cast spells from the top of your library.",
+                );
+                b.id()
+            };
+            let top = scenario.add_card_to_library_top(P0, "Augury Owl");
+            let mut runner = scenario.build();
+            make_nonland_blue(runner.state_mut(), top);
+            derive_display_state(runner.state_mut());
+
+            // The cast family still authorizes a Library→Stack cast.
+            assert!(
+                top_of_library_permission_source(runner.state(), P0, Some(CardPlayMode::Cast))
+                    .is_some(),
+                "Future Sight class must still authorize casting the top card"
+            );
+            // But it is NOT a plot authorizer — the dedicated path is disjoint.
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "TopOfLibraryCastPermission must never authorize plot-from-library"
+            );
+            // No exile-from-library plot ability is granted on the top card.
+            assert!(
+                runtime_granted_top_of_library_plot_abilities(runner.state(), top).is_empty(),
+                "cast permission must not synthesize a plot ability"
+            );
+        }
+
+        /// test_plan #4 + #6: EXECUTE the plot special action, then the SAME-TURN
+        /// revert-probe. Drives the real activation pipeline: pay {1}{U} (the top
+        /// card's mana cost, INCLUDING the colored pip), exile from library FACE
+        /// UP, grant `Plotted{turn_plotted == turn_number}`, emit BecomesPlotted.
+        #[test]
+        fn execute_plot_exiles_face_up_and_grants_plotted() {
+            let (mut runner, _fblthp, top) = fblthp_with_nonland_top();
+            let idx = plot_ability_index(runner.state(), top);
+            // Colored-pip discriminator: two colorless cannot pay {1}{U}. If the
+            // plot cost were free or all-generic this would (wrongly) be payable.
+            add_mana(runner.state_mut(), P0, ManaType::Colorless, 2);
+            assert!(
+                !can_activate_ability_now(runner.state(), P0, top, idx),
+                "without blue, {{1}}{{U}} is unpayable — the plot cost carries the colored pip"
+            );
+            // Drain, then fund EXACTLY {1}{U} so a clean pool==0 after activation
+            // proves cost == the card's printed mana cost (colored pip included).
+            runner.state_mut().players[0].mana_pool = Default::default();
+            add_mana(runner.state_mut(), P0, ManaType::Blue, 1);
+            add_mana(runner.state_mut(), P0, ManaType::Colorless, 1);
+            let turn = runner.state().turn_number;
+
+            // Take the plot SPECIAL ACTION. CR 702.170b: it does NOT use the
+            // stack — the card becomes plotted IMMEDIATELY as part of the action,
+            // with NO intervening priority passing or stack resolution. No
+            // PassPriority loop: everything below must hold directly after the
+            // single `ActivateAbility` returns.
+            let events = apply_as_current(
+                runner.state_mut(),
+                GameAction::ActivateAbility {
+                    source_id: top,
+                    ability_index: idx,
+                },
+            )
+            .expect("activating plot-from-library must be accepted")
+            .events;
+            // The Exile cost is paid during the action — the card is already gone
+            // from the library.
+            assert_eq!(
+                runner.state().objects[&top].zone,
+                Zone::Exile,
+                "paying the plot cost must exile the top card from the library"
+            );
+            assert_ne!(
+                runner.state().players[0].library.front().copied(),
+                Some(top),
+                "the plotted card must have left the library"
+            );
+            // CR 702.170b discriminator (revert-probe vs the old on-stack model):
+            // the stack is EMPTY — plotting created no stack entry. Under the
+            // reverted model an `ActivatedAbility` entry would sit here awaiting
+            // resolution.
+            assert!(
+                runner.state().stack.is_empty(),
+                "plot is a special action (CR 702.170b) — it must NOT use the stack"
+            );
+            // CR 702.170b discriminator: the card is plotted IMMEDIATELY, with no
+            // priority passing. The old model required resolving an on-stack grant
+            // (passing priority) before `Plotted` appeared; this runs directly
+            // after the action and fails if plotting is deferred to the stack.
+            assert!(
+                runner.state().objects[&top]
+                    .casting_permissions
+                    .iter()
+                    .any(|p| matches!(p, CastingPermission::Plotted { .. })),
+                "the card must be plotted immediately as part of the special action"
+            );
+            // CR 702.170b: plot is a special action, NOT an activated ability — no
+            // `AbilityActivated` event (so "whenever you activate an ability"
+            // triggers must not fire). `BecomesPlotted` IS emitted (asserted below).
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::AbilityActivated { .. })),
+                "a special action must not emit AbilityActivated (CR 702.170b)"
+            );
+
+            // FACE-UP exile (revert-probe vs the refuted face-down claim — CR
+            // 702.170 has no face-down clause, unlike Foretell CR 116.2h).
+            assert!(
+                !runner.state().objects[&top].face_down,
+                "plot exiles FACE UP — CR 702.170 has no face-down clause"
+            );
+            // Plotted granted, stamped to the current turn (CR 702.170a/d).
+            let plotted_turn = runner.state().objects[&top]
+                .casting_permissions
+                .iter()
+                .find_map(|p| match p {
+                    CastingPermission::Plotted { turn_plotted } => Some(*turn_plotted),
+                    _ => None,
+                })
+                .expect("the exiled card must carry the Plotted permission");
+            assert_eq!(
+                plotted_turn, turn,
+                "turn_plotted must be stamped to the turn the card was plotted"
+            );
+            // BecomesPlotted emitted for the owner.
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::BecomesPlotted { object_id, player_id }
+                        if *object_id == top && *player_id == P0
+                )),
+                "a BecomesPlotted event must be emitted for the plotting player"
+            );
+            // The {1}{U} pool was fully consumed — cost == the card's mana cost.
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                0,
+                "exactly {{1}}{{U}} must be spent — the plot cost equals the card's mana cost"
+            );
+
+            // test_plan #6: SAME-TURN revert-probe — NOT free-castable the turn
+            // it was plotted (CR 702.170d: only a LATER turn; the gate is `>`).
+            let same_turn = runner.state().turn_number;
+            let top_obj = runner.state().objects[&top].clone();
+            assert!(
+                !has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn),
+                "a card plotted this turn must NOT be free-castable until a later turn"
+            );
+            // LATER-TURN probe (CR 702.170d, gate is `>`): a turn later it IS
+            // free-castable — proving the reused Plotted lifecycle is intact.
+            assert!(
+                has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn + 1),
+                "on a later turn the plotted card must be free-castable"
+            );
+        }
+
+        /// Frontend exposure (design risk #4): a player with MayLookAtTopOfLibrary
+        /// (which Fblthp grants) sees their OWN library top in the viewer-filtered
+        /// state, so `ActivateAbility{source_id: top}` has a render target. The
+        /// opponent does not. Engine-authoritative — never computed client-side.
+        #[test]
+        fn maylook_exposes_own_library_top_to_viewer_only() {
+            let (mut runner, _fblthp, top) = fblthp_with_nonland_top();
+            derive_display_state(runner.state_mut());
+            assert!(
+                runner.state().players[0].can_look_at_top_of_library,
+                "Fblthp must grant P0 the look-at-top permission"
+            );
+
+            // P0 (the looker) sees the top card's identity.
+            let p0_view = filter_state_for_viewer(runner.state(), P0);
+            assert_eq!(
+                p0_view.objects[&top].name, "Augury Owl",
+                "the looking player must see their own library top (render target for plot)"
+            );
+            // The opponent does not.
+            let p1_view = filter_state_for_viewer(runner.state(), P1);
+            assert_ne!(
+                p1_view.objects[&top].name, "Augury Owl",
+                "an opponent must NOT see the hidden library top"
+            );
+        }
+
+        /// Parse a plot line into its real `StaticDefinition` (canonical filters).
+        fn plot_static(line: &str) -> StaticDefinition {
+            crate::parser::oracle_static::parse_static_line(line)
+                .expect("plot line must parse to a static")
+        }
+
+        /// Battlefield permanent carrying exactly the given plot statics + a top
+        /// library card (land or nonland). Returns (runner, source_id, top_id).
+        fn scenario_with_plot_statics(
+            statics: &[StaticDefinition],
+            top_is_land: bool,
+        ) -> (GameRunner, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let src = {
+                let mut b = scenario.add_creature(P0, "Plot Source", 1, 1);
+                for s in statics {
+                    b.with_static_definition(s.clone());
+                }
+                b.id()
+            };
+            let top = scenario.add_card_to_library_top(P0, "Augury Owl");
+            let mut runner = scenario.build();
+            if top_is_land {
+                make_land(runner.state_mut(), top);
+            } else {
+                make_nonland_blue(runner.state_mut(), top);
+            }
+            derive_display_state(runner.state_mut());
+            (runner, src, top)
+        }
+
+        /// matthewevans [MED] split — discriminating revert-probe: plot-from-
+        /// library requires BOTH the CR 702.170a grant AND the CR 702.170f
+        /// permission. A runtime that regresses to treating one mode as both (the
+        /// pre-split conflation) would offer plot with only one role present, so
+        /// the grant-only / permission-only cases below would wrongly return
+        /// `Some` and fail. The nonland restriction is the PERMISSION's filter
+        /// (no hard-gate), so it only applies when a permission is present.
+        #[test]
+        fn plot_requires_both_grant_and_permission_roles() {
+            let grant = plot_static(
+                "The top card of your library has plot. The plot cost is equal to its mana cost.",
+            );
+            let permission =
+                plot_static("You may plot nonland cards from the top of your library.");
+            // Sanity: the two lines lower to the two distinct roles.
+            assert_eq!(grant.mode, StaticMode::TopOfLibraryHasPlot);
+            assert_eq!(permission.mode, StaticMode::TopOfLibraryPlotPermission);
+
+            // (a) GRANT-ONLY → None. CR 702.170a: a plot ability functions in
+            // hand; without a CR 702.170f permission the library card can't be
+            // plotted, even though it "has plot".
+            let (runner, _src, _top) =
+                scenario_with_plot_statics(std::slice::from_ref(&grant), false);
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "grant alone must NOT authorize plot-from-library (no permission)"
+            );
+
+            // (b) PERMISSION-ONLY → None. The permission allows plotting from the
+            // library, but the top card has no plot ability to act on.
+            let (runner, _src, _top) =
+                scenario_with_plot_statics(std::slice::from_ref(&permission), false);
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "permission alone must NOT authorize plot-from-library (no grant)"
+            );
+
+            // (c) BOTH → nonland top authorized (returns the grant source); a LAND
+            // top is rejected purely by the permission's nonland filter.
+            let (runner, src, top) =
+                scenario_with_plot_statics(&[grant.clone(), permission.clone()], false);
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                Some((top, src)),
+                "grant + permission must authorize a nonland top"
+            );
+            let (runner, _src, _top) = scenario_with_plot_statics(&[grant, permission], true);
+            assert_eq!(
+                top_of_library_plot_source(runner.state(), P0),
+                None,
+                "a land top must be rejected by the permission's nonland filter"
+            );
+        }
+
+        /// Two SEPARATE P0 battlefield permanents, each carrying its own plot
+        /// statics, plus a nonland {1}{U} top. Models two INDEPENDENT plot-from-
+        /// top sources (the UNION-within-role claim). Returns
+        /// (runner, src_a, src_b, top).
+        fn scenario_with_two_plot_sources(
+            statics_a: &[StaticDefinition],
+            statics_b: &[StaticDefinition],
+            top_is_land: bool,
+        ) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let src_a = {
+                let mut b = scenario.add_creature(P0, "Plot Source A", 1, 1);
+                for s in statics_a {
+                    b.with_static_definition(s.clone());
+                }
+                b.id()
+            };
+            let src_b = {
+                let mut b = scenario.add_creature(P0, "Plot Source B", 1, 1);
+                for s in statics_b {
+                    b.with_static_definition(s.clone());
+                }
+                b.id()
+            };
+            let top = scenario.add_card_to_library_top(P0, "Augury Owl");
+            let mut runner = scenario.build();
+            if top_is_land {
+                make_land(runner.state_mut(), top);
+            } else {
+                make_nonland_blue(runner.state_mut(), top);
+            }
+            derive_display_state(runner.state_mut());
+            (runner, src_a, src_b, top)
+        }
+
+        /// Adversarial revert-probe for the UNION-WITHIN-role claim that anchors
+        /// the grant/permission split (see `top_of_library_plot_source` doc, CR
+        /// 702.170a + CR 702.170f): "two INDEPENDENT plot-from-top sources each
+        /// authorize their own eligibility (no cross-source veto)." Every other
+        /// plot test uses exactly ONE grant + ONE permission, so a regression
+        /// from per-source UNION (`grant_source.get_or_insert` /
+        /// `has_permission = true`) to a cross-source intersection (require ALL
+        /// grants — or ALL permissions — to match the top) would pass them all.
+        ///
+        /// Here a SECOND, deliberately NON-MATCHING source of each role is
+        /// load-bearing: it carries a land-only `affected` filter that the
+        /// nonland-blue top FAILS. Under an all-match regression that non-
+        /// matching source would veto the matching one → `None` → this test
+        /// fails. (If both sources matched, the test could not distinguish UNION
+        /// from intersection — the non-matching source is the discriminator.)
+        #[test]
+        fn plot_union_within_role_no_cross_source_veto() {
+            // Land-only filter: the nonland-blue top FAILS it. A future "lands on
+            // top have plot" card would carry such a grant; it must not veto a
+            // matching source. Parser only emits `Any` grants, so build directly.
+            let land_only = TargetFilter::Typed(TypedFilter::new(TypeFilter::Land));
+
+            let grant_any = plot_static(
+                "The top card of your library has plot. The plot cost is equal to its mana cost.",
+            );
+            assert_eq!(grant_any.mode, StaticMode::TopOfLibraryHasPlot);
+            let grant_land_only =
+                StaticDefinition::new(StaticMode::TopOfLibraryHasPlot).affected(land_only.clone());
+
+            let permission_nonland =
+                plot_static("You may plot nonland cards from the top of your library.");
+            assert_eq!(
+                permission_nonland.mode,
+                StaticMode::TopOfLibraryPlotPermission
+            );
+            let permission_land_only =
+                StaticDefinition::new(StaticMode::TopOfLibraryPlotPermission).affected(land_only);
+
+            // (a) UNION within the GRANT role: source A has a matching grant
+            // (`Any`) + the matching permission; source B has a NON-matching
+            // grant (land-only). The matching grant authorizes via UNION; the
+            // non-matching grant must NOT veto.
+            let (runner, _a, _b, top) = scenario_with_two_plot_sources(
+                &[grant_any.clone(), permission_nonland.clone()],
+                std::slice::from_ref(&grant_land_only),
+                false,
+            );
+            assert!(
+                matches!(top_of_library_plot_source(runner.state(), P0), Some((t, _)) if t == top),
+                "a matching grant must authorize via UNION even when a second grant \
+                 source does not match the top (no cross-source grant veto)"
+            );
+
+            // (b) UNION within the PERMISSION role: source A has the matching
+            // grant + a matching permission (nonland); source B has a NON-matching
+            // permission (land-only). No cross-source permission veto.
+            let (runner, _a, _b, top) = scenario_with_two_plot_sources(
+                &[grant_any, permission_nonland],
+                std::slice::from_ref(&permission_land_only),
+                false,
+            );
+            assert!(
+                matches!(top_of_library_plot_source(runner.state(), P0), Some((t, _)) if t == top),
+                "a matching permission must authorize via UNION even when a second \
+                 permission source does not match the top (no cross-source permission veto)"
+            );
+        }
     }
 }

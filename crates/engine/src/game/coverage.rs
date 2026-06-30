@@ -79,6 +79,20 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: the two nullary
+            // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
+            // "you may plot nonland cards" permission). The nonland scope is the
+            // permission's printed L4 filter (NOT a CR 702.170f clause) on
+            // `affected`; the plot cost is the top card's mana cost, computed
+            // live at synthesis. Runtime enforcement is end-to-end:
+            // casting.rs::top_of_library_plot_source requires both roles,
+            // runtime_granted_top_of_library_plot_abilities synthesizes the
+            // plot special action on the top card, candidates.rs offers it as
+            // ActivateAbility, and the existing Plotted later-cast lifecycle
+            // (CR 702.170d) is reused. Not registry-keyed (mirrors the
+            // cast-permission cluster).
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
             // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
             // play_mode, and the `without_paying_mana_cost` flag. Runtime
@@ -498,6 +512,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -1818,6 +1833,10 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         }
         DelayedTriggerCondition::WhenDiesOrExiled { .. } => "when dies or exiled".into(),
         DelayedTriggerCondition::WheneverEvent { .. } => "whenever event this turn".into(),
+        DelayedTriggerCondition::WhenNextEvent {
+            lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+            ..
+        } => "when next event (persistent)".into(),
         DelayedTriggerCondition::WhenNextEvent { .. } => "when next event this turn".into(),
     }
 }
@@ -2755,6 +2774,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
+        Effect::RememberCard { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::ForEachCategoryExile { category, zone, .. } => {
             d.push((
                 "category".into(),
@@ -3613,6 +3635,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
             "grant all activated abilities of".into()
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {
+            "grant all triggered abilities of".into()
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
@@ -7772,6 +7797,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
+            // CR 702.170a grant + CR 702.170f permission: plot-from-library
+            // (Fblthp). Both descriptions ("the top card of your library has
+            // plot" / "you may plot nonland cards from the top of your library")
+            // carry "plot" + "library". The role/discriminator is already
+            // enforced by the parser; coverage just needs a phrase the
+            // description will contain.
+            StaticMode::TopOfLibraryHasPlot | StaticMode::TopOfLibraryPlotPermission => {
+                effective_lower.contains("plot") && effective_lower.contains("library")
+            }
             // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
             // discriminator phrase ("from among cards exiled with") is
             // already enforced by the parser; coverage just needs a phrase
@@ -7862,6 +7896,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantUntap => {
                 effective_lower.contains("doesn't untap") || effective_lower.contains("don't untap")
             }
+            // CR 702.26a + CR 101.2: The Pandorica's "It can't phase in for as
+            // long as ~ remains tapped".
+            StaticMode::CantPhaseIn => effective_lower.contains("can't phase in"),
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),

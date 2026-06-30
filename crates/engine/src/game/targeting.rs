@@ -955,9 +955,22 @@ fn blocked_attacker_from_event(
     let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
         return None;
     };
-    let mut attackers = assignments
+    // CR 509.1 + CR 608.2c: For a `Blocks` trigger ("Whenever ~ blocks a
+    // creature, … that creature") the source is the BLOCKER, so "that creature"
+    // is the attacker it was assigned to.
+    let mut blocked = assignments
         .iter()
         .filter_map(|(blocker, attacker)| (*blocker == source_id).then_some(*attacker));
+    if let Some(first) = blocked.next() {
+        return blocked.all(|attacker| attacker == first).then_some(first);
+    }
+    // CR 509.1 + CR 608.2c (issue #4599): For a `BecomesBlocked` trigger
+    // ("Whenever a Hero you control becomes blocked, put a +1/+1 counter on that
+    // Hero …" — She-Hulk, Wallbreaker) the source is the ATTACKER (the blocked
+    // creature), or an observer of it, never the blocker — so the blocker-side
+    // filter above is empty. The matcher narrows the event to the single
+    // matched `(blocker, attacker)` pair, so "that [creature]" is that attacker.
+    let mut attackers = assignments.iter().map(|(_, attacker)| *attacker);
     let first = attackers.next()?;
     attackers.all(|attacker| attacker == first).then_some(first)
 }
