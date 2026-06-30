@@ -674,11 +674,21 @@ pub fn move_to_zone(
         state.trigger_index.remove(object_id);
     }
 
+    // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
+    // stamps battlefield entries only, so only draw a timestamp on a battlefield
+    // entry — a graveyard/exile/hand/library move must not burn one. Computed
+    // before the `get_mut` borrow because `next_timestamp` takes `&mut self` over
+    // the whole GameState.
+    let entry_timestamp = (to == Zone::Battlefield).then(|| state.next_timestamp());
+
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
     if to == Zone::Battlefield {
-        obj_mut.reset_for_battlefield_entry(state.turn_number);
+        obj_mut.reset_for_battlefield_entry(
+            state.turn_number,
+            entry_timestamp.expect("battlefield entry draws a timestamp"),
+        );
         // CR 400.7: capture the entrant's incarnation AFTER the battlefield-entry
         // bump so a later leave + re-entry (same ObjectId, higher incarnation) is
         // distinguishable from the original entrant when an ETB intervening-if is

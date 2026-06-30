@@ -1600,6 +1600,11 @@ fn continuous_mods_grant_chosen_keyword_anaphor() {
         "gain that ability",
         "gain the chosen ability",
         "gain the chosen keyword",
+        // CR 608.2d: plural anaphors refer back to a multi-keyword choice
+        // (Greymond's "Humans you control have each of the chosen abilities").
+        // The same `AddChosenKeyword` reads ALL persisted chosen keywords.
+        "have each of the chosen abilities",
+        "have the chosen abilities",
     ] {
         let mods = parse_continuous_modifications(phrase);
         assert_eq!(
@@ -14374,6 +14379,36 @@ fn cant_cast_opponent_attacked_this_turn() {
 }
 
 #[test]
+fn cant_cast_opponent_attacked_you_this_turn() {
+    // CR 101.2 + CR 508.6 + CR 109.5: Sandswirl Wanderglyph — "Each opponent who
+    // attacked you or a planeswalker you control this turn can't cast spells." The
+    // per-affected-player predicate is YouAttackedSourceControllerThisTurn (defender
+    // = the source's controller), distinct from Angelic Arbiter's attacked-ANYONE.
+    let def = parse_static_line(
+        "Each opponent who attacked you or a planeswalker you control this turn can't cast spells.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedSourceControllerThisTurn),
+        "must carry the source-controller-defender predicate"
+    );
+    // Discriminating: must NOT collapse to Angelic Arbiter's attacked-anyone leaf.
+    assert_ne!(
+        def.per_player_condition,
+        Some(ParsedCondition::YouAttackedThisTurn),
+    );
+    // The source-relative functioning gate must stay None (always-on static).
+    assert_eq!(def.condition, None);
+}
+
+#[test]
 fn cant_attack_opponent_cast_spell_this_turn() {
     // CR 508.1 + CR 109.5: "Each opponent who cast a spell this turn can't
     // attack with creatures" — restricts OPPONENTS' creatures, not the source
@@ -18933,6 +18968,130 @@ fn top_of_library_cast_permission_rejects_other_anchors() {
     .is_none());
 }
 
+/// CR 702.170f: Fblthp L4 — "You may plot nonland cards from the top of your
+/// library." must lower to the PERMISSION role
+/// `StaticMode::TopOfLibraryPlotPermission` (the CR 702.170f effect that lets
+/// plot function from the library), NOT the grant `TopOfLibraryHasPlot` and NOT
+/// the cast-permission family (plot is CR 702.170 Library → Exile, not CR 601.2a
+/// Library → Stack). CR 702.170f authorizes plot from a zone other than hand;
+/// the nonland filter on `affected` is this printed L4 text's own scope, not a
+/// CR 702.170f clause.
+/// Discriminating on the grant/permission split: reverting L4 to emit
+/// `TopOfLibraryHasPlot` (the grant) — re-conflating the two roles — flips this.
+#[test]
+fn top_of_library_has_plot_permission_fblthp_nonland() {
+    let def = parse_static_line("You may plot nonland cards from the top of your library.")
+        .expect("Fblthp plot-from-library permission must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::TopOfLibraryPlotPermission,
+        "L4 must be the PERMISSION role, not the grant or a cast permission, got {:?}",
+        def.mode
+    );
+    // Nonland scope rides `affected`: a `Typed` filter carrying `Non(Land)`.
+    let affected = def.affected.expect("nonland affected filter set");
+    match affected {
+        TargetFilter::Typed(tf) => {
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                )),
+                "expected Non(Land) in type filters, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected Typed nonland filter, got {other:?}"),
+    }
+}
+
+/// CR 702.170a + CR 702.170f: Fblthp L3 — "The top card of your library has
+/// plot. The plot cost is equal to its mana cost." must fully classify to the
+/// GRANT role `StaticMode::TopOfLibraryHasPlot` with `affected = Any` (the
+/// nonland scope and the permission to plot from the library are the companion
+/// L4 `TopOfLibraryPlotPermission`; the runtime requires both). The optional
+/// cost-spec second sentence is consumed (no captured field) so the whole line
+/// is owned by the static parser.
+#[test]
+fn top_of_library_has_plot_l3_full_classification() {
+    let def = parse_static_line(
+        "The top card of your library has plot. The plot cost is equal to its mana cost.",
+    )
+    .expect("Fblthp has-plot line must parse");
+    assert_eq!(def.mode, StaticMode::TopOfLibraryHasPlot);
+    assert!(
+        matches!(def.affected, Some(TargetFilter::Any)),
+        "L3 affected must be Any, got {:?}",
+        def.affected
+    );
+
+    // The bare first sentence (a hypothetical L3-only printing) also classifies.
+    let bare = parse_static_line("The top card of your library has plot.")
+        .expect("bare has-plot sentence must parse");
+    assert_eq!(bare.mode, StaticMode::TopOfLibraryHasPlot);
+}
+
+/// Cross-contamination guard: the cast-permission family must be untouched.
+/// "You may cast nonland cards from the top of your library." still lowers to
+/// `TopOfLibraryCastPermission` (Library → Stack cast), proving the plot
+/// dispatch arms (anchored on "you may plot" / "the top card ... has plot")
+/// do not steal cast lines. Reverting the categorical split (folding plot into
+/// the cast variant) flips this discriminating assertion.
+#[test]
+fn top_of_library_plot_does_not_contaminate_cast_permission() {
+    let def = parse_static_line("You may cast nonland cards from the top of your library.")
+        .expect("cast-from-top permission must still parse");
+    assert!(
+        matches!(def.mode, StaticMode::TopOfLibraryCastPermission { .. }),
+        "cast family must stay TopOfLibraryCastPermission, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 702.170f reach gate: drive the FULL oracle pipeline (`parse_oracle_text`),
+/// not just the static parser in isolation, to prove Fblthp's L3/L4 are claimed
+/// by the static dispatch BEFORE the effect fallback — i.e. they are recognized
+/// statics, not `Effect::Unimplemented` GAPs. Each line must produce its
+/// role-correct static (L3 → grant `TopOfLibraryHasPlot`, L4 → permission
+/// `TopOfLibraryPlotPermission`).
+#[test]
+fn fblthp_plot_lines_classify_as_static_not_unimplemented() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::Effect;
+
+    for (line, expected_mode) in [
+        (
+            "You may plot nonland cards from the top of your library.",
+            StaticMode::TopOfLibraryPlotPermission,
+        ),
+        (
+            "The top card of your library has plot. The plot cost is equal to its mana cost.",
+            StaticMode::TopOfLibraryHasPlot,
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            line,
+            "Fblthp, Lost on the Range",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|d| d.mode == expected_mode),
+            "line {line:?} must produce a {expected_mode:?} static, got statics {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+            "line {line:?} must not fall through to Unimplemented, got abilities {:?}",
+            parsed.abilities
+        );
+    }
+}
+
 #[test]
 fn subtype_or_list_single() {
     let f = parse_subtype_or_list("Wolf").unwrap();
@@ -21329,5 +21488,72 @@ fn draw_from_bottom_singular_opponents() {
         StaticMode::DrawFromBottom {
             who: ProhibitionScope::Opponents,
         }
+    );
+}
+
+/// CR 611.3a (Heroic Defiance): an Aura's "Enchanted creature gets +3/+3 unless
+/// <condition>" grant must parse the P/T bonus AND attach the negated condition
+/// — the grant applies precisely when the condition is false. Here the condition
+/// is the most-common-color predicate, so the gate is
+/// `Not(SharesColorWithMostCommonColorAmongPermanents)`.
+#[test]
+fn heroic_defiance_pt_grant_gated_on_most_common_color() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+3 unless it shares a color with the most common \
+         color among all permanents or a color tied for most common.",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T grant");
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 }),
+        "grant must add +3 power, got {:?}",
+        grant.modifications
+    );
+    assert!(
+        grant
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 3 }),
+        "grant must add +3 toughness, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SharesColorWithMostCommonColorAmongPermanents),
+        }),
+        "the +3/+3 must be gated on Not(shares-most-common-color)"
+    );
+}
+
+/// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
+/// inside the quoted ability — the attached-subject grant parser must not lift it
+/// onto the static grant as a condition. Coral Net grants a triggered ability
+/// whose text contains "…unless you discard a card."; the static must surface a
+/// `GrantTrigger` with no spurious `condition`.
+#[test]
+fn granted_ability_inner_unless_stays_inside_quoted_ability() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has \"At the beginning of your upkeep, sacrifice this \
+         creature unless you discard a card.\"",
+    );
+    let grant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous granted-ability static");
+    assert!(
+        grant
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "the granted triggered ability must survive intact, got {:?}",
+        grant.modifications
+    );
+    assert_eq!(
+        grant.condition, None,
+        "the granted ability's inner `unless` must NOT become a static-grant condition"
     );
 }

@@ -139,16 +139,33 @@
   --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
   --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
+  /* Hand/wing cards render larger than the base card. The scale is responsive
+     (1.14 → 1.34 ≥640px → 1.4 ≥768px); keeping it in ONE variable means the
+     rendered width AND the fan's overlap margins (getHandOverlap in
+     PlayerHand.tsx) share a single basis, so the fan-out geometry stays exact
+     at every breakpoint instead of drifting by the scale factor. */
+  --hand-card-scale: 1.14;
+  --hand-card-w: calc(var(--card-w) * var(--hand-card-scale));
+  --hand-card-h: calc(var(--card-h) * var(--hand-card-scale));
   --card-radius: 6px;
   --art-crop-base: clamp(6rem, calc((10vw + 14vh) / 2), 9.5rem);
   --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale));
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
+/* Hand-card scale steps mirror the old Tailwind sm:/md: breakpoints (640/768px)
+   that previously lived inline on the CardImage class. */
+@media (min-width: 640px) {
+  :root {
+    --hand-card-scale: 1.34;
+  }
+}
+
 @media (min-width: 768px) {
   :root {
     --card-base: clamp(4.25rem, calc((6.4vw + 11.5vh) / 2), 7rem);
     --art-crop-base: clamp(6.25rem, calc((8.8vw + 15vh) / 2), 9.75rem);
+    --hand-card-scale: 1.4;
   }
 }
 

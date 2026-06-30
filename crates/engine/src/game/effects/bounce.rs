@@ -232,6 +232,8 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: false,
@@ -322,6 +324,8 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: false,
@@ -495,6 +499,8 @@ pub fn resolve_all(
                 track_exiled_by_source: false,
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
                 is_cost_payment: false,

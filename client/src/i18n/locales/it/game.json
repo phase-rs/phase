@@ -341,7 +341,20 @@
     "pendingFlash": "La prossima magia può essere lanciata come se avesse lampo",
     "pendingFree": "La prossima magia senza pagare il suo costo di mana",
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
-    "companion": "Compagno"
+    "companion": "Compagno",
+    "unboundedTooltip": "{{resource}} illimitato (∞)",
+    "unboundedManaPoolMarker": "Mana illimitato (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "punti vita",
+    "unboundedDamage": "danni",
+    "unboundedMill": "macina",
+    "unboundedCounters": "segnalini",
+    "unboundedTokens": "pedine",
+    "unboundedCards": "carte",
+    "unboundedCasts": "lanci",
+    "unboundedCombats": "combattimenti",
+    "unboundedTurns": "turni",
+    "unboundedTriggers": "inneschi"
   },
   "avatar": {
     "underAttack": "{{name}} è sotto attacco"
@@ -960,6 +973,7 @@
       "manifest": "Manifesta",
       "untap": "Stappa",
       "tap": "Tappa",
+      "attach": "Attach",
       "crew": "Equipaggio ({{power}})",
       "saddle": "Sella ({{power}})",
       "station": "Stazione (+{{power}})"
@@ -1067,6 +1081,7 @@
       "titleHand": "Restituisci",
       "titleUntap": "Stappa",
       "titleTap": "Tappa",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Scegli {{count}} permanente da sacrificare",
       "subtitleSacrificeExact_other": "Scegli {{count}} permanenti da sacrificare",
       "subtitleSacrificeUpTo_one": "Scegli fino a {{count}} permanente da sacrificare",
@@ -1103,6 +1118,12 @@
       "subtitleTapUpTo_other": "Scegli fino a {{count}} permanenti da tappare",
       "subtitleTapRange_one": "Scegli {{min}}-{{count}} permanente da tappare",
       "subtitleTapRange_other": "Scegli {{min}}-{{count}} permanenti da tappare",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Salta",
       "labelDecline": "Rifiuta",
       "labelPutOnTop": "Metti in cima ({{order}})",
@@ -1110,6 +1131,7 @@
       "labelTop": "Cima ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Cima"
     },
     "drawnThisTurn": {

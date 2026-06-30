@@ -701,6 +701,25 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 702.170f: "You may plot [filter] cards from the top of your library."
+    // Plot-from-library permission (Fblthp, Lost on the Range). Dispatched
+    // BEFORE the cast-permission arm so plot lines are claimed by the plot
+    // parser. The cast arm anchors on "you may play"/"you may cast" while this
+    // anchors on "you may plot", so there is no real collision — ordering
+    // documents intent and guards against future drift. Plot is a CR 702.170
+    // special action (Library → Exile, later Exile → Stack), categorically
+    // distinct from the cast permission's CR 601.2a Library → Stack cast.
+    if let Some(result) = try_parse_top_of_library_plot_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 702.170f + CR 702.170a: "The top card of your library has plot[. The
+    // plot cost is equal to its mana cost]." Mechanic-establishing plot grant
+    // for the top library card (Fblthp). Also claimed ahead of the cast arm.
+    if let Some(result) = try_parse_top_of_library_has_plot(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
     // top of your library [rider]." Top-of-library cast permission class
     // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future, Vivien

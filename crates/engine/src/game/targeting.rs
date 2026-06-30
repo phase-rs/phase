@@ -56,6 +56,34 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     )
 }
 
+/// Enumerate object targets for per-opponent fanout where filter membership is
+/// bound to the opponent named by the effect (for example, "that player
+/// controls"), while CR 115.1 + CR 702.11b targeting restrictions are still
+/// checked against the actual spell or ability controller and source.
+///
+/// This intentionally does not solve player-filter controller binding:
+/// player-filter enumeration still uses `source_controller`. It is only for
+/// object/permanent fanout helpers.
+pub(crate) fn find_legal_object_targets_for_ability_with_filter_controller(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    filter_controller: PlayerId,
+) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_ability_with_controller(ability, filter_controller);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+    .into_iter()
+    .filter(|target| matches!(target, TargetRef::Object(_)))
+    .collect()
+}
+
 fn find_legal_targets_with_context(
     state: &GameState,
     filter: &TargetFilter,
@@ -135,13 +163,19 @@ fn find_legal_targets_with_context(
         return targets;
     }
 
-    // Typed filter with no type_filters targets players, not permanents.
-    // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
-    // The "any other target" shape (handled above as `is_any_other_target`) is
-    // the sole exception: it adds players above and falls through to the object
+    // Typed filter with no type_filters AND no properties targets players, not
+    // permanents. e.g. "target opponent" → Typed { type_filters: [], controller:
+    // Opponent }. A non-empty `properties` list (e.g. `FilterProp::Token` for
+    // "target token you control") describes an object characteristic that has
+    // no meaning for a player, so it must fall through to the object
+    // enumeration below instead of collapsing to players-only here (issue #2004
+    // — "target token you control" was wrongly resolving to the controller
+    // player instead of enumerating tokens). The "any other target" shape
+    // (handled above as `is_any_other_target`) is the sole property-bearing
+    // exception: it adds players above and falls through to the object
     // enumeration below instead of collapsing to players-only here.
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() && !is_any_other_target {
+        if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // Player-phasing exclusion (mirrors CR 702.26b for permanents).
@@ -828,6 +862,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 crate::types::events::GameEvent::Saddled { mount_id, .. } => {
                     Some(TargetRef::Object(*mount_id))
                 }
+                // CR 603.2 + CR 608.2c: "that [creature/permanent]" on a zone-change
+                // trigger (Captain America, Team Leader's "that Hero") is the entering
+                // object when it is not the trigger source itself (Abigale's "that
+                // creature" anaphor must still inherit the chosen target).
+                crate::types::events::GameEvent::ZoneChanged { object_id, .. }
+                    if *object_id != source_id =>
+                {
+                    Some(TargetRef::Object(*object_id))
+                }
                 _ => None,
             }
         }
@@ -946,9 +989,22 @@ fn blocked_attacker_from_event(
     let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
         return None;
     };
-    let mut attackers = assignments
+    // CR 509.1 + CR 608.2c: For a `Blocks` trigger ("Whenever ~ blocks a
+    // creature, … that creature") the source is the BLOCKER, so "that creature"
+    // is the attacker it was assigned to.
+    let mut blocked = assignments
         .iter()
         .filter_map(|(blocker, attacker)| (*blocker == source_id).then_some(*attacker));
+    if let Some(first) = blocked.next() {
+        return blocked.all(|attacker| attacker == first).then_some(first);
+    }
+    // CR 509.1 + CR 608.2c (issue #4599): For a `BecomesBlocked` trigger
+    // ("Whenever a Hero you control becomes blocked, put a +1/+1 counter on that
+    // Hero …" — She-Hulk, Wallbreaker) the source is the ATTACKER (the blocked
+    // creature), or an observer of it, never the blocker — so the blocker-side
+    // filter above is empty. The matcher narrows the event to the single
+    // matched `(blocker, attacker)` pair, so "that [creature]" is that attacker.
+    let mut attackers = assignments.iter().map(|(_, attacker)| *attacker);
     let first = attackers.next()?;
     attackers.all(|attacker| attacker == first).then_some(first)
 }
@@ -1694,7 +1750,7 @@ fn can_target(
     let ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller)
             || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
-    // CR 702.11a: Hexproof prevents targeting by opponents.
+    // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
         && obj.controller != source_controller
@@ -4156,6 +4212,49 @@ mod tests {
         assert_eq!(result, vec![TargetRef::Object(creature)]);
     }
 
+    /// CR 603.2 + CR 608.2c: "that Hero" on a zone-change ETB trigger is the
+    /// entering object (Captain America, Team Leader — issue #4564).
+    #[test]
+    fn resolved_targets_parent_target_for_zone_changed_event_returns_trigger_source() {
+        let (mut state, trigger_source, entering) = {
+            let mut state = GameState::new_two_player(7);
+            let trigger_source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Captain America, Team Leader".to_string(),
+                Zone::Battlefield,
+            );
+            let entering = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Other Hero".to_string(),
+                Zone::Battlefield,
+            );
+            (state, trigger_source, entering)
+        };
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                entering,
+                Some(crate::types::zones::Zone::Hand),
+                crate::types::zones::Zone::Battlefield,
+            )),
+        });
+        let ability = make_resolved_with_targets(vec![], trigger_source);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(entering)],
+            "ParentTarget on a zone-change trigger must bind to the entering object"
+        );
+    }
+
     /// CR 603.2c + CR 608.2c: batched attack triggers pump every attacker that
     /// satisfied the subject ("those creatures get +4/+4").
     #[test]
@@ -4263,6 +4362,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![second.clone()],
@@ -4336,6 +4436,7 @@ mod tests {
         let event = crate::types::events::GameEvent::AbilityActivated {
             player_id: PlayerId(1),
             source_id: ObjectId(99),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

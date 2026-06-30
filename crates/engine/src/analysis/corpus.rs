@@ -839,7 +839,7 @@ pub(crate) struct ComboBoard {
 
 /// Build a board with the named permanents installed on P0's battlefield, a large
 /// finite mana pool floated (so mana-cost abilities can pay, while a mana-GAIN
-/// axis is still measurable — not `debug_infinite_mana`), and layers settled.
+/// axis is still measurable — not `unbounded_resources`), and layers settled.
 /// `None` if any name is missing from `db`. Auras are installed but NOT
 /// auto-attached (each driver attaches them to the correct host).
 pub(crate) fn build_board(db: &CardDatabase, cards: &[&str]) -> Option<ComboBoard> {
@@ -1621,28 +1621,41 @@ pub(crate) fn drive_offline_marwyn_sword(db: &CardDatabase) -> Option<LoopCertif
 // exercised end-to-end.
 // ===========================================================================
 
-/// Build a 2-player board with the named permanents installed on P0, P1 set to a
-/// high life total `victim_life` (so a natural CR 704.5a death cannot be the cause
-/// of any early `GameOver`), and the active player P0 at a clean `PreCombatMain`
-/// priority window. No mana is floated (the drain cascade is trigger-driven).
-/// Returns `None` if any name is missing.
-pub(crate) fn build_drain_board(
+/// Build an N-player board with the named permanents installed on P0, each opponent
+/// `PlayerId(i + 1)` set to `opponent_lives[i]`, the controller P0 at `controller_life`,
+/// and the active player P0 at a clean `PreCombatMain` priority window with the live
+/// detector opted ON. Generalizes [`build_drain_board`] to the multiplayer tables the
+/// combo-detector must stay safe on (CR 104.2a last-standing, CR 104.4b mandatory
+/// draw). `None` if any name is missing, or if `opponent_lives.len() + 1 != num_players`.
+pub(crate) fn build_drain_board_n(
     db: &CardDatabase,
     cards: &[&str],
-    victim_life: i32,
+    num_players: u8,
+    opponent_lives: &[i32],
+    controller_life: i32,
 ) -> Option<ComboBoard> {
     if cards.iter().any(|c| db.get_face_by_name(c).is_none()) {
         return None;
     }
-    let mut scenario = GameScenario::new();
+    if opponent_lives.len() + 1 != num_players as usize {
+        return None;
+    }
+    let mut scenario = GameScenario::new_n_player(num_players, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 40);
-    scenario.with_life(P1, victim_life);
+    scenario.with_life(P0, controller_life);
+    for (i, &life) in opponent_lives.iter().enumerate() {
+        scenario.with_life(PlayerId(i as u8 + 1), life);
+    }
     let mut runner = scenario.build();
     {
         let state = runner.state_mut();
         state.active_player = P0;
         state.priority_player = P0;
+        // CR 732.2a: this harness exercises the live combo-detector, so it opts the
+        // (default-OFF) detector ON. Without this the reconcile-seam shortcut and the
+        // loop-detection ring sampler are both gated off and no drain cascade would be
+        // shortcut to its GameOver — see `GameState::loop_detection`.
+        state.loop_detection = crate::types::game_state::LoopDetectionMode::On;
     }
     let mut ids = Vec::new();
     {
@@ -1653,6 +1666,20 @@ pub(crate) fn build_drain_board(
         settle_layers(state);
     }
     Some(ComboBoard { runner, ids })
+}
+
+/// Build a 2-player board with the named permanents installed on P0, P1 set to a
+/// high life total `victim_life` (so a natural CR 704.5a death cannot be the cause
+/// of any early `GameOver`), and the active player P0 at a clean `PreCombatMain`
+/// priority window. No mana is floated (the drain cascade is trigger-driven).
+/// Returns `None` if any name is missing. Thin 2-player wrapper over
+/// [`build_drain_board_n`] (P0 at 40 life, the sole opponent at `victim_life`).
+pub(crate) fn build_drain_board(
+    db: &CardDatabase,
+    cards: &[&str],
+    victim_life: i32,
+) -> Option<ComboBoard> {
+    build_drain_board_n(db, cards, 2, &[victim_life], 40)
 }
 
 /// Seed a drain cascade by gaining P0 1 life through the real life-gain pipeline
@@ -1686,8 +1713,19 @@ pub(crate) struct BeatTrace {
     pub(crate) wf: WaitingFor,
     pub(crate) stack_len: usize,
     pub(crate) ring_len: usize,
-    pub(crate) p0_life: i32,
-    pub(crate) p1_life: i32,
+    /// Life total of every seat (index = `PlayerId`), snapshotted this beat. A `Vec`
+    /// (not `p0_life`/`p1_life`) so the multiplayer regressions read 3- and 4-player
+    /// tables without assuming a fixed count.
+    pub(crate) lives: Vec<i32>,
+}
+
+impl BeatTrace {
+    /// Lowest life among the opponents (every seat except the controller P0). Lets the
+    /// multiplayer drain regressions assert "an opponent is draining toward 0" without
+    /// hard-coding which seat or how many. `i32::MAX` if there are no opponents.
+    pub(crate) fn min_opponent_life(&self) -> i32 {
+        self.lives.iter().skip(1).copied().min().unwrap_or(i32::MAX)
+    }
 }
 
 /// Drive `runner.act(PassPriority)` up to `max_beats` times, recording one
@@ -1710,8 +1748,7 @@ pub(crate) fn drive_pass_priority(board: &mut ComboBoard, max_beats: usize) -> V
             wf: s.waiting_for.clone(),
             stack_len: s.stack.len(),
             ring_len: s.loop_detect_ring.len(),
-            p0_life: s.players[0].life,
-            p1_life: s.players[1].life,
+            lives: s.players.iter().map(|p| p.life).collect(),
         });
         if matches!(
             board.runner.state().waiting_for,

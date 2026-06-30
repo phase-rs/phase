@@ -18,7 +18,7 @@ import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmo
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -315,6 +315,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
+              {[...new Set(opponentDesignations.unboundedResources.map((u) => familyOf(u.axis)))].map(
+                (family) => (
+                  <UnboundedBadge key={family} family={family} />
+                ),
+              )}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
@@ -734,6 +739,9 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
       {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+      {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map((family) => (
+        <UnboundedBadge key={family} family={family} />
+      ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       {onKick && !isEliminated && (
         // Stop propagation so clicking the kick affordance doesn't also fire

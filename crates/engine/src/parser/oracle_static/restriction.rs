@@ -824,6 +824,21 @@ pub(crate) fn parse_per_player_conditional_prohibition(
             ParsedCondition::YouAttackedThisTurn,
             tag::<_, _, OracleError<'_>>("attacked with a creature this turn"),
         ),
+        // CR 508.6: "attacked you or a planeswalker you control this turn" — the
+        // attacked-defender is the source's controller (CR 109.5 "you"), distinct
+        // from `YouAttackedThisTurn`'s attacked-anyone. Longer disjunctive form
+        // first; the bare "attacked you this turn" is the same predicate (the
+        // planeswalker disjunct collapses to the controller via CR 508.5).
+        // Sandswirl Wanderglyph.
+        value(
+            ParsedCondition::YouAttackedSourceControllerThisTurn,
+            alt((
+                tag::<_, _, OracleError<'_>>(
+                    "attacked you or a planeswalker you control this turn",
+                ),
+                tag("attacked you this turn"),
+            )),
+        ),
         value(
             ParsedCondition::YouCastSpellThisTurn { filter: None },
             tag::<_, _, OracleError<'_>>("cast a spell this turn"),
@@ -2409,6 +2424,99 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     Some(def)
 }
 
+/// CR 702.170f: Parse "You may plot [filter] cards from the top of your library"
+/// — the plot-from-library PERMISSION line (Fblthp, Lost on the Range L4). This
+/// is the CR 702.170f effect that allows the plot ability to function in a zone
+/// other than hand and authorizes taking the special action there; it emits
+/// [`StaticMode::TopOfLibraryPlotPermission`], the permission role — DISTINCT
+/// from [`StaticMode::TopOfLibraryHasPlot`] (the L3 grant that the top card
+/// *has* plot). The runtime requires both. (Both are also categorically
+/// distinct from the cast-permission family: plot is a CR 702.170 special action
+/// — Library → Exile, then a later Exile → Stack free cast — not a CR 601.2a
+/// Library → Stack cast.)
+///
+/// Structurally a clone of [`try_parse_top_of_library_cast_permission`], anchored
+/// on the plot verb ("you may plot "). The eligibility filter ("nonland") rides
+/// `StaticDefinition.affected`, exactly as the cast-permission sibling carries
+/// its eligibility. Built for the class: any type/subtype phrase the cast arm
+/// accepts is accepted here, so future "you may plot <type> cards from the top
+/// of your library" printings slot in without parser changes.
+pub(crate) fn try_parse_top_of_library_plot_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // "you may plot <filter> from the top of your library"
+    let rest = nom_tag_lower(lower, lower, "you may plot ")?;
+
+    // Anchor on " from the top of your library"; the filter text precedes it.
+    let (filter_text, _trailing) =
+        nom_primitives::split_once_on(rest, " from the top of your library")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Strip a leading article so `parse_type_phrase` sees the bare noun.
+    let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
+        .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
+        .unwrap_or(filter_text);
+
+    // Drop trailing " cards"/" card" so `parse_type_phrase` sees the bare
+    // type/subtype phrase ("nonland cards" → "nonland"). Mirrors the
+    // " spells"/" spell" replacen idiom of the cast-permission arm; plot
+    // operates on cards (it exiles a card), so the noun is "card(s)".
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "cards") {
+        Cow::Owned(filter_text.replacen(" cards", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "card") {
+        Cow::Owned(filter_text.replacen(" card", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    let (filter, _) = parse_type_phrase(&cleaned);
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryPlotPermission)
+            .affected(filter)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 702.170a + CR 702.170f: Parse "The top card of your library has plot[. The
+/// plot cost is equal to its mana cost]" — the GRANT line that gives the top
+/// library card the plot ability (Fblthp, Lost on the Range L3). Emits
+/// [`StaticMode::TopOfLibraryHasPlot`] (the grant role) with `affected =
+/// TargetFilter::Any`; the *permission* to actually plot from the library (and
+/// its nonland scope) is the companion L4 `TopOfLibraryPlotPermission` — the
+/// runtime requires both.
+///
+/// The optional second sentence is consumed (no capture) so the full line
+/// classifies: the plot cost is the card's own mana cost (CR 702.170a),
+/// computed at activation synthesis from the live top card, not data carried on
+/// the static. The remainder must be empty after consuming the known sentences
+/// so an unexpected longer line is not silently swallowed.
+pub(crate) fn try_parse_top_of_library_has_plot(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "the top card of your library has plot")?;
+
+    // CR 702.170a: optional intrinsic cost sentence — consumed, never captured.
+    let rest =
+        nom_tag_lower(rest, rest, ". the plot cost is equal to its mana cost").unwrap_or(rest);
+
+    // Allow a trailing sentence period after either sentence.
+    let rest = nom_tag_lower(rest, rest, ".").unwrap_or(rest);
+
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryHasPlot)
+            .affected(TargetFilter::Any)
+            .description(text.to_string()),
+    )
+}
+
 /// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive filtered top-of-
 /// library play/cast permission — "You may play <land-filter> and cast
 /// <spell-filter> from the top of your library." — into a single
@@ -2492,8 +2600,10 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     };
 
     // The zone qualifier "from your hand" is optional. When omitted, the static
-    // only replaces the mana cost for spells already castable from their current
-    // zone; it does not create an independent cast-from-anywhere permission.
+    // only replaces the mana cost for spells in the controller's built-in cast
+    // zones (runtime scope: hand plus command-zone commanders/signature spells,
+    // per `cast_free_origin_admits_object`); it does not create an independent
+    // cast-from-anywhere permission.
     //
     // Both branches must terminate at " without paying" — that token is the
     // single anchor for the static. The qualified branch keeps a permissive

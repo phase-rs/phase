@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
 use engine::database::removed_cards::is_removed_offensive_card;
+use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
@@ -667,6 +668,11 @@ fn main() {
     let rarity_map = build_rarity_map(&mtgjson_path);
     let token_source_metadata = build_token_source_metadata(&mtgjson_path);
 
+    let set_catalog = data_dir
+        .as_ref()
+        .map(|d| load_set_catalog(d))
+        .unwrap_or_default();
+
     // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
     // directly from MTGJSON `isGameChanger`; this file covers policy axes that
     // MTGJSON does not expose.
@@ -781,6 +787,7 @@ fn main() {
                     .get(&face.name.to_lowercase())
                     .cloned()
                     .unwrap_or_default();
+
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 collect_localized(&mut sidecars, &key, source);
                 insert_face_with_priority(
@@ -884,6 +891,7 @@ fn main() {
                 .get(&face.name.to_lowercase())
                 .cloned()
                 .unwrap_or_default();
+
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             collect_localized(&mut sidecars, &key, &faces[0]);
             insert_face(
@@ -921,9 +929,10 @@ fn main() {
     // they are excluded from every format-scoped deck-builder pool. The gated
     // sets are separately hidden from the draft/picker/deck-builder UIs below
     // (the `is_set_gated` filter on the set list), so the sets remain
-    // un-draftable. Reprint-aware. No-op when GATED_SETS is unset/empty. See
+    // un-draftable. Reprint-aware. Sets past their MTGJSON release date are
+    // auto-unlocked even when still listed in `GATED_SETS`. See
     // `database::set_gating`.
-    let gated_sets = set_gating::gated_sets_from_env();
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
     if !gated_sets.is_empty() {
         let banned = legalities_to_export_map(&set_gating::all_formats_banned());
         let mut gated_count = 0usize;
@@ -1188,8 +1197,9 @@ fn run_set_list(remaining_args: &[String]) {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", input.display()));
 
     // Release-gate: hide gated sets from the picker / draft / deck-builder UIs.
-    // No-op when GATED_SETS is unset/empty. See `database::set_gating`.
-    let gated_sets = set_gating::gated_sets_from_env();
+    // Sets past their release date are auto-unlocked. See `database::set_gating`.
+    let set_catalog = load_set_catalog(Path::new(data_dir));
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
     let projected: BTreeMap<String, SetListEntry> = raw
         .data
         .into_iter()

@@ -3265,6 +3265,7 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })
         }
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => None,
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::WasCast { .. } => None,
         StaticCondition::IsPresent { filter } => {
@@ -5721,6 +5722,25 @@ mod tests {
                 );
             }
             other => panic!("expected Typed Angel filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_if_you_do_conditional_hero_enters_this_way() {
+        let (condition, body) = strip_if_you_do_conditional(
+            "if a hero enters this way, it enters with an additional +1/+1 counter on it",
+        );
+        assert_eq!(body, "it enters with an additional +1/+1 counter on it");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Hero"))
+                ));
+            }
+            other => panic!("expected Typed Hero filter, got {other:?}"),
         }
     }
 

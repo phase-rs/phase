@@ -587,12 +587,17 @@ pub fn initialize_game(
             state.debug_permitted.insert(PlayerId(i));
         }
     }
-    state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
     } else {
         MatchConfig::default()
     };
+    // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
+    // onto the runtime `loop_detection` gate via the single engine authority shared
+    // with the server path. The detector is player-count-agnostic, so it carries
+    // through for local 3-/4-player tables too.
+    state.set_match_config(match_config);
 
     // Load deck data if provided — resolve names via the loaded card database.
     //

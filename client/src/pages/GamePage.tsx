@@ -212,6 +212,7 @@ export function GamePage() {
   const formatParam = searchParams.get("format") as GameFormat | null;
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
+  const loopParam = searchParams.get("loop");
   const firstParam = searchParams.get("first");
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
@@ -246,8 +247,11 @@ export function GamePage() {
   const matchConfig = useMemo<MatchConfig>(
     () => ({
       match_type: matchParam?.toLowerCase() === "bo3" ? "Bo3" : "Bo1",
+      // CR 732.2a: combo (infinite-loop) detector opt-in carried from the local
+      // game-setup screen; immutable once the game starts (engine default Off).
+      loop_detection: loopParam?.toLowerCase() === "on" ? { type: "On" } : { type: "Off" },
     }),
-    [matchParam],
+    [matchParam, loopParam],
   );
 
   // Map URL modes to GameProvider modes
