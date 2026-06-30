@@ -14,7 +14,8 @@
     "stepForward": "Krok naprzód",
     "actionOf": "Akcja {{current}} / {{total}}",
     "speed": "Szybkość",
-    "speedValue": "{{value}}x"
+    "speedValue": "{{value}}x",
+    "seekError": "Nie udało się odtworzyć tego momentu powtórki: {{message}}"
   },
   "export": {
     "button": "Eksportuj powtórkę",

@@ -37,6 +37,16 @@ pub enum ReplayError {
     /// a state this recording depends on) — it is not a normal rules outcome.
     #[error("replay action {index} desynced reconstruction: {message}")]
     Desync { index: u32, message: String },
+    /// The header carries deck data (the recorded game was not started with
+    /// empty libraries) but no `CardDatabase` was supplied to resolve it.
+    /// Silently skipping deck hydration in this case would reconstruct a
+    /// *different* starting state (empty libraries) than the one the
+    /// original game actually had — a wrong-but-quiet result is worse than
+    /// failing loudly here.
+    #[error(
+        "replay requires a card database to resolve its recorded deck data, but none was loaded"
+    )]
+    MissingCardDatabase,
 }
 
 /// Reconstruct the state immediately after `start_game` (before any recorded
@@ -44,7 +54,17 @@ pub enum ReplayError {
 /// canonical init sequence every transport (WASM, server-core) already
 /// shares — see `load_and_hydrate_decks` — so reconstruction can't drift from
 /// how the original game was actually started.
-pub fn reconstruct_initial_state(header: &ReplayHeader, db: Option<&CardDatabase>) -> GameState {
+///
+/// Errors with `ReplayError::MissingCardDatabase` when `header.deck_data` is
+/// `Some` but `db` is `None` — that combination can only reconstruct a
+/// wrong starting state (empty libraries instead of the recorded deck), so
+/// it isn't accepted silently. `db: None` is only valid when
+/// `header.deck_data` is also `None` (a format that genuinely starts with
+/// empty libraries).
+pub fn reconstruct_initial_state(
+    header: &ReplayHeader,
+    db: Option<&CardDatabase>,
+) -> Result<GameState, ReplayError> {
     let mut state = GameState::new(
         header.format_config.clone(),
         header.player_count,
@@ -55,10 +75,14 @@ pub fn reconstruct_initial_state(header: &ReplayHeader, db: Option<&CardDatabase
     // game reconstructs with the same runtime gate the original game had.
     state.set_match_config(header.match_config);
 
-    if let (Some(deck_data), Some(db)) = (&header.deck_data, db) {
-        let payload = resolve_deck_list(db, deck_data);
-        load_and_hydrate_decks(&mut state, &payload, Some(db));
-        state.all_card_names = db.card_names().into();
+    match (&header.deck_data, db) {
+        (Some(deck_data), Some(db)) => {
+            let payload = resolve_deck_list(db, deck_data);
+            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            state.all_card_names = db.card_names().into();
+        }
+        (Some(_), None) => return Err(ReplayError::MissingCardDatabase),
+        (None, _) => {}
     }
 
     match header.first_player {
@@ -66,12 +90,13 @@ pub fn reconstruct_initial_state(header: &ReplayHeader, db: Option<&CardDatabase
         Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
         _ => start_game(&mut state),
     };
-    state
+    Ok(state)
 }
 
 /// Deterministic playback over a `ReplayLog`. Holds sparse cached
 /// checkpoints (see `CHECKPOINT_INTERVAL`) so repeated scrubbing doesn't
 /// re-simulate the whole game on every call.
+#[derive(Debug)]
 pub struct ReplayPlayer {
     log: ReplayLog,
     checkpoints: BTreeMap<u32, GameState>,
@@ -84,17 +109,17 @@ pub struct ReplayPlayer {
 impl ReplayPlayer {
     /// Build a player for `log`, eagerly reconstructing the index-0
     /// (post-`start_game`) checkpoint. `db` is forwarded to
-    /// `reconstruct_initial_state` and is `None` only for header-less test
-    /// fixtures or formats that genuinely start with empty libraries.
-    pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Self {
-        let initial = reconstruct_initial_state(&log.header, db);
+    /// `reconstruct_initial_state`, which errors if `log.header.deck_data`
+    /// is `Some` and `db` is `None` — see that function's doc comment.
+    pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Result<Self, ReplayError> {
+        let initial = reconstruct_initial_state(&log.header, db)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
-        Self {
+        Ok(Self {
             log,
             checkpoints,
             scratch: None,
-        }
+        })
     }
 
     /// Total number of recorded actions. Valid `seek` targets are `0..=len()`.
@@ -186,7 +211,8 @@ mod tests {
     #[test]
     fn replay_player_reconstructs_every_recorded_index() {
         let header = two_player_header(99);
-        let mut live = reconstruct_initial_state(&header, None);
+        let mut live = reconstruct_initial_state(&header, None)
+            .expect("deck_data is None, so reconstruction cannot fail");
 
         let mut log = ReplayLog::new(header);
         let mut live_snapshots = vec![live.clone()];
@@ -210,7 +236,8 @@ mod tests {
         );
         assert_eq!(log.actions.len(), live_snapshots.len() - 1);
 
-        let mut player = ReplayPlayer::load(log, None);
+        let mut player =
+            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
         assert_eq!(player.len(), live_snapshots.len() as u32 - 1);
 
         for (index, expected) in live_snapshots.iter().enumerate() {
@@ -236,7 +263,8 @@ mod tests {
     #[test]
     fn replay_player_seeks_out_of_order_and_caches_correctly() {
         let header = two_player_header(42);
-        let mut live = reconstruct_initial_state(&header, None);
+        let mut live = reconstruct_initial_state(&header, None)
+            .expect("deck_data is None, so reconstruction cannot fail");
         let mut log = ReplayLog::new(header);
 
         for _ in 0..6 {
@@ -249,7 +277,8 @@ mod tests {
         let total = log.actions.len() as u32;
         assert!(total >= 3);
 
-        let mut player = ReplayPlayer::load(log, None);
+        let mut player =
+            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
 
         // Seek forward, then back, then forward again — exercises both the
         // checkpoint-cache hit path and the nearest-checkpoint replay path.
@@ -263,10 +292,27 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_initial_state_fails_loudly_without_card_database() {
+        let mut header = two_player_header(13);
+        header.deck_data = Some(crate::game::deck_loading::DeckList::default());
+
+        let err = reconstruct_initial_state(&header, None)
+            .expect_err("deck_data present with no CardDatabase must error, not silently reconstruct empty libraries");
+        assert!(matches!(err, ReplayError::MissingCardDatabase));
+
+        // ReplayPlayer::load propagates the same failure.
+        let log = ReplayLog::new(header);
+        let load_err = ReplayPlayer::load(log, None)
+            .expect_err("load must surface the same MissingCardDatabase failure");
+        assert!(matches!(load_err, ReplayError::MissingCardDatabase));
+    }
+
+    #[test]
     fn replay_player_seek_clamps_to_length_and_handles_empty_log() {
         let header = two_player_header(7);
         let log = ReplayLog::new(header);
-        let mut player = ReplayPlayer::load(log, None);
+        let mut player =
+            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
 
         assert_eq!(player.len(), 0);
         assert!(player.is_empty());

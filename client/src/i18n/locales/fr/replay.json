@@ -14,7 +14,8 @@
     "stepForward": "Avancer",
     "actionOf": "Action {{current}} / {{total}}",
     "speed": "Vitesse",
-    "speedValue": "{{value}}x"
+    "speedValue": "{{value}}x",
+    "seekError": "Impossible de reconstruire ce point du replay : {{message}}"
   },
   "export": {
     "button": "Exporter le replay",

@@ -106,9 +106,21 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
     const { adapter, totalActions } = get();
     if (!adapter) return;
     const clamped = Math.max(0, Math.min(index, totalActions));
-    const state = await adapter.seek(clamped);
-    set({ currentIndex: clamped });
-    pushStateToGameStore(state);
+    try {
+      const state = await adapter.seek(clamped);
+      set({ currentIndex: clamped, error: null });
+      pushStateToGameStore(state);
+    } catch (err) {
+      // A reconstruction desync (ReplayError::Desync — see
+      // crates/engine/src/game/replay.rs) is a real failure, not "nothing to
+      // show": surface it instead of silently leaving the board on the last
+      // good frame. Caught here (rather than left to propagate) because
+      // `seek` is driven from fire-and-forget call sites (the scrubber
+      // input, the play-loop interval) that can't otherwise react to a
+      // rejected promise without producing an unhandled rejection.
+      get().pause();
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 
   stepForward: async () => {

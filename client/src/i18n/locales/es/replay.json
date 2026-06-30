@@ -14,7 +14,8 @@
     "stepForward": "Avanzar",
     "actionOf": "Acción {{current}} / {{total}}",
     "speed": "Velocidad",
-    "speedValue": "{{value}}x"
+    "speedValue": "{{value}}x",
+    "seekError": "No se pudo reconstruir este punto de la repetición: {{message}}"
   },
   "export": {
     "button": "Exportar repetición",

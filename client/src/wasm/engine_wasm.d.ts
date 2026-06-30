@@ -254,9 +254,11 @@ export function load_card_database(json_str: string): number;
  * Load a replay log (the JSON produced by `export_replay_log`) for
  * scrubbing/playback. Independent of the live `GAME_STATE` — does not
  * require, and does not affect, an active game. Uses the loaded `CARD_DB`
- * (if any) to resolve the recorded deck list when reconstructing the
- * starting state. Returns the total number of recorded actions; valid
- * `replay_seek_js` targets are `0..=length`.
+ * to resolve the recorded deck list when reconstructing the starting
+ * state — and errors (rather than silently reconstructing empty
+ * libraries) if the replay carries deck data but no card database is
+ * loaded; see `ReplayError::MissingCardDatabase`. Returns the total number
+ * of recorded actions; valid `replay_seek_js` targets are `0..=length`.
  */
 export function load_replay_for_playback(json_str: string): number;
 
@@ -286,9 +288,12 @@ export function replay_length_js(): number;
 /**
  * Seek the loaded replay to `target` (clamped to the recording's length) and
  * return the reconstructed state at that point, wrapped the same way
- * `get_game_state` wraps the live state. Returns `null` if no replay is
- * loaded or reconstruction desynced (`ReplayError::Desync` — an engine
- * version mismatch between recording and playback, not a rules outcome).
+ * `get_game_state` wraps the live state. Returns `Ok(null)` only when no
+ * replay is loaded — a reconstruction desync (`ReplayError::Desync`, an
+ * engine-version mismatch between recording and playback, not a rules
+ * outcome) is a real failure and must not be silently swallowed into the
+ * same null the caller uses for "nothing loaded"; it throws instead, like
+ * every other fallible engine entry point that returns `Result<_, JsValue>`.
  */
 export function replay_seek_js(target: number): any;
 
@@ -425,7 +430,7 @@ export interface InitOutput {
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
-    readonly replay_seek_js: (a: number) => any;
+    readonly replay_seek_js: (a: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];

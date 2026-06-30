@@ -17,6 +17,7 @@ export function ReplayControls() {
   const totalActions = useReplayStore((s) => s.totalActions);
   const isPlaying = useReplayStore((s) => s.isPlaying);
   const playbackSpeed = useReplayStore((s) => s.playbackSpeed);
+  const error = useReplayStore((s) => s.error);
   const seek = useReplayStore((s) => s.seek);
   const stepBackward = useReplayStore((s) => s.stepBackward);
   const stepForward = useReplayStore((s) => s.stepForward);
@@ -26,6 +27,11 @@ export function ReplayControls() {
 
   return (
     <div className="flex w-full flex-col gap-2 border-t border-white/10 bg-black/70 px-4 py-3 backdrop-blur">
+      {error && (
+        <p className="text-xs text-red-400" role="alert">
+          {t("controls.seekError", { message: error })}
+        </p>
+      )}
       <input
         type="range"
         min={0}

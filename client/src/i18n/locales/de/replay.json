@@ -14,7 +14,8 @@
     "stepForward": "Schritt vor",
     "actionOf": "Aktion {{current}} / {{total}}",
     "speed": "Geschwindigkeit",
-    "speedValue": "{{value}}x"
+    "speedValue": "{{value}}x",
+    "seekError": "Dieser Punkt der Wiederholung konnte nicht rekonstruiert werden: {{message}}"
   },
   "export": {
     "button": "Wiederholung exportieren",

@@ -1366,17 +1366,21 @@ pub fn export_replay_log() -> Result<String, JsValue> {
 /// Load a replay log (the JSON produced by `export_replay_log`) for
 /// scrubbing/playback. Independent of the live `GAME_STATE` — does not
 /// require, and does not affect, an active game. Uses the loaded `CARD_DB`
-/// (if any) to resolve the recorded deck list when reconstructing the
-/// starting state. Returns the total number of recorded actions; valid
-/// `replay_seek_js` targets are `0..=length`.
+/// to resolve the recorded deck list when reconstructing the starting
+/// state — and errors (rather than silently reconstructing empty
+/// libraries) if the replay carries deck data but no card database is
+/// loaded; see `ReplayError::MissingCardDatabase`. Returns the total number
+/// of recorded actions; valid `replay_seek_js` targets are `0..=length`.
 #[wasm_bindgen]
 pub fn load_replay_for_playback(json_str: &str) -> Result<u32, JsValue> {
     let log: ReplayLog = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse replay log: {e}")))?;
-    let player = CARD_DB.with(|cell| {
-        let db = cell.borrow();
-        ReplayPlayer::load(log, db.as_ref())
-    });
+    let player = CARD_DB
+        .with(|cell| {
+            let db = cell.borrow();
+            ReplayPlayer::load(log, db.as_ref())
+        })
+        .map_err(|e| JsValue::from_str(&format!("Engine error: {e}")))?;
     let len = player.len();
     REPLAY_PLAYER.with(|cell| cell.set(Some(player)));
     Ok(len)
@@ -1411,22 +1415,27 @@ pub fn replay_header_js() -> JsValue {
 
 /// Seek the loaded replay to `target` (clamped to the recording's length) and
 /// return the reconstructed state at that point, wrapped the same way
-/// `get_game_state` wraps the live state. Returns `null` if no replay is
-/// loaded or reconstruction desynced (`ReplayError::Desync` — an engine
-/// version mismatch between recording and playback, not a rules outcome).
+/// `get_game_state` wraps the live state. Returns `Ok(null)` only when no
+/// replay is loaded — a reconstruction desync (`ReplayError::Desync`, an
+/// engine-version mismatch between recording and playback, not a rules
+/// outcome) is a real failure and must not be silently swallowed into the
+/// same null the caller uses for "nothing loaded"; it throws instead, like
+/// every other fallible engine entry point that returns `Result<_, JsValue>`.
 #[wasm_bindgen]
-pub fn replay_seek_js(target: u32) -> JsValue {
+pub fn replay_seek_js(target: u32) -> Result<JsValue, JsValue> {
     REPLAY_PLAYER.with(|cell| {
         let mut player = cell.take();
         let result = match player.as_mut() {
             Some(player) => match player.seek(target) {
-                Ok(state) => to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-                    state,
-                    Some(PlayerId(0)),
+                Ok(state) => Ok(to_js(
+                    &engine::game::derived_views::ClientGameStateRef::wrap(
+                        state,
+                        Some(PlayerId(0)),
+                    ),
                 )),
-                Err(_) => JsValue::NULL,
+                Err(e) => Err(JsValue::from_str(&format!("Engine error: {e}"))),
             },
-            None => JsValue::NULL,
+            None => Ok(JsValue::NULL),
         };
         cell.set(player);
         result
@@ -1580,6 +1589,24 @@ pub fn resolve_all(
     with_state_mut(|state| {
         let mut rng = rand::rng();
         let mut result = resolve_all_inner(state, requester, &ai_seats, max_resolutions, &mut rng);
+        // A Resolve All burst applies real actions directly via
+        // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
+        // which is the only other place REPLAY_LOG is appended to) — without
+        // this, an exported replay would silently omit every action a player
+        // fast-forwarded through, and playback would desync from the game
+        // they actually played. `recorded_actions` is `#[serde(skip)]`, so
+        // draining it here has no effect on the JS-visible result shape.
+        if !result.recorded_actions.is_empty() {
+            REPLAY_LOG.with(|cell| {
+                let mut log = cell.take();
+                if let Some(log) = log.as_mut() {
+                    for (actor, action) in result.recorded_actions.drain(..) {
+                        log.push_action(actor, action);
+                    }
+                }
+                cell.set(log);
+            });
+        }
         result.events.clear();
         result.log_entries.clear();
         Ok(to_js(&result))

@@ -446,7 +446,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "replaySeek": {
-        result(msg.id, replay_seek_js(msg.target) ?? null);
+        // replay_seek_js returns Result<JsValue, JsValue> on the Rust side —
+        // `null` only for "no replay loaded"; a reconstruction desync throws,
+        // which the outer try/catch around this switch converts to an error
+        // response instead of silently returning null for both cases.
+        result(msg.id, replay_seek_js(msg.target));
         break;
       }
 
