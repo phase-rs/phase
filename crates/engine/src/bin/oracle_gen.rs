@@ -5,7 +5,6 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::legality_inference::{self, InferenceContext};
 use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::{load_set_catalog, SetCatalog};
@@ -51,28 +50,6 @@ struct CardExportEntry {
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
-}
-
-/// Resolve MTGJSON legalities for export, synthesizing format legalities when
-/// AtomicCards has not yet populated them for a newly released set.
-fn resolve_export_legalities(
-    source: &AtomicCard,
-    set_catalog: &SetCatalog,
-    rarities: &BTreeSet<Rarity>,
-) -> BTreeMap<String, String> {
-    let normalized = normalize_legalities(&source.legalities);
-    let resolved = if legality_inference::needs_inference(&normalized) {
-        legality_inference::infer_missing_legalities(&InferenceContext {
-            printings: &source.printings,
-            catalog: set_catalog,
-            leadership_skills: source.leadership_skills.as_ref(),
-            type_line: source.type_line.as_deref(),
-            rarities,
-        })
-    } else {
-        normalized
-    };
-    legalities_to_export_map(&resolved)
 }
 
 /// A localized card face for the per-language content-i18n sidecars. Only display
@@ -799,15 +776,17 @@ fn main() {
                 }
                 stamp_token_source_metadata(&mut face, &token_source_metadata);
                 let key = face.name.to_lowercase();
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
-                let legalities = resolve_export_legalities(source, &set_catalog, &rarities);
+                let legalities =
+                    legalities_to_export_map(&normalize_legalities(&source.legalities));
 
                 if stats && card_face_has_unimplemented_parts(&face) {
                     cards_with_unimplemented += 1;
                 }
+
+                let rarities = rarity_map
+                    .get(&face.name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 collect_localized(&mut sidecars, &key, source);
@@ -831,13 +810,9 @@ fn main() {
             let mut legalities_by_face = BTreeMap::new();
             let layout = build_export_layout(faces, oracle_id, layout_kind);
             for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
-                let face_rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
                 legalities_by_face.insert(
                     face.name.to_lowercase(),
-                    resolve_export_legalities(source, &set_catalog, &face_rarities),
+                    legalities_to_export_map(&normalize_legalities(&source.legalities)),
                 );
             }
 
@@ -906,15 +881,16 @@ fn main() {
             }
             stamp_token_source_metadata(&mut face, &token_source_metadata);
             let key = face.name.to_lowercase();
-            let rarities = rarity_map
-                .get(&face.name.to_lowercase())
-                .cloned()
-                .unwrap_or_default();
-            let legalities = resolve_export_legalities(&faces[0], &set_catalog, &rarities);
+            let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
             if stats && card_face_has_unimplemented_parts(&face) {
                 cards_with_unimplemented += 1;
             }
+
+            let rarities = rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
 
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             collect_localized(&mut sidecars, &key, &faces[0]);

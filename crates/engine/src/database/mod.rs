@@ -9,7 +9,6 @@ pub mod forge;
 pub mod haunt;
 pub mod hideaway;
 pub mod legality;
-pub mod legality_inference;
 pub mod meld;
 pub mod mtgjson;
 pub mod oracle_loader;

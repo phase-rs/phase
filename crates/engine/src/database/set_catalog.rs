@@ -116,53 +116,10 @@ impl SetCatalog {
         self.sets.is_empty()
     }
 
-    /// Whether every printing in `printings` belongs to a set released on or
-    /// before `as_of`. Empty `printings` returns false (no basis to infer).
-    pub fn printings_all_released(&self, printings: &[String], as_of: ReleaseDate) -> bool {
-        if printings.is_empty() {
-            return false;
-        }
-        printings.iter().all(|code| {
-            self.get(code)
-                .is_some_and(|meta| meta.is_released_as_of(as_of))
-        })
-    }
-
-    /// Dominant set type among `printings` — prefers expansion/core over
-    /// supplemental types when a card spans multiple sets.
-    pub fn dominant_set_type<'a>(&'a self, printings: &'a [String]) -> Option<&'a str> {
-        let mut best: Option<(&'a str, u8)> = None;
-        for code in printings {
-            let Some(meta) = self.get(code) else {
-                continue;
-            };
-            let Some(set_type) = meta.set_type.as_deref() else {
-                continue;
-            };
-            let rank = set_type_priority(set_type);
-            if best.is_none_or(|(_, best_rank)| rank > best_rank) {
-                best = Some((set_type, rank));
-            }
-        }
-        best.map(|(set_type, _)| set_type)
-    }
-
     /// Test/catalog builder helper.
     pub fn insert_test_meta(&mut self, meta: SetMeta) {
         let code = meta.code.to_uppercase();
         self.sets.insert(code, meta);
-    }
-}
-
-fn set_type_priority(set_type: &str) -> u8 {
-    match set_type {
-        "expansion" | "core" => 10,
-        "commander" => 8,
-        "masters" | "draft_innovation" => 7,
-        "starter" | "box" => 5,
-        "promo" | "spellbook" => 3,
-        "funny" | "memorabilia" | "token" | "vanguard" | "minigame" | "arcade" => 1,
-        _ => 4,
     }
 }
 
@@ -268,52 +225,17 @@ mod tests {
     }
 
     #[test]
-    fn printings_all_released_requires_every_set() {
-        let mut catalog = SetCatalog::default();
-        catalog.sets.insert(
-            "MSH".to_string(),
-            SetMeta {
-                code: "MSH".into(),
-                name: "Marvel Super Heroes".into(),
-                release_date: ReleaseDate::parse("2026-06-26"),
-                set_type: Some("expansion".into()),
-                is_online_only: false,
-                parent_code: None,
-            },
-        );
-        catalog.sets.insert(
-            "DOM".to_string(),
-            SetMeta {
-                code: "DOM".into(),
-                name: "Dominaria".into(),
-                release_date: ReleaseDate::parse("2018-04-27"),
-                set_type: Some("expansion".into()),
-                is_online_only: false,
-                parent_code: None,
-            },
-        );
-        let as_of = ReleaseDate::parse("2026-06-30").unwrap();
-        assert!(catalog.printings_all_released(&["MSH".into()], as_of));
-        assert!(catalog.printings_all_released(&["MSH".into(), "DOM".into()], as_of));
-        assert!(!catalog.printings_all_released(&[], as_of));
-    }
-
-    #[test]
-    fn dominant_set_type_prefers_expansion() {
-        let mut catalog = SetCatalog::default();
-        for (code, set_type) in [("MSH", "expansion"), ("MSC", "commander")] {
-            catalog.insert_test_meta(SetMeta {
-                code: code.into(),
-                name: code.into(),
-                release_date: ReleaseDate::parse("2026-06-26"),
-                set_type: Some(set_type.into()),
-                is_online_only: false,
-                parent_code: None,
-            });
-        }
-        assert_eq!(
-            catalog.dominant_set_type(&["MSC".into(), "MSH".into()]),
-            Some("expansion")
-        );
+    fn set_meta_is_released_as_of_uses_mtgjson_date() {
+        let meta = SetMeta {
+            code: "MSH".into(),
+            name: "Marvel Super Heroes".into(),
+            release_date: ReleaseDate::parse("2026-06-26"),
+            set_type: Some("expansion".into()),
+            is_online_only: false,
+            parent_code: None,
+        };
+        assert!(!meta.is_released_as_of(ReleaseDate::parse("2026-06-25").unwrap()));
+        assert!(meta.is_released_as_of(ReleaseDate::parse("2026-06-26").unwrap()));
+        assert!(meta.is_released_as_of(ReleaseDate::parse("2026-06-30").unwrap()));
     }
 }
