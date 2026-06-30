@@ -341,7 +341,20 @@
     "pendingFlash": "A próxima mágica pode ser conjurada como se tivesse lampejo",
     "pendingFree": "A próxima mágica sem pagar seu custo de mana",
     "pendingCheaper": "A próxima mágica custa {{amount}} a menos",
-    "companion": "Companheiro"
+    "companion": "Companheiro",
+    "unboundedTooltip": "{{resource}} ilimitado (∞)",
+    "unboundedManaPoolMarker": "Mana ilimitada (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "vida",
+    "unboundedDamage": "dano",
+    "unboundedMill": "moagem",
+    "unboundedCounters": "marcadores",
+    "unboundedTokens": "fichas",
+    "unboundedCards": "cartas",
+    "unboundedCasts": "conjuros",
+    "unboundedCombats": "combates",
+    "unboundedTurns": "turnos",
+    "unboundedTriggers": "gatilhos"
   },
   "avatar": {
     "underAttack": "{{name}} está sob ataque"

@@ -682,6 +682,10 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             Zone::Battlefield,
         );
 
+        // CR 613.7d: a token enters the battlefield, so it receives a timestamp.
+        // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
+
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
             obj.is_token = true;
@@ -718,7 +722,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             // (summoning sickness, echo, damage, loyalty-activated flags).
             // Delegate to the single authority for summoning sickness and
             // related transient flags rather than setting them ad-hoc.
-            obj.reset_for_battlefield_entry(state.turn_number);
+            obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
             obj.tapped = enter_tapped.resolve(spec.tapped);
 
             // CR 113.3d + CR 613.1: Apply static abilities from the token

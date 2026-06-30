@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
@@ -132,6 +133,21 @@ pub struct PlayerStatusView {
     pub source: Option<ObjectId>,
 }
 
+/// One rendered `∞` HUD row: a detected/forced unbounded loop pumps `axis`, and
+/// the engine attributes the badge to `player` (the HUD it attaches to). `axis`
+/// is the engine-provided identity the frontend formats to a family label — the
+/// display layer never decides attribution or which axes are unbounded.
+///
+/// `player` is computed by [`attribution_player`] (NOT the raw producing
+/// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
+/// routes to the player it names (the drain/mill victim or the lifegain/self-mill
+/// beneficiary), while aggregate axes route to the loop's controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundedResourceView {
+    pub player: PlayerId,
+    pub axis: ResourceAxis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanechaseView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +247,14 @@ pub struct DerivedViews {
     /// zone objects or recomputing side membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<ArchenemyView>,
+
+    /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
+    /// every unbounded-resource loop in `GameState::unbounded_resources`. The
+    /// engine decides both the axis identity and the player attribution
+    /// ([`attribution_player`]); the frontend only formats each axis to a display
+    /// family. Empty (and omitted) in the dominant case where no loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_resources: Vec<UnboundedResourceView>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -442,6 +466,20 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // Commander short-circuit below).
     views.player_status = player_status_views(state);
 
+    // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
+    // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
+    // short-circuit below) and stays empty (field omitted) when no loop is
+    // active — the dominant case. The engine owns attribution
+    // (`attribution_player`); the frontend only formats each axis to a family.
+    for (&controller, axes) in &state.unbounded_resources {
+        for &axis in axes {
+            views.unbounded_resources.push(UnboundedResourceView {
+                player: attribution_player(axis, controller),
+                axis,
+            });
+        }
+    }
+
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
     }
@@ -463,6 +501,51 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
+/// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
+/// variant must make a deliberate attribution choice here, never silently inherit
+/// a default.
+///
+/// A payload-keyed axis names the player it acts on, so the badge follows the
+/// payload, NOT permanent control:
+/// - CR 704.5a: `Life(p)` — a drain drives an opponent's life down (the win
+///   condition is the afflicted player reaching 0 life) and lifegain raises the
+///   controller's own; either way the badge belongs on `p`'s HUD.
+/// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
+///   opponent-burn loop shows `∞` on the victim's HUD.
+/// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
+///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
+///
+/// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
+/// `controller` (the player generating the unbounded resource).
+//
+// CR 704.5c: a player with ten or more poison counters loses the game — so the
+// *afflicted* player owns the win condition, and a poison ∞ belongs on the VICTIM's
+// HUD. But `Counter(Poison, ObjectClass::Player)` is AGGREGATE-keyed in ResourceVector
+// (no victim PlayerId; loop_check.rs:239-246 reads the summed (Poison, Player) pair),
+// so it falls into the aggregate `=> controller` arm and is controller-attributed here.
+// This is correct ONLY because no live producer emits a poison axis in PR-6 (the mana
+// toggle is the sole producer). PR-7 MUST NOT wire a live poison loop until the analysis
+// poison axis is re-keyed by victim PlayerId, or ∞ would render on the wrong HUD.
+fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+    match axis {
+        ResourceAxis::Life(p) | ResourceAxis::DamageDealt(p) | ResourceAxis::LibraryDelta(p) => p,
+        ResourceAxis::Mana(_)
+        | ResourceAxis::Counter(_, _)
+        | ResourceAxis::Trigger(_)
+        | ResourceAxis::TokensCreated
+        | ResourceAxis::CardsDrawn
+        | ResourceAxis::Casts
+        | ResourceAxis::LandfallTriggers
+        | ResourceAxis::CombatPhases
+        | ResourceAxis::ExtraTurns
+        | ResourceAxis::DeathTriggers
+        | ResourceAxis::EtbTriggers
+        | ResourceAxis::LtbTriggers
+        | ResourceAxis::SacTriggers => controller,
+    }
 }
 
 /// Aggregate player-affecting conditions into render-ready rows.
@@ -1732,6 +1815,240 @@ mod tests {
         assert!(
             none_views.web_slinging_costs.is_empty(),
             "derive_views(_, None) must not populate web-slinging costs"
+        );
+    }
+
+    /// PR-6 test 7: `attribution_player` is exhaustive and routes payload-keyed
+    /// axes both directions — a controller-self payload stays on the controller, a
+    /// victim payload routes to the named victim — while every aggregate axis stays
+    /// on the controller.
+    ///
+    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta => p` arm to
+    /// `=> controller` → the three victim assertions (`p1` expected) fail.
+    #[test]
+    fn attribution_player_routes_payload_axes_both_directions() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // Controller-self payload axes attribute to the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p0), p0), p0);
+
+        // Victim payload axes attribute to the NAMED victim, not the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
+
+        // Aggregate axes (no victim PlayerId) attribute to the controller.
+        assert_eq!(
+            attribution_player(ResourceAxis::Mana(ManaType::Red), p0),
+            p0
+        );
+        assert_eq!(
+            attribution_player(
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+                p0
+            ),
+            p0
+        );
+        assert_eq!(
+            attribution_player(ResourceAxis::Trigger(TriggerKind::Proliferate), p0),
+            p0
+        );
+        assert_eq!(attribution_player(ResourceAxis::TokensCreated, p0), p0);
+    }
+
+    /// PR-6 test 1: a REAL opponent-burn certificate's axes project into victim-HUD
+    /// rows. The axis set is derived via the SAME authority `detect_loop` uses
+    /// (`ResourceVector::unbounded_axes_for`) from the delta a damage pinger loop
+    /// produces (positive damage to P1, P1's life driven negative), so it is the
+    /// genuine `{DamageDealt(P1), Life(P1)}` cert — both on the victim P1, never a
+    /// controller `Life(P0)`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_resources`
+    /// is empty → both `contains` assertions fail. Without the `mark_unbounded_loop`
+    /// call the projection is also empty.
+    #[test]
+    fn real_certificate_axes_project_to_victim_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+
+        // The delta an opponent-burn pinger loop pumps each cycle.
+        let mut delta = crate::analysis::ResourceVector::default();
+        delta.damage_dealt.insert(PlayerId(1), 1);
+        delta.life.insert(PlayerId(1), -1);
+        // Same single authority that fills LoopCertificate.unbounded (loop_check.rs).
+        let cert_axes = delta.unbounded_axes_for(PlayerId(0));
+        assert!(cert_axes.contains(&ResourceAxis::DamageDealt(PlayerId(1))));
+        assert!(cert_axes.contains(&ResourceAxis::Life(PlayerId(1))));
+        assert!(
+            !cert_axes.contains(&ResourceAxis::Life(PlayerId(0))),
+            "the controller has no Life axis — the drain is on the victim P1"
+        );
+
+        state.mark_unbounded_loop(PlayerId(0), &cert_axes);
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "opponent-burn ∞ damage must land on the victim P1's HUD"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "opponent-drain ∞ life must land on the victim P1's HUD"
+        );
+    }
+
+    /// PR-6 test 9 (hostile e2e): a hand-built `{DamageDealt(P1), Life(P1)}` cert
+    /// where the VICTIM P1 ALSO controls a permanent. Attribution must follow the
+    /// axis payload PlayerId, NOT permanent control — both rows land on P1's HUD,
+    /// none on the loop controller P0.
+    ///
+    /// REVERT-PROBE: make `attribution_player` return `controller` for
+    /// `DamageDealt`/`Life` → both rows move to P0 → the P1 assertions fail and the
+    /// "no controller rows" assertion fails.
+    #[test]
+    fn attribution_hostile_victim_controls_permanent() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // Hostile element: the victim P1 controls a battlefield permanent. If
+        // attribution keyed off permanent control rather than the axis payload, the
+        // routing could be fooled — it must not be.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Victim's Permanent".into(),
+            Zone::Battlefield,
+        );
+
+        // P0 is the loop controller; the cert names P1 (victim) on both axes.
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::DamageDealt(PlayerId(1)),
+                ResourceAxis::Life(PlayerId(1)),
+            ],
+        );
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "damage ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "drain ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            !views
+                .unbounded_resources
+                .iter()
+                .any(|v| v.player == PlayerId(0)),
+            "no ∞ row may attribute to the controller P0 for victim-keyed axes"
+        );
+    }
+
+    /// PR-6 test 3 (projection half): a NON-mana unbounded axis still projects an
+    /// `∞` row attributed to its controller; the empty map yields no rows (field
+    /// omitted). The mana-vs-non-mana refill gating half lives in
+    /// `mana_payment::refill_infinite_mana_gated_on_mana_axis_only`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → the `TokensCreated`
+    /// row is absent → the `contains` assertion fails.
+    #[test]
+    fn non_mana_axis_projects_to_controller_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(0),
+                axis: ResourceAxis::TokensCreated,
+            }),
+            "a non-mana unbounded axis must still project an ∞ row on its controller"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_resources.is_empty(),
+            "no unbounded loop → no ∞ rows (field omitted)"
+        );
+    }
+
+    /// PR-6 tests 4+5 (serde wire shape + round-trip): the `unbounded_resources`
+    /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
+    /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
+    /// (unit → bare string, single-data → `{"Mana":"Red"}`, PlayerId transparent
+    /// `{"Life":1}`, tuple → `{"Counter":["Poison","Player"]}`), and the empty case
+    /// omits the key. Exercises the `Serialize`/`Deserialize` derives added to
+    /// `ResourceAxis`/`CounterClass`/`ObjectClass`/`TriggerKind`.
+    ///
+    /// REVERT-PROBE: remove `Deserialize` from `ResourceAxis` → this test fails to
+    /// compile (the wire round-trip can no longer deserialize the axis rows).
+    #[test]
+    fn unbounded_resources_round_trip_through_wire() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Red),
+                ResourceAxis::Life(PlayerId(1)),
+                ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player),
+                ResourceAxis::Trigger(TriggerKind::Proliferate),
+                ResourceAxis::TokensCreated,
+            ],
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        // The externally-tagged wire shapes the hand-maintained TS union mirrors.
+        assert!(json.contains(r#"{"Mana":"Red"}"#), "single-data axis shape");
+        assert!(json.contains(r#"{"Life":1}"#), "PlayerId transparent shape");
+        assert!(
+            json.contains(r#"{"Counter":["Poison","Player"]}"#),
+            "tuple axis shape"
+        );
+        assert!(
+            json.contains(r#""TokensCreated""#),
+            "unit axis bare-string shape"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        let rows = &round.derived.unbounded_resources;
+        assert_eq!(rows.len(), 5, "all five axis rows survive the round-trip");
+        // Aggregate poison axis attributes to the controller P0 (see attribution_player).
+        assert!(rows.iter().any(|r| r.player == PlayerId(0)
+            && r.axis == ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player)));
+        // Victim-keyed life axis attributes to P1.
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Life(PlayerId(1))));
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_resources"),
+            "empty unbounded resources must omit the wire key"
         );
     }
 }

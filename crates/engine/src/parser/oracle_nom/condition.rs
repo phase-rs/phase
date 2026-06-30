@@ -2728,6 +2728,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
         parse_you_control_no,
+        // "no opponent controls a/an [type]" → Not(IsPresent { Opponent })
+        parse_no_opponent_controls_a,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -2959,24 +2961,34 @@ fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, Stati
 }
 
 /// CR 109.5 (you = the controller of the object the ability is on) +
-/// CR 102.2 / CR 102.3 (an opponent of that player). Parse "you control
-/// a/an/another [type]" AND "an opponent controls a/an/another [type]" →
-/// `IsPresent` whose
-/// filter carries the matched `ControllerRef` (You / Opponent).
+/// CR 102.2 / CR 102.3 (an opponent of that player) + CR 109.4 (any player).
+/// Parse "you control a/an/another [type]", "an opponent controls a/an/another
+/// [type]", and "any player controls a/an/another [type]" → `IsPresent` whose
+/// filter carries the matched `ControllerRef` (You / Opponent) or, for "any
+/// player controls", no controller restriction at all.
 ///
 /// The verb is parameterized over the controller axis: the leading verb phrase
-/// selects `ControllerRef::You` or `ControllerRef::Opponent`, and the SAME
-/// downstream parse (required article, `parse_type_phrase`, full-consume) runs
-/// for both. CR 611.3a: this is a static "as long as" gate, so the condition is
-/// re-evaluated continuously rather than locked in. CR 109.4: the injected
-/// `InZone { Battlefield }` reflects that only the battlefield (and stack) has a
-/// controller, so the presence check is battlefield-scoped.
+/// selects `Some(ControllerRef::You)`, `Some(ControllerRef::Opponent)`, or
+/// `None` (any player), and the SAME downstream parse (required article,
+/// `parse_type_phrase`, full-consume) runs for all three. CR 611.3a: this is a
+/// static "as long as" gate, so the condition is re-evaluated continuously
+/// rather than locked in. CR 109.4: the injected `InZone { Battlefield }`
+/// reflects that only the battlefield (and stack) has a controller, so the
+/// presence check is battlefield-scoped; "any player controls" leaves the
+/// controller unset so a permanent controlled by anyone qualifies.
 fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // Verb axis: select the controller from the leading verb phrase. The rest of
-    // the parse is identical for both branches.
+    // the parse is identical for every branch. `None` = "any player controls"
+    // (no controller restriction).
     let (rest, ctrl) = alt((
-        value(ControllerRef::You, tag("you control ")),
-        value(ControllerRef::Opponent, tag("an opponent controls ")),
+        value(Some(ControllerRef::You), tag("you control ")),
+        value(Some(ControllerRef::Opponent), tag("an opponent controls ")),
+        // CR 109.4: "any player controls X" is a battlefield-presence gate with
+        // no controller restriction — any player's matching permanent qualifies
+        // (Knight of Grace / Knight of Malice: "as long as any player controls a
+        // black/white permanent"). A `None` controller flows to the
+        // controller-less presence injection below.
+        value(None::<ControllerRef>, tag("any player controls ")),
     ))
     .parse(input)?;
     // Required article — reject bare-plural "you control creatures" (that's a
@@ -3031,7 +3043,13 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     } else {
         TargetFilter::Or { filters }
     };
-    let combined = inject_controller(combined, ctrl);
+    let combined = match ctrl {
+        Some(ctrl) => inject_controller(combined, ctrl),
+        // CR 109.4: "any player controls" — battlefield presence with any
+        // controller; inject the battlefield scope but no controller filter, so
+        // a permanent controlled by ANY player satisfies the gate.
+        None => inject_battlefield_presence(combined),
+    };
     let consumed = input.len() - remainder.len();
     Ok((
         &input[consumed..],
@@ -3172,6 +3190,37 @@ fn parse_you_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
+/// CR 102.2 / CR 102.3 (an opponent of that player) + CR 109.4: Parse "no
+/// opponent controls a/an [type]" → `Not(IsPresent { filter, controller:
+/// Opponent })`. The condition holds while NO opponent controls a matching
+/// permanent. Kavu Runner / Skittish Kavu: "... as long as no opponent controls
+/// a white or blue creature". Mirrors `parse_you_dont_control_a` with the
+/// opponent controller axis.
+fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no opponent controls ").parse(input)?;
+    // Require an article — reject the bare-plural count form ("no opponent
+    // controls creatures") exactly as the affirmative control arms do.
+    let (rest, _) = parse_article(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // CR 109.4: battlefield-scoped presence controlled by an opponent.
+    let filter = inject_controller(filter, ControllerRef::Opponent);
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsPresent {
+                filter: Some(filter),
+            }),
+        },
+    ))
+}
+
 /// Parse "you don't control a/an [type]" → Not(IsPresent).
 fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you don't control ").parse(input)?;
@@ -3274,10 +3323,15 @@ fn parse_filter_have_total_property(input: &str) -> OracleResult<'_, StaticCondi
 /// Inject a controller (CR 109.5 You / CR 102.2 Opponent) into a TargetFilter
 /// produced by `parse_type_phrase`, and ensure the filter is battlefield-scoped
 /// (CR 109.4: only the battlefield and stack have a controller).
-pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> TargetFilter {
+/// CR 109.4: Add `InZone { Battlefield }` to a Typed filter (and each `Or`/`And`
+/// leg) if absent, WITHOUT constraining the controller. Used for "any player
+/// controls X" presence gates, where any player's matching permanent qualifies
+/// (Knight of Grace / Knight of Malice). Only the battlefield (and stack) has a
+/// controller, so the presence check is battlefield-scoped; leaving the
+/// controller unset matches an object regardless of who controls it.
+pub(crate) fn inject_battlefield_presence(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
-            tf.controller = Some(ctrl);
             if !tf
                 .properties
                 .iter()
@@ -3288,6 +3342,29 @@ pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> Ta
                 });
             }
             TargetFilter::Typed(tf)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(inject_battlefield_presence)
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(inject_battlefield_presence)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.controller = Some(ctrl);
+            // Share the battlefield-presence injection (CR 109.4).
+            inject_battlefield_presence(TargetFilter::Typed(tf))
         }
         // CR 109.5: Words like 'you' or 'your' on an object refer to the object's controller.
         TargetFilter::Or { filters } => TargetFilter::Or {
@@ -7722,6 +7799,42 @@ mod tests {
         assert_has_color(tf, ManaColor::Red);
     }
 
+    /// CR 109.4: "any player controls a <type>" → `IsPresent` with NO controller
+    /// restriction (any player's permanent qualifies), still battlefield-scoped.
+    /// Knight of Grace / Knight of Malice ("as long as any player controls a
+    /// black/white permanent").
+    #[test]
+    fn test_any_player_controls_a_black_permanent() {
+        let (rest, c) = parse_inner_condition("any player controls a black permanent").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_eq!(
+            tf.controller, None,
+            "'any player controls' must leave the controller unset (any controller)"
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }
+            )),
+            "presence must stay battlefield-scoped, got {:?}",
+            tf.properties
+        );
+        assert_has_color(tf, ManaColor::Black);
+    }
+
+    /// The required-article guard applies to the new "any player" arm too:
+    /// bare-plural "any player controls creatures" is a count, not a presence gate.
+    #[test]
+    fn test_any_player_controls_bare_plural_rejected() {
+        assert!(
+            parse_you_control_a("any player controls creatures").is_err(),
+            "bare-plural 'any player controls creatures' must be rejected"
+        );
+    }
+
     /// GUARD (scope containment): "an opponent controls no creatures" is owned by
     /// `parse_you_control_no` ("you control no ", untouched) and must NOT be
     /// corrupted into `IsPresent { Opponent }`. The verb alt requires an article;
@@ -7757,6 +7870,46 @@ mod tests {
         assert_eq!(rest, "");
         let tf = typed_presence(&c);
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 102.2: "no opponent controls a <type>" → `Not(IsPresent { Opponent })`.
+    #[test]
+    fn test_no_opponent_controls_a_creature() {
+        let (rest, c) = parse_inner_condition("no opponent controls a creature").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence_under_not(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+    }
+
+    /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
+    /// or blue creature" must parse to a negated opponent presence (not the
+    /// `Unrecognized` fallthrough it used to).
+    #[test]
+    fn test_no_opponent_controls_a_white_or_blue_creature() {
+        let (rest, c) =
+            parse_inner_condition("no opponent controls a white or blue creature").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(c, StaticCondition::Not { .. }),
+            "expected Not(IsPresent), got {c:?}"
+        );
+    }
+
+    /// The required-article guard applies: bare-plural "no opponent controls
+    /// creatures" is a count form, not this presence gate.
+    #[test]
+    fn test_no_opponent_controls_bare_plural_rejected() {
+        assert!(
+            parse_no_opponent_controls_a("no opponent controls creatures").is_err(),
+            "bare-plural must be rejected"
+        );
     }
 
     /// The "Villain" creature subtype (Marvel set) must be recognized so that

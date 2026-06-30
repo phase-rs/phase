@@ -370,7 +370,20 @@
     "pendingFlash": "Next spell can be cast as though it had flash",
     "pendingFree": "Next spell without paying its mana cost",
     "pendingCheaper": "Next spell costs {{amount}} less",
-    "companion": "Companion"
+    "companion": "Companion",
+    "unboundedTooltip": "Unbounded {{resource}} (∞)",
+    "unboundedManaPoolMarker": "Unbounded mana (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "life",
+    "unboundedDamage": "damage",
+    "unboundedMill": "mill",
+    "unboundedCounters": "counters",
+    "unboundedTokens": "tokens",
+    "unboundedCards": "cards",
+    "unboundedCasts": "casts",
+    "unboundedCombats": "combats",
+    "unboundedTurns": "turns",
+    "unboundedTriggers": "triggers"
   },
   "avatar": {
     "underAttack": "{{name}} is under attack"

@@ -341,7 +341,20 @@
     "pendingFlash": "Nächster Zauber kann gewirkt werden, als hätte er Blitz",
     "pendingFree": "Nächster Zauber, ohne seine Manakosten zu bezahlen",
     "pendingCheaper": "Nächster Zauber kostet {{amount}} weniger",
-    "companion": "Gefährte"
+    "companion": "Gefährte",
+    "unboundedTooltip": "Unbegrenzt: {{resource}} (∞)",
+    "unboundedManaPoolMarker": "Unbegrenztes Mana (∞)",
+    "unboundedMana": "Mana",
+    "unboundedLife": "Leben",
+    "unboundedDamage": "Schaden",
+    "unboundedMill": "Mühle",
+    "unboundedCounters": "Marken",
+    "unboundedTokens": "Spielsteine",
+    "unboundedCards": "Karten",
+    "unboundedCasts": "Zauber",
+    "unboundedCombats": "Kämpfe",
+    "unboundedTurns": "Züge",
+    "unboundedTriggers": "Auslöser"
   },
   "avatar": {
     "underAttack": "{{name}} wird angegriffen"

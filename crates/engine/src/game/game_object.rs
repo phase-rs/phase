@@ -1450,11 +1450,15 @@ impl GameObject {
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
-    pub fn reset_for_battlefield_entry(&mut self, turn_number: u32) {
+    pub fn reset_for_battlefield_entry(&mut self, turn_number: u32, timestamp: u64) {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
         self.incarnation += 1;
+        // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
+        // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
+        // functioning statics) is a deferred hook (see scope boundary).
+        self.timestamp = timestamp;
         self.base_controller = Some(self.owner);
         self.controller = self.owner;
         self.entered_battlefield_turn = Some(turn_number);

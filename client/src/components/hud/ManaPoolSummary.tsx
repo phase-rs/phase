@@ -1,8 +1,10 @@
 import { useTranslation } from "react-i18next";
 
 import type { ManaType, ManaUnit } from "../../adapter/types.ts";
+import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { groupManaPoolUnits, manaGroupTooltip } from "../../viewmodel/manaPoolGroups.ts";
+import { familyOf } from "./HudBadges.tsx";
 
 const EMPTY_MANA: ManaUnit[] = [];
 
@@ -25,6 +27,10 @@ export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryP
   const manaUnits = useGameStore(
     (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
   );
+  // CR 732.2a: when an unbounded loop pumps the mana family, surface a small `∞`
+  // marker on the pool. Engine-decided (the FE only formats the provided axis).
+  const { unboundedResources } = usePlayerDesignations(playerId);
+  const hasUnboundedMana = unboundedResources.some((u) => familyOf(u.axis) === "mana");
 
   // Group fungible units (color, restrictions, grants) so distinctly-restricted
   // mana of the same color renders as separate pills (shared with the payment UI).
@@ -34,6 +40,15 @@ export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryP
 
   return (
     <div className={`flex items-center ${size === "sm" ? "gap-0.5" : "gap-1"}`}>
+      {hasUnboundedMana && (
+        <span
+          aria-label={t("badges.unboundedManaPoolMarker")}
+          title={t("badges.unboundedManaPoolMarker")}
+          className={`inline-flex items-center justify-center font-black leading-none text-fuchsia-200 ${size === "sm" ? "text-[11px]" : "text-[13px]"}`}
+        >
+          ∞
+        </span>
+      )}
       {entries.map((group, index) => {
         const title = manaGroupTooltip((k) => t(k), group);
         return (

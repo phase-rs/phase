@@ -341,7 +341,20 @@
     "pendingFlash": "El próximo hechizo puede lanzarse como si tuviera destello",
     "pendingFree": "El próximo hechizo sin pagar su coste de maná",
     "pendingCheaper": "El próximo hechizo cuesta {{amount}} menos",
-    "companion": "Compañero"
+    "companion": "Compañero",
+    "unboundedTooltip": "{{resource}} ilimitado (∞)",
+    "unboundedManaPoolMarker": "Maná ilimitado (∞)",
+    "unboundedMana": "maná",
+    "unboundedLife": "vidas",
+    "unboundedDamage": "daño",
+    "unboundedMill": "molienda",
+    "unboundedCounters": "contadores",
+    "unboundedTokens": "fichas",
+    "unboundedCards": "cartas",
+    "unboundedCasts": "lanzamientos",
+    "unboundedCombats": "combates",
+    "unboundedTurns": "turnos",
+    "unboundedTriggers": "disparos"
   },
   "avatar": {
     "underAttack": "{{name}} está bajo ataque"
