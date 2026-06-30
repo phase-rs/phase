@@ -2520,9 +2520,9 @@ pub(crate) fn inject_catalog_token_abilities(
         return;
     }
 
-    for static_def in static_definitions {
-        Arc::make_mut(&mut obj.base_static_definitions).push(static_def.clone());
-        obj.static_definitions.push(static_def);
+    if !static_definitions.is_empty() {
+        Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.clone());
+        obj.static_definitions.extend(static_definitions);
     }
 
     let mut static_mods = Vec::new();
@@ -2565,7 +2565,8 @@ pub(crate) fn inject_catalog_token_abilities(
             if !obj.base_keywords.contains(&keyword) {
                 obj.base_keywords.push(keyword.clone());
             }
-            if !obj.keywords.contains(&keyword) {
+            let already_live = obj.keywords.contains(&keyword); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+            if !already_live {
                 obj.keywords.push(keyword);
             }
         }
