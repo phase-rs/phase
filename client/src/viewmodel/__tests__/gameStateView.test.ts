@@ -259,6 +259,9 @@ describe("getBoardChoiceView", () => {
         eligible: [10, 11],
         cap: 4,
         source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
       },
     });
     const objects = {
