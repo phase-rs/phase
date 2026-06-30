@@ -6568,16 +6568,18 @@ fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
 /// "[subject] perpetually become(s)/has base power and toughness N/N" →
 /// [`Effect::ApplyPerpetual`] with [`PerpetualModification::SetBasePowerToughness`].
 ///
-/// Three subject classes are recognized, each resolved by the perpetual
-/// resolver's referent binding:
+/// Three subject classes are recognized:
 ///   * self-subjects ("~"/"this creature"/…) → [`TargetFilter::Any`], the source
 ///     (High Fae Prankster);
-///   * "the duplicate" → [`TargetFilter::ParentTarget`], the conjured copy in
-///     Three Tree Battalion's put-then-duplicate chain;
-///   * the inverted possessive "its base power and toughness perpetually
-///     become …" → [`TargetFilter::SelfRef`] (Blood Age Muster). "its" is a
-///     self-possessive here, matching the quantity/counter parsers' grouping of
-///     "its"/"~'s"/"this creature's".
+///   * the referenced-object forms "the duplicate" (Three Tree Battalion) and
+///     the inverted possessive "its base power and toughness perpetually
+///     become …" (Blood Age Muster) → [`TargetFilter::LastCreated`]. Both clauses
+///     are sub-abilities chained after a `Conjure`, which publishes the conjured
+///     object as the most-recently-created set (`last_created_token_ids`), so
+///     `LastCreated` binds the perpetual edit to the conjured card — not the
+///     source. (`ParentTarget`/`SelfRef` would fall back to the source here,
+///     since the conjure chain does not forward the new object as inherited
+///     targets.)
 ///
 /// The anaphoric bare "it " is still excluded — it can refer to an unrelated
 /// prior object choice, so accepting it would mutate the wrong object. The
@@ -6613,7 +6615,7 @@ fn parse_perpetual_base_pt_subject(lower: &str) -> Option<(TargetFilter, &str)> 
         ("this permanent ", TargetFilter::Any),
         ("this token ", TargetFilter::Any),
         ("this card ", TargetFilter::Any),
-        ("the duplicate ", TargetFilter::ParentTarget),
+        ("the duplicate ", TargetFilter::LastCreated),
     ];
     for (subject, target) in normal_subjects {
         let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(subject).parse(lower) else {
@@ -6639,7 +6641,8 @@ fn parse_perpetual_base_pt_subject(lower: &str) -> Option<(TargetFilter, &str)> 
     }
 
     // Inverted possessive order (Blood Age Muster): "its base power and toughness
-    // perpetually <becomes|become> <N/N>". "its" is a self-possessive → SelfRef.
+    // perpetually <becomes|become> <N/N>". "its" is the conjured card from the
+    // preceding Conjure → LastCreated.
     let (rest, _) = tag::<_, _, OracleError<'_>>("its base power and toughness perpetually ")
         .parse(lower)
         .ok()?;
@@ -6649,7 +6652,7 @@ fn parse_perpetual_base_pt_subject(lower: &str) -> Option<(TargetFilter, &str)> 
     ))
     .parse(rest)
     .ok()?;
-    Some((TargetFilter::SelfRef, rest))
+    Some((TargetFilter::LastCreated, rest))
 }
 
 /// Digital-only Alchemy: parse the "perpetually gets +N/+M" modifier form —
@@ -52726,12 +52729,12 @@ mod tests {
         use crate::types::ability::PerpetualModification;
 
         // "the duplicate …" (Three Tree Battalion's conjured copy) binds to the
-        // chained parent object, not the source.
+        // most-recently-created object the preceding Conjure published.
         let e = parse_effect("the duplicate perpetually has base power and toughness 1/1.");
         assert!(matches!(
             e,
             Effect::ApplyPerpetual {
-                target: TargetFilter::ParentTarget,
+                target: TargetFilter::LastCreated,
                 modification: PerpetualModification::SetBasePowerToughness {
                     power: 1,
                     toughness: 1,
@@ -52740,12 +52743,12 @@ mod tests {
         ));
 
         // Inverted possessive "its base power and toughness perpetually become …"
-        // (Blood Age Muster); "its" is a self-possessive → SelfRef.
+        // (Blood Age Muster); "its" is the conjured card → LastCreated.
         let e = parse_effect("its base power and toughness perpetually become 2/2.");
         assert!(matches!(
             e,
             Effect::ApplyPerpetual {
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::LastCreated,
                 modification: PerpetualModification::SetBasePowerToughness {
                     power: 2,
                     toughness: 2,

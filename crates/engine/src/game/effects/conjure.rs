@@ -51,6 +51,7 @@ pub fn resolve(
         _ => return Ok(()),
     };
 
+    let mut conjured_ids: Vec<ObjectId> = Vec::new();
     for conjure_card in cards {
         let count =
             resolve_quantity_with_targets(state, &conjure_card.count, ability).max(0) as u32;
@@ -94,6 +95,7 @@ pub fn resolve(
                 card_name.clone(),
                 destination,
             );
+            conjured_ids.push(obj_id);
 
             // CR 613.7d: an object receives a timestamp when it enters a zone.
             // Stage 2 stamps battlefield entries only, so only draw one when the
@@ -177,6 +179,15 @@ pub fn resolve(
         }
     }
 
+    // CR 603.7: Publish the conjured objects as the most-recently-created set so
+    // chained sub-abilities that reference them via `TargetFilter::LastCreated`
+    // bind correctly (e.g. Three Tree Battalion / Blood Age Muster's "the
+    // duplicate / its base power and toughness perpetually …"). A conjure that
+    // produced nothing leaves any prior `LastCreated` untouched.
+    if !conjured_ids.is_empty() {
+        state.last_created_token_ids = conjured_ids;
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Conjure,
         source_id: ability.source_id,
@@ -247,6 +258,81 @@ mod tests {
         assert_eq!(state.zone_changes_this_turn[0].object_id, zone_change.0);
         assert_eq!(state.zone_changes_this_turn[0].from_zone, None);
         assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
+    }
+
+    /// CR 603.7 + digital Alchemy: a conjure publishes the conjured object as
+    /// the most-recently-created set, so a chained perpetual sub-ability that
+    /// references it via `LastCreated` (Three Tree Battalion / Blood Age Muster's
+    /// "the duplicate / its base power and toughness perpetually …") edits the
+    /// conjured card — not the conjuring source.
+    #[test]
+    fn conjure_publishes_last_created_for_perpetual_subability() {
+        use crate::types::ability::PerpetualModification;
+
+        let mut state = GameState::new_two_player(7);
+
+        // The conjuring permanent. The perpetual edit must not land on it.
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Three Tree Battalion".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+        }
+
+        // Conjure a card onto the battlefield (the "duplicate").
+        let conjure = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "Grizzly Bears".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Battlefield,
+                tapped: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &conjure, &mut events).unwrap();
+
+        // The conjure published exactly the conjured object as LastCreated.
+        assert_eq!(state.last_created_token_ids.len(), 1);
+        let duplicate = state.last_created_token_ids[0];
+        assert_ne!(duplicate, source);
+
+        // The chained "the duplicate perpetually has base power and toughness 1/1"
+        // sub-ability resolves against LastCreated.
+        let perpetual = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::LastCreated,
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 1,
+                    toughness: 1,
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::super::perpetual::resolve(&mut state, &perpetual, &mut events).unwrap();
+
+        // The conjured object got 1/1; the conjuring source is untouched.
+        let dup = state.objects.get(&duplicate).unwrap();
+        assert_eq!(dup.base_power, Some(1));
+        assert_eq!(dup.base_toughness, Some(1));
+        let src = state.objects.get(&source).unwrap();
+        assert_eq!(src.base_power, Some(3));
+        assert_eq!(src.base_toughness, Some(3));
     }
 
     /// CR 707.2: "conjure a duplicate of <reference>" copies the referenced
