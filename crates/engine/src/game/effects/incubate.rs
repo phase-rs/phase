@@ -64,6 +64,36 @@ pub fn resolve(
         obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
     }
 
+    // Battlefield entry: incremental re-derive candidate for this Incubator
+    // token (escalates to a full pass if it sources effects, carries
+    // counters, etc.).
+    crate::game::layers::mark_layers_entered(state, obj_id);
+    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+    crate::game::restrictions::record_token_created(state, obj_id);
+
+    // CR 603.6a: The Incubator token enters the battlefield as a zone change
+    // from outside the game (`from: None`) — emit `ZoneChanged` so every ETB
+    // trigger matcher (Altar of the Brood's "another permanent you control
+    // enters", Soul Warden, Panharmonicon, etc.) fires for it through the
+    // same code path used for normal token creation. Without this the
+    // Incubator enters silently and no ETB ability ever triggers (issue
+    // #4238). Mirrors `token.rs::apply_create_token_after_replacement_with_created_ids`
+    // and `conjure.rs`'s identical fix for the same bug class.
+    let zone_change_record = state
+        .objects
+        .get(&obj_id)
+        .expect("incubator token was just created")
+        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
+    state
+        .zone_changes_this_turn
+        .push(zone_change_record.clone());
+    events.push(GameEvent::ZoneChanged {
+        object_id: obj_id,
+        from: None,
+        to: Zone::Battlefield,
+        record: Box::new(zone_change_record),
+    });
+
     // CR 701.53a: The Incubator enters with N +1/+1 counters.
     if n > 0
         && !add_counter_with_replacement(
@@ -108,6 +138,82 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn incubate_records_zone_change_for_etb_triggers() {
+        let mut state = GameState::new_two_player(7);
+        let mut events = Vec::new();
+        let ability = make_incubate_ability(QuantityExpr::Fixed { value: 1 });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let zone_change = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } => Some((*object_id, *from, *to)),
+                _ => None,
+            })
+            .expect("incubate emits ZoneChanged so ETB triggers (e.g. Altar of the Brood) fire");
+
+        assert_eq!(zone_change.1, None);
+        assert_eq!(zone_change.2, Zone::Battlefield);
+        assert_eq!(state.zone_changes_this_turn.len(), 1);
+        assert_eq!(state.zone_changes_this_turn[0].object_id, zone_change.0);
+        assert_eq!(state.zone_changes_this_turn[0].from_zone, None);
+        assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
+    }
+
+    /// Issue #4238: Altar of the Brood's "another permanent you control
+    /// enters" trigger must fire when Incubate creates the Incubator token.
+    /// Mirrors `token::tests::catalog_pest_dies_trigger_fires_through_zone_pipeline`'s
+    /// pattern of resolving an effect, then calling `process_triggers`
+    /// directly on the resulting events (the same chokepoint every
+    /// cast/resolve path uses) to confirm the trigger is queued.
+    #[test]
+    fn incubate_token_fires_another_permanent_enters_trigger() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::triggers::process_triggers;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let altar_id = scenario
+            .add_creature(P0, "Altar Stand-in", 0, 0)
+            .from_oracle_text(
+                "Whenever another permanent you control enters, each opponent mills a card.",
+            )
+            .id();
+
+        let mut runner = scenario.build();
+        let ability = ResolvedAbility::new(
+            Effect::Incubate {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+        process_triggers(runner.state_mut(), &events);
+
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "Altar's ETB trigger should be queued on the stack"
+        );
+        let triggered = runner.state().stack[0]
+            .ability()
+            .expect("triggered ability");
+        assert_eq!(runner.state().stack[0].source_id, altar_id);
+        assert!(matches!(triggered.effect, Effect::Mill { .. }));
     }
 
     #[test]
