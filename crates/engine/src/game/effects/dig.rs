@@ -464,6 +464,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2203,10 +2204,6 @@ mod tests {
     /// library count (now 1, not 0) before `WinTheGame`'s condition evaluated.
     #[test]
     fn thassas_oracle_dread_return_empty_library_still_wins() {
-        use crate::parser::oracle_effect::parse_effect_chain;
-        use crate::types::ability::AbilityKind;
-        use crate::types::mana::{ManaCost, ManaCostShard};
-
         let def = parse_effect_chain(
             "Look at the top X cards of your library, where X is your devotion to blue. \
              Put up to one of them on top of your library and the rest on the bottom of \
