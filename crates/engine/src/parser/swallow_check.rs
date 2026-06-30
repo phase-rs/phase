@@ -4178,6 +4178,65 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
     }
 
+    /// CR 611.2a: direct-call contract for `detect_duration_until_eot`. The
+    /// structured `def_tree_has_duration` walk cannot descend into
+    /// `Effect::Token`-granted abilities, so the detector falls back to a
+    /// serialized-AST marker check. This pins that fallback at the detector
+    /// boundary: an "until end of turn" phrase with no structured duration AND no
+    /// AST marker fires, while the same phrase with a `"duration":"UntilEndOfTurn"`
+    /// marker in the serialized AST stays silent.
+    #[test]
+    fn duration_until_eot_fires_without_marker_and_exempts_serialized_duration() {
+        let parsed = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+
+        // Fire: phrase present, but neither a structured duration nor a serialized
+        // AST duration marker represents it.
+        let mut fire = Vec::new();
+        super::detect_duration_until_eot(
+            "target creature gets +1/+1 until end of turn.",
+            "Target creature gets +1/+1 until end of turn.",
+            &parsed,
+            "{}",
+            &mut fire,
+        );
+        assert!(
+            fire.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. }
+                    if detector == "Duration_UntilEndOfTurn"
+            )),
+            "unrepresented 'until end of turn' must fire Duration_UntilEndOfTurn: {fire:?}"
+        );
+
+        // Silent: a serialized-AST duration marker (the token-granted-trigger
+        // fallback) accounts for the phrase even though the structured walk is blind.
+        let mut silent = Vec::new();
+        super::detect_duration_until_eot(
+            "target creature gets +1/+1 until end of turn.",
+            "Target creature gets +1/+1 until end of turn.",
+            &parsed,
+            r#"{"abilities":[{"effect":{"type":"Token","duration":"UntilEndOfTurn"}}]}"#,
+            &mut silent,
+        );
+        assert!(
+            silent.is_empty(),
+            "serialized 'duration':'UntilEndOfTurn' marker must exempt the phrase: {silent:?}"
+        );
+    }
+
     /// CR 603.4: "Activate only if ... this turn" scopes a turn-history
     /// activation condition (`ActivationRestriction::RequiresCondition`), not
     /// an effect duration — `detect_duration_this_turn` must not fire.
