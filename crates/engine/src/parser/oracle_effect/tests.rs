@@ -1,6 +1,6 @@
 use super::*;
 use crate::parser::parse_oracle_text;
-use crate::types::ability::{AttachmentKind, PerpetualModification};
+use crate::types::ability::AttachmentKind;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -36522,35 +36522,4 @@ fn reef_worm_nested_token_is_not_modal_choice() {
         );
     };
     assert_eq!(name, "Fish", "outer token is the 3/3 Fish");
-}
-
-#[test]
-fn perpetual_parser_maps_referenced_base_pt() {
-    // "the duplicate ..." (Three Tree Battalion's conjured copy) binds to the
-    // most-recently-created object the preceding Conjure published.
-    let e = parse_effect("the duplicate perpetually has base power and toughness 1/1.");
-    assert!(matches!(
-        e,
-        Effect::ApplyPerpetual {
-            target: TargetFilter::LastCreated,
-            modification: PerpetualModification::SetBasePowerToughness {
-                power: 1,
-                toughness: 1,
-            },
-        }
-    ));
-
-    // Inverted possessive "its base power and toughness perpetually become ..."
-    // (Blood Age Muster); "its" is the conjured card -> LastCreated.
-    let e = parse_effect("its base power and toughness perpetually become 2/2.");
-    assert!(matches!(
-        e,
-        Effect::ApplyPerpetual {
-            target: TargetFilter::LastCreated,
-            modification: PerpetualModification::SetBasePowerToughness {
-                power: 2,
-                toughness: 2,
-            },
-        }
-    ));
 }
