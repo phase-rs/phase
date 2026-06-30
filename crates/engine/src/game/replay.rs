@@ -1,0 +1,280 @@
+//! Deterministic action-based replay reconstruction.
+//!
+//! A recorded game (`ReplayLog`) carries no per-turn state — only the inputs
+//! needed to reconstruct its starting state (`ReplayHeader`) and the ordered
+//! sequence of actions that were submitted and accepted. Because `apply` is a
+//! pure reducer over a `GameState` seeded from a fixed RNG seed, replaying the
+//! same actions against the same starting state reproduces the original game
+//! exactly. `ReplayPlayer` wraps that reconstruction with sparse checkpoint
+//! caching so scrubbing to an arbitrary point doesn't re-simulate the whole
+//! game from turn 1 every time.
+
+use std::collections::BTreeMap;
+
+use thiserror::Error;
+
+use crate::database::CardDatabase;
+use crate::types::game_state::GameState;
+use crate::types::player::PlayerId;
+use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog};
+
+use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
+use super::engine::{apply, start_game, start_game_with_starting_player};
+
+/// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
+/// size to roughly `len / CHECKPOINT_INTERVAL` snapshots while keeping any
+/// `seek` to at most this many replayed actions from the nearest one.
+/// `GameState::clone()` is O(log n) (the `im`-backed structural-sharing
+/// containers documented in CLAUDE.md), so caching at this granularity is
+/// cheap relative to re-running `apply` from scratch.
+const CHECKPOINT_INTERVAL: u32 = 20;
+
+#[derive(Debug, Error)]
+pub enum ReplayError {
+    /// An action that was recorded as having succeeded failed to re-apply
+    /// during reconstruction. This means the recording and the engine version
+    /// replaying it have diverged (e.g. an engine change altered behavior for
+    /// a state this recording depends on) — it is not a normal rules outcome.
+    #[error("replay action {index} desynced reconstruction: {message}")]
+    Desync { index: u32, message: String },
+}
+
+/// Reconstruct the state immediately after `start_game` (before any recorded
+/// action has been applied) from a `ReplayHeader` alone. Reuses the same
+/// canonical init sequence every transport (WASM, server-core) already
+/// shares — see `load_and_hydrate_decks` — so reconstruction can't drift from
+/// how the original game was actually started.
+pub fn reconstruct_initial_state(header: &ReplayHeader, db: Option<&CardDatabase>) -> GameState {
+    let mut state = GameState::new(
+        header.format_config.clone(),
+        header.player_count,
+        header.seed,
+    );
+    // CR 732.2a: project the combo-detector opt-in onto `loop_detection` via the
+    // single authority shared by every transport, so a replay of a detector-on
+    // game reconstructs with the same runtime gate the original game had.
+    state.set_match_config(header.match_config);
+
+    if let (Some(deck_data), Some(db)) = (&header.deck_data, db) {
+        let payload = resolve_deck_list(db, deck_data);
+        load_and_hydrate_decks(&mut state, &payload, Some(db));
+        state.all_card_names = db.card_names().into();
+    }
+
+    match header.first_player {
+        Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
+        Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
+        _ => start_game(&mut state),
+    };
+    state
+}
+
+/// Deterministic playback over a `ReplayLog`. Holds sparse cached
+/// checkpoints (see `CHECKPOINT_INTERVAL`) so repeated scrubbing doesn't
+/// re-simulate the whole game on every call.
+pub struct ReplayPlayer {
+    log: ReplayLog,
+    checkpoints: BTreeMap<u32, GameState>,
+    /// Holds the most recently reconstructed state when `seek` lands on a
+    /// non-checkpoint-aligned index, so `seek` can return a borrow of `self`
+    /// without caching every single scrubbed-through position.
+    scratch: Option<GameState>,
+}
+
+impl ReplayPlayer {
+    /// Build a player for `log`, eagerly reconstructing the index-0
+    /// (post-`start_game`) checkpoint. `db` is forwarded to
+    /// `reconstruct_initial_state` and is `None` only for header-less test
+    /// fixtures or formats that genuinely start with empty libraries.
+    pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Self {
+        let initial = reconstruct_initial_state(&log.header, db);
+        let mut checkpoints = BTreeMap::new();
+        checkpoints.insert(0, initial);
+        Self {
+            log,
+            checkpoints,
+            scratch: None,
+        }
+    }
+
+    /// Total number of recorded actions. Valid `seek` targets are `0..=len()`.
+    pub fn len(&self) -> u32 {
+        self.log.actions.len() as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.log.actions.is_empty()
+    }
+
+    pub fn header(&self) -> &ReplayHeader {
+        &self.log.header
+    }
+
+    pub fn action_at(&self, index: u32) -> Option<&RecordedAction> {
+        self.log.actions.get(index as usize)
+    }
+
+    /// Reconstruct and return the state immediately after action `target`
+    /// has been applied (`target == 0` is the post-`start_game` state before
+    /// any action). Clamped to `len()`.
+    pub fn seek(&mut self, target: u32) -> Result<&GameState, ReplayError> {
+        let target = target.min(self.len());
+
+        if self.checkpoints.contains_key(&target) {
+            return Ok(self.checkpoints.get(&target).expect("just checked"));
+        }
+
+        let state = self.replay_from_nearest_checkpoint(target)?;
+        if target.is_multiple_of(CHECKPOINT_INTERVAL) || target == self.len() {
+            self.checkpoints.insert(target, state);
+            return Ok(self.checkpoints.get(&target).expect("just inserted"));
+        }
+
+        self.scratch = Some(state);
+        Ok(self.scratch.as_ref().expect("just set"))
+    }
+
+    fn replay_from_nearest_checkpoint(&self, target: u32) -> Result<GameState, ReplayError> {
+        let (&start_idx, base) = self
+            .checkpoints
+            .range(..=target)
+            .next_back()
+            .expect("index 0 checkpoint is always present");
+        let mut state = base.clone();
+        for recorded in &self.log.actions[start_idx as usize..target as usize] {
+            apply(&mut state, recorded.actor, recorded.action.clone()).map_err(|e| {
+                ReplayError::Desync {
+                    index: recorded.seq,
+                    message: e.to_string(),
+                }
+            })?;
+        }
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::actions::GameAction;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::match_config::MatchConfig;
+
+    fn two_player_header(seed: u64) -> ReplayHeader {
+        ReplayHeader {
+            format_config: FormatConfig::standard(),
+            match_config: MatchConfig::default(),
+            player_count: 2,
+            first_player: Some(0),
+            seed,
+            deck_data: None,
+        }
+    }
+
+    /// If the live state is sitting on a priority decision, return the
+    /// `(actor, action)` pair that passes it — the simplest fully-generic
+    /// action available regardless of deck contents, which is exactly why
+    /// this test can run with `deck_data: None` (no CardDatabase needed).
+    fn next_priority_pass(state: &GameState) -> Option<(PlayerId, GameAction)> {
+        match state.waiting_for {
+            WaitingFor::Priority { player } => Some((player, GameAction::PassPriority)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn replay_player_reconstructs_every_recorded_index() {
+        let header = two_player_header(99);
+        let mut live = reconstruct_initial_state(&header, None);
+
+        let mut log = ReplayLog::new(header);
+        let mut live_snapshots = vec![live.clone()];
+
+        // Pass priority a handful of times — enough to walk through several
+        // phases of turn 1 without reaching turn 2's draw step (which would
+        // lose the game to CR 704.5b against an empty library).
+        for _ in 0..8 {
+            let Some((actor, action)) = next_priority_pass(&live) else {
+                break;
+            };
+            apply(&mut live, actor, action.clone())
+                .expect("passing priority while waiting on it is always legal");
+            log.push_action(actor, action);
+            live_snapshots.push(live.clone());
+        }
+
+        assert!(
+            log.actions.len() >= 4,
+            "expected several priority passes to have been recorded"
+        );
+        assert_eq!(log.actions.len(), live_snapshots.len() - 1);
+
+        let mut player = ReplayPlayer::load(log, None);
+        assert_eq!(player.len(), live_snapshots.len() as u32 - 1);
+
+        for (index, expected) in live_snapshots.iter().enumerate() {
+            let got = player
+                .seek(index as u32)
+                .unwrap_or_else(|e| panic!("seek({index}) desynced: {e}"));
+            assert_eq!(
+                got.turn_number, expected.turn_number,
+                "turn_number at {index}"
+            );
+            assert_eq!(got.phase, expected.phase, "phase at {index}");
+            assert_eq!(
+                got.active_player, expected.active_player,
+                "active_player at {index}"
+            );
+            assert_eq!(
+                got.waiting_for, expected.waiting_for,
+                "waiting_for at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_player_seeks_out_of_order_and_caches_correctly() {
+        let header = two_player_header(42);
+        let mut live = reconstruct_initial_state(&header, None);
+        let mut log = ReplayLog::new(header);
+
+        for _ in 0..6 {
+            let Some((actor, action)) = next_priority_pass(&live) else {
+                break;
+            };
+            apply(&mut live, actor, action.clone()).unwrap();
+            log.push_action(actor, action);
+        }
+        let total = log.actions.len() as u32;
+        assert!(total >= 3);
+
+        let mut player = ReplayPlayer::load(log, None);
+
+        // Seek forward, then back, then forward again — exercises both the
+        // checkpoint-cache hit path and the nearest-checkpoint replay path.
+        let last = player.seek(total).unwrap().clone();
+        let first = player.seek(0).unwrap().clone();
+        let last_again = player.seek(total).unwrap().clone();
+
+        assert_eq!(first.turn_number, 1);
+        assert_eq!(last.waiting_for, last_again.waiting_for);
+        assert_eq!(last.phase, last_again.phase);
+    }
+
+    #[test]
+    fn replay_player_seek_clamps_to_length_and_handles_empty_log() {
+        let header = two_player_header(7);
+        let log = ReplayLog::new(header);
+        let mut player = ReplayPlayer::load(log, None);
+
+        assert_eq!(player.len(), 0);
+        assert!(player.is_empty());
+
+        // Seeking past the end of an empty log clamps to 0, not an error.
+        let state = player
+            .seek(50)
+            .expect("empty log still has the initial state");
+        assert_eq!(state.turn_number, 1);
+    }
+}

@@ -48,7 +48,7 @@ function isMemoryConstrainedDevice(): boolean {
  *
  * See `crates/engine/src/game/derived_views.rs`.
  */
-function unwrapClientGameState(raw: unknown): GameState {
+export function unwrapClientGameState(raw: unknown): GameState {
   if (raw != null && typeof raw === "object" && "state" in raw) {
     const wrapped = raw as { state: GameState; derived?: GameState["derived"] };
     return { ...wrapped.state, derived: wrapped.derived ?? wrapped.state.derived };

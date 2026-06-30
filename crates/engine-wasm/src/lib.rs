@@ -19,13 +19,13 @@ use engine::game::{
     is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
     rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
-    PlayerDeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
-use engine::types::{GameAction, GameState, PlayerId};
+use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
 
 use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
@@ -90,6 +90,17 @@ thread_local! {
     /// init/clear/resume; deliberately NOT invalidated on `restore_game_state`
     /// so per-decision pool workers reuse the session.
     static AI_SESSION_CACHE: Cell<SessionCache> = const { Cell::new(SessionCache::new_empty()) };
+    /// In-progress recording of GAME_STATE's actions for the Replay system.
+    /// Auto-started by `initialize_game` and appended to by `submit_action` on
+    /// every successfully-applied action. `None` before any game has started,
+    /// or after the recording was invalidated by undo/restore (see
+    /// `restore_game_state`). Independent of CARD_DB/GAME_STATE's own
+    /// take/set discipline but follows the same panic-resilient pattern.
+    static REPLAY_LOG: Cell<Option<ReplayLog>> = const { Cell::new(None) };
+    /// A loaded replay being scrubbed/played back by the Replay Viewer.
+    /// Entirely independent of GAME_STATE / REPLAY_LOG — loading or seeking a
+    /// replay never touches (or requires) a live game.
+    static REPLAY_PLAYER: Cell<Option<ReplayPlayer>> = const { Cell::new(None) };
 }
 
 /// Toggle the multiplayer enforcement flag. Called by multiplayer adapters
@@ -230,6 +241,7 @@ pub fn take_last_panic_message() -> Option<String> {
 pub fn clear_game_state() {
     GAME_STATE.with(|cell| cell.set(None));
     clear_ai_session_cache();
+    REPLAY_LOG.with(|cell| cell.set(None));
 }
 
 /// Verify WASM integration works.
@@ -606,7 +618,7 @@ pub fn initialize_game(
         }));
     }
 
-    let mut state = GameState::new(format_config, count, seed);
+    let mut state = GameState::new(format_config.clone(), count, seed);
     state.debug_mode = true;
     // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
     // `submit_action` gate checks `debug_permitted`, mirroring server-core's
@@ -631,6 +643,14 @@ pub fn initialize_game(
     // through for local 3-/4-player tables too.
     state.set_match_config(match_config);
 
+    // Captured for the Replay system's `ReplayHeader` once the game actually
+    // starts (below) — `None` mirrors the empty-libraries `deck_data: null`
+    // path. Cloned at parse time rather than read back from `state` because
+    // the engine's resolved/hydrated deck shape (`DeckPayload`) is lossy
+    // relative to the name-only `DeckList` a replay needs to re-resolve from
+    // scratch on reconstruction.
+    let mut recorded_deck_list: Option<DeckList> = None;
+
     // Load deck data if provided — resolve names via the loaded card database.
     //
     // Each failure mode below MUST surface as a hard error: a game that enters
@@ -649,6 +669,7 @@ pub fn initialize_game(
                 }));
             }
         };
+        recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
@@ -805,6 +826,20 @@ pub fn initialize_game(
         _ => start_game(&mut state),
     };
 
+    // Auto-start the Replay recording for this game. Captures exactly the
+    // inputs this function was called with — reconstructing from the header
+    // alone (see `engine::game::replay::reconstruct_initial_state`) reproduces
+    // this same starting state byte-for-byte given the same seed.
+    let replay_header = ReplayHeader {
+        format_config,
+        match_config,
+        player_count: count,
+        first_player,
+        seed,
+        deck_data: recorded_deck_list,
+    };
+    REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(replay_header))));
+
     GAME_STATE.with(|cell| cell.set(Some(state)));
     clear_ai_session_cache();
 
@@ -860,8 +895,21 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb);
     }
 
+    // Cloned before `apply` consumes `action` — recorded into REPLAY_LOG only
+    // on the success path below. Debug actions (handled above) never reach
+    // here, so sandbox card-spawning never pollutes a replay recording.
+    let action_for_replay = action.clone();
     match with_state_mut(|state| match apply(state, actor, action) {
-        Ok(result) => to_js(&result),
+        Ok(result) => {
+            REPLAY_LOG.with(|cell| {
+                let mut log = cell.take();
+                if let Some(log) = log.as_mut() {
+                    log.push_action(actor, action_for_replay);
+                }
+                cell.set(log);
+            });
+            to_js(&result)
+        }
         Err(e) => {
             let error_msg = format!("Engine error: {}", e);
             JsValue::from_str(&error_msg)
@@ -1195,6 +1243,10 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     });
     finalize_public_state(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
+    // Restoring (undo, or resuming a save from a fresh worker that never saw
+    // `initialize_game`) invalidates any in-progress recording — the restored
+    // state's history no longer matches the recorded action sequence.
+    REPLAY_LOG.with(|cell| cell.set(None));
     Ok(())
 }
 
@@ -1258,7 +1310,133 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
     clear_ai_session_cache();
+    // Multiplayer games are out of scope for v1 recording (see
+    // `crates/engine/src/types/replay.rs`); ensure no stale local-game
+    // recording from this worker's previous session lingers.
+    REPLAY_LOG.with(|cell| cell.set(None));
     Ok(())
+}
+
+// ── Replay system ───────────────────────────────────────────────────────
+//
+// Recording: `initialize_game` auto-starts a `ReplayLog` (REPLAY_LOG) and
+// `submit_action` appends every successfully-applied action to it. See
+// `engine::types::replay` and `engine::game::replay` for the reconstruction
+// model — a replay carries no per-turn snapshots, only the inputs needed to
+// reconstruct the starting state plus the ordered action sequence.
+//
+// Playback: entirely separate from the live game. `load_replay_for_playback`
+// parses an exported log into a `ReplayPlayer` (REPLAY_PLAYER) that the
+// Replay Viewer scrubs with `replay_seek_js`. Loading or seeking a replay
+// never touches GAME_STATE / REPLAY_LOG.
+
+/// Whether the current game has an in-progress replay recording. `false`
+/// before any game has started, or after the recording was invalidated by
+/// undo/restore (see `restore_game_state`).
+#[wasm_bindgen]
+pub fn has_replay_recording() -> bool {
+    REPLAY_LOG.with(|cell| {
+        let log = cell.take();
+        let present = log.is_some();
+        cell.set(log);
+        present
+    })
+}
+
+/// Serialize the current game's replay recording to a JSON string — the
+/// format `load_replay_for_playback` reads back. Errors if no game has been
+/// initialized in this worker (or the recording was invalidated by undo).
+#[wasm_bindgen]
+pub fn export_replay_log() -> Result<String, JsValue> {
+    REPLAY_LOG.with(|cell| {
+        let log = cell.take();
+        let result = match &log {
+            Some(log) => serde_json::to_string(log)
+                .map_err(|e| JsValue::from_str(&format!("Failed to serialize replay log: {e}"))),
+            None => Err(JsValue::from_str(
+                "No replay recording available. Start a game first, or it was \
+                 invalidated by an undo/restore.",
+            )),
+        };
+        cell.set(log);
+        result
+    })
+}
+
+/// Load a replay log (the JSON produced by `export_replay_log`) for
+/// scrubbing/playback. Independent of the live `GAME_STATE` — does not
+/// require, and does not affect, an active game. Uses the loaded `CARD_DB`
+/// (if any) to resolve the recorded deck list when reconstructing the
+/// starting state. Returns the total number of recorded actions; valid
+/// `replay_seek_js` targets are `0..=length`.
+#[wasm_bindgen]
+pub fn load_replay_for_playback(json_str: &str) -> Result<u32, JsValue> {
+    let log: ReplayLog = serde_json::from_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse replay log: {e}")))?;
+    let player = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        ReplayPlayer::load(log, db.as_ref())
+    });
+    let len = player.len();
+    REPLAY_PLAYER.with(|cell| cell.set(Some(player)));
+    Ok(len)
+}
+
+/// Total number of recorded actions in the loaded replay, or `0` if none is loaded.
+#[wasm_bindgen]
+pub fn replay_length_js() -> u32 {
+    REPLAY_PLAYER.with(|cell| {
+        let player = cell.take();
+        let len = player.as_ref().map(ReplayPlayer::len).unwrap_or(0);
+        cell.set(player);
+        len
+    })
+}
+
+/// The loaded replay's header (format/match config, player count, seed,
+/// deck data), or `null` if none is loaded. Lets the viewer show "vs. <deck>"
+/// chrome without re-deriving it from the action sequence.
+#[wasm_bindgen]
+pub fn replay_header_js() -> JsValue {
+    REPLAY_PLAYER.with(|cell| {
+        let player = cell.take();
+        let header = player
+            .as_ref()
+            .map(|p| to_js(p.header()))
+            .unwrap_or(JsValue::NULL);
+        cell.set(player);
+        header
+    })
+}
+
+/// Seek the loaded replay to `target` (clamped to the recording's length) and
+/// return the reconstructed state at that point, wrapped the same way
+/// `get_game_state` wraps the live state. Returns `null` if no replay is
+/// loaded or reconstruction desynced (`ReplayError::Desync` — an engine
+/// version mismatch between recording and playback, not a rules outcome).
+#[wasm_bindgen]
+pub fn replay_seek_js(target: u32) -> JsValue {
+    REPLAY_PLAYER.with(|cell| {
+        let mut player = cell.take();
+        let result = match player.as_mut() {
+            Some(player) => match player.seek(target) {
+                Ok(state) => to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
+                    state,
+                    Some(PlayerId(0)),
+                )),
+                Err(_) => JsValue::NULL,
+            },
+            None => JsValue::NULL,
+        };
+        cell.set(player);
+        result
+    })
+}
+
+/// Discard the loaded replay (if any). Safe to call even when none is loaded.
+#[wasm_bindgen]
+pub fn clear_replay_playback() {
+    REPLAY_PLAYER.with(|cell| cell.set(None));
 }
 
 /// Get the AI's chosen action for the current game state.
@@ -1892,5 +2070,121 @@ mod tests {
 
         assert!(restored.objects[&object_id].printed_ref.is_none());
         assert_eq!(restored.objects[&object_id].name, "Legacy Card");
+    }
+}
+
+#[cfg(test)]
+mod replay_bridge_tests {
+    use super::*;
+    use engine::types::game_state::WaitingFor;
+
+    /// Exercises the bridge wiring (auto-start in `initialize_game`, append
+    /// in `submit_action`, clear in `restore_game_state`) through the
+    /// inner helpers rather than the `#[wasm_bindgen]` entry points
+    /// themselves — those return their result via `to_js`, which calls the
+    /// real `JSON.parse` JS binding and panics outside a wasm32 runtime (see
+    /// `bracket_estimate_tests` / `resolve_all_tests` above, which follow the
+    /// same convention). Deterministic reconstruction itself is covered
+    /// end-to-end by `crates/engine/src/game/replay.rs`'s tests; this test's
+    /// job is narrower — proving the thread-local plumbing actually fires.
+    #[test]
+    fn replay_log_records_actions_and_survives_export_import_round_trip() {
+        clear_game_state();
+        clear_replay_playback();
+
+        let mut state = GameState::new_two_player(99);
+        let start_result = start_game(&mut state);
+        let _ = start_result;
+
+        let header = ReplayHeader {
+            format_config: state.format_config.clone(),
+            match_config: state.match_config,
+            player_count: state.players.len() as u8,
+            first_player: Some(state.active_player.0),
+            seed: state.rng_seed,
+            deck_data: None,
+        };
+        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        assert!(
+            has_replay_recording(),
+            "seeding REPLAY_LOG must be observable via has_replay_recording"
+        );
+
+        // Mirror what `submit_action` does on every successful action: apply,
+        // then push the same action it just applied into REPLAY_LOG.
+        for _ in 0..6 {
+            let waiting = with_state(|state| state.waiting_for.clone()).expect("game initialized");
+            let WaitingFor::Priority { player } = waiting else {
+                break;
+            };
+            let applied =
+                with_state_mut(|state| apply(state, player, GameAction::PassPriority).is_ok())
+                    .expect("game initialized");
+            assert!(
+                applied,
+                "passing priority while waiting on it is always legal"
+            );
+            REPLAY_LOG.with(|cell| {
+                let mut log = cell.take();
+                if let Some(log) = log.as_mut() {
+                    log.push_action(player, GameAction::PassPriority);
+                }
+                cell.set(log);
+            });
+        }
+
+        let replay_json =
+            export_replay_log().expect("a recording should exist after at least one action");
+        assert!(
+            replay_json.contains("PassPriority"),
+            "exported JSON should contain the recorded actions"
+        );
+
+        let length =
+            load_replay_for_playback(&replay_json).expect("exported replay should load back");
+        assert!(
+            length >= 4,
+            "expected several recorded priority passes, got {length}"
+        );
+        assert_eq!(replay_length_js(), length);
+
+        clear_replay_playback();
+        assert_eq!(
+            replay_length_js(),
+            0,
+            "clear_replay_playback should drop the loaded replay"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn restore_game_state_invalidates_the_in_progress_recording() {
+        clear_game_state();
+
+        let state = GameState::new_two_player(7);
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        assert!(has_replay_recording());
+
+        let json = serde_json::to_string(&state).unwrap();
+        restore_game_state(&json).expect("restore should succeed");
+
+        assert!(
+            !has_replay_recording(),
+            "undo/restore must invalidate the recording — it no longer matches \
+             the restored state's history"
+        );
+
+        clear_game_state();
     }
 }
