@@ -36,9 +36,12 @@ export class ReplayAdapter implements EngineAdapter {
     try {
       await this.client.loadCardDbFromUrl();
     } catch {
-      // Reconstruction degrades gracefully without a card database (see
-      // `reconstruct_initial_state` — deck data is simply skipped), so a
-      // failed/offline card-data fetch isn't fatal to viewing a replay.
+      // Not fatal here: a replay whose header carries no deck data (e.g. a
+      // debug/sandbox game that started with empty libraries) reconstructs
+      // fine without a card database. Replays that *do* carry deck data
+      // require one — `reconstruct_initial_state` now fails loudly with
+      // `MissingCardDatabase` rather than silently skipping deck hydration,
+      // so `loadReplay` below will throw for those if this fetch failed.
     }
   }
 

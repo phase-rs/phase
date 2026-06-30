@@ -927,6 +927,24 @@ fn handle_debug_create_card(
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
 ) -> JsValue {
+    match handle_debug_create_card_inner(card_name, owner, zone, attach_to, run_etb) {
+        Ok(result) => to_js(&result),
+        Err(msg) => JsValue::from_str(msg),
+    }
+}
+
+/// Mutation core of `handle_debug_create_card`, factored out so it can be
+/// exercised by native unit tests — the `#[wasm_bindgen]`-facing wrapper's
+/// success path calls `to_js`, which requires a JS runtime and panics under
+/// plain `cargo test`. See `bracket_estimate_tests::estimate_bracket_inner`
+/// for the same split.
+fn handle_debug_create_card_inner(
+    card_name: &str,
+    owner: PlayerId,
+    zone: engine::types::zones::Zone,
+    attach_to: Option<engine::game::game_object::AttachTarget>,
+    run_etb: bool,
+) -> Result<engine::types::game_state::ActionResult, &'static str> {
     let face = CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
@@ -936,20 +954,22 @@ fn handle_debug_create_card(
             Some(face) => Ok(face.clone()),
             None => Err("Engine error: card not found in database"),
         }
-    });
-    let face = match face {
-        Ok(f) => f,
-        Err(msg) => return JsValue::from_str(msg),
-    };
-    match with_state_mut(|state| {
+    })?;
+    with_state_mut(|state| {
         if !state.debug_mode {
-            return JsValue::from_str(
-                "Engine error: Debug actions require debug_mode to be enabled",
-            );
+            return Err("Engine error: Debug actions require debug_mode to be enabled");
         }
         if !state.players.iter().any(|p| p.id == owner) {
-            return JsValue::from_str("Engine error: Debug: invalid owner player id");
+            return Err("Engine error: Debug: invalid owner player id");
         }
+        // Debug-spawned cards are resolved against the WASM-local CARD_DB and
+        // never recorded into REPLAY_LOG (unlike normal actions in
+        // `submit_action`), so a faithful replay can't reconstruct this
+        // mutation. Invalidate any in-progress recording here, the same way
+        // `restore_game_state` invalidates on a history-breaking state swap,
+        // so `export_replay_log` can't produce a log that silently omits a
+        // debug spawn.
+        REPLAY_LOG.with(|cell| cell.set(None));
         // CR 400.7: For battlefield destination, stage the object in Hand
         // first, then route through the real ETB pipeline so replacements,
         // triggers, and SBAs all fire. Direct creation in Battlefield (the
@@ -1035,11 +1055,9 @@ fn handle_debug_create_card(
         engine::game::public_state::bump_state_revision(state);
         engine::game::public_state::mark_public_state_all_dirty(state);
         engine::game::public_state::finalize_public_state(state);
-        to_js(&result)
-    }) {
-        Ok(val) => val,
-        Err(e) => e,
-    }
+        Ok(result)
+    })
+    .unwrap_or(Err(NOT_INITIALIZED_ERR))
 }
 
 /// Get the current game state as a `ClientGameState` wire envelope
@@ -2213,5 +2231,71 @@ mod replay_bridge_tests {
         );
 
         clear_game_state();
+    }
+
+    #[test]
+    fn debug_create_card_invalidates_the_in_progress_recording() {
+        use engine::database::CardDatabase;
+
+        clear_game_state();
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "test card": {
+                    "name": "Test Card",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "power": "1",
+                    "toughness": "1",
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .unwrap();
+        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+
+        let mut state = GameState::new_two_player(11);
+        state.debug_mode = true;
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        assert!(has_replay_recording());
+
+        let result = handle_debug_create_card_inner(
+            "Test Card",
+            PlayerId(0),
+            engine::types::zones::Zone::Hand,
+            None,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "debug create-card should succeed in this fixture: {result:?}"
+        );
+
+        assert!(
+            !has_replay_recording(),
+            "a debug-spawned card is never appended to REPLAY_LOG (the WASM \
+             bridge resolves it against CARD_DB before reaching `apply`), so \
+             any in-progress recording must be invalidated rather than left \
+             to silently omit the mutation"
+        );
+
+        clear_game_state();
+        CARD_DB.with(|c| *c.borrow_mut() = None);
     }
 }
