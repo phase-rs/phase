@@ -88,6 +88,9 @@ pub mod merge;
 #[cfg(test)]
 #[path = "omnath_tests.rs"]
 mod omnath_tests;
+#[cfg(test)]
+#[path = "risen_reef_tests.rs"]
+mod risen_reef_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
