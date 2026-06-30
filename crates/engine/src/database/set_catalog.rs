@@ -182,8 +182,7 @@ pub fn load_set_catalog_from_path(path: &Path) -> Result<SetCatalog, String> {
 pub fn load_set_catalog_adjacent_to_sets_dir(sets_dir: &Path) -> SetCatalog {
     let data_dir = sets_dir
         .parent()
-        .map(|p| p.parent())
-        .flatten()
+        .and_then(|p| p.parent())
         .unwrap_or_else(|| sets_dir.parent().unwrap_or(sets_dir));
     load_set_catalog(data_dir)
 }
