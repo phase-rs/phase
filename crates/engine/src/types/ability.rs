@@ -354,8 +354,16 @@ pub enum ChoiceType {
     /// `ChosenAttribute::Keyword` on the source so a downstream
     /// `ContinuousModification::RemoveChosenKeyword` (Layer 6) can strip the
     /// chosen ability at layer-evaluation time.
+    ///
+    /// `count` is the "how many to choose" leaf parameterization on this same
+    /// CR 608.2d choice axis (NOT a separate `TwoKeywords` variant): `count: 1`
+    /// is the bare "choose an ability" case (Urborg), `count: 2` is Greymond's
+    /// "choose two abilities from among first strike, vigilance, and lifelink".
+    /// For `count > 1` each chosen keyword is persisted as its own
+    /// `ChosenAttribute::Keyword`.
     Keyword {
         options: Vec<Keyword>,
+        count: usize,
     },
 }
 
@@ -470,11 +478,22 @@ impl Serialize for ChoiceType {
             Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
             Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
             Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
-            Self::Keyword { options } => {
-                let mut variant =
-                    serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 1)?;
-                variant.serialize_field("options", options)?;
-                variant.end()
+            Self::Keyword { options, count } => {
+                // Skip `count` when it is the default (1) so existing
+                // single-keyword card-data JSON stays byte-stable; only emit
+                // the field for multi-choice cards (Greymond, count: 2).
+                if *count == 1 {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 1)?;
+                    variant.serialize_field("options", options)?;
+                    variant.end()
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 2)?;
+                    variant.serialize_field("options", options)?;
+                    variant.serialize_field("count", count)?;
+                    variant.end()
+                }
             }
         }
     }
@@ -515,7 +534,15 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             Keyword {
                 options: Vec<Keyword>,
+                // Default to 1 (the bare single-keyword choice) so legacy
+                // `Keyword { options }` JSON round-trips to `count: 1`.
+                #[serde(default = "default_keyword_choice_count")]
+                count: usize,
             },
+        }
+
+        fn default_keyword_choice_count() -> usize {
+            1
         }
 
         match ChoiceTypeRepr::deserialize(deserializer)? {
@@ -556,7 +583,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
-                ChoiceTypeData::Keyword { options } => Ok(Self::Keyword { options }),
+                ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
             },
         }
     }
@@ -907,6 +934,7 @@ impl ChosenAttribute {
             // `NumberRange { min: 0, max: 20 }` template idiom.
             Self::Keyword(_) => ChoiceType::Keyword {
                 options: Vec::new(),
+                count: 1,
             },
             // CR 614.12c: Anchor-word labels are a free-form labeled choice
             // (the per-card option list — e.g. ["Jeskai", "Temur"] — is
@@ -1007,7 +1035,7 @@ impl ChoiceValue {
             // list by display string. Comparison is case-insensitive so the
             // frontend can render canonical capitalization while the engine
             // accepts either form.
-            ChoiceType::Keyword { options } => {
+            ChoiceType::Keyword { options, .. } => {
                 let needle = value.to_lowercase();
                 options
                     .iter()
@@ -17529,6 +17557,18 @@ pub struct ResolvedAbility {
     /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
+    /// CR 401.5 + CR 608.2c (issue #1365): Stamped ONLY by
+    /// `effects::apply_parent_chain_context` at the exact moment this ability
+    /// is handed off as the immediate sub_ability of a `Dig` that just looked
+    /// at an empty library — never set any other way, so it cannot be
+    /// confused with a stale value from an unrelated resolution. Consulted
+    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
+    /// to resolve a `target: ParentTarget` with no selection to NO target
+    /// instead of the generic self-fallback, which would otherwise move the
+    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
+    /// it just found empty.
+    #[serde(skip)]
+    pub dig_found_nothing_for_parent_target: bool,
 }
 
 impl ResolvedAbility {
@@ -17581,6 +17621,7 @@ impl ResolvedAbility {
             source_incarnation: None,
             modal: None,
             mode_abilities: Vec::new(),
+            dig_found_nothing_for_parent_target: false,
         }
     }
 

@@ -543,15 +543,42 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
-/// effect? This single Effect variant simultaneously encodes a replacement
-/// effect (CR 614.1a "instead"), a conditional gate ("if [target] would die"),
-/// and an EOT duration (the carried replacement's `expiry: EndOfTurn`). Its
-/// presence satisfies the Replacement_Instead, Condition_If, and
-/// Duration_ThisTurn detectors when the original text matches the
-/// "die this turn, exile instead" rider grammar.
+/// or `CreateDamageReplacement` effect? This single Effect variant simultaneously
+/// encodes a replacement effect (CR 614.1a "instead"), a conditional gate
+/// ("if [target] would die"), and an EOT duration (the carried replacement's
+/// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
+/// Condition_If, and Duration_ThisTurn detectors when the original text matches
+/// the "die this turn, exile instead" rider grammar. Flip-coin branches
+/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// Flip-coin branch payloads may carry one-shot damage replacements.
+fn flip_branch_has_target_replacement(
+    win_effect: &Option<Box<AbilityDefinition>>,
+    lose_effect: &Option<Box<AbilityDefinition>>,
+) -> bool {
+    win_effect
+        .as_deref()
+        .is_some_and(def_tree_has_target_replacement)
+        || lose_effect
+            .as_deref()
+            .is_some_and(def_tree_has_target_replacement)
+}
+
 fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::AddTargetReplacement { .. }) {
-        return true;
+    match def.effect.as_ref() {
+        Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
+            return true
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } if flip_branch_has_target_replacement(win_effect, lose_effect) => return true,
+        _ => {}
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_target_replacement(sub) {
@@ -5771,5 +5798,158 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 
         // No swallowed-clause diagnostic for the dropped EOT duration.
         assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    fn flip_branch_has_create_damage_replacement(
+        win_effect: &Option<Box<AbilityDefinition>>,
+        lose_effect: &Option<Box<AbilityDefinition>>,
+    ) -> bool {
+        win_effect
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || lose_effect
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+    }
+
+    fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
+        match def.effect.as_ref() {
+            Effect::CreateDamageReplacement { .. } => return true,
+            Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            }
+            | Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } if flip_branch_has_create_damage_replacement(win_effect, lose_effect) => return true,
+            _ => {}
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement)
+    }
+
+    /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
+    /// one-shot damage replacements; the Replacement_Instead detector must walk
+    /// `FlipCoin` payloads (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
+        let parsed = parse_named(
+            "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
+            "Desperate Gambit",
+            &["Instant"],
+        );
+        assert!(
+            !parsed.abilities.iter().any(def_tree_has_unimplemented),
+            "Desperate Gambit must parse without Unimplemented"
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement),
+            "expected CreateDamageReplacement in flip-coin branches, got {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    /// CR 614.1a: Edge of Malacol untap replacement and Jinnie Fay token
+    /// replacement choice must not trip Replacement_Instead (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_untap_and_token_choice_replacements() {
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let edge = parse_named(
+            "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+            "Edge of Malacol",
+            &["Enchantment"],
+        );
+        assert!(
+            !edge
+                .replacements
+                .iter()
+                .any(|r| { r.execute.as_deref().is_some_and(def_tree_has_unimplemented) }),
+            "Edge of Malacol replacement must parse without Unimplemented"
+        );
+        assert!(
+            edge.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::Untap
+                    && r.condition == Some(ReplacementCondition::DuringUntapStep)
+                    && r.execute.is_some()
+            }),
+            "expected untap-step replacement AST, got {:#?}",
+            edge.replacements
+        );
+        assert!(!has_swallowed_detector(&edge, "Replacement_Instead"));
+
+        let doubling = parse_named(
+            "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.",
+            "Doubling Season",
+            &["Enchantment"],
+        );
+        assert!(
+            doubling.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken && r.quantity_modification.is_some()
+            }),
+            "expected CreateToken quantity-modifier replacement AST, got {:#?}",
+            doubling.replacements
+        );
+        assert!(!has_swallowed_detector(&doubling, "Replacement_Instead"));
+
+        let jinnie = parse_named(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !jinnie
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Jinnie Fay replacement must parse without Unimplemented"
+        );
+        fn def_tree_has_create_token_choice(def: &AbilityDefinition) -> bool {
+            match &*def.effect {
+                Effect::ChooseOneOf { branches, .. } => branches
+                    .iter()
+                    .any(|branch| matches!(&*branch.effect, Effect::Token { .. })),
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    def_tree_has_create_token_choice(effect)
+                }
+                _ => {
+                    def.sub_ability
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+                        || def
+                            .else_ability
+                            .as_deref()
+                            .is_some_and(def_tree_has_create_token_choice)
+                }
+            }
+        }
+        assert!(
+            jinnie.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken
+                    && r.execute
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+            }),
+            "expected CreateToken replacement-choice AST, got {:#?}",
+            jinnie.replacements
+        );
+        assert!(!has_swallowed_detector(&jinnie, "Replacement_Instead"));
     }
 }

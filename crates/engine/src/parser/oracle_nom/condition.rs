@@ -1931,6 +1931,32 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
         ));
     }
 
+    // CR 402: "more cards in hand than each opponent" → HandSize(player) GT
+    // HandSize(Opponent{Max}). "each opponent" is universal (more than ALL of
+    // them), so the predicate is "your hand > the maximum opponent hand" — the
+    // Max aggregate, mirroring how "more life than an opponent" uses Min for its
+    // existential "an". Okina Nightwatch, Secretkeeper.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("more cards in hand than each opponent").parse(rest)
+    {
+        return Some((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { player },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+            },
+        ));
+    }
+
     // "N or more cards in hand" → HandSize GE N
     let (after_n, n) = parse_number(rest).ok()?;
     if let Ok((rest, _)) = alt((
@@ -4283,6 +4309,10 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_player_lost_life_this_turn,
         // "you gained life this turn" / "you gained N or more life this turn"
         parse_you_gained_life_this_turn,
+        // "you lost life this turn" / "you lost N or more life this turn" — the
+        // controller-scoped mirror of the gained sibling (was the only missing
+        // subject in the gained/lost × you/opponent/player matrix).
+        parse_you_lost_life_this_turn,
     ))
     .parse(input)
 }
@@ -4893,6 +4923,46 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
         rest,
         make_quantity_ge(
             QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+    ))
+}
+
+/// CR 119.3 + CR 603.4: Parse "you lost [N or more] life this turn".
+///
+/// Controller-scoped mirror of `parse_you_gained_life_this_turn`. The opponent
+/// and any-player subjects already parse (`parse_opponent_lost_life_this_turn`,
+/// `parse_player_lost_life_this_turn`) and the controller *gained* subject
+/// parses too — only "you lost …" was missing, so phase-trigger intervening-ifs
+/// such as The Book of Vile Darkness ("if you lost 2 or more life this turn,
+/// create a 2/2 black Zombie") silently dropped their condition. Resolves via
+/// the existing `LifeLostThisTurn { Controller }` QuantityRef — no new variants.
+fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("you lost "), tag("you've lost "))).parse(input)?;
+    // Try "N or more life this turn".
+    if let Ok((after_n, n)) = parse_number(rest) {
+        let after_n = after_n.trim_start();
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("or more life this turn").parse(after_n)
+        {
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    n,
+                ),
+            ));
+        }
+    }
+    // "life this turn" (minimum 1).
+    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             1,
@@ -7453,6 +7523,48 @@ mod tests {
             }
             other => {
                 panic!("expected HandSize(ScopedPlayer) GT HandSize(Controller), got {other:?}")
+            }
+        }
+    }
+
+    /// CR 402: "you have more cards in hand than each opponent" →
+    /// HandSize(Controller) GT HandSize(Opponent{Max}). "each opponent" is
+    /// universal (more than all of them), so the bar is the maximum opponent
+    /// hand — the mirror of "more life than an opponent"'s existential Min.
+    /// Okina Nightwatch, Secretkeeper.
+    #[test]
+    fn test_parse_condition_more_cards_in_hand_than_each_opponent() {
+        let (rest, c) =
+            parse_condition("as long as you have more cards in hand than each opponent").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Max,
+                            },
+                        },
+                    }
+                );
+            }
+            other => {
+                panic!("expected HandSize(Controller) GT HandSize(Opponent{{Max}}), got {other:?}")
             }
         }
     }

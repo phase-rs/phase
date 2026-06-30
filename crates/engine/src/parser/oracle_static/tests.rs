@@ -1600,6 +1600,11 @@ fn continuous_mods_grant_chosen_keyword_anaphor() {
         "gain that ability",
         "gain the chosen ability",
         "gain the chosen keyword",
+        // CR 608.2d: plural anaphors refer back to a multi-keyword choice
+        // (Greymond's "Humans you control have each of the chosen abilities").
+        // The same `AddChosenKeyword` reads ALL persisted chosen keywords.
+        "have each of the chosen abilities",
+        "have the chosen abilities",
     ] {
         let mods = parse_continuous_modifications(phrase);
         assert_eq!(

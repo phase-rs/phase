@@ -1803,7 +1803,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
         // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
-        ChoiceType::Keyword { options } => {
+        ChoiceType::Keyword { options, .. } => {
             return format!(
                 "ability from: {}",
                 options

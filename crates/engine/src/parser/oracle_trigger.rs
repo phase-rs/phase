@@ -17661,6 +17661,55 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 603.4: The Book of Vile Darkness — the controller-scoped
+    /// "you lost N or more life this turn" intervening-if mirrors the gained
+    /// sibling. Previously the condition was silently dropped (left `None`).
+    #[test]
+    fn trigger_if_you_lost_2_or_more_life() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you lost 2 or more life this turn, create a 2/2 black Zombie creature token.",
+            "The Book of Vile Darkness",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            })
+        );
+        assert!(
+            def.execute.is_some(),
+            "execute must be Some — token creation effect after the condition was dropped"
+        );
+    }
+
+    /// "if you lost life this turn" (no minimum) → controller LifeLostThisTurn ≥ 1.
+    #[test]
+    fn trigger_if_you_lost_life_this_turn_no_minimum() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you lost life this turn, draw a card.",
+            "Test Lost Life",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        assert!(def.execute.is_some(), "execute must be Some");
+    }
+
     #[test]
     fn trigger_ocelot_pride_copy_each_entered_token_not_source() {
         let def = parse_trigger_line(
@@ -33875,6 +33924,7 @@ mod tests {
             choose.0,
             ChoiceType::Keyword {
                 options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+                count: 1,
             },
             "choose clause must be a typed keyword choice"
         );

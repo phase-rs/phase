@@ -599,6 +599,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         || nom_primitives::scan_contains(&lower, "would create one or more tokens")
         || nom_primitives::scan_contains(&lower, "would create a token")
     {
+        if let Some(def) = parse_optional_token_substitution_choice(&lower, &text) {
+            return Some(def);
+        }
         if let Some(def) = parse_token_replacement(&lower, &text) {
             return Some(def);
         }
@@ -5987,6 +5990,81 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     Some(
         ReplacementDefinition::new(ReplacementEvent::CopySpell)
             .quantity_modification(QuantityModification::Plus { value: additional })
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 608.2d: "If you would create one or more tokens, you may
+/// instead create that many <token A> or that many <token B>" (Jinnie Fay).
+fn parse_optional_token_substitution_choice(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    use nom::combinator::{map, peek, success};
+    use nom::multi::separated_list1;
+    use nom::sequence::preceded;
+
+    fn parse_jinnie_token_branch_segment(input: &str) -> OracleResult<'_, &str> {
+        alt((
+            terminated(take_until(" or that many "), peek(tag(" or that many "))),
+            map(terminated(rest, opt(char('.'))), |segment: &str| segment),
+        ))
+        .map(str::trim)
+        .parse(input)
+    }
+
+    let (segments, remainder) = nom_on_lower(original_text, lower, |input| {
+        let (input, ()) = preceded(
+            tag("if you would create one or more tokens, "),
+            preceded(tag("you may instead "), success(())),
+        )
+        .parse(input)?;
+        let (input, _) = tag("create ").parse(input)?;
+        let (input, segments) =
+            separated_list1(tag(" or that many "), parse_jinnie_token_branch_segment)
+                .parse(input)?;
+        Ok((
+            input,
+            segments
+                .into_iter()
+                .map(|segment| segment.to_string())
+                .collect::<Vec<_>>(),
+        ))
+    })?;
+
+    if segments.len() < 2 {
+        return None;
+    }
+    if !remainder.trim().trim_matches('.').is_empty() {
+        return None;
+    }
+
+    let mut branches = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let token_phrase = if index == 0 {
+            segment.clone()
+        } else {
+            format!("that many {segment}")
+        };
+        let token_lower = token_phrase.to_ascii_lowercase();
+        let mut ctx = ParseContext::default();
+        let effect = super::oracle_effect::try_parse_token(&token_lower, &token_phrase, &mut ctx)?;
+        if !matches!(effect, Effect::Token { .. }) {
+            return None;
+        }
+        branches.push(AbilityDefinition::new(AbilityKind::Spell, effect));
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                },
+            ))
             .description(original_text.to_string()),
     )
 }

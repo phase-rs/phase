@@ -4024,7 +4024,7 @@ fn apply_continuous_effect_filtered(
     // chosen-attribute scoping refactor.
     let chosen_keyword = if matches!(
         effect.modification,
-        ContinuousModification::RemoveChosenKeyword | ContinuousModification::AddChosenKeyword
+        ContinuousModification::RemoveChosenKeyword
     ) {
         state
             .objects
@@ -4032,6 +4032,26 @@ fn apply_continuous_effect_filtered(
             .and_then(|src| src.chosen_keyword().cloned())
     } else {
         None
+    };
+
+    // CR 608.2d + CR 613.1f: `AddChosenKeyword` reads the PLURAL chosen-keyword
+    // list off the granting source so a multi-keyword choice (Greymond's "choose
+    // two abilities ... Humans you control have each of the chosen abilities")
+    // grants every chosen ability, not just the first. Single-keyword grants
+    // (Angelic Skirmisher, Linvala) yield a one-element Vec — same behavior as
+    // the prior singular read. Source-scoped via `effect.source_id` so multiple
+    // Greymonds with different chosen pairs each grant their own keywords.
+    let add_chosen_keywords: Vec<Keyword> = if matches!(
+        effect.modification,
+        ContinuousModification::AddChosenKeyword
+    ) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .map(|src| src.chosen_keywords().into_iter().cloned().collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
 
     // Pre-read chosen card type from source (avoids borrow conflict in the loop).
@@ -4330,7 +4350,12 @@ fn apply_continuous_effect_filtered(
             // choose effect has resolved), this is a no-op rather than a panic,
             // mirroring `AddChosenColor` / `RemoveChosenKeyword`.
             ContinuousModification::AddChosenKeyword => {
-                if let Some(kw) = chosen_keyword.as_ref() {
+                // CR 608.2d: grant EACH chosen keyword (one for the single-choice
+                // cards, two for Greymond's "each of the chosen abilities"). If
+                // the source has no stored chosen keyword (e.g. the static is
+                // gathered before the choose effect has resolved), the list is
+                // empty and this is a no-op rather than a panic.
+                for kw in &add_chosen_keywords {
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.
                     if kw.sums_across_instances() || !obj.keywords.contains(kw) {

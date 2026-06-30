@@ -7335,7 +7335,7 @@ mod tests {
             effects.iter().any(|e| matches!(
                 e,
                 Effect::Choose {
-                    choice_type: ChoiceType::Keyword { options },
+                    choice_type: ChoiceType::Keyword { options, .. },
                     persist: true,
                     ..
                 } if options.as_slice()
@@ -7353,6 +7353,157 @@ mod tests {
             )),
             "expected an AddChosenKeyword grant, got {effects:?}"
         );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "no clause may be Unimplemented, got {effects:?}"
+        );
+    }
+
+    /// CR 608.2d + CR 613.1f + CR 614.12c: Whole-card structural parse of
+    /// Greymond, Avacyn's Stalwart. Confirms all three lines parse to the right
+    /// shapes with zero `Unimplemented`:
+    ///   L1: a `Moved` replacement whose execute is a persisting count-2 typed
+    ///       keyword `Choose`.
+    ///   L2: a Continuous static on Humans-you-control carrying `AddChosenKeyword`
+    ///       (NOT a trigger).
+    ///   L3: a Continuous static on Humans-you-control with +2/+2 gated on a
+    ///       `>= 4` count of Humans you control.
+    #[test]
+    fn parse_greymond_avacyns_stalwart_whole_card() {
+        use crate::types::ability::{
+            ChoiceType, Comparator, ContinuousModification, QuantityExpr, QuantityRef,
+            StaticCondition, TargetFilter, TypeFilter,
+        };
+
+        let text = "As Greymond, Avacyn's Stalwart enters, choose two abilities from among \
+                    first strike, vigilance, and lifelink.\n\
+                    Humans you control have each of the chosen abilities.\n\
+                    As long as you control four or more Humans, Humans you control get +2/+2.";
+        let r = parse(
+            text,
+            "Greymond, Avacyn's Stalwart",
+            &[],
+            &["Creature"],
+            &["Human", "Soldier"],
+        );
+
+        // ----- L1: the as-enters keyword choice replacement -----
+        assert_eq!(r.replacements.len(), 1, "exactly one as-enters replacement");
+        let rep = &r.replacements[0];
+        let execute = rep.execute.as_ref().expect("replacement has an execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Keyword { options, count: 2 },
+                    persist: true,
+                    ..
+                } if options.as_slice()
+                    == [Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink]
+            ),
+            "L1 must be a persisting count-2 keyword Choose, got {:?}",
+            execute.effect
+        );
+
+        // ----- L2 + L3: two Humans-you-control statics, neither a trigger -----
+        assert!(
+            r.triggers.is_empty(),
+            "Greymond has no triggered abilities, got {:?}",
+            r.triggers
+        );
+        assert_eq!(
+            r.statics.len(),
+            2,
+            "two static definitions (grant + anthem)"
+        );
+
+        let human_you_control = |filter: &Option<TargetFilter>| -> bool {
+            matches!(
+                filter,
+                Some(TargetFilter::Typed(tf))
+                    if tf.type_filters.contains(&TypeFilter::Subtype("Human".to_string()))
+            )
+        };
+
+        // L2: the chosen-keyword grant.
+        let grant = r
+            .statics
+            .iter()
+            .find(|s| s.modifications == vec![ContinuousModification::AddChosenKeyword])
+            .expect("a static carrying AddChosenKeyword");
+        assert!(
+            human_you_control(&grant.affected),
+            "L2 grant must affect Humans you control, got {:?}",
+            grant.affected
+        );
+        assert!(
+            grant.condition.is_none(),
+            "L2 grant is unconditional, got {:?}",
+            grant.condition
+        );
+
+        // L3: the conditional +2/+2 anthem.
+        let anthem = r
+            .statics
+            .iter()
+            .find(|s| {
+                s.modifications
+                    .contains(&ContinuousModification::AddPower { value: 2 })
+            })
+            .expect("a static carrying +2 power");
+        assert!(
+            anthem
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 2 }),
+            "L3 anthem is +2/+2"
+        );
+        // The +2/+2 subject carries the Human subtype filter.
+        assert!(
+            human_you_control(&anthem.affected),
+            "L3 anthem subject must be Humans you control, got {:?}",
+            anthem.affected
+        );
+        // The count condition is `>= 4` Humans you control.
+        match &anthem.condition {
+            Some(StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }) => {
+                assert!(
+                    matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters
+                                .contains(&TypeFilter::Subtype("Human".to_string()))
+                    ),
+                    "count condition filter must carry the Human subtype, got {filter:?}"
+                );
+            }
+            other => panic!("L3 condition must be `>= 4` Human ObjectCount, got {other:?}"),
+        }
+
+        // ----- Zero Unimplemented across every parsed effect -----
+        let mut effects: Vec<&Effect> = Vec::new();
+        for ability in &r.abilities {
+            let mut node = Some(ability);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+        }
+        if let Some(execute) = rep.execute.as_ref() {
+            let mut node = Some(execute.as_ref());
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+        }
         assert!(
             !effects
                 .iter()
