@@ -842,6 +842,56 @@ fn build_when_next_delayed_trigger(
     }
 }
 
+/// CR 122.1 + CR 608.2c: "it enters with an additional +1/+1 counter on it" rider
+/// after a zone-change-this-way gate (Winter Soldier, Reborn Avenger).
+fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+
+    let (rest, count) =
+        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
+            (r, 1u32)
+        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ").parse(r).ok()?;
+            (r, n)
+        } else {
+            return None;
+        };
+
+    let (rest, counter_type) = alt((
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" counter on it"),
+        tag(" counters on it"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    if !rest.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        target: TargetFilter::ParentTarget,
+    })
+}
+
 /// CR 603.7: Parse "when you next cast a [type] spell [post-spell modifier] this turn, [effect]"
 /// delayed triggers. Creates a one-shot delayed trigger that fires once on the next matching
 /// SpellCast event.
@@ -1163,6 +1213,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -1241,6 +1292,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ));
@@ -1548,6 +1600,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -1805,9 +1858,12 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
 fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
     // "that creature enters with an additional +1/+1 counter on it"
     // "that creature enters with N additional +1/+1 counters on it"
-    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature enters with ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower)
+    .ok()?;
 
     // Parse "an additional" or "N additional"
     let (rest, count) =
@@ -2972,6 +3028,7 @@ fn try_parse_self_name_exile(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }));
     }
@@ -3044,6 +3101,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }
     };
@@ -3125,6 +3183,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -4614,6 +4673,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))),
@@ -5604,6 +5664,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // with …" is recognized as a `CastFromZone` permission rider rather than
     // falling through to `Effect::Unimplemented`.
     if let Some(effect) = try_parse_cast_this_way_enters_with_counter(&lower) {
+        return parsed_clause(effect);
+    }
+    if let Some(effect) = try_parse_enters_this_way_additional_counter(&lower) {
         return parsed_clause(effect);
     }
     // CR 701.26b + CR 614.6 + CR 611.2b: "That creature can't become untapped
@@ -8081,6 +8144,7 @@ fn try_parse_owner_of_target_shuffle(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     }))
 }
@@ -11267,6 +11331,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     )));
@@ -13026,6 +13091,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
@@ -13043,6 +13109,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     };
 
@@ -19628,6 +19695,7 @@ fn try_parse_for_each_attacker_copy_blocker(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
@@ -19685,6 +19753,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
     );
@@ -23168,6 +23237,7 @@ fn try_parse_put_zone_change_parts(
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 choice_count,
@@ -61265,6 +61335,7 @@ mod snapshot_tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         };
         // Non-delayed top-level ParentTarget return.
@@ -61318,6 +61389,7 @@ mod snapshot_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
