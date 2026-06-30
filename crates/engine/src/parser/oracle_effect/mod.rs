@@ -137,8 +137,8 @@ use self::sequence::{
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
-    try_parse_each_deals_damage_equal_to_power, try_parse_subject_predicate_ast,
-    try_parse_targeted_controller_gain_life,
+    try_parse_each_deals_damage_equal_to_power, try_parse_each_source_deals_damage,
+    try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::ParseContext;
@@ -5526,6 +5526,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         if matches!(clause.effect, Effect::Unimplemented { .. }) {
             return clause;
         }
+    }
+
+    // CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
+    // to <recipient>" — every matching object is its own damage source. Intercept
+    // BEFORE the generic subject-stripping sites (mod.rs `9705`/`9735`,
+    // `subject.rs:178` via `try_parse_subject_predicate_ast`) flatten the source
+    // class into a single ability-sourced `DealDamage`. Returns the supported
+    // `EachSourceDealsDamage` clause, or a fail-closed `Unimplemented` for the
+    // deferred attachment-host recipient (Aura Barbs clause 2).
+    if let Some(clause) = try_parse_each_source_deals_damage(text, ctx) {
+        return clause;
     }
 
     // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits

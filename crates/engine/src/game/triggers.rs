@@ -6927,8 +6927,15 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
     // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
     // class).
+    // CR 120.1 + CR 115.1: `EachSourceDealsDamage` with a `Shared(Any)` recipient
+    // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
+    // is the same "any target" player-chosen slot as `DealDamage` — surface it so
+    // the cast/trigger-time target slot is built.
     if effect.target_filter() == Some(&TargetFilter::Any)
-        && !matches!(effect, Effect::DealDamage { .. })
+        && !matches!(
+            effect,
+            Effect::DealDamage { .. } | Effect::EachSourceDealsDamage { .. }
+        )
     {
         return None;
     }

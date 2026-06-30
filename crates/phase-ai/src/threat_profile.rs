@@ -153,6 +153,20 @@ fn classify_effect(probs: &mut ThreatProbabilities, effect: &Effect, is_instant:
                 probs.direct_damage = 1.0;
             }
         }
+        // CR 120.1: "each <class> deals N damage to <recipient>". Reaches creatures
+        // (removal) and, when the recipient resolves toward players, players (burn).
+        Effect::EachSourceDealsDamage { recipient, .. } => {
+            probs.targeted_removal = 1.0;
+            if matches!(
+                recipient,
+                engine::types::ability::EachDamageRecipient::EachController
+                    | engine::types::ability::EachDamageRecipient::Shared(
+                        engine::types::ability::TargetFilter::Any
+                    )
+            ) {
+                probs.direct_damage = 1.0;
+            }
+        }
         Effect::Pump { .. } if is_instant => probs.combat_trick = 1.0,
         Effect::ChangeZone {
             destination: engine::types::zones::Zone::Exile | engine::types::zones::Zone::Graveyard,

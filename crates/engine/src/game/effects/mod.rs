@@ -10,11 +10,11 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2780,6 +2780,9 @@ pub fn resolve_effect(
         Effect::EachDealsDamageEqualToPower { .. } => {
             deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
         }
+        Effect::EachSourceDealsDamage { .. } => {
+            deal_damage::resolve_each_source_deals_damage(state, ability, events)
+        }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
@@ -4754,6 +4757,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // from "whenever an opponent draws a card, they lose 2 life").
         Effect::LoseLife {
             target: Some(ref filter),
+            ..
+        } => filter,
+        // CR 120.1 + CR 603.2: `EachSourceDealsDamage`'s `Shared` recipient may be
+        // an event-context ref (`TriggeringSource` — Sarkhan; `ParentTarget` —
+        // Missy) that auto-resolves from the current trigger event at resolution.
+        // `EachController` and the deferred per-source recipients carry no
+        // event-context target.
+        Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(ref filter),
             ..
         } => filter,
         _ => return None,

@@ -11,8 +11,8 @@ use crate::game::quantity::{
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageContextSnapshot, DamageSource, Effect, EffectError, EffectKind, PlayerFilter,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -87,6 +87,47 @@ fn player_context_target(
         )))
     } else {
         None
+    }
+}
+
+/// CR 120.1 + CR 608.2c + CR 109.4: Single authority for resolving the recipients
+/// of a non-distributed damage effect from its `target` filter. Shared by
+/// `DealDamage::resolve` and `EachSourceDealsDamage`'s `Shared` recipient so both
+/// resolve `SelfRef` (the printed-name anaphor → the source object), player
+/// context anaphors (`ParentTargetController`, `Controller`, … via
+/// `player_context_target`), announced or hydrated context-ref targets
+/// (`ability.targets`), and the `Controller` fallback identically.
+///
+/// `skip_first_target` encodes the single-source `DamageSource::Target`
+/// precedence: when the FIRST object target is the damage *source* (CR 120.1) and
+/// more than one target was chosen, the recipients are `ability.targets[1..]`.
+/// Effects with no `Target` damage source (including every `EachSourceDealsDamage`)
+/// pass `false`.
+fn resolve_effect_recipients(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    skip_first_target: bool,
+) -> Vec<TargetRef> {
+    // `SelfRef` is the printed-name anaphor (`~`) — always the source object,
+    // short-circuited before the `ability.targets` fallback so chained
+    // `DealDamage { target: SelfRef }` sub-abilities don't inherit the parent's
+    // targets via chain propagation (issue #323 class).
+    if matches!(target_filter, TargetFilter::SelfRef) {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+    if let Some(target) = player_context_target(state, ability, target_filter) {
+        return vec![target];
+    }
+    if !ability.targets.is_empty() {
+        if skip_first_target && ability.targets.len() > 1 {
+            return ability.targets[1..].to_vec();
+        }
+        return ability.targets.clone();
+    }
+    match target_filter {
+        TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
+        _ => vec![],
     }
 }
 
@@ -879,26 +920,12 @@ pub fn resolve(
     //
     // Other implicit-target filters (`Controller`) keep the pre-existing
     // "fall back when targets are empty" semantic.
-    let implicit;
-    let effective_targets: &[TargetRef] = if matches!(target_filter, TargetFilter::SelfRef) {
-        implicit = vec![TargetRef::Object(ability.source_id)];
-        &implicit
-    } else if let Some(target) = player_context_target(state, ability, target_filter) {
-        implicit = vec![target];
-        &implicit
-    } else if !ability.targets.is_empty() {
-        if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {
-            &ability.targets[1..]
-        } else {
-            &ability.targets
-        }
-    } else {
-        implicit = match target_filter {
-            TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
-            _ => vec![],
-        };
-        &implicit
-    };
+    let effective_targets = resolve_effect_recipients(
+        state,
+        ability,
+        target_filter,
+        matches!(damage_source, Some(DamageSource::Target)),
+    );
 
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.
@@ -1875,6 +1902,117 @@ pub fn resolve_each_deals_equal_to_power(
     Ok(())
 }
 
+/// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated at
+/// resolution time, CR 608.2) deals `amount` damage as its OWN source (CR 120.1)
+/// to the resolved recipient. The filter-evaluated-source counterpart of
+/// `resolve_each_deals_equal_to_power` (targeted sources, own power). `Shared`
+/// recipients reuse the same recipient-resolution authority as
+/// `DealDamage::resolve` (`resolve_effect_recipients`, fed by the same
+/// event-context hydration); `EachController` resolves a per-source recipient
+/// (CR 109.4 + CR 120.3a). Marks accumulate before any priority/SBA check (CR
+/// 704.3) so combined lethal (CR 120.6) / excess (CR 120.10) on a shared recipient
+/// are computed across the whole batch; a replacement pause mid-batch resumes the
+/// remaining sources with PER-SOURCE identity preserved
+/// (`stash_remaining_each_source_damage`).
+pub fn resolve_each_source_deals_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (sources, amount, recipient) = match &ability.effect {
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => (sources, amount, recipient),
+        _ => {
+            return Err(EffectError::MissingParam(
+                "EachSourceDealsDamage".to_string(),
+            ))
+        }
+    };
+
+    // CR 608.2: the amount is uniform across every source — resolve it once.
+    let amt = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
+
+    // CR 608.2 + CR 120.1: evaluate the source class against the battlefield at
+    // resolution (mirrors `resolve_all`). Each matching object is an independent
+    // source of its own damage.
+    let resolved_sources = crate::game::effects::resolved_object_filter(ability, sources);
+    let filter_ctx = filter::FilterContext::from_ability(ability);
+    let source_ids: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| filter::matches_target_filter(state, **id, &resolved_sources, &filter_ctx))
+        .copied()
+        .collect();
+
+    // CR 115.1 / CR 608.2c: resolve the shared recipient ONCE (an announced target
+    // or a hydrated context anaphor). An empty result (e.g. an "up to one" / fizzled
+    // referent) means no damage is dealt, per CR 608.2b/c.
+    let shared_recipients = match recipient {
+        EachDamageRecipient::Shared(filter) => {
+            resolve_effect_recipients(state, ability, filter, false)
+        }
+        EachDamageRecipient::EachController => Vec::new(),
+    };
+
+    // Build every (source, context, recipient, amount) entry up front, before any
+    // damage is applied (CR 120.6 + CR 120.10: marks accumulate on a shared
+    // recipient so combined lethal/excess is computed once all sources have
+    // marked). Each source carries its OWN `DamageContext` (CR 120.1 identity).
+    let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = Vec::new();
+    if amt > 0 {
+        for &source_id in &source_ids {
+            let ctx = DamageContext::from_source(state, source_id)
+                .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+            match recipient {
+                EachDamageRecipient::Shared(_) => {
+                    for recip in &shared_recipients {
+                        entries.push((source_id, ctx, recip.clone(), amt));
+                    }
+                }
+                // CR 109.4 + CR 120.3a: each source deals to the player that
+                // controls it.
+                EachDamageRecipient::EachController => {
+                    let controller = state
+                        .objects
+                        .get(&source_id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(ctx.controller);
+                    entries.push((source_id, ctx, TargetRef::Player(controller), amt));
+                }
+            }
+        }
+    }
+
+    for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
+        match apply_damage_to_target(state, ctx, target.clone(), *dmg, false, events)? {
+            DamageResult::Applied(_) => {}
+            DamageResult::NeedsChoice => {
+                // CR 120.3 + CR 616.1e: a replacement on this source's damage needs
+                // a player choice — pause. Stash the remaining entries with
+                // PER-SOURCE identity so each resumes through its own source's
+                // keywords/LKI, then mark the parent kind so the drain re-emits the
+                // `EachSourceDealsDamage` EffectResolved the non-pause tail fires.
+                let remaining = entries[i + 1..]
+                    .iter()
+                    .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
+                stash_remaining_each_source_damage(state, ability, remaining);
+                mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+                return Ok(());
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
 /// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
 /// Last Known Information when the object has left the battlefield. Mirrors the
 /// `ObjectScope::Source` arm of `quantity::resolve_object_pt`.
@@ -2012,6 +2150,207 @@ mod tests {
         // CR 120.1: the sources are not damaged (one-directional, unlike fight).
         assert_eq!(outcome.damage_marked(src_a), 0);
         assert_eq!(outcome.damage_marked(src_b), 0);
+    }
+
+    /// CR 120.1 + CR 120.6: `EachSourceDealsDamage` with a `Shared` recipient — two
+    /// creatures the controller controls each deal the fixed amount to one shared
+    /// recipient, whose marked total accumulates across both sources (Case of the
+    /// Gateway Express / Princess Snowfall class).
+    #[test]
+    fn each_source_deals_fixed_to_shared_recipient_accumulates_marks() {
+        let mut state = GameState::new_two_player(7);
+        let src_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Pinger A".to_string(),
+            Zone::Battlefield,
+        );
+        let src_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Pinger B".to_string(),
+            Zone::Battlefield,
+        );
+        for src in [src_a, src_b] {
+            let obj = state.objects.get_mut(&src).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.base_power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        // CR 120.3e: a 0/9 recipient survives 2 marked damage, so the marked total
+        // is directly observable post-resolution.
+        let recipient = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Wall".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.base_power = Some(0);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+
+        // "each creature you control deals 1 damage to <recipient>"; the recipient
+        // is the announced target slot.
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+            },
+            vec![TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        // CR 120.1 + CR 120.6: two controlled sources each deal 1 → 2 marks; the
+        // opponent's recipient is not a source ("you control").
+        assert_eq!(state.objects[&recipient].damage_marked, 2);
+        assert_eq!(state.objects[&src_a].damage_marked, 0);
+        assert_eq!(state.objects[&src_b].damage_marked, 0);
+    }
+
+    /// CR 109.4 + CR 120.3a: `EachSourceDealsDamage { EachController }` — each
+    /// creature deals to the player that controls it, so two creatures under
+    /// different controllers each ping a different player (Rakdos Charm / Aura Barbs
+    /// clause 1 class).
+    #[test]
+    fn each_source_each_controller_damages_each_owning_player() {
+        let mut state = GameState::new_two_player(8);
+        let mine = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        for c in [mine, theirs] {
+            let obj = state.objects.get_mut(&c).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.base_power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_toughness = Some(1);
+        }
+        let p0_life = state.players[0].life;
+        let p1_life = state.players[1].life;
+
+        // "each creature deals 1 damage to its controller" (no controller scope on
+        // the source class).
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::EachController,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        // CR 109.4 + CR 120.3a: each source pings its own controller for 1.
+        assert_eq!(state.players[0].life, p0_life - 1);
+        assert_eq!(state.players[1].life, p1_life - 1);
+    }
+
+    /// CR 120.1 + CR 603.2: END-TO-END runtime proof that a trigger-body
+    /// `EachSourceDealsDamage { Shared(TriggeringSource) }` with empty targets binds
+    /// the triggering object as the recipient via `hydrate_event_context_targets`
+    /// (the exact path `DealDamage { target: TriggeringSource }` uses), then each
+    /// controlled source deals to it. This is Sarkhan the Masterless's
+    /// "each Dragon you control deals 1 damage to that creature" — and also proves
+    /// Case of the Gateway Express, where the SequentialSibling chain instead
+    /// pre-populates `ability.targets` (which takes precedence over hydration).
+    #[test]
+    fn each_source_shared_triggering_source_hydrates_recipient() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(9);
+        let source = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.base_power = Some(4);
+            obj.toughness = Some(4);
+            obj.base_toughness = Some(4);
+        }
+        // The triggering creature ("that creature"), controlled by the opponent.
+        let attacker = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(5);
+            obj.base_power = Some(5);
+            obj.toughness = Some(5);
+            obj.base_toughness = Some(5);
+        }
+        // CR 603.2: bind `TriggeringSource` to the attacker via the trigger event.
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped {
+            object_id: attacker,
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::TriggeringSource),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // CR 120.1: the attacker (TriggeringSource) takes 1 from the P0 source; the
+        // P0 source is not itself a recipient.
+        assert_eq!(state.objects[&attacker].damage_marked, 1);
+        assert_eq!(state.objects[&source].damage_marked, 0);
     }
 
     /// CR 120.3f + CR 120.4b + CR 616.1e: In the `EachTarget` simultaneous batch,
