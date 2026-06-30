@@ -390,6 +390,7 @@ mod issue_4384_airbend_stack_spell;
 mod issue_4420_lava_blister_unless_deal_damage;
 mod issue_4459_decoy_gambit_unless_have_you_draw;
 mod issue_4503_incremental_growth;
+mod issue_4560_winter_soldier;
 mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;
 mod issue_536_six_grants_retrace;

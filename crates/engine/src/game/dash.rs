@@ -87,6 +87,7 @@ fn return_to_owner_hand_effect() -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     }
 }

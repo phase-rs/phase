@@ -290,6 +290,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" activates ability: "),

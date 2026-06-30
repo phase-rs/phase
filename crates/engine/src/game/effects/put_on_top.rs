@@ -209,6 +209,8 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: library-position selection is not a face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: Some(position.clone()),
                     is_cost_payment: false,
@@ -255,6 +257,8 @@ pub fn resolve(
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position.clone()),
             is_cost_payment: false,

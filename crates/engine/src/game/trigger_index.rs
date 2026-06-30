@@ -178,6 +178,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(_) => push(TriggerEventKey::AbilityOrCopyActivated),
         TriggerMode::Countered => {

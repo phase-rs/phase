@@ -4362,6 +4362,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![second.clone()],
@@ -4435,6 +4436,7 @@ mod tests {
         let event = crate::types::events::GameEvent::AbilityActivated {
             player_id: PlayerId(1),
             source_id: ObjectId(99),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
