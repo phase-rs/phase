@@ -1410,6 +1410,17 @@ pub(crate) fn apply_face_down_entry_profile(
     if let Some(obj) = state.objects.get_mut(&object_id) {
         let original = crate::game::printed_cards::snapshot_object_face(obj);
         crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+        // CR 708.2a: this object is now face down. `apply_face_down_creature_characteristics`
+        // already raises the flag, but re-assert it here so the single authority is
+        // self-sufficient: an Exile -> Battlefield entry runs `apply_zone_exit_cleanup`
+        // *during* `move_to_zone`, which clears `face_down` on every exile exit
+        // (CR 400.7, the foretold/exile reset). Without an explicit assertion the
+        // restored face-down state would depend on a side effect of the characteristics
+        // helper, so a future change to that helper could silently leak the entrant
+        // face up. The early pre-flag in `deliver_replaced_zone_change` only has to
+        // survive the entry guard (which runs before exit cleanup); this is the
+        // authoritative final assertion that survives it.
+        obj.face_down = true;
         obj.back_face = Some(original);
     }
 }
@@ -2868,6 +2879,85 @@ mod parsed_leyline_card_scoping_tests {
             state.objects[&card_creature].zone,
             Zone::Exile,
             "CR 614.6: the opponent's dying nontoken card is exiled instead"
+        );
+    }
+}
+
+#[cfg(test)]
+mod face_down_exile_entry_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::FaceDownProfile;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+
+    /// CR 708.2a + CR 400.4a + CR 400.7: a NON-permanent (instant/sorcery) card
+    /// put onto the battlefield face down from EXILE must still enter as a
+    /// face-down 2/2 creature.
+    ///
+    /// This pins the Exile-origin corner of the manifest/face-down entry path.
+    /// `move_to_zone` runs the instant/sorcery battlefield-entry guard BEFORE
+    /// `apply_zone_exit_cleanup`, so the early pre-flag in
+    /// `deliver_replaced_zone_change` is what carries the non-permanent past the
+    /// guard. But `apply_zone_exit_cleanup` then clears `face_down` on every
+    /// exile exit (the CR 400.7 foretold/exile reset), so the final face-down
+    /// state must be re-asserted by `apply_face_down_entry_profile` after the
+    /// move. Without that authoritative re-assertion the card would land on the
+    /// battlefield face UP, leaking the hidden card. A Library/Hand origin never
+    /// hits that exile reset, so Exile is the discriminating origin to test.
+    #[test]
+    fn nonpermanent_manifested_from_exile_enters_face_down() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(70001),
+            PlayerId(0),
+            "Manifest Source".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(70002),
+            PlayerId(0),
+            "Hidden Instant".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types = vec![CoreType::Instant];
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Battlefield, source)
+                .face_down(FaceDownProfile::vanilla_2_2()),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        let obj = state.objects.get(&card).expect("manifested object");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "a non-permanent put onto the battlefield face down from exile must \
+             enter, not be bounced by the instant/sorcery guard"
+        );
+        assert!(
+            obj.face_down,
+            "the exile-exit cleanup clears face_down mid-move (CR 400.7); the \
+             entry must re-assert it so the card does not leak face up"
+        );
+        assert_eq!(obj.power, Some(2), "a face-down card is a 2/2 (CR 708.2a)");
+        assert_eq!(obj.toughness, Some(2), "a face-down card is a 2/2 (CR 708.2a)");
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "a face-down card presents as a creature regardless of its hidden type"
+        );
+        assert!(
+            obj.back_face.is_some(),
+            "the real (hidden) card must be preserved in back_face for turn-face-up"
         );
     }
 }
