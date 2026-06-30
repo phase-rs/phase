@@ -163,13 +163,19 @@ fn find_legal_targets_with_context(
         return targets;
     }
 
-    // Typed filter with no type_filters targets players, not permanents.
-    // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
-    // The "any other target" shape (handled above as `is_any_other_target`) is
-    // the sole exception: it adds players above and falls through to the object
+    // Typed filter with no type_filters AND no properties targets players, not
+    // permanents. e.g. "target opponent" → Typed { type_filters: [], controller:
+    // Opponent }. A non-empty `properties` list (e.g. `FilterProp::Token` for
+    // "target token you control") describes an object characteristic that has
+    // no meaning for a player, so it must fall through to the object
+    // enumeration below instead of collapsing to players-only here (issue #2004
+    // — "target token you control" was wrongly resolving to the controller
+    // player instead of enumerating tokens). The "any other target" shape
+    // (handled above as `is_any_other_target`) is the sole property-bearing
+    // exception: it adds players above and falls through to the object
     // enumeration below instead of collapsing to players-only here.
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() && !is_any_other_target {
+        if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // Player-phasing exclusion (mirrors CR 702.26b for permanents).
