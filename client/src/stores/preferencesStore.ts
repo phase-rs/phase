@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 
 import type { GameFormat, MatchType, Phase } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
+import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
   ANIMATION_SPEED_DEFAULT,
   ANIMATION_SPEED_MAX,
@@ -277,6 +278,7 @@ function buildDefaultPreferences(): PreferencesState {
     commandZoneDisplay: "auto",
     tapRotation: "mtga",
     spellPaymentMode: "auto",
+    handSort: "none",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
@@ -341,6 +343,11 @@ interface PreferencesState {
   commandZoneDisplay: CommandZoneDisplay;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
+  /** Persisted sort order for the player's own hand (display-only — never
+   *  reorders `player.hand`). Mirrors the discard grid's `SortKey`; defaults to
+   *  "none" (insertion order, the prior behavior). The hide-filter is kept
+   *  ephemeral per-game in `uiStore.handFilter`. */
+  handSort: SortKey;
   showKeywordStrip: boolean;
   /** When true, hovering an unfocused opponent's tab opens a small popover
    *  previewing that opponent's nonland permanents. Disable for a quieter
@@ -414,6 +421,7 @@ interface PreferencesActions {
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
+  setHandSort: (sort: SortKey) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
@@ -562,6 +570,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
+      setHandSort: (sort) => set({ handSort: sort }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
@@ -719,7 +728,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 18,
+      version: 19,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -754,6 +763,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          via the shallow merge. The changelog hook then silently seeds
       //          it to the current latest on first load, so existing users get
       //          no unread dot for entries that predate this upgrade.
+      // v18 → v19: Add handSort; legacy stores default to "none" (insertion
+      //          order — the prior hand behavior) via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

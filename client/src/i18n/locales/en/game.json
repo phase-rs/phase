@@ -481,7 +481,9 @@
     "viewFullHand_other": "View full hand ({{count}} cards)",
     "handLabel": "Hand {{count}}",
     "handTitle": "Hand ({{count}})",
-    "cardBack": "Card back"
+    "cardBack": "Card back",
+    "organizeLabel": "Organize hand",
+    "reorderPausedHint": "Drag-to-reorder is paused while the hand is sorted or filtered."
   },
   "opponentHud": {
     "ally": "Ally",
@@ -1295,6 +1297,12 @@
       "optCmc": "Mana value",
       "optType": "Type",
       "optColor": "Color",
+      "filterLabel": "Show",
+      "filterNone": "All",
+      "filterPlayable": "Playable",
+      "filterCreatures": "Creatures",
+      "filterLands": "Lands",
+      "filterNonland": "Nonland",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",
