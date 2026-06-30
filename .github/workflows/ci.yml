@@ -97,6 +97,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free runner disk for Rust test linking
+        # The nextest count partition splits execution, but each shard still
+        # runs `cargo test --no-run` for the whole workspace. Keep the Rust
+        # caches intact and reclaim only unused hosted-image payloads before
+        # setup-rust-toolchain restores/saves Cargo state.
+        run: |
+          echo "Disk before cleanup:"
+          df -h /
+
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+
+          if command -v docker >/dev/null 2>&1; then
+            docker system prune --all --force || true
+          fi
+
+          echo "Disk after cleanup:"
+          df -h /
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
