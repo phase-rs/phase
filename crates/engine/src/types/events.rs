@@ -558,6 +558,14 @@ pub enum GameEvent {
     TurnedFaceUp {
         object_id: ObjectId,
     },
+    /// CR 701.27b: A face-up permanent was turned face down by a resolving effect
+    /// (Cyber Conversion). Distinct from `Transformed` — turning face down and
+    /// transforming are different game actions, so a "whenever a permanent is
+    /// turned face down" trigger must observe THIS event, not `Transformed`.
+    /// Drives the game log and the public-state/frontend re-render.
+    TurnedFaceDown {
+        object_id: ObjectId,
+    },
     CardsRevealed {
         player: PlayerId,
         #[serde(default)]

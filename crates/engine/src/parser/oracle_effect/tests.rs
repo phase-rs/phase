@@ -1,6 +1,7 @@
 use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::AttachmentKind;
+use crate::types::card_type::CoreType;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -745,7 +746,7 @@ use crate::types::ability::{
     PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
     SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::Supertype;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaExpiry};
@@ -36533,6 +36534,106 @@ fn reef_worm_nested_token_is_not_modal_choice() {
         );
     };
     assert_eq!(name, "Fish", "outer token is the 3/3 Fish");
+}
+
+#[test]
+fn cyber_conversion_turn_face_down_with_cyberman_body() {
+    // CR 708.2a + CR 205.1a: Cyber Conversion — "Turn target creature face
+    // down. It's a 2/2 Cyberman artifact creature." The head clause lowers to
+    // `Effect::TurnFaceDown` targeting a creature; the trailing body sentence
+    // is consumed as a `FaceDownProfileSpec` continuation that refines the
+    // seeded vanilla 2/2 into the Cyberman artifact profile — NOT left as an
+    // `Unimplemented` sibling.
+    let chain = parse_effect_chain(
+        "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
+        AbilityKind::Spell,
+    );
+    let Effect::TurnFaceDown { target, profile } = &*chain.effect else {
+        panic!("expected TurnFaceDown, got: {:?}", chain.effect);
+    };
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected a typed creature target, got: {target:?}"
+    );
+    let profile = profile.as_ref().expect("face-down profile must be present");
+    assert_eq!(profile.power, Some(2));
+    assert_eq!(profile.toughness, Some(2));
+    assert_eq!(profile.body, crate::types::ability::FaceDownBody::Creature);
+    assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+    assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
+    assert!(
+        chain.sub_ability.is_none(),
+        "the body sentence must refine the profile, not survive as an \
+         Unimplemented sibling: {:?}",
+        chain.sub_ability
+    );
+}
+
+#[test]
+fn mondassian_colony_ship_turn_face_down_becomes_cyberman_body() {
+    // CR 708.2a + CR 205.1a: Mondassian Colony Ship — "Turn target creature
+    // face down. It becomes a 2/2 Cyberman artifact creature." Mirrors Cyber
+    // Conversion but with the "It becomes a ..." copula instead of "It's a
+    // ...". The body sentence must refine the seeded vanilla 2/2 into the
+    // Cyberman artifact profile, NOT survive as a separate `GenericEffect`
+    // "becomes" static targeting the source ship.
+    let chain = parse_effect_chain(
+        "Turn target creature face down. It becomes a 2/2 Cyberman artifact creature.",
+        AbilityKind::Spell,
+    );
+    let Effect::TurnFaceDown { target, profile } = &*chain.effect else {
+        panic!("expected TurnFaceDown, got: {:?}", chain.effect);
+    };
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected a typed creature target, got: {target:?}"
+    );
+    let profile = profile.as_ref().expect("face-down profile must be present");
+    assert_eq!(profile.power, Some(2));
+    assert_eq!(profile.toughness, Some(2));
+    assert_eq!(profile.body, crate::types::ability::FaceDownBody::Creature);
+    assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+    assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
+    assert!(
+        chain.sub_ability.is_none(),
+        "the 'It becomes a ...' body sentence must refine the profile, not \
+         survive as a separate GenericEffect sibling: {:?}",
+        chain.sub_ability
+    );
+}
+
+#[test]
+fn self_ref_turn_this_creature_face_down_is_a_resolving_effect() {
+    // CR 708.2a: "{cost}: Turn this creature face down" (Mischievous Quanar,
+    // Wall of Deceit) is a genuine resolving activated ability, not a special
+    // action — turning face DOWN has no special-action form (morph/cloak/
+    // disguise only turn face UP). The self-reference must parse to a
+    // `TurnFaceDown { target: SelfRef }`, not be rejected to Unimplemented.
+    let e = parse_effect("Turn this creature face down.");
+    assert!(
+        matches!(
+            e,
+            Effect::TurnFaceDown {
+                target: TargetFilter::SelfRef,
+                profile: Some(_)
+            }
+        ),
+        "expected TurnFaceDown {{ SelfRef }}, got: {e:?}"
+    );
+
+    // Sibling self-reference type ("this enchantment", Obscuring Aether)
+    // proves the class coverage is not creature-specific.
+    let e = parse_effect("Turn this enchantment face down.");
+    assert!(
+        matches!(
+            e,
+            Effect::TurnFaceDown {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected TurnFaceDown {{ SelfRef }} for 'this enchantment', got: {e:?}"
+    );
 }
 
 /// CR 115.1 + CR 118.12a: resolution-side parity with the trigger arm —
