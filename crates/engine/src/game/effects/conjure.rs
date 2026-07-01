@@ -179,8 +179,8 @@ pub fn resolve(
         }
     }
 
-    // CR 603.7: Publish the conjured objects as the most-recently-created set so
-    // chained sub-abilities that reference them via `TargetFilter::LastCreated`
+    // Publish the conjured objects as the engine-local most-recently-created set
+    // so chained sub-abilities that reference them via `TargetFilter::LastCreated`
     // bind correctly (e.g. Three Tree Battalion / Blood Age Muster's "the
     // duplicate / its base power and toughness perpetually …"). A conjure that
     // produced nothing leaves any prior `LastCreated` untouched.
@@ -260,8 +260,8 @@ mod tests {
         assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
     }
 
-    /// CR 603.7 + digital Alchemy: a conjure publishes the conjured object as
-    /// the most-recently-created set, so a chained perpetual sub-ability that
+    /// Digital Alchemy: a conjure publishes the conjured object as the
+    /// engine-local most-recently-created set, so a chained perpetual sub-ability that
     /// references it via `LastCreated` (Three Tree Battalion / Blood Age Muster's
     /// "the duplicate / its base power and toughness perpetually …") edits the
     /// conjured card — not the conjuring source.
