@@ -2928,9 +2928,12 @@ mod parsed_leyline_card_scoping_tests {
 mod face_down_exile_entry_tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::FaceDownProfile;
+    use crate::types::ability::{
+        FaceDownProfile, FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::statics::StaticMode;
 
     /// CR 708.2a + CR 400.4a + CR 400.7: a NON-permanent (instant/sorcery) card
     /// put onto the battlefield face down from EXILE must still enter as a
@@ -3016,11 +3019,6 @@ mod face_down_exile_entry_tests {
     /// for a move that never happened).
     #[test]
     fn blocked_battlefield_entry_does_not_strand_card_face_down() {
-        use crate::types::ability::{
-            FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
-        };
-        use crate::types::statics::StaticMode;
-
         let mut state = GameState::new_two_player(42);
 
         let source = create_object(
