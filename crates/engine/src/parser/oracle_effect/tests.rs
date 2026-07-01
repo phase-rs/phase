@@ -37330,3 +37330,148 @@ fn full_bore_grant_clause_is_target_scoped_warp_condition() {
         "the trample+haste grant must be gated on the TARGET's warp-cast marker"
     );
 }
+
+// ── Issue #735 — Amalia Benavides Aguirre power-threshold board wipe ──
+//
+// Amalia: "Whenever you gain life, ~ explores. Then destroy all other
+// creatures if its power is exactly 20." Before the fix the "if its power is
+// exactly 20" clause failed to parse (no "exactly N" comparison arm), so the
+// DestroyAll sub-ability carried NO condition → an unconditional board wipe on
+// every lifegain (issue #735 p2). Two edits make the condition load-bearing:
+//   Edit A (oracle_util.rs): "exactly N" → Comparator::EQ.
+//   Edit B (conditions.rs): "its power" binds the trigger SOURCE (Amalia) for
+//     a player/phase-subject trigger, so scope == ObjectScope::Source.
+
+const AMALIA_ORACLE_735: &str = "Ward—Pay 3 life.\nWhenever you gain life, Amalia Benavides Aguirre explores. Then destroy all other creatures if its power is exactly 20. (To have this creature explore, reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)";
+
+/// Extract the `DestroyAll` sub-ability's condition from a lifegain trigger.
+fn amalia_destroy_all_condition(text: &str) -> Option<AbilityCondition> {
+    let parsed = parse_oracle_text(
+        text,
+        "Amalia Benavides Aguirre",
+        &["Ward".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    parsed.triggers.iter().find_map(|t| {
+        let exe = t.execute.as_deref()?;
+        // The DestroyAll lives on the trigger effect's sub_ability chain.
+        let sub = exe.sub_ability.as_deref()?;
+        matches!(&*sub.effect, Effect::DestroyAll { .. }).then(|| sub.condition.clone())?
+    })
+}
+
+/// SHAPE (issue #735): the live-parsed Amalia lifegain trigger lowers its
+/// DestroyAll sub-ability to a `QuantityCheck { Power{Source} EQ 20 }`.
+///
+/// Revert-fail proof for BOTH production edits:
+///   - Edit A (remove the "exactly N" → EQ arm in `parse_comparison_suffix`):
+///     the "if its power is exactly 20" clause no longer parses, the condition
+///     drops to `None`, and the `Some(QuantityCheck { .. })` assert fails.
+///   - Edit B (force `strip_property_conditional`'s scope back to
+///     `CostPaidObject`): the `scope: ObjectScope::Source` assert fails.
+#[test]
+fn amalia_lifegain_destroy_all_is_source_power_eq_20() {
+    use crate::types::ability::{ObjectScope, QuantityRef};
+
+    let condition =
+        amalia_destroy_all_condition(AMALIA_ORACLE_735).expect("DestroyAll sub-ability must exist");
+
+    match condition {
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 20 },
+        } => {}
+        other => panic!(
+            "Amalia DestroyAll condition must be QuantityCheck{{Power{{Source}} EQ 20}}, got \
+             {other:?}"
+        ),
+    }
+}
+
+/// Non-regression (issue #735): Tribute to the World Tree keeps
+/// `ObjectScope::CostPaidObject` for its "if its power is 3 or greater" clause —
+/// the "its" binds the ENTERING creature, not the enchantment source. Its
+/// trigger subject is a typed object ("a creature you control"), which is not
+/// one of the Controller/Player/Any player-subject arms Edit B flips to Source.
+#[test]
+fn tribute_world_tree_keeps_cost_paid_object_scope() {
+    use crate::types::ability::{ObjectScope, QuantityRef};
+
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control enters, draw a card if its power is 3 or greater. \
+         Otherwise, put two +1/+1 counters on it.",
+        "Tribute to the World Tree",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let condition = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref().and_then(|e| e.condition.clone()))
+        .expect("Tribute trigger must carry a QuantityCheck condition");
+
+    assert!(
+        matches!(
+            condition,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        ),
+        "Tribute must keep Power{{CostPaidObject}} GE 3, got {condition:?}"
+    );
+}
+
+/// Non-regression (issue #735): Ent's Fury keeps `ObjectScope::CostPaidObject`
+/// for "if its power is 4 or greater". It is an instant with no trigger subject
+/// (None), so Edit B's `_ => CostPaidObject` fall-through binds "its" to the
+/// clause-local target — unchanged by the fix.
+#[test]
+fn ents_fury_keeps_cost_paid_object_scope() {
+    use crate::types::ability::{ObjectScope, QuantityRef};
+
+    let parsed = parse_oracle_text(
+        "Put a +1/+1 counter on target creature you control if its power is 4 or greater. \
+         Then that creature gets +1/+1 until end of turn and fights target creature you \
+         don't control.",
+        "Ent's Fury",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let condition = parsed
+        .abilities
+        .iter()
+        .find_map(|a| a.condition.clone())
+        .expect("Ent's Fury must carry a QuantityCheck condition");
+
+    assert!(
+        matches!(
+            condition,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        ),
+        "Ent's Fury must keep Power{{CostPaidObject}} GE 4, got {condition:?}"
+    );
+}

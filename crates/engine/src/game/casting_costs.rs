@@ -6692,18 +6692,15 @@ fn auto_tap_mana_sources_inner(
         deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let effective_ctx = payment_context.or(spell_ctx.as_ref());
-    let any_color = if matches!(
-        payment_context,
-        Some(PaymentContext::Effect | PaymentContext::Activation { .. })
-    ) {
-        super::static_abilities::player_can_spend_as_any_color(state, player)
-    } else {
-        super::casting::player_can_spend_as_any_color_for_optional_spell(
-            state,
-            player,
-            deprioritize_source,
-        )
-    };
+    // CR 609.4b: Auto-tap planning must use the same spend-as-any-color authority
+    // as legality dry-runs and real payment (`player_can_spend_as_any_color_for_payment`),
+    // including activation-source-filtered grants (Agatha's Soul Cauldron class).
+    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+        state,
+        player,
+        deprioritize_source,
+        effective_ctx,
+    );
     let residual = state
         .players
         .iter()

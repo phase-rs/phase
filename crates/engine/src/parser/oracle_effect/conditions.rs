@@ -1673,23 +1673,30 @@ pub(super) fn strip_turn_conditional(text: &str) -> (Option<AbilityCondition>, S
     (None, text.to_string())
 }
 
-pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_property_conditional(
+    text: &str,
+    ctx: &ParseContext,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // CR 608.2c + CR 608.2k + CR 208.1: "its power" binds the ability SOURCE for
+    // a player/phase-subject trigger (Amalia, Lily Bowen), or the clause-local
+    // object (CostPaidObject) for a target/entering-referent clause (Tribute,
+    // Ent's Fury). A player/phase subject ("you", "a player", any) has no
+    // clause-local object for "its" to bind, so the anaphor resolves to the
+    // ability source (CR 113.7a LKI); a target/typed-object subject supplies the
+    // referent the untargeted "its" reads (CR 608.2k).
+    let scope = match ctx.subject {
+        Some(TargetFilter::Controller) | Some(TargetFilter::Player) | Some(TargetFilter::Any) => {
+            ObjectScope::Source
+        }
+        _ => ObjectScope::CostPaidObject,
+    };
+
     for (property, qty_ref) in &[
-        (
-            "power",
-            QuantityRef::Power {
-                scope: ObjectScope::CostPaidObject,
-            },
-        ),
-        (
-            "toughness",
-            QuantityRef::Toughness {
-                scope: ObjectScope::CostPaidObject,
-            },
-        ),
+        ("power", QuantityRef::Power { scope }),
+        ("toughness", QuantityRef::Toughness { scope }),
     ] {
         let pattern = format!(" if its {property} is ");
         if let Some((before, after)) = tp.rsplit_around(&pattern) {

@@ -34074,6 +34074,7 @@ fn add_vizier_filtered_any_type_source(state: &mut GameState, player: PlayerId) 
     );
     let def = StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
         spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        activation_source_filter: None,
     })
     .affected(TargetFilter::Controller);
     state

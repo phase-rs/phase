@@ -756,7 +756,11 @@ fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
         return false;
     };
     if static_abilities.len() != 1
-        || static_abilities[0].mode != (StaticMode::SpendManaAsAnyColor { spell_filter: None })
+        || static_abilities[0].mode
+            != (StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+            })
     {
         return false;
     }
