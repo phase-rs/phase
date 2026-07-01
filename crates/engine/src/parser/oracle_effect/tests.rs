@@ -741,10 +741,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
     CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
     Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-    DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition, LinkedExileScope,
-    ManaContribution, ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-    PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+    DevotionColors, DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition,
+    LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty, ObjectScope,
+    PermissionGrantee, PlayerFilter, PlayerRelation, PreventionScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+    TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -4629,7 +4630,7 @@ fn teferis_response_destroy_rider_absorbed_draw_chains() {
 /// `Effect::Counter.countered_spell_zone` as `Library { Top }`.
 #[test]
 fn memory_lapse_counter_spell_zone_redirect_library_top() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let ability = parse_effect_chain(
             "Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard.",
@@ -4650,7 +4651,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Top
             })
         ),
@@ -4663,7 +4664,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
 /// Crumple on the bottom of its owner's library." is a separate sentence.)
 #[test]
 fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it on the bottom of its owner's library instead of into that player's graveyard. Put Spell Crumple on the bottom of its owner's library.",
@@ -4683,7 +4684,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Bottom
             })
         ),
@@ -4695,7 +4696,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
 /// `Hand`, and the subsequent "Draw a card." still chains as a sibling.
 #[test]
 fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
-    use crate::types::ability::CounteredSpellDestination;
+    use crate::types::ability::SpellStackToGraveyardReplacement;
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard.\nDraw a card.",
@@ -4713,7 +4714,10 @@ fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
         panic!("expected Counter effect, got {:?}", ability.effect);
     };
     assert!(
-        matches!(countered_spell_zone, Some(CounteredSpellDestination::Hand)),
+        matches!(
+            countered_spell_zone,
+            Some(SpellStackToGraveyardReplacement::Hand)
+        ),
         "expected Hand, got {countered_spell_zone:?}"
     );
 
@@ -19531,6 +19535,7 @@ fn cast_variant_paid_sneak_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         })
     );
@@ -19546,6 +19551,7 @@ fn cast_variant_paid_ninjutsu_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Ninjutsu,
         })
     );
@@ -19573,7 +19579,8 @@ fn foretold_instead_rewrites_those_tokens_with_x_count() {
             if matches!(
                 &**inner,
                 AbilityCondition::CastVariantPaid {
-                    variant: crate::types::ability::CastVariantPaid::Foretell
+                    variant: crate::types::ability::CastVariantPaid::Foretell,
+                    ..
                 }
             )
     ));
@@ -19615,6 +19622,7 @@ fn conditional_enter_tapped_attacking_patches_token() {
     assert_eq!(
         def.condition,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         }),
         "Token should have CastVariantPaid condition"
@@ -24551,6 +24559,87 @@ fn cant_cast_spells_this_turn_defending_player() {
         ),
         "got {:?}",
         def.effect
+    );
+}
+
+#[test]
+fn cant_cast_spells_during_that_players_next_turn() {
+    // CR 514.2 + CR 500.7: Sphinx's Decree / Azor — "Each opponent can't cast
+    // instant or sorcery spells during that player's next turn." The trailing
+    // next-turn duration must be captured (not dropped into an Unimplemented
+    // sub_ability), yielding a next-turn-expiring prohibition rather than an
+    // end-of-current-turn one.
+    let def = parse_effect_chain(
+        "Each opponent can't cast instant or sorcery spells during that player's next turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // The duration drives the runtime expiry (fill_runtime_fields lowers this to
+    // RestrictionExpiry::UntilEndOfNextTurnOf); it must NOT be dropped.
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    // The next-turn clause is consumed, not left as an Unimplemented sub_ability.
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_during_their_next_turn_determiner_variant() {
+    // The "during their next turn" determiner is the sibling surface form of
+    // "during that player's next turn" and resolves to the same duration.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells during their next turn.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_this_turn_keeps_end_of_turn_expiry() {
+    // Regression guard: the plain "this turn" form must NOT be rewritten to a
+    // next-turn duration by the new trailing-duration arm.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                expiry: RestrictionExpiry::EndOfTurn,
+                ..
+            }
+        }
+    ));
+    assert_ne!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
     );
 }
 
@@ -33080,25 +33169,67 @@ fn bare_cast_from_among_those_exiled_cards_unchanged() {
 }
 
 /// CR 614.1a + CR 701.5: Verify the structural detector for the
-/// "If that spell would be put into a graveyard, exile it instead" rider
+/// "If that spell would be put into a graveyard, [dest] instead" rider
 /// covers the determiner variants (a / the / its owner's / your /
-/// opponent's). All forms must dispatch identically so the parent-target
-/// rewrite applies uniformly.
+/// opponent's) AND every typed destination (exile / library bottom / library
+/// top / hand). All forms must dispatch so the parent-target rewrite applies
+/// uniformly and the destination axis is parameterized, not exile-only.
 #[test]
-fn exile_after_spell_rider_clause_recognises_determiner_variants() {
-    for clause in [
-        "if that spell would be put into a graveyard, exile it instead",
-        "if that spell would be put into the graveyard, exile it instead",
-        "if that spell would be put into its owner's graveyard, exile it instead",
-        "if that spell would be put into your graveyard, exile it instead",
-        "if that spell would be put into an opponent's graveyard, exile it instead",
-        "if that spell would be put into a graveyard, exile it instead.",
+fn spell_graveyard_replacement_rider_recognises_determiner_and_destination_variants() {
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
+    for (clause, expected) in [
+        (
+            "if that spell would be put into a graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into the graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into its owner's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into your graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into an opponent's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, exile it instead.",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on the bottom of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Bottom,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on top of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Top,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, return it to its owner's hand instead",
+            SpellStackToGraveyardReplacement::Hand,
+        ),
     ] {
-        assert!(
-            is_exile_after_spell_rider_clause(clause),
+        assert_eq!(
+            parse_spell_graveyard_replacement_rider(clause),
+            Some(expected),
             "should recognise rider clause: {clause:?}"
         );
     }
+    // Negative: a non-rider "instead" clause must not match.
+    assert_eq!(
+        parse_spell_graveyard_replacement_rider("draw a card instead"),
+        None,
+    );
 }
 
 #[test]
@@ -35245,6 +35376,7 @@ fn excess_damage_fight_followup_parses_condition_amount_and_retention() {
         Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            ..
         })
     ));
     assert!(matches!(
@@ -36548,6 +36680,289 @@ fn split_choice_list_items_is_quote_aware() {
     );
 }
 
+fn assert_semantic_where_x_binding(value: &QuantityExpr, expected: &QuantityExpr) {
+    assert!(
+        !matches!(
+            value,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        ),
+        "where-X binding must not fall back to an arbitrary variable: {value:?}"
+    );
+    assert_eq!(
+        value, expected,
+        "where-X binding must have the expected semantic quantity"
+    );
+}
+
+fn controlled_object_count(type_filter: TypeFilter) -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(type_filter).controller(ControllerRef::You),
+            ),
+        },
+    }
+}
+
+fn find_filter_prop<'a>(
+    filter: &'a TargetFilter,
+    predicate: &impl Fn(&'a FilterProp) -> bool,
+) -> Option<&'a FilterProp> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .find_map(|filter| find_filter_prop(filter, predicate)),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            find_filter_prop(filter, predicate)
+        }
+        _ => None,
+    }
+}
+
+fn find_nested_filter_prop<'a>(
+    prop: &'a FilterProp,
+    predicate: &impl Fn(&'a FilterProp) -> bool,
+) -> Option<&'a FilterProp> {
+    match prop {
+        FilterProp::AnyOf { props } => props.iter().find_map(|prop| {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }),
+        FilterProp::Not { prop } => {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => find_filter_prop(target, predicate),
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => find_filter_prop(reference, predicate),
+        _ => None,
+    }
+}
+
+fn assert_pt_where_x_bound(filter: &TargetFilter, stat: PtStat, expected: &QuantityExpr) {
+    let prop = find_filter_prop(filter, &|prop| {
+        matches!(
+            prop,
+            FilterProp::PtComparison {
+                stat: found,
+                ..
+            } if *found == stat
+        )
+    })
+    .unwrap_or_else(|| panic!("expected rewritten {stat:?} PtComparison in {filter:?}"));
+    let FilterProp::PtComparison { value, .. } = prop else {
+        unreachable!("predicate matched PtComparison");
+    };
+    assert_semantic_where_x_binding(value, expected);
+}
+
+fn assert_cmc_where_x_bound(filter: &TargetFilter, expected: &QuantityExpr) {
+    let prop = find_filter_prop(filter, &|prop| matches!(prop, FilterProp::Cmc { .. }))
+        .unwrap_or_else(|| panic!("expected rewritten Cmc in {filter:?}"));
+    let FilterProp::Cmc { value, .. } = prop else {
+        unreachable!("predicate matched Cmc");
+    };
+    assert_semantic_where_x_binding(value, expected);
+}
+
+fn ability_tree_has_rewritten_dig_filter(ability: &AbilityDefinition) -> bool {
+    if let Effect::Dig { filter, .. } = ability.effect.as_ref() {
+        if find_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::Cmc { value, .. }
+                    if !value.contains_x()
+                        && !matches!(
+                            value,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { .. }
+                            }
+                        )
+            )
+        })
+        .is_some()
+        {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_tree_has_rewritten_dig_filter)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_rewritten_dig_filter)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_tree_has_rewritten_dig_filter)
+}
+
+fn ability_tree_has_rewritten_change_zone_tracked_filter(ability: &AbilityDefinition) -> bool {
+    if let Effect::ChangeZone { target, .. } = ability.effect.as_ref() {
+        if matches!(target, TargetFilter::TrackedSetFiltered { .. })
+            && find_filter_prop(target, &|prop| {
+                matches!(
+                    prop,
+                    FilterProp::Cmc { value, .. }
+                        if !value.contains_x()
+                            && !matches!(
+                                value,
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { .. }
+                                }
+                            )
+                )
+            })
+            .is_some()
+        {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_tree_has_rewritten_change_zone_tracked_filter)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_rewritten_change_zone_tracked_filter)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_tree_has_rewritten_change_zone_tracked_filter)
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_destroy_target_go_shintai_hidden_cruelty() {
+    let ability = parse_effect_chain(
+        "destroy target creature with toughness X or less, where X is the number of Shrines you control",
+        AbilityKind::Spell,
+    );
+    let Effect::Destroy { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Destroy, got {:?}", ability.effect);
+    };
+    assert_pt_where_x_bound(
+        target,
+        PtStat::Toughness,
+        &controlled_object_count(TypeFilter::Subtype("Shrine".to_string())),
+    );
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_destroy_target_invasion_of_lorwyn() {
+    let ability = parse_effect_chain(
+        "destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control",
+        AbilityKind::Spell,
+    );
+    let Effect::Destroy { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Destroy, got {:?}", ability.effect);
+    };
+    assert_pt_where_x_bound(
+        target,
+        PtStat::Power,
+        &controlled_object_count(TypeFilter::Land),
+    );
+}
+
+#[test]
+fn where_x_rewrites_cmc_bounce_target_devotion_to_white_blue() {
+    let ability = parse_effect_chain(
+        "return target creature an opponent controls with mana value X or less to its owner's hand, where X is your devotion to white and blue",
+        AbilityKind::Spell,
+    );
+    let Effect::Bounce { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Bounce, got {:?}", ability.effect);
+    };
+    assert_cmc_where_x_bound(
+        target,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::White, ManaColor::Blue]),
+            },
+        },
+    );
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_bounce_all_scourge_and_spectral_deluge() {
+    for text in [
+        "return each creature your opponents control with toughness X or less to its owner's hand, where X is the number of Islands you control",
+        "Return each creature your opponents control with toughness X or less to its owner's hand, where X is the number of Islands you control.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::BounceAll { target, .. } = ability.effect.as_ref() else {
+            panic!("expected BounceAll for {text:?}, got {:?}", ability.effect);
+        };
+        assert_pt_where_x_bound(
+            target,
+            PtStat::Toughness,
+            &controlled_object_count(TypeFilter::Subtype("Island".to_string())),
+        );
+    }
+}
+
+#[test]
+fn where_x_rewrites_dig_filter_hatchery_spider() {
+    let parsed = parse_oracle_text(
+        "Reach\nUndergrowth — When you cast this spell, reveal the top X cards of your library, where X is the number of creature cards in your graveyard. You may put a green permanent card with mana value X or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        "Hatchery Spider",
+        &["Reach".to_string()],
+        &["Creature".to_string()],
+        &["Spider".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(ability_tree_has_rewritten_dig_filter),
+        "expected Hatchery Spider Dig filter to bind where-X, got {:?}",
+        parsed.triggers
+    );
+}
+
+#[test]
+fn where_x_rewrites_tracked_set_filtered_change_zone_keldon_flamesage() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+        "Keldon Flamesage",
+        &["Enlist".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Shaman".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(ability_tree_has_rewritten_change_zone_tracked_filter),
+        "expected Keldon Flamesage tracked-set ChangeZone filter to bind where-X, got {:?}",
+        parsed.triggers
+    );
+}
+
 /// CR 111.2 + CR 608.2d: Reef Worm creates a single cascading Fish token that
 /// carries a quoted death-triggered ability; it is NOT a modal token choice.
 /// Before the quote-aware splitter, the inner ", create …" severed the clause
@@ -36735,5 +37150,32 @@ fn resolution_unless_anaphoric_payers_unchanged() {
         you.expect("you-pay unless-pay").payer,
         TargetFilter::Controller,
         "\"you pay\" must stay Controller"
+    );
+}
+
+/// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore parses to a `Pump` (+3/+2
+/// on the controlled creature) with a `SequentialSibling` grant sub-ability
+/// gated on `CastVariantPaid { variant: Warp, subject: Target }` — "that
+/// creature" anaphors to the +3/+2 target, so the rider is TARGET-scoped, not
+/// the source-scoped "if its warp cost was paid" form. Reverting the parser
+/// arm drops the condition (the `Condition_If` swallow returns).
+#[test]
+fn full_bore_grant_clause_is_target_scoped_warp_condition() {
+    let def = parse_effect_chain(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was cast for its warp cost, it also gains trample and haste until end of turn.",
+            AbilityKind::Spell,
+        );
+    assert!(
+        matches!(&*def.effect, Effect::Pump { .. }),
+        "parent effect is the +3/+2 pump"
+    );
+    let sub = def.sub_ability.as_ref().expect("grant sub-ability");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::CastVariantPaid {
+            variant: CastVariantPaid::Warp,
+            subject: ObjectScope::Target,
+        }),
+        "the trample+haste grant must be gated on the TARGET's warp-cast marker"
     );
 }

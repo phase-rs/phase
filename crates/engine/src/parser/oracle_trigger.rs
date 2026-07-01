@@ -7667,11 +7667,21 @@ fn split_taps_for_mana_for_clause(text: &str) -> Option<(String, Option<Vec<Mana
 /// CR 603.2 + CR 605.1a: Shared nom dispatch for "Whenever [an opponent / a player]
 /// taps … for mana" trigger conditions. Used by trigger-line dispatch and by
 /// `condition_matches_taps_for_mana_event` for `"that player"` scope binding.
+///
+/// The leading "whenever "/"when " keyword is OPTIONAL. Printed-permanent
+/// dispatch (`try_parse_player_trigger`) passes the full keyworded condition,
+/// but the instant/sorcery delayed-trigger split path
+/// (`try_parse_whenever_this_turn` in `oracle_effect`) strips the "whenever "
+/// keyword before handing the condition to `parse_trigger_condition`, so the
+/// keyword is already gone by the time this recognizer runs on High Tide /
+/// Bubbling Muck. `opt()` accepts both forms; because both callers require the
+/// recognizer to consume the ENTIRE candidate line (empty remainder), the
+/// looser match cannot false-positive on mid-sentence text.
 fn parse_taps_for_mana_actor_line(
     i: &str,
 ) -> OracleResult<'_, (Option<ControllerRef>, String, Option<Vec<ManaType>>)> {
     let (rest, actor_controller) = preceded(
-        alt((tag("whenever "), tag("when "))),
+        opt(alt((tag("whenever "), tag("when ")))),
         alt((
             value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
             value(None, tag("a player taps ")),

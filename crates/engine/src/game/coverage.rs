@@ -13,12 +13,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
@@ -1466,7 +1466,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
-            excess_only,
+            channel,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1477,7 +1477,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
-            let excess_tag = if *excess_only { " excess" } else { "" };
+            let excess_tag = match channel {
+                crate::types::ability::DamageChannel::Excess => " excess",
+                crate::types::ability::DamageChannel::Total => "",
+            };
             format!(
                 "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
@@ -2183,20 +2186,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             // CR 701.6a + CR 614.1a: countered-spell destination redirect.
             match countered_spell_zone {
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 }) => d.push(("redirect".into(), "library top".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 }) => d.push(("redirect".into(), "library bottom".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::NthFromTop { n },
                 }) => d.push(("redirect".into(), format!("library #{n} from top"))),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
-                Some(CounteredSpellDestination::Hand) => {
+                Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
+                }
+                // CR 614.1a: `Exile` is shared with the cast-this-way rider; the
+                // counter parser never emits it (exile-on-counter is a separate
+                // sub-ability rider), but the arm keeps the match exhaustive.
+                Some(SpellStackToGraveyardReplacement::Exile) => {
+                    d.push(("redirect".into(), "exile".into()))
                 }
                 None => {}
             }
@@ -3282,8 +3291,16 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
-        AbilityCondition::PreviousEffectAmount { comparator, rhs } => format!(
-            "previous amount {} {}",
+        AbilityCondition::PreviousEffectAmount {
+            comparator,
+            rhs,
+            channel,
+        } => format!(
+            "previous {}amount {} {}",
+            match channel {
+                crate::types::ability::DamageChannel::Excess => "excess ",
+                crate::types::ability::DamageChannel::Total => "",
+            },
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
@@ -3327,6 +3344,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
+        AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
         AbilityCondition::ZoneChangedThisWay { filter } => {
             format!("{} changed zones this way", fmt_target(filter))
         }
@@ -6335,6 +6353,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
         AbilityCondition::FirstEndStepOfTurn => ("FirstEndStepOfTurn", Handled),
+        // CR 505.1 + CR 500.1 + CR 608.2c: live current-phase check; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::CurrentPhaseIs { .. } => ("CurrentPhaseIs", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by

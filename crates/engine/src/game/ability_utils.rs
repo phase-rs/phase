@@ -1410,6 +1410,34 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 601.2d: The node whose effect divides damage/counters among its own
+/// targets. Mirrors `extract_distribution_total`, which inspects only the
+/// top-level `ability.effect`; a divided effect only reaches the
+/// `WaitingFor::DistributeAmong` sites when it is the top-level node.
+fn distributing_node(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    matches!(
+        ability.effect,
+        Effect::DealDamage { .. } | Effect::PutCounter { .. }
+    )
+    .then_some(ability)
+}
+
+/// CR 601.2d: The targets a division is distributed among — the distributing
+/// node's OWN targets only, excluding sibling-effect targets elsewhere in the
+/// chain (e.g. a chained "tap two target permanents"). Per-opponent fanout
+/// strips player refs (mirroring `flatten_targets_in_chain`); ordinary
+/// player-targeted divided damage keeps its player targets.
+pub fn distribution_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let Some(node) = distributing_node(ability) else {
+        return Vec::new();
+    };
+    if is_per_opponent_target_fanout(node) {
+        object_targets_only(&node.targets)
+    } else {
+        node.targets.clone()
+    }
+}
+
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
@@ -2432,10 +2460,17 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 /// `ChooseXValue` ahead of target selection.
 fn filter_prop_contains_chosen_x_ref(prop: &FilterProp) -> bool {
     match prop {
-        FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
-            value.contains_x()
-        }
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => value.contains_x(),
         FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_chosen_x_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_chosen_x_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_chosen_x_ref),
         FilterProp::Not { prop } => filter_prop_contains_chosen_x_ref(prop),
         _ => false,
     }
@@ -5933,12 +5968,12 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
-        ControllerRef, CountScope, CounterTransferMode, DamageKindFilter, Duration, Effect,
-        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
-        MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticDefinition,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
+        Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -6368,6 +6403,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(victim)],
             ObjectId(99),
@@ -7088,6 +7124,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -7143,6 +7180,84 @@ mod tests {
             .and_then(|shuffle| shuffle.sub_ability.as_deref())
             .expect("counter continuation must exist");
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
+    }
+
+    /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
+    /// controller sacrifices it. …". The ability must SURFACE a required target
+    /// slot for the artifact creature (before the fix it compiled to a targetless
+    /// `Sacrifice{ParentTarget}` and activated with no target). Only artifact
+    /// creatures are legal; a plain creature is not.
+    #[test]
+    fn build_target_slots_target_controller_sacrifices_it_requires_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Arcum Dagsson".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent-controlled artifact creature (a legal target).
+        let art_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Ornithopter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let types = &mut state.objects.get_mut(&art_creature).unwrap().card_types;
+            types.core_types.push(CoreType::Artifact);
+            types.core_types.push(CoreType::Creature);
+        }
+        // A plain (non-artifact) creature — must NOT be a legal target.
+        let plain_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{T}: Target artifact creature's controller sacrifices it. That player may search their library for a noncreature artifact card, put it onto the battlefield, then shuffle.",
+            "Arcum Dagsson",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Artificer".to_string()],
+        );
+        let def = parsed.abilities.first().expect("activated ability parsed");
+        let ability = build_resolved_from_def(def, source, PlayerId(0));
+
+        let slots = build_target_slots(&state, &ability).unwrap();
+        assert_eq!(
+            slots.len(),
+            1,
+            "exactly one object target slot for the artifact creature, got {slots:?}",
+        );
+        assert!(
+            !slots[0].optional,
+            "the artifact-creature target is required"
+        );
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(art_creature)),
+            "the opponent's artifact creature must be a legal target",
+        );
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(plain_creature)),
+            "a non-artifact creature must NOT be a legal target",
+        );
     }
 
     /// CR 109.4 + CR 707.2: "target opponent creates a token that's a copy of
@@ -7293,6 +7408,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -7354,6 +7470,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(2),
@@ -8029,6 +8146,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8067,6 +8185,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8099,6 +8218,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8164,6 +8284,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -8333,6 +8454,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9056,6 +9178,119 @@ mod tests {
         ability
     }
 
+    /// CR 601.2d building-block (AST-shape) test: a division is announced only
+    /// among the distributing effect's OWN targets, never sibling-effect targets
+    /// elsewhere in the chain. `flatten_targets_in_chain` still returns the full
+    /// chain (those siblings still "become targets" per CR 601.2c), proving the
+    /// two helpers diverge.
+    #[test]
+    fn distribution_targets_excludes_sibling_chain_targets() {
+        // Top-level divided damage carries two of its own object targets; a
+        // chained "tap two target permanents" carries two unrelated targets.
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability = ability.sub_ability(ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            vec![
+                TargetRef::Object(ObjectId(3)),
+                TargetRef::Object(ObjectId(4)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let dist = distribution_targets(&ability);
+        assert_eq!(
+            dist,
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2))
+            ],
+            "division scoped to the DealDamage node's own targets"
+        );
+        assert_eq!(
+            flatten_targets_in_chain(&ability).len(),
+            4,
+            "flatten still spans the whole chain (siblings became targets)"
+        );
+
+        // Ordinary player-targeted divided damage (NOT per-opponent fanout):
+        // the player target is part of the division and is kept.
+        let with_player = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(5)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(
+            distribution_targets(&with_player),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(5)),
+            ],
+            "non-fanout divided damage keeps its player target"
+        );
+
+        // Per-opponent fanout divided damage: player refs are structural
+        // partitions, not division recipients, so they are stripped.
+        let mut fanout = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(6)),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(ObjectId(7)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        fanout.multi_target = Some(MultiTargetSpec::bounded(
+            1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        assert!(is_per_opponent_target_fanout(&fanout));
+        assert_eq!(
+            distribution_targets(&fanout),
+            vec![
+                TargetRef::Object(ObjectId(6)),
+                TargetRef::Object(ObjectId(7)),
+            ],
+            "per-opponent fanout strips player partition refs from the division"
+        );
+    }
+
     #[test]
     fn assign_selected_slots_handles_skipped_optional_slot_in_chain() {
         let mut ability = ResolvedAbility::new(
@@ -9124,6 +9359,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(10),
@@ -9290,6 +9526,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9506,7 +9743,7 @@ mod tests {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
         };
         assert!(quantity_expr_references_target_creature(&damage));
@@ -9607,7 +9844,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         let spec = quantity_ref_target_slot_spec(&targeted_damage)
             .expect("targeted DamageDealtThisTurn must surface a slot");
@@ -9631,7 +9868,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         assert_eq!(
             quantity_ref_target_slot_spec(&opponents_damage),

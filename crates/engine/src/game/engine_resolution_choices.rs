@@ -83,6 +83,10 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Discover { .. },
                 ..
             }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
@@ -132,6 +136,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
 }
@@ -321,6 +326,7 @@ fn apply_search_partition(
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             primary_targets,
             source_id,
@@ -556,7 +562,8 @@ pub(super) fn handle_resolution_choice(
                         ),
                         cast_transformed: false,
                         cleanup,
-                        exile_instead_of_graveyard_on_resolve: false,
+                        graveyard_replacement: None,
+                        cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
                 )?;
@@ -576,6 +583,54 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
 
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
+        }
+        // CR 608.2g + CR 609.4b: Paid during-resolution graveyard cast (Quistis
+        // Trepe, Tinybones the Pickpocket). Accept → cast the card at its real
+        // printed cost through `initiate_cast_during_resolution` with
+        // `ResolutionCastCost::FullCost`, which opens a manual mana-payment window
+        // and rides the any-type concession onto the grant. Decline → the card
+        // stays in the graveyard and resolution continues.
+        (
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::GraveyardPaidCast {
+                        hit_card,
+                        mana_spend_permission,
+                        graveyard_replacement,
+                        cast_transformed,
+                        constraint,
+                    },
+            },
+            GameAction::GraveyardPaidCastChoice { choice },
+        ) => {
+            if matches!(choice, crate::types::actions::CastChoice::Cast) {
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses: Vec::new(),
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state,
+                    player,
+                    hit_card,
+                    casting::ResolutionCastRequest {
+                        constraint,
+                        cast_transformed,
+                        cleanup,
+                        graveyard_replacement,
+                        cost: crate::types::ability::ResolutionCastCost::FullCost {
+                            mana_spend_permission,
+                        },
+                    },
+                    events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
+            } else {
+                // CR 608.2g decline: card stays in the graveyard; nothing is cast.
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
@@ -791,7 +846,8 @@ pub(super) fn handle_resolution_choice(
                         ),
                         cast_transformed: false,
                         cleanup,
-                        exile_instead_of_graveyard_on_resolve: false,
+                        graveyard_replacement: None,
+                        cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
                 )?;
@@ -840,7 +896,8 @@ pub(super) fn handle_resolution_choice(
                         constraint: None,
                         cast_transformed: false,
                         cleanup,
-                        exile_instead_of_graveyard_on_resolve: false,
+                        graveyard_replacement: None,
+                        cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
                 )?;
@@ -933,7 +990,8 @@ pub(super) fn handle_resolution_choice(
                     constraint: None,
                     cast_transformed: false,
                     cleanup,
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
+                    cost: crate::types::ability::ResolutionCastCost::Free,
                 },
                 events,
             )?;
@@ -2667,6 +2725,7 @@ pub(super) fn handle_resolution_choice(
                 count_param,
                 library_position,
                 is_cost_payment,
+                enters_modified_if,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -2845,6 +2904,10 @@ pub(super) fn handle_resolution_choice(
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
                             library_placement: None,
+                            // CR 614.12: evaluate the moved-object type gate carried
+                            // across the `EffectZoneChoice` round-trip against each
+                            // chosen object (Summoner's Grimoire).
+                            enters_modified_if: enters_modified_if.clone(),
                         };
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
@@ -2881,6 +2944,9 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        // CR 614.12: preserve the moved-object type
+                                        // gate across a further as-enters pause.
+                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2915,6 +2981,9 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        // CR 614.12: preserve the moved-object type
+                                        // gate across a further as-enters pause.
+                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3116,6 +3185,9 @@ pub(super) fn handle_resolution_choice(
                         track_exiled_by_source,
                         face_down_profile: face_down_profile.clone(),
                         library_placement: None,
+                        // CR 614.12: cost-payment exile carries no enter-modifier
+                        // gate; thread the (None) round-trip value for consistency.
+                        enters_modified_if: enters_modified_if.clone(),
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
@@ -3151,6 +3223,9 @@ pub(super) fn handle_resolution_choice(
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        // CR 614.12: preserve the moved-object type
+                                        // gate across a further as-enters pause.
+                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3182,6 +3257,9 @@ pub(super) fn handle_resolution_choice(
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        // CR 614.12: preserve the moved-object type
+                                        // gate across a further as-enters pause.
+                                        enters_modified_if: ctx.enters_modified_if.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3915,6 +3993,91 @@ pub(super) fn handle_resolution_choice(
                 // scan this action's events and drains any prior parked queue;
                 // B2 (paused) batches this action's sacrifice events for a
                 // later drain.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                    }
+                } else {
+                    let trigger_events: Vec<GameEvent> = events
+                        [events_before_sacrifice..events_after_sacrifice]
+                        .iter()
+                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                        .cloned()
+                        .collect();
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            }
+        }
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): player kept a subset of
+        // their creatures within the total-power cap; sacrifice the rest.
+        (
+            WaitingFor::KeepWithinTotalPowerChoice {
+                player,
+                target_player: _,
+                eligible,
+                cap,
+                choose_filter,
+                sacrifice_filter,
+                chooser_scope,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_kept,
+                scoped_players,
+            },
+            GameAction::ChooseKeptCreatures { kept },
+        ) => {
+            // Validate: every kept creature is eligible, and the combined power of
+            // the (deduped) kept set is within the cap.
+            let mut chosen = Vec::new();
+            for id in &kept {
+                if !eligible.contains(id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Creature {id:?} is not eligible to keep"
+                    )));
+                }
+                if !chosen.contains(id) {
+                    chosen.push(*id);
+                }
+            }
+            let kept_power = effects::choose_and_sacrifice_rest::total_power(state, &chosen);
+            if kept_power > cap {
+                return Err(EngineError::InvalidAction(format!(
+                    "Kept creatures' total power {kept_power} exceeds {cap}"
+                )));
+            }
+            all_kept.extend(chosen);
+
+            // `step_total_power` either pauses for the next chooser or, when no
+            // players remain, sacrifices the unchosen (stamping that slice itself).
+            let events_before_sacrifice = events.len();
+            set_priority(state, player);
+            effects::choose_and_sacrifice_rest::step_total_power(
+                state,
+                source_id,
+                source_controller,
+                chooser_scope,
+                &remaining_players,
+                all_kept,
+                &choose_filter,
+                &sacrifice_filter,
+                cap,
+                &scoped_players,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            if matches!(
+                state.waiting_for,
+                WaitingFor::KeepWithinTotalPowerChoice { .. }
+            ) {
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                let events_after_sacrifice = events.len();
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    resume_with_error_propagation(state, events)?;
+                }
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(wf));

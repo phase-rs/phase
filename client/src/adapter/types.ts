@@ -1131,6 +1131,15 @@ export type CastOfferKind =
   | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
   | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] }
   | {
+      type: "GraveyardPaidCast";
+      hit_card: ObjectId;
+      // Mirrors the engine `ManaSpendPermission` enum (single fieldless variant,
+      // serialized as a bare string). Not consumed by the modal — the paid-cast
+      // copy is fixed — but carried to mirror the serialized shape.
+      mana_spend_permission?: "AnyTypeOrColor";
+      cast_transformed?: boolean;
+    }
+  | {
       type: "FreeCastWindow";
       candidates: ObjectId[];
       remaining_casts: number;
@@ -1365,6 +1374,22 @@ export type WaitingFor =
       source_controller?: PlayerId;
       eligible_per_category: ObjectId[][];
       source_id: ObjectId;
+      remaining_players: PlayerId[];
+      all_kept: ObjectId[];
+      scoped_players: PlayerId[];
+    } }
+  // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of eligible
+  // creatures whose combined power is at most `cap`; the rest are sacrificed.
+  | { type: "KeepWithinTotalPowerChoice"; data: {
+      player: PlayerId;
+      target_player: PlayerId;
+      eligible: ObjectId[];
+      cap: number;
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      source_id: ObjectId;
+      source_controller?: PlayerId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
       scoped_players: PlayerId[];
@@ -1638,6 +1663,7 @@ export type GameAction =
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
+  | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "RippleChoice"; data: { choice: CastChoice } }
   | { type: "FreeCastWindowChoice"; data: { selection?: ObjectId } }
@@ -1669,6 +1695,7 @@ export type GameAction =
   | { type: "ChooseRoomDoor"; data: { object_id: ObjectId; op: DoorLockOp; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
+  | { type: "ChooseKeptCreatures"; data: { kept: ObjectId[] } }
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }

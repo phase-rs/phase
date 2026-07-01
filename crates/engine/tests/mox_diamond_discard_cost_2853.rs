@@ -48,6 +48,7 @@ fn enter_via_change_zone(runner_state: &mut engine::types::game_state::GameState
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![],
         ObjectId(9000),

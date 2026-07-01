@@ -24,9 +24,10 @@ use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DigSource,
-    Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DamageChannel,
+    DigSource, Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -521,6 +522,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             return (
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Sneak,
+                    subject: ObjectScope::Source,
                 }),
                 after.original.to_string(),
             );
@@ -541,6 +543,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             return (
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Ninjutsu,
+                    subject: ObjectScope::Source,
                 }),
                 after.original.to_string(),
             );
@@ -561,6 +564,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             return (
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Surge,
+                    subject: ObjectScope::Source,
                 }),
                 after.original.to_string(),
             );
@@ -581,6 +585,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             return (
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Spectacle,
+                    subject: ObjectScope::Source,
                 }),
                 after.original.to_string(),
             );
@@ -601,6 +606,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             return (
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Prowl,
+                    subject: ObjectScope::Source,
                 }),
                 after.original.to_string(),
             );
@@ -1532,6 +1538,92 @@ fn parse_target_reflexive_property_condition_text(text: &str) -> Option<AbilityC
     parsed
 }
 
+/// CR 208.1: threshold grammar — `exactly N` → `EQ`, else `N or less` /
+/// `N or greater` via the shared `parse_or_threshold` building block. The
+/// equality leaf mirrors the proven `exactly N` → `EQ` form in oracle_nom's
+/// `parse_hand_size_predicate`; `parse_or_threshold` has no such leaf, so it is
+/// added here as a parameterizing prefix rather than a new variant.
+fn parse_threshold_with_exactly(input: &str) -> OracleResult<'_, (Comparator, i32)> {
+    if let Ok((rest, n)) = preceded(
+        tag::<_, _, OracleError<'_>>("exactly "),
+        nom_primitives::parse_number,
+    )
+    .parse(input)
+    {
+        return Ok((rest, (Comparator::EQ, n as i32)));
+    }
+    parse_or_threshold(input)
+}
+
+/// CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric possessive power/toughness
+/// comparison — "that creature's power is 2 or less" / "that permanent's
+/// toughness is exactly N" (Depressurize, Gore Vassal, Reptilian Recruiter's
+/// first disjunct). The possessive "'s <stat> is N" form is NOT reached by
+/// `parse_target_reflexive_property_condition` (its predicate parser rejects the
+/// leading "is"), and the generic `parse_cda_quantity` fallback mis-scopes it to
+/// `Power { CostPaidObject }`. CR 115.1: "that creature" is the ability's first
+/// target, so this binds Target scope via `TargetMatchesFilter`, which resolves
+/// `ability.targets[0]` and — for subject-based triggers with no chosen target —
+/// falls back to the triggering source (see effects/mod.rs). Composes:
+///   - subject: `parse_target_demonstrative_subject` (that creature/permanent/card)
+///   - possessive `'s ` + stat (`parse_reflexive_pt_stat`) + linking `is `
+///   - threshold: `parse_threshold_with_exactly`.
+fn parse_target_possessive_pt_comparison(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, _) = parse_target_demonstrative_subject(input)?;
+    let (rest, _) = tag("'s ").parse(rest)?;
+    let (rest, stat) = parse_reflexive_pt_stat(rest)?;
+    let (rest, _) = tag("is ").parse(rest)?;
+    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::PtComparison {
+                    stat,
+                    scope: PtValueScope::Current,
+                    comparator,
+                    value: QuantityExpr::Fixed { value },
+                },
+            ])),
+            use_lki: false,
+        },
+    ))
+}
+
+fn parse_target_possessive_pt_comparison_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let parsed = all_consuming(parse_target_possessive_pt_comparison)
+        .parse(lower.as_str())
+        .ok()
+        .map(|(_, c)| c);
+    parsed
+}
+
+/// CR 201.5 + CR 208.1 + CR 608.2c: source-referential "if its/her/his power or
+/// toughness is exactly N" — the possessive subject names the ability's own
+/// source (Amalia Benavides Aguirre: "destroy all other creatures if its power is
+/// exactly 20", CR 201.5). `strip_property_conditional` already owns the
+/// "N or less" / "N or greater" thresholds (`CostPaidObject` scope) and returns
+/// None only for the equality form, so this fires SOLELY on the `exactly N`
+/// equality — the `EQ` guard makes that invariant explicit and keeps it from ever
+/// re-scoping a threshold condition a sibling stripper already owns.
+fn parse_source_pt_comparison_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, sc) =
+        all_consuming(crate::parser::oracle_nom::condition::parse_source_power_toughness_condition)
+            .parse(lower.as_str())
+            .ok()?;
+    match &sc {
+        StaticCondition::QuantityComparison {
+            comparator: Comparator::EQ,
+            ..
+        } => static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+        _ => None,
+    }
+}
+
 pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let lower = lower.trim_end_matches('.');
@@ -2352,6 +2444,15 @@ pub(super) fn strip_suffix_conditional(
     if let Some(cond) = parse_colored_mana_symbol_count_target_condition(condition_text) {
         return (Some(cond), text[..if_pos].trim().to_string());
     }
+    // CR 201.5 + CR 208.1: source-referential "if its power is exactly N" (Amalia
+    // Benavides Aguirre). "its power is " / "its toughness is " are in
+    // NON_REHOMEABLE_CONDITION_PREFIXES, so — like the colored-mana check above —
+    // this equality-only source P/T gate must run BEFORE the rehomeable bail or it
+    // would never reach the condition parser. Fires solely on the "exactly N" form
+    // (threshold forms are owned upstream by strip_property_conditional).
+    if let Some(cond) = parse_source_pt_comparison_condition_text(condition_text) {
+        return (Some(cond), text[..if_pos].trim().to_string());
+    }
     if !condition_text_is_rehomeable(condition_text) {
         return (None, text.to_string());
     }
@@ -2674,29 +2775,78 @@ fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition
 fn parse_cast_during_phase_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
-    all_consuming(|input| {
-        let (rest, _) =
-            tag::<_, _, OracleError<'_>>("you cast this spell during your ").parse(input)?;
-        alt((
-            value(
-                vec![Phase::PreCombatMain, Phase::PostCombatMain],
-                tag::<_, _, OracleError<'_>>("main phase"),
-            ),
-            value(vec![Phase::PreCombatMain], tag("precombat main phase")),
-            value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
-            value(vec![Phase::Upkeep], tag("upkeep")),
-            value(vec![Phase::Draw], tag("draw step")),
-            value(vec![Phase::BeginCombat], tag("beginning of combat step")),
-            value(vec![Phase::DeclareAttackers], tag("declare attackers step")),
-            value(vec![Phase::DeclareBlockers], tag("declare blockers step")),
-            value(vec![Phase::CombatDamage], tag("combat damage step")),
-            value(vec![Phase::EndCombat], tag("end of combat step")),
-            value(vec![Phase::End], tag("end step")),
-            value(vec![Phase::Cleanup], tag("cleanup step")),
-        ))
-        .parse(rest)
-    })
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("you cast this spell during your "),
+        parse_phase_name_set,
+    ))
     .parse(input)
+}
+
+/// CR 500.1 + CR 505.1 + CR 505.1a: Map a phase/step *name phrase* to the
+/// concrete `Phase` set it denotes. Shared by the casting-time
+/// `parse_cast_during_phase_condition` and the resolution-time
+/// `parse_current_phase_condition`. NON-`all_consuming` by design — callers
+/// wrap with `all_consuming` (or `preceded`) and own any trailing text. The
+/// `alt` ordering is load-bearing: the grouped "main phase" (both main phases,
+/// CR 505.1/505.1a) is tried before the "precombat"/"postcombat" refinements,
+/// and "end of combat step" before "end step", so the longest/grouped phrase
+/// wins.
+fn parse_phase_name_set(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
+    alt((
+        value(
+            vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            tag::<_, _, OracleError<'_>>("main phase"),
+        ),
+        value(vec![Phase::PreCombatMain], tag("precombat main phase")),
+        value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+        value(vec![Phase::Upkeep], tag("upkeep")),
+        value(vec![Phase::Draw], tag("draw step")),
+        value(vec![Phase::BeginCombat], tag("beginning of combat step")),
+        value(vec![Phase::DeclareAttackers], tag("declare attackers step")),
+        value(vec![Phase::DeclareBlockers], tag("declare blockers step")),
+        value(vec![Phase::CombatDamage], tag("combat damage step")),
+        value(vec![Phase::EndCombat], tag("end of combat step")),
+        value(vec![Phase::End], tag("end step")),
+        value(vec![Phase::Cleanup], tag("cleanup step")),
+    ))
+    .parse(input)
+}
+
+/// CR 505.1 + CR 102.1 + CR 608.2c: "it is[n't] your [phase/step]" — the
+/// resolution-time current-phase gate (CR 608.2c: read the whole text when the
+/// ability resolves). The "your [phase]" possessive decomposes into two
+/// orthogonal checks: `CurrentPhaseIs { phases }` (the live phase, via
+/// `parse_phase_name_set`) AND `IsYourTurn` (CR 102.1: the active player is the
+/// controller — "your" phase means a phase of your turn). The polarity prefix
+/// selects negation, wrapping the conjunction in `Not`. NON-`all_consuming`:
+/// the dispatcher wraps with `all_consuming` so the whole clause must be
+/// consumed, which (together with the expletive "it") rules out any anaphoric
+/// mis-binding.
+fn parse_current_phase_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, negated) = alt((
+        value(
+            true,
+            alt((
+                tag::<_, _, OracleError<'_>>("it isn't your "),
+                tag("it is not your "),
+                tag("it's not your "),
+            )),
+        ),
+        value(false, alt((tag("it is your "), tag("it's your ")))),
+    ))
+    .parse(input)?;
+    let (rest, phases) = parse_phase_name_set(rest)?;
+    let condition = AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::CurrentPhaseIs { phases },
+            AbilityCondition::IsYourTurn,
+        ],
+    };
+    Ok((rest, maybe_negate(condition, negated)))
 }
 
 fn parse_mana_color_spent_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -3620,6 +3770,7 @@ pub(crate) fn ability_condition_to_static_condition(
         // predicates.
         AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::CurrentPhaseIs { .. }
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::SourceLacksKeyword { .. } => None,
 
@@ -3872,8 +4023,115 @@ fn parse_cast_variant_cost_paid_condition(lower: &str) -> Option<AbilityConditio
                 .ok()?;
             rest.trim()
                 .is_empty()
-                .then_some(AbilityCondition::CastVariantPaid { variant })
+                .then_some(AbilityCondition::CastVariantPaid {
+                    variant,
+                    subject: ObjectScope::Source,
+                })
         })
+}
+
+/// CR 702.185a: keyword tokens recognized inside "was cast for its <variant>
+/// cost". Table-driven `value(variant, tag(phrase))` dispatch so the class
+/// extends by adding a row — any future `CastVariantPaid` member whose cards
+/// use the "was cast for its X cost" phrasing slots in here. Today only Warp
+/// (Full Bore) uses this target-scoped phrasing.
+const CAST_FOR_VARIANT_PHRASES: &[(&str, CastVariantPaid)] = &[("warp", CastVariantPaid::Warp)];
+
+/// Consume a `<variant>` keyword from `CAST_FOR_VARIANT_PHRASES`, returning the
+/// typed `CastVariantPaid`. Pure nom `value(variant, tag(phrase))` over the
+/// table — never `contains`/`find`/`split`.
+fn parse_cast_for_variant(input: &str) -> OracleResult<'_, CastVariantPaid> {
+    for &(phrase, variant) in CAST_FOR_VARIANT_PHRASES {
+        if let Ok((rest, v)) = value(variant, tag::<_, _, OracleError<'_>>(phrase)).parse(input) {
+            return Ok((rest, v));
+        }
+    }
+    Err(nom::Err::Error(OracleError::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
+}
+
+/// CR 115.1 + CR 608.2c + CR 702.185a: target-scoped "<that creature> was cast
+/// for its <variant> cost [this turn]" rider — Full Bore's "if that creature was
+/// cast for its warp cost, it also gains trample and haste". "that creature"
+/// anaphors to the +3/+2 target permanent (CR 115.1), so the produced condition
+/// is `subject: ObjectScope::Target` — distinct from the source-scoped "if its
+/// warp cost was paid" form (CR 113.7). Pure nom: `parse_target_anaphoric_subject`
+/// (which cannot match "a spell", so there is no overlap with the turn-wide
+/// `SpellCastWithVariantThisTurn` path) + the " was cast for its " / " cost"
+/// anchors + the table-driven variant dispatch. The caller wraps this in
+/// `all_consuming`, so the " cost" anchor plus full consumption forbid any
+/// partial / mis-bound match.
+fn parse_target_cast_variant_paid_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = parse_target_anaphoric_subject(input)?;
+    let (rest, _) = tag(" was cast for its ").parse(rest)?;
+    let (rest, variant) = parse_cast_for_variant(rest)?;
+    let (rest, _) = tag(" cost").parse(rest)?;
+    let (rest, _) = opt(tag(" this turn")).parse(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::CastVariantPaid {
+            variant,
+            subject: ObjectScope::Target,
+        },
+    ))
+}
+
+/// Text wrapper for `parse_target_cast_variant_paid_condition`: lowercases,
+/// trims a trailing period, and requires full consumption (`all_consuming`).
+fn parse_target_cast_variant_paid_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let parsed = all_consuming(parse_target_cast_variant_paid_condition)
+        .parse(lower.as_str())
+        .ok()
+        .map(|(_, c)| c);
+    parsed
+}
+
+/// CR 608.2c: Parse an " or if "-connected disjunction of condition clauses into
+/// `AbilityCondition::Or`. Each disjunct is a full condition (the connective
+/// re-introduces "if"), so the clause is split on every " or if " boundary and
+/// each side is recursed back through `try_nom_condition_as_ability_condition`.
+///
+/// The binding is all-or-nothing: if ANY disjunct fails to parse, the whole
+/// function returns None so the caller leaves the gate unrepresented (honest
+/// `Condition_If` fallthrough) rather than firing the effect on a partial
+/// condition. The disjuncts themselves carry no " or if ", so the recursion
+/// short-circuits on the guard below — no unbounded recursion.
+fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
+    let lower = text.to_lowercase();
+    fn split_on_or_if(input: &str) -> Option<(&str, &str)> {
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" or if "),
+            tag::<_, _, OracleError<'_>>(" or if "),
+        )
+        .parse(input)
+        .ok()
+        .map(|(rest, disjunct)| (disjunct, rest))
+    }
+    // The first split doubles as the guard: no " or if " connective means this is
+    // not a disjunction, so the single-arm dispatchers should handle the clause.
+    let (first_disjunct, mut remaining) = split_on_or_if(lower.as_str())?;
+    let mut conditions = vec![try_nom_condition_as_ability_condition(
+        first_disjunct.trim(),
+        ctx,
+    )?];
+    loop {
+        let (disjunct, rest) = match split_on_or_if(remaining) {
+            Some((disjunct, rest)) => (disjunct, Some(rest)),
+            None => (remaining, None),
+        };
+        conditions.push(try_nom_condition_as_ability_condition(
+            disjunct.trim(),
+            ctx,
+        )?);
+        match rest {
+            Some(r) => remaining = r,
+            None => break,
+        }
+    }
+    Some(AbilityCondition::Or { conditions })
 }
 
 pub(super) fn try_nom_condition_as_ability_condition(
@@ -3883,6 +4141,25 @@ pub(super) fn try_nom_condition_as_ability_condition(
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 608.2c: "<condition A> or if <condition B>" disjunction (Reptilian
+    // Recruiter: "If that creature's power is 2 or less or if you control another
+    // Lizard, ..."). Each disjunct is a complete condition clause (the second
+    // re-introduces "if"), so peel on " or if " and recurse every disjunct through
+    // this dispatcher; bind `Or` only when EVERY disjunct parses. Tried first so a
+    // disjunction wins over any single-arm match on its leading disjunct.
+    if let Some(condition) = parse_or_if_disjunction(text, ctx) {
+        return Some(condition);
+    }
+
+    // CR 505.1 + CR 102.1 + CR 608.2c: resolution-time "it is[n't] your [phase]"
+    // current-phase gate (Dose of Dawnglow: "if it isn't your main phase").
+    // Placed before every anaphoric arm: the subject "it" here is an expletive
+    // (it never anaphors to a target), and the `all_consuming` wrap over the
+    // unique "it … your <phase>" shape forbids any partial / mis-bound match.
+    if let Ok((_, condition)) = all_consuming(parse_current_phase_condition).parse(lower.as_str()) {
+        return Some(condition);
+    }
 
     // CR 508.1a: "you attacked with <filter> [this turn]" filtered attack-history gate.
     if let Some(condition) = parse_attacked_with_filter_condition(lower.as_str()) {
@@ -3919,6 +4196,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric possessive P/T comparison —
+    // "that creature's power is 2 or less" / "that permanent's toughness is
+    // exactly N" (Depressurize, Gore Vassal, Reptilian disjunct A). Placed right
+    // after the reflexive arm (which does not match the possessive "'s ... is N"
+    // form) so it wins over the generic `parse_cda_quantity` path downstream that
+    // would otherwise mis-scope the subject to `Power { CostPaidObject }`.
+    if let Some(condition) = parse_target_possessive_pt_comparison_text(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -3931,6 +4218,15 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // routing Adipose Offspring's "instead create X of those tokens" body through
     // the ConditionInstead token-reproduction path.
     if let Some(condition) = parse_cast_variant_cost_paid_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 115.1 + CR 608.2c + CR 702.185a: target-scoped "that creature was cast
+    // for its warp cost" (Full Bore) → CastVariantPaid { subject: Target }.
+    // Tried after the source-scoped "[possessive] X cost was paid" form above:
+    // the subject here is a target anaphor ("that creature"/"it"), not a
+    // possessive cost reference, so the two are lexically disjoint.
+    if let Some(condition) = parse_target_cast_variant_paid_condition_text(lower.as_str()) {
         return Some(condition);
     }
 
@@ -4160,6 +4456,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     {
         return Some(AbilityCondition::CastVariantPaid {
             variant: CastVariantPaid::Foretell,
+            subject: ObjectScope::Source,
         });
     }
 
@@ -4769,22 +5066,49 @@ fn parse_cost_paid_object_type_filter(text: &str) -> Option<TypeFilter> {
     .or_else(|| parse_subtype(text).map(|(subtype, _)| TypeFilter::Subtype(subtype)))
 }
 
-fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityCondition> {
-    all_consuming((
-        alt((
-            tag::<_, _, OracleError<'_>>("the creature the opponent controls"),
-            tag("that creature"),
-            tag("that permanent"),
-            tag("a creature"),
-            tag("a permanent"),
-        )),
-        tag(" is dealt excess damage this way"),
+/// Shared damage-recipient phrase for both excess-damage condition voices
+/// ("the creature the opponent controls" / "that creature" / "that permanent"
+/// / "a creature" / "a permanent"). Used by the active voice ("[subject] is
+/// dealt excess damage this way", the Fight class) and the passive voice
+/// ("excess damage was dealt [to subject] this way", the DealDamage class).
+fn parse_excess_damage_subject(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("the creature the opponent controls"),
+        tag("that creature"),
+        tag("that permanent"),
+        tag("a creature"),
+        tag("a permanent"),
     ))
-    .parse(lower)
-    .ok()?;
+    .parse(input)
+}
+
+/// CR 120.10: "[subject] is dealt excess damage this way" (active, Fight class —
+/// e.g. The Last Agni Kai) or "excess damage was dealt [to subject] this way"
+/// (passive, DealDamage class — e.g. Torch the Witness, Orbital Plunge). Both
+/// voices gate on the resolution-local excess channel, so both map to
+/// `PreviousEffectAmount { GT 0, channel: Excess }`.
+///
+/// Each arm is `all_consuming` and carries the `excess` keyword, so this parser
+/// returns `None` for any plain "damage … this way" anaphor — it cannot shadow
+/// or partially consume the non-excess `PreviousEffectAmount` / `this way`
+/// parses tried elsewhere in the dispatcher.
+fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    let active = all_consuming((
+        parse_excess_damage_subject,
+        tag::<_, _, OracleError<'_>>(" is dealt excess damage this way"),
+    ));
+    let passive = all_consuming((
+        tag::<_, _, OracleError<'_>>("excess damage was dealt"),
+        opt(preceded(tag(" to "), parse_excess_damage_subject)),
+        tag(" this way"),
+    ));
+    alt((map(active, |_| ()), map(passive, |_| ())))
+        .parse(lower)
+        .ok()?;
     Some(AbilityCondition::PreviousEffectAmount {
         comparator: Comparator::GT,
         rhs: QuantityExpr::Fixed { value: 0 },
+        channel: DamageChannel::Excess,
     })
 }
 
@@ -4883,6 +5207,8 @@ fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
     Some(AbilityCondition::PreviousEffectAmount {
         comparator,
         rhs: QuantityExpr::Fixed { value },
+        // CR 120.6: die-result comparison reads the total channel.
+        channel: DamageChannel::Total,
     })
 }
 
@@ -5308,6 +5634,218 @@ mod tests {
         assert_eq!(body, "draw a card.");
     }
 
+    /// CR 505.1 + CR 102.1: resolution-time "it is[n't] your [phase]" gate routes
+    /// through the production dispatcher `try_nom_condition_as_ability_condition`
+    /// (the function the new arm lives in). "your [phase]" decomposes into
+    /// `And([CurrentPhaseIs{phases}, IsYourTurn])`; "isn't" wraps in `Not`. Reverting
+    /// the parser arm makes every assertion here flip to `None`.
+    #[test]
+    fn current_phase_condition_dispatches_through_production_entry() {
+        let parse =
+            |t: &str| try_nom_condition_as_ability_condition(t, &mut ParseContext::default());
+
+        let your_phase = |phases: Vec<Phase>| AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::CurrentPhaseIs { phases },
+                AbilityCondition::IsYourTurn,
+            ],
+        };
+        let main = || your_phase(vec![Phase::PreCombatMain, Phase::PostCombatMain]);
+
+        // Negated polarity — Dose of Dawnglow's exact gate. Revert-failing assertion.
+        assert_eq!(
+            parse("it isn't your main phase"),
+            Some(AbilityCondition::Not {
+                condition: Box::new(main()),
+            }),
+        );
+        // Positive polarity + contraction variant both reach the same shape.
+        assert_eq!(parse("it's your main phase"), Some(main()));
+        assert_eq!(parse("it is your main phase"), Some(main()));
+
+        // Class generality: the shared `parse_phase_name_set` covers every named
+        // phase/step, not just the main phase.
+        assert_eq!(
+            parse("it isn't your upkeep"),
+            Some(AbilityCondition::Not {
+                condition: Box::new(your_phase(vec![Phase::Upkeep])),
+            }),
+        );
+        assert_eq!(
+            parse("it's your end step"),
+            Some(your_phase(vec![Phase::End])),
+        );
+
+        // Negative: an unrelated condition must NOT be captured by this arm.
+        assert_ne!(
+            parse("it is your turn"),
+            Some(main()),
+            "bare 'your turn' (no phase name) must not match the current-phase arm",
+        );
+    }
+
+    /// CR 120.10: both voices of the excess-damage condition route through the
+    /// production dispatcher and bind the typed excess channel. The passive voice
+    /// ("excess damage was dealt [to <subject>] this way") is the DealDamage class
+    /// (Torch the Witness, Orbital Plunge); the active voice ("<subject> is dealt
+    /// excess damage this way") is the Fight class (The Last Agni Kai). Reverting
+    /// the passive arm flips the passive cases to `None`; reverting the
+    /// `DamageChannel::Excess` binding to `Total` flips the channel and breaks
+    /// runtime gating (the resolver test below proves the channel is load-bearing).
+    #[test]
+    fn excess_damage_condition_dispatches_to_excess_channel() {
+        let parse =
+            |t: &str| try_nom_condition_as_ability_condition(t, &mut ParseContext::default());
+        let excess = || {
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Excess,
+            })
+        };
+
+        // Passive voice — DealDamage class. Subject optional and varied.
+        assert_eq!(parse("excess damage was dealt this way"), excess());
+        assert_eq!(
+            parse("excess damage was dealt to that creature this way"),
+            excess()
+        );
+        assert_eq!(
+            parse("excess damage was dealt to a permanent this way"),
+            excess()
+        );
+        // Active voice — Fight class — also binds the excess channel (decoupled).
+        assert_eq!(
+            parse("that creature is dealt excess damage this way"),
+            excess()
+        );
+        assert_eq!(
+            parse("the creature the opponent controls is dealt excess damage this way"),
+            excess()
+        );
+
+        // Revert-discriminating negatives:
+        // - turn-scoped excess is the DamageDealtThisTurn class, NOT this one.
+        assert_eq!(parse("excess damage was dealt this turn"), None);
+        // - a non-excess "this way" anaphor must NOT be captured by the excess arm
+        //   (proves the all_consuming `excess` arms don't shadow the plain parse).
+        assert_ne!(parse("a creature is dealt damage this way"), excess());
+        // - the excess arm binds Excess, never the Total default.
+        assert_ne!(
+            parse("excess damage was dealt this way"),
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            })
+        );
+    }
+
+    /// CR 115.1 + CR 208.1: target-anaphoric possessive P/T comparison — "that
+    /// creature's power is 2 or less" / "that permanent's toughness is exactly 3"
+    /// → `TargetMatchesFilter{PtComparison{.., Current, .., Fixed}}` (Target scope,
+    /// NOT `Power{CostPaidObject}`). The "exactly" leaf composes with the
+    /// "or less"/"or greater" thresholds.
+    #[test]
+    fn target_possessive_pt_comparison_binds_target_scope() {
+        let pt = |c: &AbilityCondition| -> (PtStat, Comparator, i32) {
+            match c {
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(tf),
+                    use_lki: false,
+                } => match tf.properties.as_slice() {
+                    [FilterProp::PtComparison {
+                        stat,
+                        scope: PtValueScope::Current,
+                        comparator,
+                        value: QuantityExpr::Fixed { value },
+                    }] => (*stat, *comparator, *value),
+                    other => panic!("expected single PtComparison, got {other:?}"),
+                },
+                other => panic!("expected Target-scoped TargetMatchesFilter, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            pt(
+                &parse_target_possessive_pt_comparison_text("that creature's power is 2 or less")
+                    .unwrap()
+            ),
+            (PtStat::Power, Comparator::LE, 2)
+        );
+        assert_eq!(
+            pt(&parse_target_possessive_pt_comparison_text(
+                "that permanent's toughness is exactly 3"
+            )
+            .unwrap()),
+            (PtStat::Toughness, Comparator::EQ, 3)
+        );
+        // The reflexive past-tense "had power" form is owned by the reflexive arm,
+        // not this possessive-present recognizer.
+        assert!(
+            parse_target_possessive_pt_comparison_text("that creature had power 2 or less")
+                .is_none()
+        );
+    }
+
+    /// CR 201.5: the source equality wrapper fires ONLY on "exactly N" — the
+    /// threshold forms are owned upstream by `strip_property_conditional`, so the
+    /// EQ guard rejects them (returns None) to avoid re-scoping them.
+    #[test]
+    fn source_pt_comparison_text_is_exactly_only() {
+        assert_eq!(
+            parse_source_pt_comparison_condition_text("its power is exactly 20"),
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            })
+        );
+        assert!(parse_source_pt_comparison_condition_text("its power is 2 or less").is_none());
+        assert!(parse_source_pt_comparison_condition_text("its power is 2 or greater").is_none());
+    }
+
+    /// CR 608.2c: the " or if " disjunction (Reptilian Recruiter) lowers to
+    /// `Or[ TargetMatchesFilter{PtComparison{Power,Current,LE,2}}, QuantityCheck{
+    /// ObjectCount GE 1} ]`. All-or-nothing: a partial disjunct returns None.
+    #[test]
+    fn or_if_disjunction_binds_reptilian_gate() {
+        let mut ctx = ParseContext::default();
+        let cond = try_nom_condition_as_ability_condition(
+            "that creature's power is 2 or less or if you control another lizard",
+            &mut ctx,
+        );
+        let conds = match cond {
+            Some(AbilityCondition::Or { conditions }) => conditions,
+            other => panic!("expected Or disjunction, got {other:?}"),
+        };
+        assert_eq!(conds.len(), 2);
+        assert!(matches!(
+            &conds[0],
+            AbilityCondition::TargetMatchesFilter { use_lki: false, .. }
+        ));
+        assert!(matches!(
+            &conds[1],
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                comparator: Comparator::GE,
+                ..
+            }
+        ));
+        // Honest fallthrough: when a disjunct does not parse, no partial Or binds.
+        let mut ctx2 = ParseContext::default();
+        assert!(try_nom_condition_as_ability_condition(
+            "the sky is blue or if you control another lizard",
+            &mut ctx2,
+        )
+        .is_none());
+    }
+
     /// CR 702.119a-c: "[possessive] emerge cost was paid" lowers to
     /// `CastVariantPaid { Emerge }` across the possessive-subject variants, and
     /// the membership filter rejects the other cast-variant phrases so their
@@ -5325,6 +5863,7 @@ mod tests {
                 parse_cast_variant_cost_paid_condition(subject),
                 Some(AbilityCondition::CastVariantPaid {
                     variant: CastVariantPaid::Emerge,
+                    subject: ObjectScope::Source,
                 }),
                 "{subject:?} must lower to CastVariantPaid {{ Emerge }}"
             );
@@ -5343,6 +5882,50 @@ mod tests {
                 "{other:?} must not be claimed by the emerge instead recognizer"
             );
         }
+    }
+
+    /// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore's target-scoped "that
+    /// creature was cast for its warp cost" routes through the production
+    /// dispatcher `try_nom_condition_as_ability_condition` to `CastVariantPaid {
+    /// variant: Warp, subject: Target }` — distinct from the source-scoped "if its
+    /// warp cost was paid" form. Reverting the new parser arm flips the positive
+    /// assertions to `None`. The negative arm proves the turn-wide "a spell was
+    /// warped this turn" still lowers to `SpellCastWithVariantThisTurn` (NOT
+    /// target-scoped), so the two phrasings stay disjoint.
+    #[test]
+    fn target_cast_for_warp_cost_dispatches_target_scoped() {
+        let parse =
+            |t: &str| try_nom_condition_as_ability_condition(t, &mut ParseContext::default());
+
+        let target_warp = Some(AbilityCondition::CastVariantPaid {
+            variant: CastVariantPaid::Warp,
+            subject: ObjectScope::Target,
+        });
+
+        // Every target-anaphoric subject form reaches the same Target-scoped shape.
+        assert_eq!(
+            parse("that creature was cast for its warp cost"),
+            target_warp
+        );
+        assert_eq!(parse("it was cast for its warp cost"), target_warp);
+        assert_eq!(
+            parse("that permanent was cast for its warp cost"),
+            target_warp
+        );
+        // Optional " this turn" tail is consumed (CR 603.4).
+        assert_eq!(
+            parse("that creature was cast for its warp cost this turn"),
+            target_warp
+        );
+
+        // Negative: the turn-wide flag stays `SpellCastWithVariantThisTurn`, never
+        // the new Target-scoped arm.
+        assert_eq!(
+            parse("a spell was warped this turn"),
+            Some(AbilityCondition::SpellCastWithVariantThisTurn {
+                variant: crate::types::game_state::CastingVariant::Warp,
+            })
+        );
     }
 
     #[test]
@@ -6380,6 +6963,7 @@ mod tests {
             cond,
             Some(AbilityCondition::CastVariantPaid {
                 variant: CastVariantPaid::Prowl,
+                subject: ObjectScope::Source,
             })
         );
         assert_eq!(body, "draw a card.");

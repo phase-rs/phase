@@ -50,6 +50,53 @@ fn refers_to_attached(filter: &TargetFilter) -> bool {
         ))
 }
 
+/// CR 701.14a + CR 120.10: Resolve the two fighters as `(subject, fought
+/// creature)` without mutating state. This is the single authority for the
+/// fighter split, so the damage resolver and the "[the fought creature] is
+/// dealt excess damage this way" recipient lookup
+/// (`previous_effect_excess_amount_from_events`, The Last Agni Kai) never
+/// disagree on which object receives the fight damage.
+///
+/// - Two chosen object targets ("target creature you control fights target
+///   creature an opponent controls") → both are fighters and the fought
+///   creature is the *second* target.
+/// - One chosen object target ("~ fights target creature" / "enchanted creature
+///   fights target creature") → the subject is the ability source / attached
+///   host and the sole object target is the fought creature.
+///
+/// `Ok(None)` means the fight can't happen (a dual-target fight reduced to a
+/// lone surviving fighter) and must resolve with no damage.
+pub(crate) fn resolve_fight_fighters(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<(ObjectId, ObjectId)>, EffectError> {
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+
+    if object_targets.len() >= 2 {
+        return Ok(Some((object_targets[0], object_targets[1])));
+    }
+    if let Effect::Fight { subject, .. } = &ability.effect {
+        if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
+            // CR 701.14a: Dual-target fights require both chosen fighters; do
+            // not reinterpret a lone survivor as "~ fights target creature".
+            return Ok(None);
+        }
+    }
+    let source_id = resolve_fight_subject(state, ability)?;
+    let target_id = object_targets
+        .first()
+        .copied()
+        .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+    Ok(Some((source_id, target_id)))
+}
+
 /// CR 701.14b + CR 702.26b: A creature can fight only while it is on the
 /// battlefield, still a creature, and phased in. A phased-out permanent is
 /// treated as though it does not exist (CR 702.26b), so a creature that phased
@@ -75,40 +122,18 @@ pub fn resolve(
     // - "Target creature you control fights another target creature": two chosen
     //   object targets are the fighters; the ability's source (e.g. Ulvenwald
     //   Tracker) is not a participant.
-    let object_targets: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
-
-    let (source_id, target_id) = if object_targets.len() >= 2 {
-        (object_targets[0], object_targets[1])
-    } else if let Effect::Fight { subject, .. } = &ability.effect {
-        if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
-            // CR 701.14a: Dual-target fights require both chosen fighters; do
-            // not reinterpret a lone survivor as "~ fights target creature".
+    let (source_id, target_id) = match resolve_fight_fighters(state, ability)? {
+        Some(pair) => pair,
+        None => {
+            // CR 701.14a: Dual-target fight reduced to a lone fighter — no fight,
+            // no damage. Emit the parent Fight event so downstream "when a
+            // creature fights" triggers observe the (no-op) resolution.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Fight,
                 source_id: ability.source_id,
             });
             return Ok(());
         }
-        let source_id = resolve_fight_subject(state, ability)?;
-        let target_id = object_targets
-            .first()
-            .copied()
-            .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
-        (source_id, target_id)
-    } else {
-        let source_id = resolve_fight_subject(state, ability)?;
-        let target_id = object_targets
-            .first()
-            .copied()
-            .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
-        (source_id, target_id)
     };
 
     // CR 701.14b: If either fighter left the battlefield or is no longer a creature, no damage.
@@ -405,6 +430,7 @@ mod tests {
         mana.condition = Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
         });
         ability.sub_ability = Some(Box::new(mana));
 
@@ -441,6 +467,7 @@ mod tests {
         mana.condition = Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
         });
         ability.sub_ability = Some(Box::new(mana));
 
@@ -448,6 +475,70 @@ mod tests {
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    /// CR 120.10 + CR 701.14a: In a *dual-target* fight (The Last Agni Kai —
+    /// "target creature you control fights target creature an opponent controls.
+    /// If the creature the opponent controls is dealt excess damage this way,
+    /// add that much {R}"), both the excess-gate condition and the "that much"
+    /// quantity must read excess dealt to the FOUGHT creature (the second chosen
+    /// object target), never the fighting subject (the first).
+    ///
+    /// Discriminates the fix: the attacker (5/5) is fat and takes no excess from
+    /// the 0/1 victim, so the old first-object-target lookup read 0 excess off
+    /// the subject and produced no mana. The victim receives 5 damage — 4 excess
+    /// beyond its 1 lethal — so the correct recipient lookup adds 4 red mana.
+    #[test]
+    fn dual_target_fight_excess_reads_fought_creature_not_subject() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 5, 5);
+        let victim = make_creature(&mut state, PlayerId(1), "Victim", 0, 1);
+
+        // Dual-target fight: both fighters are chosen object targets, ordered
+        // [your creature, opponent's creature].
+        let mut ability = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(attacker), TargetRef::Object(victim)],
+            attacker,
+            PlayerId(0),
+        );
+        let mut mana = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        );
+        mana.condition = Some(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
+        });
+        ability.sub_ability = Some(Box::new(mana));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // 4 excess dealt to the fought creature → "add that much {R}" = 4 red.
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 4);
+        // The subject took no excess (victim has 0 power) — the old lookup would
+        // have read 0 here and added no mana.
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
+        assert_eq!(state.objects[&victim].damage_marked, 5);
     }
 
     #[test]

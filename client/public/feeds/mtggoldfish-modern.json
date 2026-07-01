@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-30T00:00:00Z",
+  "updated": "2026-07-01T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -873,8 +873,8 @@
       "author": "MTGGoldfish",
       "colors": [
         "R",
-        "W",
-        "U"
+        "G",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -882,31 +882,63 @@
       "main": [
         {
           "count": 4,
-          "name": "Pyretic Ritual"
+          "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Manamorphose"
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 2,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 2,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 2,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
         },
         {
           "count": 3,
           "name": "Past in Flames"
         },
         {
-          "count": 4,
-          "name": "Ruby Medallion"
+          "count": 1,
+          "name": "Stomping Ground"
         },
         {
           "count": 4,
-          "name": "Ral, Monsoon Mage"
+          "name": "Manamorphose"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
         },
         {
           "count": 2,
           "name": "Wish"
-        },
-        {
-          "count": 4,
-          "name": "Glimpse the Impossible"
         },
         {
           "count": 4,
@@ -918,77 +950,33 @@
         },
         {
           "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 2,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 3,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 3,
-          "name": "Arid Mesa"
+          "name": "Commercial District"
         },
         {
           "count": 2,
           "name": "Elegant Parlor"
         },
         {
-          "count": 2,
-          "name": "Mountain"
+          "count": 4,
+          "name": "Glimpse the Impossible"
         },
         {
           "count": 4,
-          "name": "Desperate Ritual"
+          "name": "Ral, Monsoon Mage"
         },
         {
-          "count": 1,
-          "name": "Gemstone Caverns"
+          "count": 4,
+          "name": "Ruby Medallion"
         },
         {
           "count": 2,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 1,
-          "name": "March of Reckless Joy"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
           "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Galvanic Relay"
-        },
-        {
-          "count": 3,
-          "name": "Flusterstorm"
-        },
-        {
-          "count": 1,
-          "name": "Out of Time"
-        },
-        {
-          "count": 1,
-          "name": "Blood Moon"
+          "name": "Empty the Warrens"
         },
         {
           "count": 1,
@@ -1004,7 +992,11 @@
         },
         {
           "count": 1,
-          "name": "Empty the Warrens"
+          "name": "Blast Zone"
+        },
+        {
+          "count": 3,
+          "name": "Veil of Summer"
         },
         {
           "count": 3,
@@ -1012,6 +1004,10 @@
         },
         {
           "count": 1,
+          "name": "Galvanic Relay"
+        },
+        {
+          "count": 2,
           "name": "Fire Magic"
         }
       ]
