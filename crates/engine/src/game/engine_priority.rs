@@ -91,8 +91,16 @@ pub(super) fn run_post_action_pipeline_from(
     // of a spell or ability") means checking SBAs now would wrongly send a
     // still-entering 0/0 to the graveyard (CR 704.5f) before its counters land. The
     // loop runs on the next pipeline pass, once the choice is answered and
-    // resolution settles back to Priority. Player-loss SBAs remain covered
-    // mid-choice by `reconcile_terminal_result`'s narrow safety net.
+    // resolution settles back to Priority.
+    //
+    // Player-loss SBAs remain covered mid-choice by `reconcile_terminal_result`
+    // (engine.rs), which deliberately runs the SBA loop even while paused on a
+    // replacement choice so the engine never waits on a player who has already
+    // lost (#962). That path is safe against the 0/0-destruction described above
+    // because `check_state_based_actions` itself honors the same CR 704.4
+    // exemption: it returns before the object-destroying SBAs whenever
+    // `pending_replacement` is set, so the mid-choice player-loss net processes
+    // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
         sba::check_state_based_actions(state, events);

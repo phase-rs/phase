@@ -5,6 +5,7 @@ import {
   computeHandInsertionMarker,
   computeFlankDisplacement,
   computeGapPx,
+  computeReorderedHand,
   flankingHandIndices,
   VISIBLE_GAP_FRACTION,
 } from "../handInsertionSlot.ts";
@@ -142,5 +143,39 @@ describe("computeHandInsertionSlot", () => {
 
   it("returns middle insertion slots around remaining card centers", () => {
     expect(computeHandInsertionSlot(cardRects, 125, 3)).toBe(1);
+  });
+});
+
+describe("computeReorderedHand", () => {
+  const hand = [10, 20, 30, 40];
+
+  it("moves a card to an earlier slot, preserving the rest in order", () => {
+    // Move id 40 (index 3) to slot 1.
+    expect(computeReorderedHand(hand, 40, 1, false)).toEqual([10, 40, 20, 30]);
+  });
+
+  it("moves a card to a later slot", () => {
+    // Move id 10 (index 0) to slot 2.
+    expect(computeReorderedHand(hand, 10, 2, false)).toEqual([20, 30, 10, 40]);
+  });
+
+  it("SUPPRESSES the reorder when sort/filter or a cast is active (data-corruption guard)", () => {
+    // The invariant this PR exists to protect: a displayed slot index must never
+    // be mapped onto `player.hand` while the display diverges from it. suppressed
+    // => null regardless of how valid the move otherwise looks.
+    expect(computeReorderedHand(hand, 40, 1, true)).toBeNull();
+    expect(computeReorderedHand(hand, 10, 2, true)).toBeNull();
+  });
+
+  it("is a no-op (null) for an unknown slot, an unknown card, or a same-slot move", () => {
+    expect(computeReorderedHand(hand, 40, null, false)).toBeNull();
+    expect(computeReorderedHand(hand, 999, 1, false)).toBeNull();
+    expect(computeReorderedHand(hand, 30, 2, false)).toBeNull(); // id 30 is already at index 2
+  });
+
+  it("does not mutate the input hand", () => {
+    const input = [1, 2, 3];
+    computeReorderedHand(input, 3, 0, false);
+    expect(input).toEqual([1, 2, 3]);
   });
 });

@@ -68,7 +68,13 @@ export function AttackTargetPicker({
     return [...validTargets].sort((a, b) => {
       const aIdx = a.type === "Player" ? seatOrder.indexOf(a.data) : Infinity;
       const bIdx = b.type === "Player" ? seatOrder.indexOf(b.data) : Infinity;
-      return aIdx - bIdx;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      // Total order: two non-Player targets both map to Infinity (as do any equal
+      // seat-index ties), so tie-break on the numeric id. Without this the
+      // comparator returns `Infinity - Infinity === NaN` for a pair of
+      // planeswalkers/battles, leaving their order — and thus which defender takes
+      // the front-loaded even-split remainder — dependent on JS sort stability.
+      return Number(a.data) - Number(b.data);
     });
   }, [validTargets, seatOrder]);
 

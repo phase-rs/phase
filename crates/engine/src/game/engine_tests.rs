@@ -1017,6 +1017,17 @@ fn walking_ballista_enters_with_counters_survives_with_two_material_replacements
         state.waiting_for,
     );
 
+    // The pause must actually be the CR 616.1 replacement-order choice. Without
+    // this, a future change that auto-orders the two doublers (no choice
+    // surfaced) would still land 9/10 counters with the Ballista alive, so every
+    // assertion below — and the "still entering" one above — would pass vacuously
+    // while the SBA-suppression-during-ReplacementChoice branch went unexercised.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected a CR 616.1 replacement-order choice pending mid-entry, got {:?}",
+        state.waiting_for,
+    );
+
     // CR 616.1: answer the (possibly repeated) replacement-order choices.
     let mut guard = 0;
     while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {

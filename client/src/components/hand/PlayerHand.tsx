@@ -24,6 +24,7 @@ import {
   computeHandInsertionMarker,
   computeFlankDisplacement,
   computeGapPx,
+  computeReorderedHand,
   flankingHandIndices,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
@@ -343,19 +344,21 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        // Reorder is disabled while a cast is in progress OR while the hand is
-        // sorted/filtered. In both cases the displayed slot index doesn't map
-        // 1:1 onto `player.hand`: a cast filters out `pendingObjectId` (DOM has
-        // N-1 slots for N entries), and a sort/filter permutes or hides entries.
-        // Dispatching ReorderHand from a displayed slot would scramble the hand.
-        if (pendingObjectId != null || organizeActive) return false;
-        if (targetSlot == null || !player) return false;
-        const currentOrder = player.hand.slice();
-        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
-        if (fromIdx === -1 || fromIdx === targetSlot) return false;
-        const [moved] = currentOrder.splice(fromIdx, 1);
-        currentOrder.splice(targetSlot, 0, moved);
-        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        if (!player) return false;
+        // Reorder is suppressed while a cast is in progress (`pendingObjectId`)
+        // OR while the hand is sorted/filtered (`organizeActive`): in both cases
+        // the displayed slot index doesn't map 1:1 onto `player.hand`, so
+        // dispatching from a displayed slot would scramble the hand. The pure
+        // helper returns null in those states (and for no-op moves).
+        const nextOrder = computeReorderedHand(
+          player.hand,
+          objectId as ObjectId,
+          targetSlot,
+          pendingObjectId != null || organizeActive,
+        );
+        if (nextOrder) {
+          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
+        }
         return false;
       }
 
