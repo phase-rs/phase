@@ -395,6 +395,7 @@ mod issue_4544_abhorrent_oculus_manifest_nonpermanent;
 mod issue_4560_winter_soldier;
 mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;
+mod issue_4663_chosen_x_ptcomparison_targets;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;

@@ -85,6 +85,35 @@ pub fn transform_permanent(
     Ok(())
 }
 
+/// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
+/// (transform/modal/meld DFC) or a melded permanent — none of which can be
+/// turned face down. Used by `effects::turn_face_down` to enforce the no-op.
+///
+/// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
+/// so that single-faced layouts that may legally be turned face down — Adventure,
+/// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
+/// `layout_kind`). A DFC currently showing its back face is caught by the
+/// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
+/// the front face is stashed in `back_face` during a transform.
+pub(crate) fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card::LayoutKind;
+    // CR 730.2j: a face-up melded permanent contains a double-faced component.
+    if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {
+        return true;
+    }
+    // CR 712.16: nonmodal/modal DFC and meld cards — the back face records the
+    // DFC layout.
+    if matches!(
+        obj.back_face.as_ref().and_then(|b| b.layout_kind),
+        Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
+    ) {
+        return true;
+    }
+    // CR 712.16: a DFC already showing its back face (its front face is snapshot
+    // into `back_face` with a zeroed `layout_kind`) is still a DFC.
+    obj.transformed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

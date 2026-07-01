@@ -97,6 +97,24 @@ fn is_search_muzzled(state: &GameState, cause_controller: crate::types::player::
     false
 }
 
+/// CR 701.23f + CR 614.1a: smallest active top-N library-search restriction
+/// applying to `searcher_id` (a searcher restricted by a
+/// `RestrictLibrarySearchToTop` source under its controller-relative `who`).
+/// None = unrestricted. Multiple sources stack as the minimum (Aven Mindcensor
+/// pairs all converge on the tightest cap).
+fn library_search_top_limit(state: &GameState, searcher_id: PlayerId) -> Option<u32> {
+    crate::game::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(bf_obj, def)| match def.mode {
+            StaticMode::RestrictLibrarySearchToTop { ref who, count }
+                if prohibition_scope_matches_player(who, searcher_id, bf_obj.id, state) =>
+            {
+                Some(count)
+            }
+            _ => None,
+        })
+        .min()
+}
+
 /// CR 608.2c: Validate a chosen card-id set against the search-selection
 /// constraint propagated from `Effect::SearchLibrary.selection_constraint`.
 /// Centralized here so the resolver, the engine submission guard, and the AI
@@ -389,20 +407,33 @@ pub fn resolve(
     // library owner — the targeted player for opponent searches, the caster
     // otherwise. `searcher_id` governs WHO chooses and the shuffle/tracking, not
     // whose zones are searched. Resolve the owner once.
+    // CR 701.23f + CR 614.1a: A top-N search restriction (Aven Mindcensor) caps
+    // the LIBRARY portion of the candidate set to the top `n` cards
+    // (`library[0]` is the top — see zones.rs). It applies per `searcher`, not
+    // per library owner, and only to the library zone — a multi-zone tutor's
+    // graveyard/hand portions are unrestricted (CR 609.3 "do as much as
+    // possible"). The whole-library shuffle (a separate chain step) is
+    // untouched, and the per-turn search tracking above already fired.
+    // G3: AI needs no change here — the candidate set is truncated BEFORE
+    // `WaitingFor::SearchChoice` is built below, so the AI enumerator inherits
+    // the restriction from `cards`.
+    let library_top_limit = library_search_top_limit(state, searcher_id);
     let Some(owner) = state.players.iter().find(|p| p.id == library_owner_id) else {
         return Err(EffectError::PlayerNotFound);
     };
     let mut candidate_ids: Vec<crate::types::identifiers::ObjectId> = Vec::new();
     for zone in &effective_zones {
-        let zone_objects = match zone {
-            Zone::Library => &owner.library,
-            Zone::Graveyard => &owner.graveyard,
-            Zone::Hand => &owner.hand,
+        match zone {
+            Zone::Library => match library_top_limit {
+                Some(n) => candidate_ids.extend(owner.library.iter().take(n as usize).copied()),
+                None => candidate_ids.extend(owner.library.iter().copied()),
+            },
+            Zone::Graveyard => candidate_ids.extend(owner.graveyard.iter().copied()),
+            Zone::Hand => candidate_ids.extend(owner.hand.iter().copied()),
             // CR 701.23a: The parser only ever produces Graveyard/Hand/Library
             // for `source_zones`; other zones are not searchable tutoring zones.
             _ => continue,
-        };
-        candidate_ids.extend(zone_objects.iter().copied());
+        }
     }
 
     // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability in
@@ -2363,5 +2394,401 @@ mod tests {
                 .contains(&PlayerId(0)),
             "caster is the searcher for 'search target opponent's library'"
         );
+    }
+
+    // === CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop runtime enforcement ===
+
+    fn add_restrict_search_to_top_permanent(
+        state: &mut GameState,
+        controller: PlayerId,
+        who: ProhibitionScope,
+        count: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xAE7),
+            controller,
+            "Aven Mindcensor".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.entered_battlefield_turn = Some(0);
+        obj.static_definitions.push(StaticDefinition::new(
+            StaticMode::RestrictLibrarySearchToTop { who, count },
+        ));
+        id
+    }
+
+    /// Stack `count` creatures into `owner`'s library and return their ids in
+    /// top→bottom order (`library[0]` is the top — see zones.rs).
+    fn stack_library_creatures(
+        state: &mut GameState,
+        owner: PlayerId,
+        count: u64,
+        base_id: u64,
+    ) -> Vec<ObjectId> {
+        (0..count)
+            .map(|i| add_library_creature(state, base_id + i, owner, &format!("Stacked {i}")))
+            .collect()
+    }
+
+    #[test]
+    fn aven_caps_opponent_search_to_top_four() {
+        // CR 701.23f + CR 614.1a: P0 controls Aven (who=Opponents). P1 (opponent)
+        // searches their own ≥6-card library — only the top 4 cards are offered;
+        // the bottom cards are excluded. Revert-fail: without truncation all 6
+        // would be offered.
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let lib = stack_library_creatures(&mut state, PlayerId(1), 6, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9990),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards.len(), 4, "only the top 4 library cards are offered");
+                for top in &lib[0..4] {
+                    assert!(cards.contains(top), "top-4 card must be offered");
+                }
+                for bottom in &lib[4..6] {
+                    assert!(
+                        !cards.contains(bottom),
+                        "bottom cards beyond the top 4 must be excluded"
+                    );
+                }
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aven_does_not_cap_controllers_own_search() {
+        // CR 701.23f: Aven's `who = Opponents`. The controller's OWN search is not
+        // restricted — all cards are offered.
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let _lib = stack_library_creatures(&mut state, PlayerId(0), 6, 1);
+
+        let ability = make_search_ability(TargetFilter::Typed(TypedFilter::creature()), 1);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => assert_eq!(
+                cards.len(),
+                6,
+                "the controller's own search sees the whole library"
+            ),
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aven_cap_below_library_size_offers_all_cards() {
+        // CR 701.23f: a library with fewer than N cards is searched in full —
+        // take(n) clamps to the available count.
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let lib = stack_library_creatures(&mut state, PlayerId(1), 2, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9991),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards.len(), 2, "all available cards offered when < N");
+                assert!(cards.contains(&lib[0]) && cards.contains(&lib[1]));
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aven_caps_by_searcher_not_library_owner() {
+        // CR 701.23f: P0 controls Aven. P1 (opponent of P0) searches P2's library
+        // (searcher ≠ owner). The cap keys off the SEARCHER (P1, an opponent of
+        // Aven's controller), so the top-4 limit still applies to P2's library.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let lib = stack_library_creatures(&mut state, PlayerId(2), 6, 1);
+
+        // P1 casts "search target opponent's library" targeting P2; searcher = P1.
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(crate::types::ability::ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(2))],
+            ObjectId(9992),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "searcher (caster P1) browses P2's library"
+                );
+                assert_eq!(
+                    cards.len(),
+                    4,
+                    "cap keyed by searcher applies to P2's library"
+                );
+                for bottom in &lib[4..6] {
+                    assert!(!cards.contains(bottom));
+                }
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aven_caps_only_library_portion_of_multi_zone_search() {
+        // CR 701.23f + CR 609.3: an opponent's multi-zone search (graveyard +
+        // library) has ONLY the library portion capped; graveyard cards are all
+        // offered.
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        // P1 library: 6 "Target" creatures; only the top 4 should be offered.
+        let lib: Vec<ObjectId> = (0..6)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(1 + i),
+                    PlayerId(1),
+                    "Target".to_string(),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        // P1 graveyard: 3 "Target" cards; all should be offered (uncapped).
+        let gy: Vec<ObjectId> = (0..3)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(100 + i),
+                    PlayerId(1),
+                    "Target".to_string(),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Named {
+                        name: "Target".to_string(),
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Graveyard, Zone::Library],
+            },
+            vec![],
+            ObjectId(9993),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                // 4 (top of library) + 3 (whole graveyard) = 7.
+                assert_eq!(
+                    cards.len(),
+                    7,
+                    "library capped to top 4; graveyard uncapped"
+                );
+                for top in &lib[0..4] {
+                    assert!(cards.contains(top));
+                }
+                for bottom in &lib[4..6] {
+                    assert!(!cards.contains(bottom), "library bottom cards excluded");
+                }
+                for g in &gy {
+                    assert!(cards.contains(g), "every graveyard card is offered");
+                }
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aven_capped_search_still_tracks_and_preserves_whole_library() {
+        // CR 701.23f: a restricted search still records the searcher in the
+        // per-turn tracking AND the whole library is preserved (the separate
+        // shuffle chain step would still see every card; truncation only filters
+        // the candidate set, not the zone contents).
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let lib = stack_library_creatures(&mut state, PlayerId(1), 6, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9994),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::SearchedLibrary,
+                } if *player_id == PlayerId(1)
+            )),
+            "CR 701.23f: a restricted (replaced) search still fires SearchedLibrary"
+        );
+        assert!(
+            state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(1)),
+            "CR 701.23f: per-turn tracking records the restricted searcher"
+        );
+        let p1 = state.players.iter().find(|p| p.id == PlayerId(1)).unwrap();
+        assert_eq!(
+            p1.library.len(),
+            6,
+            "CR 701.23f: the whole library is intact — the shuffle tail sees every card"
+        );
+        for card in &lib {
+            assert!(p1.library.contains(card));
+        }
+    }
+
+    #[test]
+    fn two_aven_sources_still_cap_to_top_four() {
+        // CR 701.23f: two Aven Mindcensors → min(4, 4) = 4. The minimum-stacking
+        // is idempotent for equal counts.
+        let mut state = GameState::new_two_player(42);
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        add_restrict_search_to_top_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+            4,
+        );
+        let _lib = stack_library_creatures(&mut state, PlayerId(1), 6, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9995),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards.len(), 4, "two equal sources still cap to top 4")
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
     }
 }

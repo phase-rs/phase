@@ -910,6 +910,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Specialized { .. }
         | GameEvent::DayNightChanged { .. }
         | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
         | GameEvent::CardsRevealed { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::PlayerEliminated { .. }

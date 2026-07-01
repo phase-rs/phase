@@ -36,7 +36,8 @@ use super::ability_utils::{
     build_resolved_from_def, build_target_slots, compute_unavailable_modes,
     filter_references_target_player, flatten_targets_in_chain,
     has_legal_target_assignment_for_ability, kicker_instead_spell_has_legal_targets,
-    modal_choice_for_player, target_constraints_from_modal,
+    modal_choice_for_player, simple_legal_target_assignment_exists_for_ability,
+    target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
@@ -522,12 +523,21 @@ fn is_blocked_by_cant_cast_spells(
         let GameRestriction::ProhibitActivity {
             source,
             affected_players,
+            expiry,
             activity: ProhibitedActivity::CastSpells { spell_filter },
-            ..
         } = restriction
         else {
             return false;
         };
+        // CR 514.2 + CR 500.7: a still-pre-armed `UntilEndOfNextTurnOf` cast ban
+        // ("Each opponent can't cast … during that player's next turn" — Sphinx's
+        // Decree / Azor, fanned out per opponent) is not yet in force; it takes
+        // effect only once the restricted player's untap step converts it to
+        // `EndOfTurn` (turns.rs). Mirror the activate-abilities gate so the ban
+        // does not leak onto the creating turn.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            return false;
+        }
         let source_controller = state
             .objects
             .get(source)
@@ -12731,15 +12741,28 @@ pub fn can_activate_ability_now(
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
 
+    if let Some(has_target) = simple_legal_target_assignment_exists_for_ability(
+        &simulated,
+        &resolved,
+        &ability_def.target_constraints,
+    ) {
+        return has_target;
+    }
+
     match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
-            target_slots.is_empty()
-                || has_legal_target_assignment_for_ability(
-                    &simulated,
-                    &resolved,
-                    &target_slots,
-                    &ability_def.target_constraints,
-                )
+            if target_slots.is_empty() {
+                return true;
+            }
+            if ability_def.target_constraints.is_empty() && target_slots.len() == 1 {
+                return target_slots[0].optional || !target_slots[0].legal_targets.is_empty();
+            }
+            has_legal_target_assignment_for_ability(
+                &simulated,
+                &resolved,
+                &target_slots,
+                &ability_def.target_constraints,
+            )
         }
         Err(_) => {
             ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())

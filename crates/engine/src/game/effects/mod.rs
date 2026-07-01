@@ -187,6 +187,7 @@ pub mod specialize;
 pub mod speed_effects;
 pub mod spellbook;
 pub mod stickers;
+pub mod turn_face_down;
 pub mod turn_face_up;
 // Tests for `spellbook` live in a sibling file (declared here, not in
 // `spellbook.rs`, so `spellbook.rs` stays implementation-only).
@@ -235,6 +236,47 @@ pub(crate) fn effect_object_targets(
             })
             .collect(),
     }
+}
+
+/// Resolve the battlefield object(s) an effect's `target` slot designates,
+/// falling back to a zone scan when the ability declared no explicit object
+/// target (mass / population forms). Shared by the `turn_face_up` and
+/// `turn_face_down` handlers, whose target resolution is identical: prefer the
+/// explicit chosen targets, otherwise enumerate the filter's zone (default
+/// battlefield) and keep the objects the filter matches.
+pub(crate) fn resolved_battlefield_object_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    let resolved = crate::game::targeting::resolved_targets(ability, target, state);
+    let explicit = effect_object_targets(target, &resolved);
+    if !explicit.is_empty() {
+        return explicit;
+    }
+
+    // CR 601.2c + CR 608.2b: A *targeting* ability affects only the objects the
+    // controller chose as targets. When the ability carries a target-count spec
+    // ("any number of target ..." / "up to N target ...") or is otherwise
+    // optionally targeted ("up to one target"), an empty resolved set means the
+    // controller chose zero targets (or no legal target remains) — the effect
+    // must affect nothing. It must NOT fall through to the mass/population zone
+    // scan below, which would illegally affect every object matching the filter
+    // (e.g. Illithid Harvester turning every tapped nontoken creature face
+    // down). The scan is reserved for genuinely non-targeted forms (`SelfRef`,
+    // `ExiledBySource`, untargeted "each face-down permanent" population).
+    if ability.multi_target.is_some() || ability.optional_targeting {
+        return Vec::new();
+    }
+
+    let zone = target
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    crate::game::targeting::zone_object_ids(state, zone)
+        .into_iter()
+        .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))
+        .collect()
 }
 
 pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
@@ -3113,6 +3155,7 @@ pub fn resolve_effect(
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
         Effect::Cloak { .. } => cloak::resolve(state, ability, events),
         Effect::TurnFaceUp { .. } => turn_face_up::resolve(state, ability, events),
+        Effect::TurnFaceDown { .. } => turn_face_down::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
         Effect::GrantExtraLoyaltyActivations { .. } => {
             grant_extra_loyalty_activations::resolve(state, ability, events)
@@ -3817,6 +3860,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::TurnFaceUp { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::TurnedFaceUp { .. })),
+        // CR 708.2b + CR 608.2c: The inverse sibling of TurnFaceUp. A resolving
+        // "turn this ... face down" "did anything" iff a permanent actually
+        // became face down. `turn_face_down::resolve` emits `TurnedFaceDown`
+        // only on success — it is skipped when the object was already face down
+        // (CR 708.2b) or when the object is a double-faced/melded permanent
+        // (CR 712.16 + CR 730.2j), which can never be turned face down. The
+        // event's presence is therefore the authoritative "the turn-down
+        // happened" signal, so a "Turn target ... face down. If you do, …"
+        // rider gated on `OptionalEffectPerformed` correctly suppresses its
+        // branch when the turn-down was blocked. Without this arm the effect
+        // would fall into the `_ => true` default and always claim success.
+        Effect::TurnFaceDown { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TurnedFaceDown { .. })),
         _ => true,
     }
 }

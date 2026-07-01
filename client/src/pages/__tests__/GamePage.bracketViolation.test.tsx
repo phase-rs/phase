@@ -134,6 +134,11 @@ vi.mock("../../hooks/usePlayerId", () => ({
   usePlayerId: () => 0,
   usePerspectivePlayerId: () => 0,
   useCanActForWaitingState: () => true,
+  // useTurnStatus (reached via the mounted <TurnStatusLine/>) also imports
+  // waitingPlayer from this module; the whole module is mocked, so it must be
+  // re-declared or the call throws. gameStore is mocked with waitingFor: null,
+  // for which the real waitingPlayer returns null — mirror that here.
+  waitingPlayer: () => null,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({

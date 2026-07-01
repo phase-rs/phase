@@ -813,6 +813,18 @@ pub enum StaticMode {
     CantSearchLibrary {
         cause: ProhibitionScope,
     },
+    /// CR 701.23f + CR 614.1a: "If an opponent would search a library, that
+    /// player searches the top N cards of that library instead." (Aven
+    /// Mindcensor). Replaces searching a library with searching the top
+    /// `count` cards. `who` scopes which SEARCHER is restricted
+    /// (controller-relative; Aven = Opponents). Runtime enforcement lives in
+    /// game/effects/search_library.rs (library_search_top_limit), consulted
+    /// inline in resolve(); search-triggers and per-turn tracking still fire
+    /// and the whole library still shuffles (CR 701.23f).
+    RestrictLibrarySearchToTop {
+        who: ProhibitionScope,
+        count: u32,
+    },
     /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
     /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
     /// abilities you control can't cause you to sacrifice or exile creature
@@ -1918,6 +1930,13 @@ impl Hash for StaticMode {
             StaticMode::AlternativeKeywordCost { keyword, .. } => {
                 keyword.hash(state);
             }
+            // CR 701.23f: Parameterized by scope + count — hash both so distinct
+            // top-N search restrictions (Opponents/top-4 vs AllPlayers/top-2)
+            // don't collide.
+            StaticMode::RestrictLibrarySearchToTop { who, count } => {
+                who.hash(state);
+                count.hash(state);
+            }
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
@@ -1974,6 +1993,7 @@ impl StaticMode {
             | StaticMode::CantBeCast { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::RestrictLibrarySearchToTop { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
@@ -2095,6 +2115,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::RestrictLibrarySearchToTop { who, count } => {
+                write!(f, "RestrictLibrarySearchToTop({who},{count})")
+            }
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
             }
@@ -2923,6 +2946,20 @@ impl FromStr for StaticMode {
                     // CR 701.23: Round-trip of the scope identifier.
                     if let Ok(cause) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantSearchLibrary { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("RestrictLibrarySearchToTop(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 701.23f + CR 614.1a: Round-trip of scope + count.
+                    if let Some((who_str, count_str)) = inner.split_once(',') {
+                        if let (Ok(who), Ok(count)) = (
+                            ProhibitionScope::from_str(who_str),
+                            count_str.parse::<u32>(),
+                        ) {
+                            return Ok(StaticMode::RestrictLibrarySearchToTop { who, count });
+                        }
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
@@ -3777,6 +3814,18 @@ mod tests {
             cause: ProhibitionScope::Opponents,
         };
         assert_eq!(mode.to_string(), "CantSearchLibrary(opponents)");
+
+        // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop display + FromStr
+        // round-trip carries both the searcher scope and the count.
+        let mode = StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::Opponents,
+            count: 4,
+        };
+        assert_eq!(mode.to_string(), "RestrictLibrarySearchToTop(opponents,4)");
+        assert_eq!(
+            StaticMode::from_str("RestrictLibrarySearchToTop(opponents,4)").unwrap(),
+            mode
+        );
 
         // CR 603.2g: SuppressTriggers display enumerates the event set.
         let mode = StaticMode::SuppressTriggers {

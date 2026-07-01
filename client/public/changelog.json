@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 157,
+      "date": "2026-06-30",
+      "title": "Mother of Runes protects again",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• New cards: Athreos, God of Passage and Aven Mindcensor\n• Newly released sets now unlock automatically once their release date passes — Marvel Super Heroes cards are now playable\n• \"Whenever you roll a [number]\" dice-roll triggers now fire on the matching result\n• \"Whenever you activate a loyalty ability of a planeswalker\" triggers now work\n\n🛠️ Cards That Now Work Right\n• Protection and hexproof \"from the color of your choice\" now grant real protection instead of doing nothing — you're prompted to pick a color when it resolves (Mother of Runes, Aven Liberator, Blessed Breath, and ~60 more)\n• Abilities that add bonus mana when a permanent is tapped now fire and give the extra mana to the player who tapped it\n• Turning a creature face down into a fixed 2/2 now snapshots its true printed stats, so anthems and other continuous effects no longer compound its power/toughness after it flips back up\n• Returning several targeted cards and then doing something \"that many\" times now uses the right count (Vengeful Regrowth makes one Plant Warrior per land returned)\n• Tokens created from the token catalog now pick up their static abilities\n• Optional \"you may attach\" choices for Auras and Equipment are now offered correctly\n• Modal triggers that refer to \"that player\" in bullet-list choices now point at the correct player\n• \"Where X is…\" target filters now bind correctly\n\n🤖 AI\n• Fixed AI turn timeouts on very large boards\n\n🖥️ Interface\n• A new turn and priority indicator shows who currently holds the pending decision and why the game is waiting — distinct from whose turn it is\n• Long animation sequences are now collapsed so big multi-event turns play back smoothly",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521707004790575237"
+    },
+    {
       "id": 156,
       "date": "2026-06-30",
       "title": "Infinite combos end the game (∞)",

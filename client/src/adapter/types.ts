@@ -1760,6 +1760,7 @@ export type GameEvent =
   | { type: "Transformed"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
+  | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
   | { type: "Regenerated"; data: { object_id: ObjectId } }
   | {
@@ -2313,11 +2314,10 @@ export const AdapterErrorCode = {
    * A gameplay round-trip to the engine Web Worker never returned within the
    * timeout window (see `ENGINE_REQUEST_TIMEOUT_MS` in engine-worker-client).
    * Without this, a wedged worker call hangs forever and leaves the dispatch
-   * mutex held, silently dropping every subsequent click. Classified as
-   * recoverable (mirrors STATE_LOST): the recovery layer surfaces the Layer 3
-   * reload prompt via `notifyEngineLost` rather than freezing the UI. A late
-   * worker reply that arrives after the timeout is a safe no-op (the pending
-   * entry has already been deleted by id).
+   * mutex held, silently dropping every subsequent click. This code is kept for
+   * legacy adapter failures; current worker watchdogs surface `notifyEngineSlow`
+   * and keep the pending request alive so a late worker reply can complete the
+   * original dispatch.
    */
   ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
   WASM_ERROR: "WASM_ERROR",

@@ -10499,6 +10499,23 @@ pub enum Effect {
         #[serde(default = "default_target_filter_exiled_by_source")]
         target: TargetFilter,
     },
+    /// CR 708.2a + CR 708.2b + CR 712.16: Turn the face-up permanent(s) selected
+    /// by `target` face down via a resolving effect. The permanent becomes the
+    /// body given by `profile` (CR 205.1a) — defaulting to a vanilla 2/2 creature
+    /// when `None` (CR 708.2a sentence 1). "Turn target creature face down. It's a
+    /// 2/2 Cyberman artifact creature." (Cyber Conversion) seeds
+    /// `Some(vanilla_2_2())` at the verb arm; the trailing "It's a 2/2 Cyberman
+    /// artifact creature." `FaceDownProfileSpec` continuation refines it. Inverse
+    /// of [`Effect::TurnFaceUp`]; a distinct game action per CR 701.27b (turning
+    /// face up and turning face down are different game actions). CR 708.2b (a
+    /// face-down permanent can't be turned face down) and CR 712.16 / CR 730.2j
+    /// (double-faced and melded permanents can't be turned face down) are enforced
+    /// as no-ops in the handler.
+    TurnFaceDown {
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<FaceDownProfile>,
+    },
     /// CR 500.7: Take an extra turn after this one. The target determines who
     /// takes the extra turn (usually Controller for "take an extra turn").
     /// Extra turns are stored as a LIFO stack — most recently created taken first.
@@ -11727,6 +11744,11 @@ impl Effect {
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
+            // CR 708.2a: "Turn target creature face down" (Cyber Conversion)
+            // declares a real target as the spell is cast; surface it so the
+            // cast-time target slot is built and CR 608.2b re-validates it at
+            // resolution.
+            | Effect::TurnFaceDown { target, .. }
             // CR 709.5f-g: the Room is a real declared target ("target Room you
             // control"); surface it so the cast/trigger-time target slot is
             // built and CR 608.2b re-validates it at resolution.
@@ -12289,6 +12311,7 @@ impl Effect {
             | Effect::Mana { .. }
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::AssembleContraptionsFromRollDifference
@@ -12518,6 +12541,7 @@ impl Effect {
             | Effect::Mana { .. }
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::AssembleContraptionsFromRollDifference
@@ -12746,6 +12770,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ManifestDread => "ManifestDread",
         Effect::Cloak { .. } => "Cloak",
         Effect::TurnFaceUp { .. } => "TurnFaceUp",
+        Effect::TurnFaceDown { .. } => "TurnFaceDown",
         Effect::ExtraTurn { .. } => "ExtraTurn",
         Effect::GrantExtraLoyaltyActivations { .. } => "GrantExtraLoyaltyActivations",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
@@ -13011,6 +13036,7 @@ pub enum EffectKind {
     Reveal,
     Transform,
     TurnFaceUp,
+    TurnFaceDown,
     DayTimeChange,
 }
 
@@ -13225,6 +13251,7 @@ impl From<&Effect> for EffectKind {
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::Cloak { .. } => EffectKind::Cloak,
             Effect::TurnFaceUp { .. } => EffectKind::TurnFaceUp,
+            Effect::TurnFaceDown { .. } => EffectKind::TurnFaceDown,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
             Effect::GrantExtraLoyaltyActivations { .. } => EffectKind::GrantExtraLoyaltyActivations,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
