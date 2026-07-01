@@ -2340,6 +2340,7 @@ mod tests {
                     choice_type: ChoiceType::CreatureType,
                     options: vec!["Wizard".to_string()],
                     source_id: Some(ObjectId(1)),
+                    persist_player: None,
                 },
             ),
             (
