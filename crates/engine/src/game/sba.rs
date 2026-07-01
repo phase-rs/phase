@@ -3261,6 +3261,60 @@ mod tests {
     }
 
     #[test]
+    fn sba_object_destroying_unfrozen_after_parked_chooser_eliminated() {
+        // CR 800.4a + CR 704.4: complements the sibling suppression test — here the
+        // eliminated player IS the parked chooser, so do_eliminate clears
+        // pending_replacement, the sba.rs guard no longer bails, and the
+        // object-destroying SBAs resume WITHIN the same check. 3 players so the game
+        // continues after one elimination.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+
+        // P0's 0/0 — spared by the guard while a replacement is pending.
+        let entering = create_creature(&mut state, CardId(9130), PlayerId(0), "Entering 0/0", 0, 0);
+
+        // Chooser C = P2 is ALSO the loser (0 life). Latched key = ReplacementChoice{P2}.
+        state.players[2].life = 0;
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(2),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(2),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[2].is_eliminated);
+        assert!(
+            state.pending_replacement.is_none(),
+            "the eliminated chooser's parked replacement must be cleared"
+        );
+        // Revert-failing vs no-clear: with the choice cleared, the guard no longer
+        // bails and CR 704.5f destroys the 0/0.
+        assert_eq!(
+            state.objects[&entering].zone,
+            Zone::Graveyard,
+            "once the parked chooser leaves, object-destroying SBAs resume and the 0/0 dies"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::GameOver { .. }),
+            "two survivors remain — the game must continue"
+        );
+    }
+
+    #[test]
     fn sba_three_player_two_die_simultaneously_ends_game() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.players[1].life = 0;
