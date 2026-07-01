@@ -2145,7 +2145,7 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: Vec::new(),
+            candidates: Vec::new(),
         };
 
         assert!(cheap_reject_candidate(
