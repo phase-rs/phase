@@ -2432,10 +2432,17 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 /// `ChooseXValue` ahead of target selection.
 fn filter_prop_contains_chosen_x_ref(prop: &FilterProp) -> bool {
     match prop {
-        FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
-            value.contains_x()
-        }
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => value.contains_x(),
         FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_chosen_x_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_chosen_x_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_chosen_x_ref),
         FilterProp::Not { prop } => filter_prop_contains_chosen_x_ref(prop),
         _ => false,
     }
