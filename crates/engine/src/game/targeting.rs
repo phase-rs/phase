@@ -39,6 +39,21 @@ pub(crate) fn find_legal_targets_for_ability(
     )
 }
 
+pub(crate) fn has_legal_target_for_ability(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> bool {
+    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    has_legal_target_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
 pub(crate) fn find_legal_targets_for_ability_with_controller(
     state: &GameState,
     filter: &TargetFilter,
@@ -343,6 +358,65 @@ fn find_legal_targets_with_context(
     }
 
     targets
+}
+
+fn has_legal_target_with_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> bool {
+    if matches!(
+        filter,
+        TargetFilter::SpecificObject { .. } | TargetFilter::ParentTarget
+    ) {
+        return false;
+    }
+
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().any(|branch| {
+            has_legal_target_with_context(state, branch, source_controller, source_id, target_ctx)
+        });
+    }
+
+    let explicit_zones = extract_explicit_zones(filter);
+    if !explicit_zones.is_empty() {
+        if explicit_zones.contains(&Zone::Battlefield) {
+            for &obj_id in &state.battlefield {
+                if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+                    let Some(obj) = state.objects.get(&obj_id) else {
+                        continue;
+                    };
+                    if can_target(obj, source_controller, source_id, state) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return !find_legal_targets_with_context(
+            state,
+            filter,
+            source_controller,
+            source_id,
+            target_ctx,
+        )
+        .is_empty();
+    }
+
+    for &obj_id in &state.battlefield {
+        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if can_target(obj, source_controller, source_id, state) {
+                return true;
+            }
+        }
+    }
+
+    !find_legal_targets_with_context(state, filter, source_controller, source_id, target_ctx)
+        .is_empty()
 }
 
 /// Recheck targets on resolution using typed filter, returns only still-legal targets.
