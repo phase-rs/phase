@@ -6186,6 +6186,71 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 400.7j: Spelunking's full ETB — "draw a card,
+    /// then you may put a land card from your hand onto the battlefield. If you
+    /// put a Cave onto the battlefield this way, you gain 4 life." CR 400.7j
+    /// lets the rider find the Cave the preceding put-land instruction moved to
+    /// the battlefield (a public zone). The trailing
+    /// active-voice "if you put a Cave onto the battlefield this way" rider must
+    /// lower the GainLife sub-ability with a `ZoneChangedThisWay { Cave }` gate
+    /// (not `condition: null`), and no part of the card may be Unimplemented.
+    /// Regression for the `Condition_If` swallow that marked the card unsupported.
+    #[test]
+    fn spelunking_etb_put_cave_gains_life_conditionally() {
+        let parsed = parse_oracle_text(
+            "When this enchantment enters, draw a card, then you may put a land card from your hand onto the battlefield. If you put a Cave onto the battlefield this way, you gain 4 life.\nLands you control enter untapped.",
+            "Spelunking",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+
+        // No swallowed clause / Unimplemented anywhere in the ETB chain.
+        let etb = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .expect("Spelunking must have an ETB trigger with an execute chain");
+
+        // Walk the sub-ability chain and locate the GainLife node + its gate.
+        fn find_gain_life(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if matches!(&*def.effect, Effect::GainLife { .. }) {
+                return Some(def);
+            }
+            assert!(
+                !matches!(&*def.effect, Effect::Unimplemented { .. }),
+                "no ETB node may be Unimplemented, got {:?}",
+                def.effect
+            );
+            def.sub_ability.as_deref().and_then(find_gain_life)
+        }
+        let gain = find_gain_life(etb).expect("the ETB chain must contain a GainLife node");
+
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = &gain.condition else {
+            panic!(
+                "GainLife must be gated by ZoneChangedThisWay, got {:?}",
+                gain.condition
+            );
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed Cave filter, got {filter:?}");
+        };
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))),
+            "gate must filter on the Cave subtype, got {:?}",
+            typed.type_filters
+        );
+
+        // The "Lands you control enter untapped." half is still a replacement.
+        assert!(
+            !parsed.replacements.is_empty(),
+            "the enter-untapped static replacement must still parse"
+        );
+    }
+
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,

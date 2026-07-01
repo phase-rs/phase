@@ -5021,9 +5021,24 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 /// article), the type/subtype filter, both tenses, the verb set, and the
 /// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
 /// matcher from firing on partial overlaps with longer condition phrases.
+///
+/// Both grammatical voices of the same event are recognized here so the leading
+/// (`if …, [effect]`) and suffix (`[effect] if …`) forms produce identical
+/// `ZoneChangedThisWay` conditions:
+///   - passive: `a Cave (is|was) put onto the battlefield this way` —
+///     `parse_zone_changed_this_way_clause`
+///   - active: `you put a Cave onto the battlefield this way` —
+///     `parse_you_put_onto_battlefield_this_way_clause` (Spelunking's ETB
+///     rider "If you put a Cave onto the battlefield this way, you gain 4 life";
+///     unlocks the whole "if you put a [type] onto the battlefield this way,
+///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) =
-        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    use crate::parser::oracle_nom::condition::{
+        parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
+    };
+    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+        .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -5741,6 +5756,63 @@ mod tests {
                 ));
             }
             other => panic!("expected Typed Equipment filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 400.7j: Spelunking's ETB rider — "If you put a Cave onto
+    /// the battlefield this way, you gain 4 life." CR 400.7j lets the rider find
+    /// the Cave the preceding put-land instruction moved to the battlefield (a
+    /// public zone). The leading `if`
+    /// form of the active-voice put-onto-battlefield gate must lower through
+    /// `strip_leading_general_conditional` to `ZoneChangedThisWay { Cave }` —
+    /// not drop to `condition: null` (which fires the `Condition_If` swallow
+    /// detector and marks the whole ETB chain unsupported). Unlocks the
+    /// "if you put a [type] onto the battlefield this way, [bonus]" rider class.
+    #[test]
+    fn leading_you_put_a_cave_onto_battlefield_spelunking() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If you put a Cave onto the battlefield this way, you gain 4 life.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "you gain 4 life.");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))
+                    ),
+                    "expected Subtype Cave, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Cave filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: The suffix form of the same active-voice gate — "[effect] if
+    /// you put a [type] onto the battlefield this way" — routes through
+    /// `parse_outcome_this_way_condition` to the identical `ZoneChangedThisWay`
+    /// condition, so leading and trailing phrasings stay in lockstep.
+    #[test]
+    fn outcome_you_put_a_creature_onto_battlefield_active_voice() {
+        let condition =
+            parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
+                .expect("active-voice put gate must lower to ZoneChangedThisWay");
+        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)),
+                    "expected Creature type filter, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Creature filter, got {other:?}"),
         }
     }
 
