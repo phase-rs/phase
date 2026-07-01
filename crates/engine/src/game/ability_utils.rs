@@ -584,7 +584,13 @@ pub fn modal_choice_for_player(
     // than exist).
     if let Some(expr) = &modal.dynamic_max_choices {
         let resolved = super::quantity::resolve_quantity(state, expr, player, source_id);
-        effective.max_choices = (resolved.max(0) as usize).min(modal.mode_count);
+        // CR 700.2i: pawprint modals reinterpret `max_choices` as a point budget,
+        // not a mode-count cap — do not clamp dynamic budgets to `mode_count`.
+        effective.max_choices = if modal.mode_pawprints.is_empty() {
+            (resolved.max(0) as usize).min(modal.mode_count)
+        } else {
+            resolved.max(0) as usize
+        };
     }
     effective
 }
@@ -5909,6 +5915,16 @@ pub fn validate_modal_indices(
 
 /// CR 700.2d: Generate all valid mode selection sequences for a modal spell/ability.
 pub fn generate_modal_index_sequences(modal: &ModalChoice) -> Vec<Vec<usize>> {
+    if !modal.mode_pawprints.is_empty() {
+        // CR 700.2i: `max_choices` is the pawprint point budget (Σ weight ≤ budget),
+        // not a mode-count cap. Enumerate every budget-legal index sequence whose
+        // length meets `min_choices`.
+        let mut actions = Vec::new();
+        let mut current = Vec::new();
+        build_pawprint_budget_sequences(modal, 0, &mut current, &mut actions);
+        return actions;
+    }
+
     let mut actions = Vec::new();
     for count in modal.min_choices..=modal.max_choices {
         let mut current = Vec::with_capacity(count);
@@ -5927,6 +5943,48 @@ pub fn generate_modal_index_sequences(modal: &ModalChoice) -> Vec<Vec<usize>> {
         );
     }
     actions
+}
+
+fn build_pawprint_budget_sequences(
+    modal: &ModalChoice,
+    spent: u32,
+    current: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+) {
+    let budget = modal.max_choices as u32;
+    if current.len() >= modal.min_choices && spent <= budget {
+        out.push(current.clone());
+    }
+    if spent >= budget {
+        return;
+    }
+
+    if modal.allow_repeat_modes {
+        for idx in 0..modal.mode_count {
+            let weight = u32::from(modal.mode_pawprints[idx]);
+            if spent + weight > budget {
+                continue;
+            }
+            current.push(idx);
+            build_pawprint_budget_sequences(modal, spent + weight, current, out);
+            current.pop();
+        }
+    } else {
+        let start_index = if let Some(&last) = current.last() {
+            last + 1
+        } else {
+            0
+        };
+        for idx in start_index..modal.mode_count {
+            let weight = u32::from(modal.mode_pawprints[idx]);
+            if spent + weight > budget {
+                continue;
+            }
+            current.push(idx);
+            build_pawprint_budget_sequences(modal, spent + weight, current, out);
+            current.pop();
+        }
+    }
 }
 
 fn build_mode_sequences(
@@ -5968,12 +6026,12 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
-        ControllerRef, CountScope, CounterTransferMode, DamageKindFilter, Duration, Effect,
-        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
-        MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticDefinition,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
+        Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -6403,6 +6461,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(victim)],
             ObjectId(99),
@@ -7123,6 +7182,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -7178,6 +7238,84 @@ mod tests {
             .and_then(|shuffle| shuffle.sub_ability.as_deref())
             .expect("counter continuation must exist");
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
+    }
+
+    /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
+    /// controller sacrifices it. …". The ability must SURFACE a required target
+    /// slot for the artifact creature (before the fix it compiled to a targetless
+    /// `Sacrifice{ParentTarget}` and activated with no target). Only artifact
+    /// creatures are legal; a plain creature is not.
+    #[test]
+    fn build_target_slots_target_controller_sacrifices_it_requires_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Arcum Dagsson".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent-controlled artifact creature (a legal target).
+        let art_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Ornithopter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let types = &mut state.objects.get_mut(&art_creature).unwrap().card_types;
+            types.core_types.push(CoreType::Artifact);
+            types.core_types.push(CoreType::Creature);
+        }
+        // A plain (non-artifact) creature — must NOT be a legal target.
+        let plain_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{T}: Target artifact creature's controller sacrifices it. That player may search their library for a noncreature artifact card, put it onto the battlefield, then shuffle.",
+            "Arcum Dagsson",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Artificer".to_string()],
+        );
+        let def = parsed.abilities.first().expect("activated ability parsed");
+        let ability = build_resolved_from_def(def, source, PlayerId(0));
+
+        let slots = build_target_slots(&state, &ability).unwrap();
+        assert_eq!(
+            slots.len(),
+            1,
+            "exactly one object target slot for the artifact creature, got {slots:?}",
+        );
+        assert!(
+            !slots[0].optional,
+            "the artifact-creature target is required"
+        );
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(art_creature)),
+            "the opponent's artifact creature must be a legal target",
+        );
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(plain_creature)),
+            "a non-artifact creature must NOT be a legal target",
+        );
     }
 
     /// CR 109.4 + CR 707.2: "target opponent creates a token that's a copy of
@@ -7328,6 +7466,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -7389,6 +7528,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(2),
@@ -7494,6 +7634,31 @@ mod tests {
         assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 2)));
         // Turn-scoped map should NOT be populated for game-scoped constraint.
         assert!(!state.modal_modes_chosen_this_turn.contains(&(source_id, 2)));
+    }
+
+    #[test]
+    fn generate_modal_index_sequences_respects_pawprint_budget() {
+        let modal = season_pawprint_modal();
+        let sequences = generate_modal_index_sequences(&modal);
+
+        assert!(
+            sequences.contains(&Vec::<usize>::new()),
+            "min_choices=0 permits choosing no modes"
+        );
+        assert!(
+            sequences.contains(&vec![0, 0, 0, 0, 0]),
+            "five 1-point picks must fit the 5-point budget"
+        );
+        assert!(
+            !sequences.contains(&vec![2, 2, 2]),
+            "three weight-3 picks (Σ=9) must not be generated for a budget of 5"
+        );
+        assert!(
+            sequences
+                .iter()
+                .all(|indices| pawprint_budget_satisfied(&modal, indices)),
+            "every generated sequence must satisfy the pawprint budget gate"
+        );
     }
 
     #[test]
@@ -8064,6 +8229,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8102,6 +8268,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8134,6 +8301,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8199,6 +8367,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -8368,6 +8537,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9272,6 +9442,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(10),
@@ -9438,6 +9609,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9654,7 +9826,7 @@ mod tests {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
         };
         assert!(quantity_expr_references_target_creature(&damage));
@@ -9755,7 +9927,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         let spec = quantity_ref_target_slot_spec(&targeted_damage)
             .expect("targeted DamageDealtThisTurn must surface a slot");
@@ -9779,7 +9951,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         assert_eq!(
             quantity_ref_target_slot_spec(&opponents_damage),

@@ -2364,6 +2364,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ])
         }
@@ -2395,6 +2396,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
             Ok(vec![
@@ -2411,6 +2413,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 Effect::CreateDelayedTrigger {
                     condition,
@@ -2851,6 +2854,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
             origin: Some(engine::types::zones::Zone::Battlefield),
@@ -2865,6 +2869,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13 + CR 400.7: Mass exile — "Exile each <filter>"
@@ -2885,6 +2890,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
@@ -2908,6 +2914,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3015,6 +3022,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7: Mass return-from-graveyard-to-hand — "Return each <filter>
@@ -3036,6 +3044,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7 + CR 614.12: Mass reanimate from a specific player's
@@ -3066,6 +3075,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3092,6 +3102,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3277,6 +3288,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 122.1: Mass counter placement — "Put a [counter] on each
@@ -3494,6 +3506,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3515,6 +3528,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 111.1 + CR 111.5: Token creation with attached `TokenFlag`s.
@@ -3727,6 +3741,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -6224,6 +6239,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enter_with_counters: enter_repls.enter_with_counters,
         conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     });
     if shuffle {
         out.push(Effect::Shuffle {
@@ -6289,6 +6305,7 @@ fn convert_multi_filter_search_library(
             enter_with_counters: enter_repls.enter_with_counters.clone(),
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         });
     }
     if shuffle {

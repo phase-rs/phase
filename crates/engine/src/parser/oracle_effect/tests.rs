@@ -683,6 +683,145 @@ fn stensian_class_builds_whenever_event_this_combat_delayed_trigger() {
     );
 }
 
+/// CR 601.2c + CR 508.1d + CR 509.1c: A dual-target combat compound —
+/// "up to one target creature [combat compulsion] and up to one target creature
+/// [combat prohibition]" — must split into two independently-targeted conjuncts
+/// so BOTH combat requirements parse (Boros Battleshaper). Regression for the
+/// clause-splitter `starts_up_to_target_combat_clause_lower` arm: before the
+/// fix the bare-`and` splitter left the RHS noun-phrase subject un-split, the
+/// leading-conditional detector swallowed the "if able" force half, and only
+/// the CantAttack prohibition survived.
+#[test]
+fn boros_battleshaper_dual_target_combat_compound_splits_both_halves() {
+    use crate::types::statics::StaticMode;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, up to one target creature attacks or blocks this combat if able and up to one target creature can't attack or block this combat.",
+        "Boros Battleshaper",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "expected one combat trigger");
+    let exec = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("beginning-of-combat trigger should carry an execute body");
+
+    // Walk the serialized effect tree and collect every StaticMode name that
+    // appears, without hardcoding the nested sequence shape. Unit StaticMode
+    // variants serialize as bare JSON strings; data-carrying ones as object
+    // keys — searching both covers the whole family.
+    fn collect_modes(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| collect_modes(x, out)),
+            serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push(k.clone());
+                collect_modes(x, out);
+            }),
+            _ => {}
+        }
+    }
+    let json = serde_json::to_value(exec).expect("effect should serialize");
+    let mut modes = Vec::new();
+    collect_modes(&json, &mut modes);
+
+    // Force half → attack/block compulsion (CR 508.1d/509.1c).
+    let must_attack = format!("{:?}", StaticMode::MustAttack);
+    let must_block = format!("{:?}", StaticMode::MustBlock);
+    assert!(
+        modes.contains(&must_attack),
+        "force half should grant MustAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.contains(&must_block),
+        "force half should grant MustBlock; modes = {modes:?}"
+    );
+    // Prohibition half → can't attack or block (CantAttack + CantBlock). Assert
+    // BOTH so a regression to half-parsed output ("can't attack" only) is caught.
+    assert!(
+        modes.iter().any(|m| m == "CantAttack"),
+        "prohibition half should grant CantAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantBlock"),
+        "prohibition half should grant CantBlock; modes = {modes:?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 601.2c + CR 508.1d + CR 509.1c: the same dual-target combat compound in
+/// its UNNUMBERED form — bare `"target creature …"` on both conjuncts, with no
+/// `"up to <n>"` count. matthewevans/gemini review: the splitter must model the
+/// whole target-combat clause class, not just the counted Boros shape, so an
+/// unnumbered second conjunct ("… and target creature can't attack or block …")
+/// is a fresh independently-targeted clause and both halves must parse. This is
+/// the Boros text with "up to one" stripped, exercising the optional-number
+/// subject arm of `starts_up_to_target_combat_clause_lower`.
+#[test]
+fn dual_target_combat_compound_splits_both_halves_unnumbered() {
+    use crate::types::statics::StaticMode;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, target creature attacks or blocks this combat if able and target creature can't attack or block this combat.",
+        "Unnumbered Dual-Target Combat",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "expected one combat trigger");
+    let exec = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("beginning-of-combat trigger should carry an execute body");
+
+    fn collect_modes(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| collect_modes(x, out)),
+            serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push(k.clone());
+                collect_modes(x, out);
+            }),
+            _ => {}
+        }
+    }
+    let json = serde_json::to_value(exec).expect("effect should serialize");
+    let mut modes = Vec::new();
+    collect_modes(&json, &mut modes);
+
+    let must_attack = format!("{:?}", StaticMode::MustAttack);
+    let must_block = format!("{:?}", StaticMode::MustBlock);
+    assert!(
+        modes.contains(&must_attack),
+        "force half should grant MustAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.contains(&must_block),
+        "force half should grant MustBlock; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantAttack"),
+        "prohibition half should grant CantAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantBlock"),
+        "prohibition half should grant CantBlock; modes = {modes:?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
 /// filter must not put the clause splitter into quote mode and thereby
 /// swallow a later sentence boundary (a text-structure concern with no
@@ -4630,7 +4769,7 @@ fn teferis_response_destroy_rider_absorbed_draw_chains() {
 /// `Effect::Counter.countered_spell_zone` as `Library { Top }`.
 #[test]
 fn memory_lapse_counter_spell_zone_redirect_library_top() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let ability = parse_effect_chain(
             "Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard.",
@@ -4651,7 +4790,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Top
             })
         ),
@@ -4664,7 +4803,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
 /// Crumple on the bottom of its owner's library." is a separate sentence.)
 #[test]
 fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it on the bottom of its owner's library instead of into that player's graveyard. Put Spell Crumple on the bottom of its owner's library.",
@@ -4684,7 +4823,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Bottom
             })
         ),
@@ -4696,7 +4835,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
 /// `Hand`, and the subsequent "Draw a card." still chains as a sibling.
 #[test]
 fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
-    use crate::types::ability::CounteredSpellDestination;
+    use crate::types::ability::SpellStackToGraveyardReplacement;
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard.\nDraw a card.",
@@ -4714,7 +4853,10 @@ fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
         panic!("expected Counter effect, got {:?}", ability.effect);
     };
     assert!(
-        matches!(countered_spell_zone, Some(CounteredSpellDestination::Hand)),
+        matches!(
+            countered_spell_zone,
+            Some(SpellStackToGraveyardReplacement::Hand)
+        ),
         "expected Hand, got {countered_spell_zone:?}"
     );
 
@@ -19532,6 +19674,7 @@ fn cast_variant_paid_sneak_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         })
     );
@@ -19547,6 +19690,7 @@ fn cast_variant_paid_ninjutsu_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Ninjutsu,
         })
     );
@@ -19574,7 +19718,8 @@ fn foretold_instead_rewrites_those_tokens_with_x_count() {
             if matches!(
                 &**inner,
                 AbilityCondition::CastVariantPaid {
-                    variant: crate::types::ability::CastVariantPaid::Foretell
+                    variant: crate::types::ability::CastVariantPaid::Foretell,
+                    ..
                 }
             )
     ));
@@ -19616,6 +19761,7 @@ fn conditional_enter_tapped_attacking_patches_token() {
     assert_eq!(
         def.condition,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         }),
         "Token should have CastVariantPaid condition"
@@ -33193,25 +33339,67 @@ fn bare_cast_from_among_those_exiled_cards_unchanged() {
 }
 
 /// CR 614.1a + CR 701.5: Verify the structural detector for the
-/// "If that spell would be put into a graveyard, exile it instead" rider
+/// "If that spell would be put into a graveyard, [dest] instead" rider
 /// covers the determiner variants (a / the / its owner's / your /
-/// opponent's). All forms must dispatch identically so the parent-target
-/// rewrite applies uniformly.
+/// opponent's) AND every typed destination (exile / library bottom / library
+/// top / hand). All forms must dispatch so the parent-target rewrite applies
+/// uniformly and the destination axis is parameterized, not exile-only.
 #[test]
-fn exile_after_spell_rider_clause_recognises_determiner_variants() {
-    for clause in [
-        "if that spell would be put into a graveyard, exile it instead",
-        "if that spell would be put into the graveyard, exile it instead",
-        "if that spell would be put into its owner's graveyard, exile it instead",
-        "if that spell would be put into your graveyard, exile it instead",
-        "if that spell would be put into an opponent's graveyard, exile it instead",
-        "if that spell would be put into a graveyard, exile it instead.",
+fn spell_graveyard_replacement_rider_recognises_determiner_and_destination_variants() {
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
+    for (clause, expected) in [
+        (
+            "if that spell would be put into a graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into the graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into its owner's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into your graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into an opponent's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, exile it instead.",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on the bottom of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Bottom,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on top of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Top,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, return it to its owner's hand instead",
+            SpellStackToGraveyardReplacement::Hand,
+        ),
     ] {
-        assert!(
-            is_exile_after_spell_rider_clause(clause),
+        assert_eq!(
+            parse_spell_graveyard_replacement_rider(clause),
+            Some(expected),
             "should recognise rider clause: {clause:?}"
         );
     }
+    // Negative: a non-rider "instead" clause must not match.
+    assert_eq!(
+        parse_spell_graveyard_replacement_rider("draw a card instead"),
+        None,
+    );
 }
 
 #[test]
@@ -35358,6 +35546,7 @@ fn excess_damage_fight_followup_parses_condition_amount_and_retention() {
         Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            ..
         })
     ));
     assert!(matches!(
@@ -37131,5 +37320,32 @@ fn resolution_unless_anaphoric_payers_unchanged() {
         you.expect("you-pay unless-pay").payer,
         TargetFilter::Controller,
         "\"you pay\" must stay Controller"
+    );
+}
+
+/// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore parses to a `Pump` (+3/+2
+/// on the controlled creature) with a `SequentialSibling` grant sub-ability
+/// gated on `CastVariantPaid { variant: Warp, subject: Target }` — "that
+/// creature" anaphors to the +3/+2 target, so the rider is TARGET-scoped, not
+/// the source-scoped "if its warp cost was paid" form. Reverting the parser
+/// arm drops the condition (the `Condition_If` swallow returns).
+#[test]
+fn full_bore_grant_clause_is_target_scoped_warp_condition() {
+    let def = parse_effect_chain(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was cast for its warp cost, it also gains trample and haste until end of turn.",
+            AbilityKind::Spell,
+        );
+    assert!(
+        matches!(&*def.effect, Effect::Pump { .. }),
+        "parent effect is the +3/+2 pump"
+    );
+    let sub = def.sub_ability.as_ref().expect("grant sub-ability");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::CastVariantPaid {
+            variant: CastVariantPaid::Warp,
+            subject: ObjectScope::Target,
+        }),
+        "the trample+haste grant must be gated on the TARGET's warp-cast marker"
     );
 }

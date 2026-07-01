@@ -184,7 +184,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Keep"
     }
   },
   "boardChoice": {
@@ -197,7 +198,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Keep"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -207,14 +209,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: power {{selected}} / {{max}} or less"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirm ({{selected}}/{{max}} power)"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -1533,16 +1537,20 @@
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Cast from Graveyard",
     "title": "Cast {{name}}?",
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
     "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
+    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost — mana of any type may be spent. Or decline and leave it in the graveyard.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
+    "castPaidSuffix": "(pay its mana cost — any type of mana may be spent)",
     "putIntoHand": "Put into hand",
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
-    "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
+    "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)",
+    "graveyardPaidDeclineSuffix": "(leave it in the graveyard)"
   },
   "freeCastWindow": {
     "eyebrow": "Free Cast",

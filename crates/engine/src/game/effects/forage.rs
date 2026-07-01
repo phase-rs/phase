@@ -69,6 +69,7 @@ fn exile_three_branch() -> AbilityDefinition {
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .multi_target(MultiTargetSpec::fixed(

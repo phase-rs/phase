@@ -6,8 +6,8 @@ use crate::types::ability::{
     BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
     ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate, TargetFilter, TypeFilter,
-    TypedFilter, EXILE_COST_X,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -5806,6 +5806,25 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         None
     };
 
+    // CR 614.1a + CR 608.2n + CR 400.7 / CR 113.6e: Capture the `CastFromZone`
+    // grant's graveyard-redirect destination BEFORE the Exile→Stack move. For an
+    // exile-origin cast (a card "exiled with it" then cast — Kylox's Voltstrider),
+    // the Exile→Stack move runs `apply_zone_exit_cleanup` (zones.rs), which drops
+    // every `ExileWithAltCost` permission on leaving exile (CR 400.7 / CR 113.6e).
+    // Reading the rider after the move would return `None` and the redirect would
+    // never install, wrongly sending the spell to the graveyard instead of the
+    // library bottom. Mirrors the sibling exile-scoped captures above
+    // (`exile_play_permission_source`, `top_of_library_permission_source`,
+    // `single_use_exile_play_group`), all read pre-move for the same reason. The
+    // destination is read from the selected-permission authority (the permission
+    // that actually supports THIS cast) so a non-consumed sibling `ExileWithAltCost`
+    // permission's redirect cannot leak onto this cast (CR 608.2c). The rider is
+    // applied AFTER the move so it attaches to the object once it lives on the stack.
+    let graveyard_replacement_dest =
+        super::casting::selected_exile_alt_cost_permission_graveyard_replacement(
+            state, object_id, player,
+        );
+
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment
     // so continuous effects that granted castability ("cards in your graveyard
@@ -5824,20 +5843,18 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id);
     crate::game::zone_pipeline::move_object(state, stack_req, events);
 
-    // CR 614.1a: `CastFromZone` grants with an "exile it instead" rider stamp the
-    // synthetic self-scoped graveyard redirect when the granted cast finalizes.
-    if state.objects.get(&object_id).is_some_and(|obj| {
-        obj.casting_permissions.iter().any(|p| {
-            matches!(
-                p,
-                crate::types::ability::CastingPermission::ExileWithAltCost {
-                    exile_instead_of_graveyard_on_resolve: true,
-                    ..
-                }
-            )
-        })
-    }) {
-        apply_exile_instead_of_graveyard_rider(state, object_id);
+    // CR 614.1a + CR 608.2n: install the graveyard-redirect rider captured above
+    // now that the spell lives on the stack. This is the application point for
+    // normal casts from exile/graveyard/hand (Kylox's Voltstrider, Emry,
+    // Electrodominance). During-resolution casts (Quistis/Tinybones paid,
+    // Torrential/Cascade free) carry `resolution_cleanup: Some(_)`, so
+    // `evaluate_cascade_constraint_with_resulting_mv` strips their rider-bearing
+    // permission earlier in this function — `graveyard_replacement_dest` is `None`
+    // for them here, and they install the rider in `initiate_cast_during_resolution`
+    // instead. The two application points are therefore mutually exclusive per cast
+    // (no double-install).
+    if let Some(dest) = graveyard_replacement_dest {
+        apply_spell_graveyard_replacement_rider(state, object_id, dest);
     }
 
     // CR 614.1c + CR 122.1: A `CastFromZone` grant whose rider was "the creature
@@ -6162,15 +6179,24 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         .expect("object present above")
         .casting_permissions
         .remove(index);
-    let (constraint, cast_transformed, cleanup) = match permission {
-        CastingPermission::ExileWithAltCost {
-            constraint,
-            cast_transformed,
-            resolution_cleanup: Some(cleanup),
-            ..
-        } => (constraint, cast_transformed, cleanup),
-        _ => unreachable!("position() already filtered to this variant"),
-    };
+    let (constraint, cast_transformed, cleanup, mana_spend_permission, granted_to) =
+        match permission {
+            CastingPermission::ExileWithAltCost {
+                constraint,
+                cast_transformed,
+                resolution_cleanup: Some(cleanup),
+                mana_spend_permission,
+                granted_to,
+                ..
+            } => (
+                constraint,
+                cast_transformed,
+                cleanup,
+                mana_spend_permission,
+                granted_to,
+            ),
+            _ => unreachable!("position() already filtered to this variant"),
+        };
 
     // CR 702.85a / CR 701.57a: evaluate the resulting-MV gate carried on the
     // permission (`< source_mv` for Cascade, `<= N` for Discover).
@@ -6183,6 +6209,32 @@ fn evaluate_cascade_constraint_with_resulting_mv(
     );
 
     if accepted {
+        // CR 609.4b: A during-resolution PAID cast (Quistis Trepe, Tinybones the
+        // Pickpocket) carries a "mana of any type can be spent to cast that spell"
+        // concession on the consumed resolution permission. The CR 608.2g timing
+        // marker (`resolution_cleanup`) is consumed here, but the CR 609.4b
+        // payment concession must outlive it — the real mana payment still runs
+        // below (`finalize_cast` → `pay_mana_cost_with_choices`). Re-home a
+        // concession-only `ExileWithAltCost` (no `resolution_cleanup`, so this
+        // gate never re-fires) so the payment step still reads the off-color
+        // concession. Cleared with the object's other permissions when the spell
+        // leaves the stack. Free casts (no concession) carry `None` and skip this.
+        if let Some(msp) = mana_spend_permission {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.casting_permissions
+                    .push(CastingPermission::ExileWithAltCost {
+                        cost: crate::types::mana::ManaCost::SelfManaCost,
+                        cast_transformed: false,
+                        constraint: None,
+                        granted_to,
+                        resolution_cleanup: None,
+                        duration: None,
+                        graveyard_replacement: None,
+                        enters_with_counter: None,
+                        mana_spend_permission: Some(msp),
+                    });
+            }
+        }
         let waiting_for = handle_resolution_cast_success(
             state,
             player,
@@ -6254,7 +6306,12 @@ fn handle_resolution_cast_success(
             exile_instead_of_graveyard,
         } => {
             if exile_instead_of_graveyard {
-                apply_exile_instead_of_graveyard_rider(state, cast_object);
+                // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
+                apply_spell_graveyard_replacement_rider(
+                    state,
+                    cast_object,
+                    SpellStackToGraveyardReplacement::Exile,
+                );
             }
             let casts_left = remaining_casts.saturating_sub(1);
             // CR 202.3: shrink the shared budget by what was actually spent on
@@ -6315,43 +6372,73 @@ fn handle_resolution_cast_success(
 /// graveyard moves are rare and re-casting mints a new object per CR 400.7),
 /// but a `Duration` field on `ReplacementDefinition` is the eventual fix for
 /// the rider's "this turn" scope.
-pub(crate) fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
+pub(crate) fn apply_spell_graveyard_replacement_rider(
+    state: &mut GameState,
+    cast_object: ObjectId,
+    dest: SpellStackToGraveyardReplacement,
+) {
     if let Some(obj) = state.objects.get_mut(&cast_object) {
         obj.replacement_definitions
-            .push(exile_instead_of_graveyard_replacement());
+            .push(spell_graveyard_replacement_def(dest));
     }
 }
 
-/// CR 614.1a + CR 608.2n: The synthetic self-scoped graveyard→exile redirect
-/// installed by the Invoke Calamity free-cast rider. Mirrors the Rest in Peace
-/// redirect shape (`ReplacementEvent::Moved`, `destination_zone: Graveyard`,
-/// `execute: ChangeZone { destination: Exile, target: SelfRef }`) but scoped to
-/// the cast spell via `valid_card: SelfRef`.
-fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
+/// CR 614.1a + CR 608.2n: The synthetic self-scoped redirect installed by a
+/// `CastFromZone` / free-cast graveyard-redirect rider (Torrential Gearhulk →
+/// exile; Kylox's Voltstrider → library bottom; the hand variant → owner's
+/// hand). Mirrors the Rest in Peace redirect shape (`ReplacementEvent::Moved`,
+/// `destination_zone: Graveyard`) but scoped to the cast spell via
+/// `valid_card: SelfRef`. The `execute` ability carries the destination-correct
+/// move: a `ChangeZone` for exile/hand, a `PutAtLibraryPosition` (no shuffle,
+/// CR 401.7) for a library position.
+fn spell_graveyard_replacement_def(
+    dest: SpellStackToGraveyardReplacement,
+) -> ReplacementDefinition {
+    let (execute_effect, description) = match dest {
+        SpellStackToGraveyardReplacement::Exile => (
+            self_ref_change_zone(Zone::Exile),
+            "CR 614.1a: if this spell would be put into its owner's graveyard, exile it instead.",
+        ),
+        SpellStackToGraveyardReplacement::Hand => (
+            self_ref_change_zone(Zone::Hand),
+            "CR 614.1a: if this spell would be put into its owner's graveyard, return it to its \
+             owner's hand instead.",
+        ),
+        SpellStackToGraveyardReplacement::Library { position } => (
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                position,
+            },
+            "CR 614.1a: if this spell would be put into its owner's graveyard, put it on its \
+             owner's library instead.",
+        ),
+    };
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .valid_card(TargetFilter::SelfRef)
         .destination_zone(Zone::Graveyard)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                origin: None,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-            },
-        ))
-        .description(
-            "CR 614.1a: if this spell would be put into its owner's graveyard, exile it instead."
-                .to_string(),
-        )
+        .execute(AbilityDefinition::new(AbilityKind::Spell, execute_effect))
+        .description(description.to_string())
+}
+
+/// CR 614.1a: a self-scoped `ChangeZone` move to `destination` — the redirect
+/// body for the exile and hand graveyard-replacement riders.
+fn self_ref_change_zone(destination: Zone) -> Effect {
+    Effect::ChangeZone {
+        destination,
+        origin: None,
+        target: TargetFilter::SelfRef,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    }
 }
 
 /// CR 608.2g: Unwind a cast-during-resolution-rejected cast — remove the
@@ -8430,7 +8517,7 @@ mod tests {
 
     /// CR 614.1a + CR 608.2n (PLAN §8 Risk #2): the Invoke Calamity free-cast
     /// "if this spell would be put into your graveyard, exile it instead" rider
-    /// is installed by `apply_exile_instead_of_graveyard_rider` as a synthetic
+    /// is installed by `apply_spell_graveyard_replacement_rider` as a synthetic
     /// self-scoped `Moved` replacement (the boolean flag is deleted). Driving a
     /// real resolution of a spell carrying the rider must redirect its
     /// stack→graveyard default move to exile through the replacement pipeline.
@@ -8454,7 +8541,11 @@ mod tests {
             .push(CoreType::Instant);
 
         // Install the rider exactly as the FreeCastFromZones resolution path does.
-        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        super::apply_spell_graveyard_replacement_rider(
+            &mut state,
+            spell,
+            crate::types::ability::SpellStackToGraveyardReplacement::Exile,
+        );
         assert!(
             state.objects[&spell]
                 .replacement_definitions
@@ -8497,6 +8588,106 @@ mod tests {
             !state.players[0].graveyard.contains(&spell),
             "the redirected spell must not also reach the graveyard"
         );
+    }
+
+    /// CR 614.1a + CR 608.2n: the E1 destination generalization — Kylox's
+    /// Voltstrider's "if that spell would be put into a graveyard, put it on the
+    /// bottom of its owner's library instead" rider. `spell_graveyard_replacement_def`
+    /// must build a `PutAtLibraryPosition{ SelfRef, Bottom }` redirect (no
+    /// shuffle), so a resolving instant carrying the rider lands on the BOTTOM of
+    /// its owner's library — not the graveyard (default CR 608.2n) and not exile
+    /// (the Torrential sibling destination). REVERT-PROBE: revert the
+    /// destination generalization (so the def builds the exile/graveyard move
+    /// regardless of `dest`) and `library.back() == Some(&spell)` fails — the
+    /// spell lands in the graveyard or exile instead of the library bottom.
+    #[test]
+    fn library_bottom_rider_bottoms_resolved_spell_on_resolution() {
+        use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
+        let mut state = GameState::new_two_player(7);
+        // A pre-existing library card so "bottom" is provably the last slot.
+        let filler_id = CardId(state.next_object_id);
+        let filler = create_object(
+            &mut state,
+            filler_id,
+            PlayerId(0),
+            "Filler".to_string(),
+            Zone::Library,
+        );
+
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Bottom-Bound Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Install the library-bottom rider exactly as the Kylox cast-finalize
+        // path does (via the typed `graveyard_replacement` permission).
+        super::apply_spell_graveyard_replacement_rider(
+            &mut state,
+            spell,
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Bottom,
+            },
+        );
+
+        // A library-neutral effect (draw 0) so the pre-existing filler survives
+        // resolution — otherwise a real draw would consume it before the
+        // stack→library redirect and "bottom" couldn't be distinguished.
+        let resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Library,
+            "the library-bottom rider must send the resolved spell to its owner's library"
+        );
+        assert_eq!(
+            state.players[0].library.back(),
+            Some(&spell),
+            "the spell must be at the BOTTOM (last slot), beneath the pre-existing filler card"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not reach the graveyard (CR 608.2n default)"
+        );
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Library,
+            "and not exile — the Torrential sibling destination must not leak in"
+        );
+        // The filler stays above the redirected spell.
+        assert_eq!(state.players[0].library.front(), Some(&filler));
     }
 
     /// CR 608.2b + CR 616.1 (review fix): a free-cast spell carrying the Invoke
@@ -8543,6 +8734,7 @@ mod tests {
                             enter_with_counters: vec![],
                             conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .description("Rest in Peace".to_string()),
@@ -8579,7 +8771,11 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Instant);
-        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        super::apply_spell_graveyard_replacement_rider(
+            &mut state,
+            spell,
+            crate::types::ability::SpellStackToGraveyardReplacement::Exile,
+        );
         let resolved = ResolvedAbility::new(
             Effect::DealDamage {
                 amount: QuantityExpr::Fixed { value: 3 },
@@ -12256,8 +12452,9 @@ mod tests {
                     }),
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -12358,8 +12555,9 @@ mod tests {
                     }),
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -12424,8 +12622,9 @@ mod tests {
                     }),
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -12468,8 +12667,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -12523,8 +12723,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             hit_obj
                 .casting_permissions
@@ -12536,8 +12737,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -12583,8 +12785,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -12650,8 +12853,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             hit_obj
                 .casting_permissions
@@ -12670,8 +12874,9 @@ mod tests {
                     }),
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -12725,8 +12930,9 @@ mod tests {
                     }),
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             hit_obj
                 .casting_permissions
@@ -12738,8 +12944,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 

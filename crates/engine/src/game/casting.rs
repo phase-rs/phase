@@ -1837,6 +1837,33 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
         })
 }
 
+// CR 614.1a + CR 608.2n: read the graveyard-redirect rider ("if that spell would
+// be put into a graveyard, exile it / put it on the bottom of its owner's library
+// / return it to its owner's hand instead") from the *consumed* cast permission
+// only (the one supporting THIS cast), not any permission that happens to carry a
+// redirect, so a non-consumed sibling permission's rider cannot leak onto this
+// cast (CR 608.2c: apply the instructions belonging to this cast). Mirrors
+// `selected_exile_alt_cost_permission_enters_with_counter`.
+pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> Option<crate::types::ability::SpellStackToGraveyardReplacement> {
+    let obj = state.objects.get(&object_id)?;
+    obj.casting_permissions
+        .iter()
+        .find(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
+        .and_then(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                graveyard_replacement,
+                ..
+            } => graveyard_replacement.clone(),
+            _ => None,
+        })
+}
+
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
@@ -2095,14 +2122,27 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| {
                 obj.casting_permissions.iter().any(|permission| {
+                    use crate::types::ability::{CastingPermission, ManaSpendPermission};
                     matches!(
                         permission,
-                        crate::types::ability::CastingPermission::PlayFromExile {
+                        CastingPermission::PlayFromExile {
                             granted_to,
-                            mana_spend_permission:
-                                Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+                            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                             ..
                         } if *granted_to == player
+                    )
+                    // CR 609.4b: Mirror of the `PlayFromExile` arm for the
+                    // in-place graveyard cast-from-zone grant (Quistis Trepe,
+                    // Tinybones the Pickpocket). Same single consumption
+                    // authority — the concession lives on the grant scoped to
+                    // `granted_to`, never as a global player permission.
+                    || matches!(
+                        permission,
+                        CastingPermission::ExileWithAltCost {
+                            granted_to: Some(g),
+                            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                            ..
+                        } if *g == player
                     )
                 })
             })
@@ -8113,7 +8153,13 @@ pub(super) struct ResolutionCastRequest {
     pub(super) constraint: Option<crate::types::ability::CastPermissionConstraint>,
     pub(super) cast_transformed: bool,
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
-    pub(super) exile_instead_of_graveyard_on_resolve: bool,
+    pub(super) graveyard_replacement:
+        Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    /// CR 608.2g + CR 609.4b: whether the during-resolution cast is free
+    /// (Cascade/Discover/Suspend, `Auto`) or pays the card's real printed cost
+    /// (Quistis Trepe / Tinybones the Pickpocket, `Manual` with an optional
+    /// any-type-mana concession).
+    pub(super) cost: crate::types::ability::ResolutionCastCost,
 }
 
 /// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
@@ -8125,7 +8171,11 @@ pub(super) struct ResolutionCastRequest {
 /// (the resulting-MV gate, evaluated at finalization once X is known),
 /// `cast_transformed` (for Siege victory casts), and `cleanup` (the misses +
 /// reject disposition, so a cast-time rejection can still bottom/hand the hit).
-/// Then prepares and continues the cast on the `Auto` payment mode. The
+/// The `request.cost` (`ResolutionCastCost`) drives the payment shape: `Free`
+/// zeroes the cost and continues on `Auto` (Cascade/Discover/Suspend);
+/// `FullCost` charges the card's live printed cost (`SelfManaCost`), forwards the
+/// any-type-mana concession onto the grant, and pauses on `Manual` payment so the
+/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b). The
 /// returned `WaitingFor` falls through
 /// `run_post_action_pipeline` normally, which fires the hit's own cast-triggers
 /// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
@@ -8151,8 +8201,28 @@ pub(super) fn initiate_cast_during_resolution(
         constraint,
         cast_transformed,
         cleanup,
-        exile_instead_of_graveyard_on_resolve,
+        graveyard_replacement,
+        cost,
     } = request;
+    // CR 608.2g + CR 609.4b: resolve the payment shape once. `Free` zeroes the
+    // cost and auto-pays (Cascade/Discover/Suspend). `FullCost` charges the
+    // card's live printed cost (`SelfManaCost`) and pauses for manual payment so
+    // the caster can spend mana; the any-type concession, when present, rides the
+    // grant (Quistis Trepe, Tinybones the Pickpocket).
+    let (perm_cost, mana_spend_permission, payment_mode) = match cost {
+        crate::types::ability::ResolutionCastCost::Free => {
+            (ManaCost::zero(), None, CastPaymentMode::Auto)
+        }
+        // CR 609.4b: SelfManaCost resolves to the card's live printed cost; the
+        // any-type concession rides the grant.
+        crate::types::ability::ResolutionCastCost::FullCost {
+            mana_spend_permission,
+        } => (
+            ManaCost::SelfManaCost,
+            mana_spend_permission,
+            CastPaymentMode::Manual,
+        ),
+    };
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
         // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
@@ -8164,21 +8234,34 @@ pub(super) fn initiate_cast_during_resolution(
         // enters the cascade reject path.
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
-                cost: ManaCost::zero(),
+                cost: perm_cost,
                 cast_transformed,
                 constraint,
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
                 duration: None,
-                exile_instead_of_graveyard_on_resolve,
+                graveyard_replacement: graveyard_replacement.clone(),
                 enters_with_counter: None,
+                mana_spend_permission,
             });
-        if exile_instead_of_graveyard_on_resolve {
-            crate::game::casting_costs::apply_exile_instead_of_graveyard_rider(state, hit_card);
+        // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
+        // the sole application point for during-resolution casts. The pushed
+        // permission carries `resolution_cleanup: Some(_)`, so
+        // `evaluate_cascade_constraint_with_resulting_mv` (casting_costs.rs) strips
+        // it during `finalize_cast_with_phyrexian_choices` BEFORE the finalize
+        // graveyard-replacement read runs, re-homing only a concession-only
+        // permission without the rider. The finalize read therefore returns `None`
+        // for these casts, so applying here does NOT double-install: the finalize
+        // read (normal exile/graveyard casts) and this read (during-resolution
+        // casts) are mutually exclusive per cast.
+        if let Some(dest) = graveyard_replacement {
+            crate::game::casting_costs::apply_spell_graveyard_replacement_rider(
+                state, hit_card, dest,
+            );
         }
     }
     let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
-    prepared.payment_mode = CastPaymentMode::Auto;
+    prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
 
@@ -12129,6 +12212,23 @@ pub(super) fn find_exile_with_aggregate_cost(
     }
 }
 
+/// CR 701.59a: Detect a collect-evidence component in an activation cost,
+/// returning its threshold `N`. Recurses into `Composite` so the class extends
+/// to any future keyword-action-cost ability that bundles collect evidence with
+/// other sub-costs. Collect evidence is interactive (the player chooses which
+/// graveyard cards to exile), so the caller detours to
+/// `WaitingFor::CollectEvidenceChoice` and pays before the ability reaches the
+/// stack.
+pub(super) fn find_collect_evidence_activation_cost(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::CollectEvidence { amount } => Some(*amount),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(find_collect_evidence_activation_cost)
+        }
+        _ => None,
+    }
+}
+
 /// CR 702.167a/b: Detect a craft materials cost requiring interactive object
 /// selection across the battlefield/graveyard union. Returns `(count,
 /// materials)`. Recurses into `Composite` (the synthesized craft cost is a
@@ -13200,6 +13300,30 @@ pub fn handle_activate_ability(
                     spell: Box::new(pending_discard),
                 },
             });
+        }
+
+        // CR 701.59a + CR 602.2b: Pre-check for a collect-evidence activation
+        // cost (Kylox's Voltstrider — "Collect evidence 6: This Vehicle becomes
+        // an artifact creature ..."). Collect evidence is an INTERACTIVE cost:
+        // the player chooses which graveyard cards (total mana value >= N) to
+        // exile, so it must detour to `WaitingFor::CollectEvidenceChoice` and be
+        // paid BEFORE the ability reaches the stack — exactly like the
+        // ExileAggregate / non-self exile detours. Without this detour the cost
+        // is a silent no-op in `pay_ability_cost` (it is documented there as
+        // "intercepted before reaching pay_ability_cost"), so the ability would
+        // resolve for free. CR 701.59b payability was already enforced by the
+        // `is_payable` gate above; `begin_cost_payment` re-checks it defensively.
+        // The resume (`CollectEvidenceResume::Casting`, made activation-aware)
+        // pushes the activated ability to the stack once the cards are exiled.
+        // This is the SINGLE-AUTHORITY interactive-cost dispatch: the call site
+        // never inspects cost components beyond routing to the resolver.
+        if let Some(amount) = find_collect_evidence_activation_cost(cost) {
+            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending.activation_cost = Some(cost.clone());
+            pending.activation_ability_index = Some(ability_index);
+            return super::effects::collect_evidence::begin_cost_payment(
+                state, player, amount, pending,
+            );
         }
 
         // CR 117.1 + CR 601.2b + CR 602.2b: Pre-check for an `ExileWithAggregate`
