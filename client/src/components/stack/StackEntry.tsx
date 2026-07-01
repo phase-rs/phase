@@ -18,6 +18,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
 
 interface StackEntryProps {
@@ -201,7 +202,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       {/* Card image with explicit inline dimensions (Tailwind can't handle dynamic values) */}
       <div
         style={{ width: cardSize.width, height: cardSize.height }}
-        className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
+        className={`relative overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
         {isLoading || !src ? (
           <div
@@ -218,6 +219,9 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         )}
         {isSpell && displayManaCost && (
           <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
+        )}
+        {sourceObj?.unimplemented_mechanics && (
+          <UnimplementedMechanicsBadge mechanics={sourceObj.unimplemented_mechanics} />
         )}
       </div>
 

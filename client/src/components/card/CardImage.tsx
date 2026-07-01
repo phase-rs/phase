@@ -8,6 +8,7 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -121,13 +122,8 @@ export function CardImage({
         className={`${baseClasses} shadow-lg object-cover`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
       />
-      {unimplementedMechanics && unimplementedMechanics.length > 0 && (
-        <span
-          className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
-          title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
-        >
-          !
-        </span>
+      {unimplementedMechanics && (
+        <UnimplementedMechanicsBadge mechanics={unimplementedMechanics} />
       )}
       {tapIndicator && (
         <span

@@ -253,4 +253,54 @@ describe("StackEntry", () => {
 
     expect(screen.queryByRole("button", { name: /auto-pass/i })).not.toBeInTheDocument();
   });
+
+  it("shows the unimplemented-mechanics warning badge when the source object has partial support", () => {
+    const entry: StackEntryType = buildStackEntry({
+      id: 10,
+      source_id: 5,
+      controller: 0,
+      kind: {
+        type: "Spell",
+        data: {
+          card_id: 1,
+          actual_mana_spent: 0,
+        },
+      },
+    });
+
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({
+          id: 5,
+          card_id: 1,
+          name: "Partial Card",
+          zone: "Stack",
+          mana_cost: { type: "Cost", shards: [], generic: 2 },
+          card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
+          color: ["Blue"],
+          base_color: ["Blue"],
+          unimplemented_mechanics: ["Cascade"],
+        }),
+      ),
+      stack: [entry],
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+      });
+    });
+
+    render(
+      <StackEntry
+        entry={entry}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+      />,
+    );
+
+    expect(screen.getByTitle("Unimplemented: Cascade")).toBeInTheDocument();
+  });
 });
