@@ -216,7 +216,7 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
+          BASE="https://data.phase-rs.dev/staging"
           fail=0
           check() {
             local f="$1"
@@ -355,9 +355,9 @@ jobs:
           # the directory holding every shared JSON; CARD_DATA_URL is pinned to
           # the content-addressed copy so the WASM bundle is locked to the exact
           # card-data it was built against (filename from the card-data job).
-          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
-          AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          DATA_BASE_URL: "https://data.phase-rs.dev/staging"
+          CARD_DATA_URL: "https://data.phase-rs.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
+          AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
           # access control), so it's baked into the bundle. Empty (secret unset) →
           # cloud sync stays disabled and the app falls back to file backup.

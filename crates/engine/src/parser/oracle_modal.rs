@@ -1278,7 +1278,11 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         mode_count,
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
-        constraints: cap_modal_constraints(&header.constraints, mode_count),
+        constraints: cap_modal_constraints(
+            &header.constraints,
+            mode_count,
+            !mode_pawprints.is_empty(),
+        ),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         mode_pawprints,
         entwine_cost: None,
@@ -1296,6 +1300,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
 fn cap_modal_constraints(
     constraints: &[ModalSelectionConstraint],
     mode_count: usize,
+    is_pawprint_budget: bool,
 ) -> Vec<ModalSelectionConstraint> {
     constraints
         .iter()
@@ -1305,11 +1310,23 @@ fn cap_modal_constraints(
                 condition,
                 max_choices,
                 otherwise_max_choices,
-            } => ModalSelectionConstraint::ConditionalMaxChoices {
-                condition,
-                max_choices: max_choices.min(mode_count),
-                otherwise_max_choices: otherwise_max_choices.min(mode_count),
-            },
+            } => {
+                if is_pawprint_budget {
+                    // CR 700.2i: conditional caps on pawprint modals are point
+                    // budgets, not mode-count ceilings.
+                    ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition,
+                        max_choices,
+                        otherwise_max_choices,
+                    }
+                } else {
+                    ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition,
+                        max_choices: max_choices.min(mode_count),
+                        otherwise_max_choices: otherwise_max_choices.min(mode_count),
+                    }
+                }
+            }
             other => other,
         })
         .collect()

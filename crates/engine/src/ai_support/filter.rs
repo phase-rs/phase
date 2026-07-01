@@ -34,7 +34,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::game::combat::AttackTarget;
-use crate::game::engine::{apply_as_current_for_legality, SimulationProbeGuard};
+use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard};
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, FilterProp, ParitySource,
@@ -144,7 +144,7 @@ impl CandidateFilter for SimulationFilter {
         let _probe = SimulationProbeGuard::enter();
         // Legality-only probe (#4479): `sim` is discarded, so skip display derivation
         // (the O(N^2) mana-availability board sweep on go-wide token boards).
-        apply_as_current_for_legality(&mut sim, candidate.action.clone()).is_ok()
+        apply_as_current_for_simulation(&mut sim, candidate.action.clone()).is_ok()
     }
 }
 
@@ -258,8 +258,8 @@ impl FilterPipeline {
 /// purpose of the expensive legality simulation: every field the conservative
 /// SAFE classifiers read is captured here, while pure identity/ordering fields
 /// (`id`, `incarnation`, `timestamp`) and display-derived fields (recomputed
-/// under `PublicFinalizeMode::DeferredDisplay`, which `apply_as_current_for_legality`
-/// uses) are excluded.
+/// under `PublicFinalizeMode::DeferredDisplay`, which the legality probe's
+/// `apply_as_current_for_simulation` uses) are excluded.
 ///
 /// CR 400.7: object identity (`id`/`incarnation`) is intentionally NOT part of
 /// the fingerprint — the whole point is to collapse distinct-id, content-identical

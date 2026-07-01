@@ -27,7 +27,7 @@ Spend your effort on `supported_aspect_defect`. That is where bugs actually live
 ### 1. Look up the card
 
 ```bash
-curl -s "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
+curl -s "https://data.phase-rs.dev/preview/coverage-data.json" \
   | jq --arg n "<card_name>" '.cards[] | select(.card_name == $n) | {oracle_text, supported, parse_details}'
 ```
 

@@ -346,9 +346,9 @@ jobs:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
           # the directory holding every shared JSON. CARD_DATA_URL pins the
           # WASM bundle to its content-addressed card-data forever.
-          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
-          AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          DATA_BASE_URL: "https://data.phase-rs.dev"
+          CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
           # deploy (deploy.yml) deliberately omits this so it never self-links.
@@ -402,7 +402,7 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+          BASE="https://data.phase-rs.dev"
           fail=0
           check() {
             local f="$1"

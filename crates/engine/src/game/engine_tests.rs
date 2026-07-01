@@ -402,7 +402,7 @@ fn setup_game_at_main_phase() -> GameState {
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
 /// squirrel state). The AI `SimulationFilter` legality probe
-/// (`apply_as_current_for_legality`) discards its mutated clone and only
+/// (`apply_as_current_for_simulation`) discards its mutated clone and only
 /// reads `.is_ok()`, so it must NOT run `finalize_display_state`'s
 /// board-global mana-availability sweep — that sweep is O(N^2) on a board of
 /// hundreds of mana sources and the filter pays it once per candidate.
@@ -413,7 +413,7 @@ fn apply_for_legality_skips_display_mana_sweep() {
     let mut sim = setup_game_at_main_phase();
     sim.public_state_dirty.mana_display_dirty = true;
     crate::game::perf_counters::reset();
-    apply_as_current_for_legality(&mut sim, GameAction::PassPriority).unwrap();
+    apply_as_current_for_simulation(&mut sim, GameAction::PassPriority).unwrap();
     assert_eq!(
         crate::game::perf_counters::snapshot().mana_display_sweeps,
         0,

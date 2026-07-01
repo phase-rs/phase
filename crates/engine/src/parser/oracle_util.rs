@@ -1810,6 +1810,15 @@ pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
             return Some((Comparator::LT, n as i32));
         }
     }
+    // "exactly N" — CR 608.2c post-effect equality condition ("if its power is
+    // exactly 20"). Uses a nom `tag` combinator (parser-combinator gate scopes
+    // src/parser/ and rejects new string-literal strip_prefix dispatch).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(text) {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::EQ, n as i32));
+        }
+    }
     None
 }
 

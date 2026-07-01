@@ -243,8 +243,9 @@ fn rebound_declined_at_upkeep_leaves_card_in_exile_with_no_permission() {
             resolution_cleanup: None,
             duration: Some(Duration::UntilEndOfTurn),
 
-            exile_instead_of_graveyard_on_resolve: false,
+            graveyard_replacement: None,
             enters_with_counter: None,
+            mana_spend_permission: None,
         });
     engine::game::layers::prune_end_of_turn_casting_permissions(&mut state);
     assert!(

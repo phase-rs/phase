@@ -433,6 +433,27 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 608.2g + CR 609.4b: paid graveyard cast (Quistis Trepe, Tinybones)
+        // offers a binary cast/decline; emit both for the search to explore.
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::GraveyardPaidCast { .. },
+        } => vec![
+            candidate(
+                GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Cast,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Decline,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
         // both accept (put onto the battlefield) and decline (hand / rest pile)
         // are legitimate plays, so emit both for the search to explore.
@@ -1175,6 +1196,42 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        WaitingFor::KeepWithinTotalPowerChoice {
+            player,
+            eligible,
+            cap,
+            ..
+        } => {
+            // Offer a few valid kept-subsets within the cap: keep nothing
+            // (sacrifice all) and a greedy subset that keeps the most creatures
+            // (lowest power first while the running total fits the cap).
+            let power = |id: &ObjectId| state.objects.get(id).and_then(|o| o.power).unwrap_or(0);
+            let mut by_power = eligible.clone();
+            by_power.sort_by_key(power);
+            let mut greedy = Vec::new();
+            let mut total = 0i32;
+            for id in by_power {
+                let p = power(&id);
+                if total + p <= *cap {
+                    total += p;
+                    greedy.push(id);
+                }
+            }
+            let mut keeps: Vec<Vec<ObjectId>> = vec![Vec::new()];
+            if !greedy.is_empty() {
+                keeps.push(greedy);
+            }
+            keeps
+                .into_iter()
+                .map(|kept| {
+                    candidate(
+                        GameAction::ChooseKeptCreatures { kept },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {
             player,
@@ -1374,6 +1431,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             modal,
             unavailable_modes,
+            is_activated,
             ..
         } => {
             let available: Vec<usize> = (0..modal.mode_count)
@@ -1411,7 +1469,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
             // mode sequences. Index the UNFILTERED `modal` (real indices
             // 0..mode_count). No-op for non-pawprint modals.
-            if modal.mode_pawprints.is_empty() {
+            let mut actions = if modal.mode_pawprints.is_empty() {
                 actions
             } else {
                 actions
@@ -1423,7 +1481,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         _ => true,
                     })
                     .collect()
+            };
+            // CR 602.2b: An activated modal ability can be cancelled at the mode-choice
+            // sub-step (see engine.rs). Surfacing CancelCast here feeds BOTH the AI search
+            // and the multiplayer exact-legal-actions gate (candidate_actions_broad flows
+            // through candidate_actions → validated_candidate_actions → flat_priority_actions
+            // → legal_actions_full), so a human in MP can submit cancel. Triggered modal
+            // abilities (CR 603.3c) must choose a mode — no cancel.
+            if *is_activated {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
             }
+            actions
         }
         WaitingFor::ConniveDiscard {
             player,
@@ -2554,6 +2626,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Discover { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { .. },
             ..
         }
         | WaitingFor::CastOffer {
@@ -5371,6 +5447,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         let actions = candidate_actions_broad(&state);
@@ -6453,6 +6530,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         .cost(AbilityCost::Mana {

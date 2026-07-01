@@ -4385,8 +4385,11 @@ fn dispatch_pending_trigger_context(
                     &trigger.ability,
                     &trigger.ability.effect,
                 ) {
+                    // CR 601.2c + CR 601.2d: Divide only among the distributing
+                    // effect's own targets; sibling-effect targets became targets
+                    // in the emit above and are not part of the division.
                     let assigned_targets =
-                        super::ability_utils::flatten_targets_in_chain(&trigger.ability);
+                        super::ability_utils::distribution_targets(&trigger.ability);
                     if assigned_targets.len() == 1 {
                         trigger.ability.distribution =
                             Some(vec![(assigned_targets[0].clone(), total)]);
@@ -6964,11 +6967,11 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp,
-        KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
+        Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -10427,6 +10430,7 @@ pub mod tests {
                 .condition(AbilityCondition::ConditionInstead {
                     inner: Box::new(AbilityCondition::CastVariantPaid {
                         variant: CastVariantPaid::Emerge,
+                        subject: crate::types::ability::ObjectScope::Source,
                     }),
                 }),
             ),
@@ -11005,6 +11009,7 @@ pub mod tests {
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
                                 face_down_profile: None,
+                                enters_modified_if: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -11176,6 +11181,121 @@ pub mod tests {
         assert_eq!(state.objects[&target2].damage_marked, 3);
     }
 
+    /// CR 601.2c + CR 601.2d + CR 603.3d (runtime seam test): a triggered
+    /// ability whose divided-damage node is CHAINED to a sibling "tap target
+    /// creature" effect announces its division only among the damage node's OWN
+    /// targets — the sibling target is excluded from `DistributeAmong.targets`
+    /// even though it still "becomes a target" (a `BecomesTarget` event fires
+    /// for it). Reverting the `distribution_targets` scoping regresses (a): the
+    /// sibling would leak into the division prompt.
+    #[test]
+    fn trigger_distributed_damage_scopes_distribution_to_own_targets_not_sibling() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let dmg1 = make_creature(&mut state, PlayerId(1), "Damage Target 1", 2, 10);
+        let dmg2 = make_creature(&mut state, PlayerId(1), "Damage Target 2", 2, 10);
+        let tap_target = make_creature(&mut state, PlayerId(1), "Tap Target", 2, 10);
+
+        let source = make_creature(&mut state, PlayerId(0), "Chained Source", 3, 3);
+        {
+            // Top-level divided damage among exactly two target creatures,
+            // chained to a sibling "tap target creature".
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                },
+            );
+            execute.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+            execute.distribute = Some(DistributionUnit::Damage);
+            let execute = execute.sub_ability(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Tap,
+                },
+            ));
+
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events);
+
+        let wf = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("begin trigger target selection")
+            .expect("target selection required");
+        state.waiting_for = wf;
+
+        // Slot order is effect-first then sub_ability: [dmg0, dmg1, tap].
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Object(dmg1),
+                    TargetRef::Object(dmg2),
+                    TargetRef::Object(tap_target),
+                ],
+            },
+        )
+        .expect("target selection should succeed");
+
+        // (a) Division is scoped to the damage node's own targets — the sibling
+        // tap target is NOT offered as a division recipient.
+        match &result.waiting_for {
+            WaitingFor::DistributeAmong {
+                total,
+                targets,
+                unit: DistributionUnit::Damage,
+                ..
+            } => {
+                assert_eq!(*total, 4);
+                assert_eq!(
+                    targets,
+                    &vec![TargetRef::Object(dmg1), TargetRef::Object(dmg2)],
+                    "distribution offered only among the damage node's own targets"
+                );
+                assert!(
+                    !targets.contains(&TargetRef::Object(tap_target)),
+                    "sibling tap target must not leak into the division"
+                );
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+
+        // (b) The sibling target still became a target (CR 601.2c) — a
+        // BecomesTarget event fired for it.
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::BecomesTarget {
+                    target: TargetRef::Object(id),
+                    ..
+                } if *id == tap_target
+            )),
+            "sibling tap target should still emit a becomes-target event"
+        );
+    }
+
     #[test]
     fn granted_etb_destroy_other_same_name_skips_source_when_no_other_exists() {
         let mut state = setup();
@@ -11296,6 +11416,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -11403,6 +11524,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         execute.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
@@ -11602,6 +11724,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -11717,6 +11840,7 @@ pub mod tests {
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
                                 face_down_profile: None,
+                                enters_modified_if: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -11793,6 +11917,7 @@ pub mod tests {
                             enter_with_counters: vec![],
                             conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -11855,6 +11980,7 @@ pub mod tests {
                             enter_with_counters: vec![],
                             conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -12007,6 +12133,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -12166,6 +12293,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -12443,6 +12571,7 @@ pub mod tests {
                                     enter_with_counters: vec![],
                                     conditional_enter_with_counters: vec![],
                                     face_down_profile: None,
+                                    enters_modified_if: None,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -13493,7 +13622,7 @@ pub mod tests {
     /// event, not any creature dealt excess damage this turn.
     fn maarika_excess_condition() -> TriggerCondition {
         // CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "if that creature was dealt
-        // excess damage this turn" — DamageDealtThisTurn{excess_only,target=EventTarget} >= 1.
+        // excess damage this turn" — DamageDealtThisTurn{channel:Excess,target=EventTarget} >= 1.
         TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::DamageDealtThisTurn {
@@ -13502,7 +13631,7 @@ pub mod tests {
                     aggregate: AggregateFunction::Sum,
                     group_by: None,
                     damage_kind: DamageKindFilter::Any,
-                    excess_only: true,
+                    channel: DamageChannel::Excess,
                 },
             },
             comparator: Comparator::GE,
@@ -14858,6 +14987,7 @@ pub mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -14882,6 +15012,7 @@ pub mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -14963,6 +15094,7 @@ pub mod tests {
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -14994,6 +15126,7 @@ pub mod tests {
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -22343,6 +22476,7 @@ pub mod tests {
                 sacrifice_filter: crate::types::ability::TargetFilter::Typed(
                     crate::types::ability::TypedFilter::permanent(),
                 ),
+                total_power_cap: None,
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);
@@ -22924,6 +23058,7 @@ pub mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -23358,6 +23493,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -23486,6 +23622,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
