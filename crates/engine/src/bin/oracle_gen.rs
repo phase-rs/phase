@@ -346,8 +346,9 @@ fn write_oracle_subtypes(
         .into_iter()
         .collect();
     let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
-    // Emit a trailing newline so the committed file is POSIX-clean and a
-    // re-generation never produces a spurious no-newline diff.
+    // `serde_json::to_string_pretty` does not emit a trailing newline; append one
+    // so the committed generated file stays POSIX-compliant (no "\ No newline at
+    // end of file" diff churn on every regeneration).
     match serde_json::to_string_pretty(&list)
         .map_err(|e| e.to_string())
         .and_then(|json| std::fs::write(&out_path, format!("{json}\n")).map_err(|e| e.to_string()))
@@ -487,9 +488,7 @@ fn build_token_source_metadata(
                 .unwrap_or(&card.name)
                 .to_lowercase();
             let entry = map.entry(key).or_default();
-            entry
-                .related_token_ids
-                .extend(card.related_cards.tokens.into_iter());
+            entry.related_token_ids.extend(card.related_cards.tokens);
             // Alchemy spellbook: keep the first non-empty list seen for the face.
             if entry.spellbook.is_empty() && !card.related_cards.spellbook.is_empty() {
                 entry.spellbook = card.related_cards.spellbook;

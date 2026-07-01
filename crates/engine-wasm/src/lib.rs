@@ -1004,7 +1004,8 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
 /// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         to_js(&LegalActionsResult {
@@ -1026,7 +1027,8 @@ pub fn get_legal_actions_js() -> JsValue {
 /// game logic into the transport adapter.
 #[wasm_bindgen]
 pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) =
             legal_actions_for_viewer(state, PlayerId(player_id as u8));
         let auto_pass = auto_pass_recommended(state, &actions);
@@ -1064,7 +1066,8 @@ struct ViewerSnapshot {
 
 #[wasm_bindgen]
 pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let (actions, spell_costs, legal_actions_by_object) =

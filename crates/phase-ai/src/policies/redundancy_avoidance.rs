@@ -513,6 +513,7 @@ fn redundancy_delta(
         | Effect::ManifestDread
         | Effect::Cloak { .. }
         | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }

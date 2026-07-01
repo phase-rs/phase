@@ -74,7 +74,6 @@
     "resolveTooltip": "Przekaż priorytet, aby górny element na stosie mógł zostać rozpatrzony, jeśli każdy gracz również przekaże priorytet. Skrót: Spacja.",
     "resolveAll": "Rozpatrz wszystko",
     "resolveAllTooltip": "Przekazuj priorytet, dopóki stos się rozpatruje. Wymagany wybór lub zatrzymanie może to przerwać.",
-    "waiting": "Oczekiwanie",
     "priorityTooltip": "Przekaż priorytet. Jeśli stos jest pusty, spowoduje to przejście przez bieżące okno priorytetu. Skrót: Spacja.",
     "pass": "Przekaż",
     "passToEndTooltip": "Automatycznie przekazuj priorytet aż do kroku końcowego, chyba że przerwie to wybór, zatrzymanie lub Pełna kontrola. Skrót: Enter.",
@@ -1593,6 +1592,7 @@
     "copyDiagnostic": "Kopiuj diagnostykę",
     "copied": "Skopiowano!",
     "reportOnGithub": "Zgłoś na GitHub",
+    "continueWaiting": "Czekaj dalej",
     "reload": "Odśwież",
     "reportTitle": "Awaria silnika: {{summary}}",
     "reportConnectionSummary": "Utracono połączenie z silnikiem",
@@ -1882,5 +1882,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for {{player}}",
+    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

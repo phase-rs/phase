@@ -375,7 +375,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
             | GameEvent::Specialized { .. }
-            | GameEvent::TurnedFaceUp { .. } => {
+            | GameEvent::TurnedFaceUp { .. }
+            // Turning a permanent face down resets its copiable values to a 2/2
+            // face-down body (Layer 1) and changes its visibility; recompute.
+            | GameEvent::TurnedFaceDown { .. } => {
                 mark_public_state_all_dirty(state);
                 return;
             }

@@ -74,7 +74,6 @@
     "resolveTooltip": "Gib die Priorität ab, damit das oberste Stapelobjekt aufgelöst werden kann, wenn alle Spieler ebenfalls abgeben. Tastenkürzel: Leertaste.",
     "resolveAll": "Alles auflösen",
     "resolveAllTooltip": "Gib die Priorität weiter ab, während sich der Stapel auflöst. Eine erforderliche Wahl oder ein Stopp kann es unterbrechen.",
-    "waiting": "Warten",
     "priorityTooltip": "Priorität abgeben. Wenn der Stapel leer ist, rückt dies durch das aktuelle Prioritätsfenster vor. Tastenkürzel: Leertaste.",
     "pass": "Abgeben",
     "passToEndTooltip": "Bis zum Endschritt automatisch abgeben, sofern keine Wahl, kein Stopp oder die volle Kontrolle unterbricht. Tastenkürzel: Eingabe.",
@@ -1593,6 +1592,7 @@
     "copyDiagnostic": "Diagnose kopieren",
     "copied": "Kopiert!",
     "reportOnGithub": "Auf GitHub melden",
+    "continueWaiting": "Weiter warten",
     "reload": "Neu laden",
     "reportTitle": "Engine-Absturz: {{summary}}",
     "reportConnectionSummary": "Engine-Verbindung verloren",
@@ -1882,5 +1882,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for {{player}}",
+    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

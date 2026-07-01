@@ -466,20 +466,25 @@ pub fn activatable_land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, true, None)
+    land_mana_options(state, object_id, controller, true, true, None, None)
 }
 
-/// Indexed arity of `activatable_land_mana_options`: the board-global
-/// activatable sweep precomputes the TapsForMana trigger-source list once
-/// (`taps_for_mana_trigger_sources`) and threads it through each land, avoiding
-/// a per-land full-battlefield scan. Byte-identical to the per-land form.
-pub(crate) fn activatable_land_mana_options_indexed(
+pub(crate) fn activatable_land_mana_options_indexed_gated(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     aura_sources: &[ObjectId],
+    gates: &mana_abilities::ManaActivationGates,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, true, Some(aura_sources))
+    land_mana_options(
+        state,
+        object_id,
+        controller,
+        true,
+        true,
+        Some(aura_sources),
+        Some(gates),
+    )
 }
 
 /// Auto-tap land mana options for the board-global cost sweep. The sweep
@@ -499,6 +504,7 @@ pub(crate) fn auto_tap_land_mana_options_indexed(
         true,
         false,
         Some(aura_sources),
+        None,
     )
 }
 
@@ -766,7 +772,7 @@ pub fn activatable_mana_options(
     if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, true)
+    scan_mana_abilities(state, obj, object_id, controller, true, None)
 }
 
 pub(crate) fn auto_tap_mana_options(
@@ -783,7 +789,7 @@ pub(crate) fn auto_tap_mana_options(
     if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, false)
+    scan_mana_abilities(state, obj, object_id, controller, false, None)
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -814,7 +820,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            is_active_tap_mana_ability(state, object_id, controller, *idx, ability, true)
+            is_active_tap_mana_ability(state, object_id, controller, *idx, ability, true, None)
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
@@ -1325,6 +1331,7 @@ fn land_mana_options(
     // callers). Byte-identical either way — the indexed and full scans visit the
     // same trigger-bearing permanents.
     aura_sources: Option<&[ObjectId]>,
+    gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> Vec<ManaSourceOption> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -1351,6 +1358,7 @@ fn land_mana_options(
         object_id,
         controller,
         require_current_payability,
+        gates,
     );
 
     // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
@@ -1452,20 +1460,32 @@ fn is_active_tap_mana_ability(
     ability_index: usize,
     ability: &AbilityDefinition,
     require_current_payability: bool,
+    gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> bool {
     if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
         return false;
     }
-    if require_current_payability
-        && !mana_abilities::can_activate_mana_ability_now(
-            state,
-            controller,
-            object_id,
-            ability_index,
-            ability,
-        )
-    {
-        return false;
+    if require_current_payability {
+        let activatable = match gates {
+            Some(gates) => mana_abilities::can_activate_mana_ability_now_gated(
+                state,
+                controller,
+                object_id,
+                ability_index,
+                ability,
+                gates,
+            ),
+            None => mana_abilities::can_activate_mana_ability_now(
+                state,
+                controller,
+                object_id,
+                ability_index,
+                ability,
+            ),
+        };
+        if !activatable {
+            return false;
+        }
     }
     if !has_tap_component(&ability.cost) {
         return false;
@@ -1481,6 +1501,7 @@ fn scan_mana_abilities(
     object_id: ObjectId,
     controller: PlayerId,
     require_current_payability: bool,
+    gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
     for (ability_index, ability) in obj.abilities.iter().enumerate() {
@@ -1491,6 +1512,7 @@ fn scan_mana_abilities(
             ability_index,
             ability,
             require_current_payability,
+            gates,
         ) {
             continue;
         }

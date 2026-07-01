@@ -1,4 +1,4 @@
-import type { PlayerId } from "../adapter/types";
+import type { PlayerId, WaitingFor } from "../adapter/types";
 import { PLAYER_ID, SPECTATOR_PLAYER_ID } from "../constants/game";
 import { useGameStore } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
@@ -32,7 +32,14 @@ export function getPlayerId(): PlayerId {
   return currentLocalPlayerId();
 }
 
-function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["waitingFor"]): PlayerId | null {
+/**
+ * The seat that must act next for `waitingFor` — the *semantic* actor, which
+ * differs from the engine's `priority_player` (the re-derived authorized
+ * submitter). Resolves Vote delegation and Assist's chosen helper; otherwise
+ * the variant's `player`. Exported so display surfaces (e.g. `useTurnStatus`)
+ * read this single authority instead of cloning the logic.
+ */
+export function waitingPlayer(waitingFor: WaitingFor | null): PlayerId | null {
   if (!waitingFor || waitingFor.type === "GameOver") return null;
   // `VoteChoice.actor` names who submits the next `ChooseOption`. Classic
   // Council's-dilemma votes carry `{ type: "SubjectActs" }` so the current
