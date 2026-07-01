@@ -17,7 +17,7 @@ export const meta = {
 const TIER = 'Frontier'
 
 // Published coverage endpoint (AI-CONTRIBUTOR.md §3).
-const COVERAGE_URL = 'https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json'
+const COVERAGE_URL = 'https://data.phase-rs.dev/staging/coverage-data.json'
 
 // This per-card pipeline embodies the /engine-implementer contract: /engine-planner ->
 // /review-engine-plan (looped) -> engine-implementation-executor -> /review-impl (looped until

@@ -165,7 +165,7 @@ Skip this section entirely on the Non-developer track — CI runs everything `--
 **If the human did not name a card**, fetch the latest coverage data directly from the published R2 endpoint (no local `cargo coverage` needed):
 
 ```
-WebFetch: https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
+WebFetch: https://data.phase-rs.dev/staging/coverage-data.json
 ```
 
 From the JSON, select a card where:
@@ -389,7 +389,7 @@ Steps:
    git fetch upstream main; git checkout main &&
    git merge --ff-only upstream/main && git push origin main
 2. If I named a card, use it. Otherwise WebFetch
-   https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
+   https://data.phase-rs.dev/staging/coverage-data.json
    and pick a card with supported==false and small gap_count.
 3. git checkout -b card/<slug> upstream/main  (cut the branch from CURRENT
    upstream/main, not stale fork main; if the branch already exists locally or

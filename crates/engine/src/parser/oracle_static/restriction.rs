@@ -2274,6 +2274,47 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
         .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 
+/// CR 609.4b: Parse the activation-source-filtered any-color-mana spend static —
+/// "You may spend mana as though it were mana of any color to activate abilities
+/// of <subject>." (Agatha's Soul Cauldron / Joiner Adept). Lowers to
+/// `StaticMode::SpendManaAsAnyColor { spell_filter: None,
+/// activation_source_filter: Some(filter) }`, scoping the any-color concession to
+/// activated abilities whose source permanent matches the subject filter (CR
+/// 609.4b: the concession changes only how a cost is paid, never the cost).
+///
+/// The unfiltered board-wide form ("you may spend mana as though it were mana of
+/// any color", Chromatic Orrery) and the spell-class-filtered form ("to cast
+/// creature spells", Vizier) are handled separately and must not be swallowed
+/// here — this handler requires the explicit "to activate abilities of <subject>"
+/// scope.
+pub(crate) fn try_parse_spend_any_color_to_activate_abilities(
+    text: &str,
+    tp: &TextPair<'_>,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(
+        tp,
+        "you may spend mana as though it were mana of any color to activate abilities of ",
+    )
+    .or_else(|| {
+        nom_tag_tp(
+            tp,
+            "spend mana as though it were mana of any color to activate abilities of ",
+        )
+    })?;
+
+    let subject = rest.trim_end().trim_end_matches('.');
+    let activation_source_filter = parse_continuous_subject_filter(subject.original)?;
+
+    Some(
+        StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: Some(activation_source_filter),
+        })
+        .affected(TargetFilter::Player)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 609.4b: Parse the spell-class-filtered any-type-mana spend static —
 /// "You (may|can) spend mana of any type to cast <spell-filter> spells."
 /// (Vizier of the Menagerie: "creature spells"). Lowers to
@@ -2341,6 +2382,7 @@ pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
     Some(
         StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(filter),
+            activation_source_filter: None,
         })
         // For the filtered (`Some`) path `affected` is documentation-only:
         // controller-scoping is enforced at runtime by the explicit
@@ -2705,6 +2747,39 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
 }
 
 #[cfg(test)]
+mod spend_any_color_to_activate_abilities_tests {
+    use super::*;
+    use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
+
+    /// CR 609.4b: Agatha's Soul Cauldron / Joiner Adept — activation-source-scoped
+    /// any-color spend must lower to `activation_source_filter: Some(creatures you
+    /// control)`, not the board-wide form.
+    #[test]
+    fn parses_creatures_you_control_activation_scope() {
+        let text = "You may spend mana as though it were mana of any color to activate abilities of creatures you control.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let def = try_parse_spend_any_color_to_activate_abilities(text, &tp)
+            .expect("activation-source-scoped spend line must parse");
+
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+
+        match def.mode {
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: Some(TargetFilter::Typed(typed)),
+            } => {
+                assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+            }
+            other => panic!(
+                "expected SpendManaAsAnyColor {{ activation_source_filter: Some(creatures you control) }}, got {other:?}"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
 mod filtered_spend_any_type_tests {
     use super::*;
 
@@ -2726,6 +2801,7 @@ mod filtered_spend_any_type_tests {
         match def.mode {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: Some(TargetFilter::Typed(typed)),
+                activation_source_filter: None,
             } => assert!(
                 typed.type_filters.contains(&TypeFilter::Creature),
                 "spell filter must scope to creature spells; got {typed:?}"

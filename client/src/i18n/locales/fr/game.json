@@ -184,7 +184,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Gard."
     }
   },
   "player": {
@@ -1499,16 +1500,20 @@
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Découverte",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Lancer depuis le cimetière",
     "title": "Lancer {{name}} ?",
     "subtitleCascade": "Cascade a exilé {{name}} (valeur de mana inférieure à {{sourceMv}}). Lancez-le sans payer son coût de mana, ou refusez et mélangez les {{total}} cartes exilées au-dessous de votre bibliothèque.",
     "subtitleDiscover": "Découverte a exilé {{name}}. Lancez-le sans payer son coût de mana, ou mettez-le dans votre main et mélangez les {{missCount}} autres cartes exilées au-dessous de votre bibliothèque.",
     "subtitleRipple": "Ripple a révélé {{name}}. Lancez-le sans payer son coût de mana, ou refusez et placez les {{total}} cartes révélées au-dessous de votre bibliothèque dans un ordre aléatoire.",
+    "subtitleGraveyardPaid": "Lancez {{name}} depuis un cimetière en payant son coût de mana — du mana de n'importe quel type peut être dépensé. Ou refusez et laissez-la dans le cimetière.",
     "castNamed": "Lancer {{name}}",
     "castSuffix": "(sans payer son coût de mana)",
+    "castPaidSuffix": "(payez son coût de mana — du mana de n'importe quel type peut être dépensé)",
     "putIntoHand": "Mettre en main",
     "decline": "Refuser",
     "discoverDeclineSuffix": "(mettre le reste en dessous)",
-    "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)"
+    "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)",
+    "graveyardPaidDeclineSuffix": "(la laisser dans le cimetière)"
   },
   "freeCastWindow": {
     "eyebrow": "Lancement gratuit",
@@ -1858,7 +1863,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Conserver"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1868,14 +1874,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}} : force {{selected}} / {{max}} ou moins"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirmer ({{selected}}/{{max}} de force)"
   },
   "planechase": {
     "active": "Active plane",

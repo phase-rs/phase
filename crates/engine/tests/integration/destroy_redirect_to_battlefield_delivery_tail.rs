@@ -57,6 +57,7 @@ fn return_to_battlefield_instead_of_dying() -> ReplacementDefinition {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         ))
         .description("Return to the battlefield instead of dying".to_string())

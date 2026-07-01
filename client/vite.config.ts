@@ -221,7 +221,7 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /^https:\/\/pub-fc5b5c2c6e774356ae3e730bb0326394\.r2\.dev\/audio\//,
+            urlPattern: /^https:\/\/data\.phase-rs\.dev\/audio\//,
             handler: "CacheFirst",
             options: {
               cacheName: "audio-r2",

@@ -184,7 +184,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Mant."
     }
   },
   "player": {
@@ -1499,16 +1500,20 @@
     "cascadeEyebrow": "Cascada",
     "discoverEyebrow": "Descubrir",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Lanzar desde el cementerio",
     "title": "¿Lanzar {{name}}?",
     "subtitleCascade": "Cascada exilió {{name}} (valor de maná inferior a {{sourceMv}}). Lánzala sin pagar su coste de maná, o rechaza y baraja las {{total}} cartas exiliadas hacia el fondo de tu biblioteca.",
     "subtitleDiscover": "Descubrir exilió {{name}}. Lánzala sin pagar su coste de maná, o ponla en tu mano y baraja las otras {{missCount}} cartas exiliadas hacia el fondo de tu biblioteca.",
     "subtitleRipple": "Ripple reveló {{name}}. Lánzala sin pagar su coste de maná, o rehúsa y pon las {{total}} cartas reveladas en el fondo de tu biblioteca en orden aleatorio.",
+    "subtitleGraveyardPaid": "Lanza {{name}} desde un cementerio pagando su coste de maná; puede gastarse maná de cualquier tipo. O rehúsa y déjala en el cementerio.",
     "castNamed": "Lanzar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
+    "castPaidSuffix": "(paga su coste de maná; puede gastarse maná de cualquier tipo)",
     "putIntoHand": "Poner en la mano",
     "decline": "Rechazar",
     "discoverDeclineSuffix": "(pon el resto en el fondo)",
-    "cascadeDeclineSuffix": "(baraja todas las cartas exiliadas hacia el fondo)"
+    "cascadeDeclineSuffix": "(baraja todas las cartas exiliadas hacia el fondo)",
+    "graveyardPaidDeclineSuffix": "(dejarla en el cementerio)"
   },
   "freeCastWindow": {
     "eyebrow": "Lanzamiento gratis",
@@ -1858,7 +1863,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Conservar"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1868,14 +1874,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: poder {{selected}} / {{max}} o menos"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirmar ({{selected}}/{{max}} de poder)"
   },
   "planechase": {
     "active": "Active plane",

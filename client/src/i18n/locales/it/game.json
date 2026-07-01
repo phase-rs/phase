@@ -184,7 +184,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Tieni"
     }
   },
   "player": {
@@ -1499,16 +1500,20 @@
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Scoperta",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Lancia dal cimitero",
     "title": "Lanciare {{name}}?",
     "subtitleCascade": "Cascata ha esiliato {{name}} (valore di mana sotto {{sourceMv}}). Lanciala senza pagare il suo costo di mana, o rifiuta e rimescola tutte le {{total}} carte esiliate in fondo al tuo grimorio.",
     "subtitleDiscover": "Scoperta ha esiliato {{name}}. Lanciala senza pagare il suo costo di mana, o mettila nella tua mano e rimescola le altre {{missCount}} carte esiliate in fondo al tuo grimorio.",
     "subtitleRipple": "Ripple ha rivelato {{name}}. Lanciala senza pagare il suo costo di mana, oppure rifiuta e metti tutte le {{total}} carte rivelate in fondo al tuo grimorio in ordine casuale.",
+    "subtitleGraveyardPaid": "Lancia {{name}} da un cimitero pagando il suo costo di mana — può essere speso mana di qualsiasi tipo. Oppure rifiuta e lasciala nel cimitero.",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
+    "castPaidSuffix": "(paga il suo costo di mana — può essere speso mana di qualsiasi tipo)",
     "putIntoHand": "Metti in mano",
     "decline": "Rifiuta",
     "discoverDeclineSuffix": "(metti il resto in fondo)",
-    "cascadeDeclineSuffix": "(rimescola tutte le carte esiliate in fondo)"
+    "cascadeDeclineSuffix": "(rimescola tutte le carte esiliate in fondo)",
+    "graveyardPaidDeclineSuffix": "(lasciala nel cimitero)"
   },
   "freeCastWindow": {
     "eyebrow": "Lancio gratuito",
@@ -1858,7 +1863,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Mantieni"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1868,14 +1874,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: forza {{selected}} / {{max}} o meno"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Conferma ({{selected}}/{{max}} forza)"
   },
   "planechase": {
     "active": "Active plane",

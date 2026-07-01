@@ -115,22 +115,28 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
   return Number.isFinite(objectId) ? objectId : null;
 }
 
+// Selected board-choice cards get a bright ring PLUS an inset fill so the whole
+// card reads as "lit up / chosen" — a clearly stronger signal than the outline-
+// only `availableBoardChoiceGlowClass` used for eligible-but-unselected cards.
+// The inset differentiates selection independently of card art (blank/tokened
+// cards otherwise looked identical selected vs. merely available).
 function selectedBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
   switch (intent) {
     case "sacrifice":
-      return "ring-2 ring-red-400 shadow-[0_0_14px_4px_rgba(248,113,113,0.55)]";
+      return "ring-2 ring-red-400 shadow-[0_0_14px_4px_rgba(248,113,113,0.55),inset_0_0_18px_5px_rgba(248,113,113,0.3)]";
     case "tap":
-      return "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55)]";
+      return "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55),inset_0_0_18px_5px_rgba(52,211,153,0.3)]";
     case "blight":
-      return "ring-2 ring-purple-400 shadow-[0_0_14px_4px_rgba(192,132,252,0.55)]";
+      return "ring-2 ring-purple-400 shadow-[0_0_14px_4px_rgba(192,132,252,0.55),inset_0_0_18px_5px_rgba(192,132,252,0.3)]";
     case "ringBearer":
-      return "ring-2 ring-amber-300 shadow-[0_0_14px_4px_rgba(252,211,77,0.55)]";
+      return "ring-2 ring-amber-300 shadow-[0_0_14px_4px_rgba(252,211,77,0.55),inset_0_0_18px_5px_rgba(252,211,77,0.3)]";
     case "return":
     case "exile":
     case "crew":
     case "saddle":
     case "station":
-      return "ring-2 ring-sky-300 shadow-[0_0_14px_4px_rgba(125,211,252,0.55)]";
+    case "keep":
+      return "ring-2 ring-sky-300 shadow-[0_0_14px_4px_rgba(125,211,252,0.55),inset_0_0_18px_5px_rgba(125,211,252,0.3)]";
   }
 }
 
@@ -149,6 +155,7 @@ function availableBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "ring-2 ring-sky-300/80 shadow-[0_0_10px_3px_rgba(125,211,252,0.35)]";
   }
 }
@@ -168,6 +175,7 @@ function boardChoiceBadgeClass(intent: BoardChoiceIntent): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-400 text-sky-950";
   }
 }
@@ -829,10 +837,13 @@ export const PermanentCard = memo(function PermanentCard({
       )}
 
       {isSelectableForBoardChoice && boardChoice && (
+        // Selected cards get a checkmark + solid, white-ringed badge; eligible-
+        // but-unselected cards get the same label dimmed, so the current
+        // selection is unambiguous and the badge reads as a toggle.
         <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "left-1 top-7" : "left-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
+          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "left-1 top-7" : "left-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "opacity-60 ring-1 ring-black/70"}`}
         >
-          {t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
+          {isSelectedForBoardChoice ? `✓ ${t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}` : t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
         </div>
       )}
 
