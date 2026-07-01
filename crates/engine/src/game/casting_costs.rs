@@ -2,11 +2,12 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, BeholdCostAction,
-    CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect, KickerVariant,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
+    AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
+    BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
+    CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
+    SpellCastingOptionKind, StaticCondition, TapCreaturesAggregate, TargetFilter, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -2126,6 +2127,92 @@ fn finish_exile_selection_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 117.1 + CR 601.2b + CR 602.2b + CR 608.2c: Resolve an `ExileWithAggregate`
+/// activation cost (Baron Helmut Zemo's Boast). The player has chosen any number
+/// of eligible graveyard cards; validate uniqueness, legality, and still-in-zone
+/// membership, then enforce the aggregate threshold (CR 118.3 — a cost can't be
+/// paid without the necessary resources). Exile the chosen cards, publish them as
+/// a fresh tracked set, and bind the resolving ability's tracked-set sentinel to
+/// that CONCRETE id BEFORE the ability is pushed onto the stack.
+///
+/// CR 608.2c (robustness): the binding MUST be to the concrete id, not left as
+/// the `TrackedSetId(0)` sentinel. The cost is paid at ACTIVATION time, but the
+/// `CastCopyOfCard` effect resolves LATER, off the stack. Between the two,
+/// `state.chain_tracked_set_id` is reset to `None` at depth-0 resolution
+/// (`effects::resolve_ability_chain`) and intervening instant-speed effects may
+/// publish their own tracked sets, so the sentinel's "newest set" fallback
+/// (`resolve_tracked_set_sentinel` / `latest_tracked_set_id`) would resolve to
+/// the WRONG set. `state.tracked_object_sets` is append-only (never cleared or
+/// rekeyed), so the concrete id published here remains valid through resolution.
+/// The threshold guarantees the chosen set is non-empty (a ≥15 sum needs at
+/// least one card), so the published set is never empty.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_aggregate_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    zone: Zone,
+    function: AggregateFunction,
+    property: ObjectProperty,
+    comparator: Comparator,
+    value: i32,
+    filter: &TargetFilter,
+    pending: PendingCast,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2b: the chosen cards must be distinct.
+    if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
+        return Err(EngineError::InvalidAction(
+            "Selected cards must be unique".to_string(),
+        ));
+    }
+    for id in chosen {
+        if !legal_cards.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not eligible for the exile cost".to_string(),
+            ));
+        }
+    }
+    // CR 601.2b: re-validate each chosen card is still eligible (still in the
+    // source zone and still matches the filter) against the live state.
+    let still_eligible = super::cost_payability::eligible_exile_with_aggregate_objects(
+        state,
+        player,
+        pending.object_id,
+        filter,
+        zone,
+    );
+    for id in chosen {
+        if !still_eligible.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card is no longer eligible to exile".to_string(),
+            ));
+        }
+    }
+    // CR 118.3: the chosen set must satisfy the advertised aggregate threshold.
+    let total = super::quantity::aggregate_property_over(state, chosen, function, property);
+    if !comparator.evaluate(total, value) {
+        return Err(EngineError::InvalidAction(format!(
+            "Chosen cards aggregate to {total}, which does not satisfy the exile cost threshold ({value})"
+        )));
+    }
+
+    for &id in chosen {
+        super::zones::move_to_zone(state, id, Zone::Exile, events);
+    }
+
+    // CR 608.2c: publish the exiled cards as a fresh tracked set and bind the
+    // resolving ability's `TrackedSetId(0)` sentinel to that concrete id before
+    // the ability reaches the stack (see the doc comment for the robustness
+    // rationale across the activation→resolution gap).
+    let set_id = super::effects::publish_fresh_tracked_set(state, chosen.to_vec());
+    let mut pending = pending;
+    pending.ability.bind_tracked_set_sentinel_recursive(set_id);
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
 /// chosen objects from the battlefield/graveyard union; validate the
 /// count and legality, re-validate eligibility against the live state via the
@@ -2210,6 +2297,17 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.170b: plot is a special action that never uses the stack — it is
+    // intercepted in `handle_activate_ability` before any stack push. No current
+    // plot cost can pause (mana auto-pays, the self-exile auto-moves), so this
+    // cost-pause resume path is unreachable for plot. If a future plot variant
+    // carries a pausing sub-cost it would reach here — relocate the special-action
+    // guard to this chokepoint then.
+    debug_assert!(
+        !super::casting::effect_is_plot_grant(&resolved.effect),
+        "plot special action reached the cost-pause resume path; relocate the CR 702.170b intercept to this chokepoint"
+    );
+
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
@@ -2602,6 +2700,8 @@ fn push_ability_entry(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: Classify loyalty vs. normal from the source ability cost.
+        kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
@@ -6244,6 +6344,7 @@ fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -8314,11 +8415,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
         StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
@@ -8437,6 +8539,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
                         },
                     ))
@@ -10811,6 +10914,103 @@ mod tests {
         assert_eq!(chosen_x, Some(2));
         assert_eq!(state.objects[&squirrel_a].zone, Zone::Graveyard);
         assert_eq!(state.objects[&squirrel_b].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn remove_counter_cost_count_feeds_that_many_token_count() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 3);
+        }
+
+        let token_effect = Effect::Token {
+            name: "Insect".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Insect".to_string()],
+            colors: vec![ManaColor::Green],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            token_effect.clone(),
+        )]);
+
+        let mut pending = make_pending(source);
+        pending.ability = ResolvedAbility::new(token_effect, Vec::new(), source, PlayerId(0));
+        pending.ability.set_chosen_x_recursive(2);
+        let legal = vec![source];
+        let chosen = vec![source];
+        let mut events = Vec::new();
+
+        handle_remove_counter_for_cost(
+            &mut state,
+            PlayerId(0),
+            pending,
+            2,
+            CounterMatch::OfType(CounterType::Plus1Plus1),
+            CounterCostSelection::SingleObject,
+            &legal,
+            &chosen,
+            &mut events,
+        )
+        .expect("remove-counter activation cost should be paid");
+
+        let Some(stack_entry) = state.stack.back() else {
+            panic!("activated ability should be pushed to the stack");
+        };
+        let chosen_x = match &stack_entry.kind {
+            StackEntryKind::ActivatedAbility { ability, .. } => ability.chosen_x,
+            other => panic!("expected activated ability on stack, got {other:?}"),
+        };
+        assert_eq!(chosen_x, Some(2));
+
+        super::stack::resolve_top(&mut state, &mut events);
+
+        let insects = state
+            .objects
+            .values()
+            .filter(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.name == "Insect"
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Insect")
+            })
+            .count();
+        assert_eq!(
+            insects, 2,
+            "that many must resolve to counters removed as a cost"
+        );
+        assert_eq!(
+            state.objects[&source]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
     }
 
     #[test]

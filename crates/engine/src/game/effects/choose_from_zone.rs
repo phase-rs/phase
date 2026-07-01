@@ -8,7 +8,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, ResolvingTriggerContext, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -89,6 +89,25 @@ pub fn resolve(
 
     // CR 700.2: Determine who makes the choice.
     let choosing_player = resolve_chooser(state, ability, chooser);
+
+    // CR 608.2: An ability's resolution is a single ongoing process. This
+    // interactive pause makes `stack::resolve_top` run to completion and
+    // unconditionally clear the live, resolution-scoped trigger context; preserve
+    // it here (this site runs inside `execute_effect`, before that clear) so an
+    // `EventContextAmount` ("that many") sub_ability continuation resolves the
+    // triggering event's amount after the pause (Amy Pond). Restored by the
+    // `ChooseFromZoneChoice` handler around the continuation drain. Set
+    // unconditionally on every single-pool raise: the `.then` yields `None` for a
+    // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
+    // resolution can never carry over; consumed by `.take()` in the handler.
+    state.pending_choose_zone_trigger_context = (state.current_trigger_event.is_some()
+        || state.current_trigger_match_count.is_some()
+        || state.die_result_this_resolution.is_some())
+    .then(|| ResolvingTriggerContext {
+        event: state.current_trigger_event.clone(),
+        match_count: state.current_trigger_match_count,
+        die_result: state.die_result_this_resolution,
+    });
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -614,6 +633,32 @@ fn collect_direct_zone_cards(
             .collect());
     }
 
+    // CR 400.1 + CR 607.2a: For AllOwners, scan the referenced zone(s) across
+    // EVERY player and rely entirely on the filter to scope. Exile is a zone
+    // shared by all players (CR 400.1), and "exiled with [source]" is a
+    // linked-ability reference (CR 607.2a) whose membership ignores ownership,
+    // so owner-gating would drop the opponent-owned cards Koh exiled before the
+    // filter ever runs. Mirrors the ScopedPlayer-on-Battlefield branch above:
+    // scan broadly, let the filter (here ExiledBySource) narrow. Kept general
+    // for all zones — the union across players reduces to the whole shared
+    // exile zone for Exile and to each player's own zone for per-player zones,
+    // with every object counted once (each object has exactly one owner).
+    if matches!(zone_owner, ZoneOwner::AllOwners) {
+        let owners: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
+        return Ok(owners
+            .into_iter()
+            .flat_map(|owner| {
+                zones
+                    .iter()
+                    .flat_map(|&zone| object_ids_in_player_zone(state, owner, zone))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|id| {
+                filter.is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+            })
+            .collect());
+    }
+
     let owner = resolve_zone_owner(state, ability, zone_owner)?;
 
     Ok(zones
@@ -652,6 +697,13 @@ fn resolve_zone_owner(
         ZoneOwner::EachPlayer | ZoneOwner::EachOpponent => Err(EffectError::MissingParam(
             "ChooseFromZone EachPlayer/EachOpponent resolves per-player, not via single owner"
                 .to_string(),
+        )),
+        // CR 400.1: `AllOwners` scans a zone shared across EVERY owner, not a
+        // single one — it is handled by the early return in
+        // `collect_direct_zone_cards` and never routes through this
+        // single-owner resolver.
+        ZoneOwner::AllOwners => Err(EffectError::MissingParam(
+            "ChooseFromZone AllOwners scans all owners, not via single owner".to_string(),
         )),
     }
 }
@@ -790,6 +842,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::zones::Zone;
 
@@ -810,6 +863,165 @@ mod tests {
         // Round-trips back to an equal value.
         let back: ChooseFromZoneConstraint = serde_json::from_value(value).unwrap();
         assert_eq!(back, constraint);
+    }
+
+    /// CR 608.2 + CR 702.62b + CR 122.1: Amy Pond's combat-damage trigger
+    /// ("choose a suspended card you own and remove that many time counters from
+    /// it") must resolve `that many` to the combat damage AFTER the interactive
+    /// `ChooseFromZone` pause, removing the counters from the CHOSEN card. This is
+    /// the deliverable proof: without the `ResolvingTriggerContext` save/restore
+    /// the `EventContextAmount` continuation reads `None` → removes 0; without the
+    /// §D anaphor rebind the counters strip off Amy instead of the chosen card.
+    fn amy_pond_setup(
+        time_counters: u32,
+        combat_damage: u32,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        use crate::game::scenario::GameScenario;
+        use crate::game::triggers::process_triggers;
+        use crate::types::events::GameEvent;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::CombatDamage);
+        let amy = scenario
+            .add_creature(PlayerId(0), "Amy Pond", 2, 2)
+            .from_oracle_text(
+                "Whenever ~ deals combat damage to a player, choose a suspended card \
+                 you own and remove that many time counters from it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let suspended;
+        {
+            let state = runner.state_mut();
+            state.active_player = PlayerId(0);
+
+            // A suspended card you own in exile with `time_counters` time counters.
+            suspended = create_object(
+                state,
+                CardId(900),
+                PlayerId(0),
+                "Suspended Spell".to_string(),
+                Zone::Exile,
+            );
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            let suspend_kw = Keyword::Suspend {
+                count: time_counters,
+                cost: ManaCost::generic(2),
+            };
+            // CR 702.62b: off-battlefield keyword queries read `base_keywords`
+            // (the printed face), so the suspended card must carry Suspend there.
+            obj.keywords.push(suspend_kw.clone());
+            obj.base_keywords.push(suspend_kw);
+            obj.counters.insert(CounterType::Time, time_counters);
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types.core_types.push(CoreType::Sorcery);
+
+            // Amy deals `combat_damage` combat damage to a player → trigger fires.
+            // A SelfRef `DamageDone` trigger listens on the per-source
+            // `DamageDealt` event (CR 510.2), not the aggregate
+            // `CombatDamageDealtToPlayer` (which is for non-SelfRef observers).
+            let event = GameEvent::DamageDealt {
+                source_id: amy,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: combat_damage,
+                is_combat: true,
+                excess: 0,
+            };
+            process_triggers(state, std::slice::from_ref(&event));
+            crate::game::stack::resolve_top(state, &mut Vec::new());
+        }
+        (runner, amy, suspended)
+    }
+
+    #[test]
+    fn amy_pond_removes_combat_damage_time_counters_from_chosen_card_after_pause() {
+        use crate::types::actions::GameAction;
+
+        let (mut runner, amy, suspended) = amy_pond_setup(3, 2);
+
+        // The trigger paused on the interactive ChooseFromZone, and the resolving
+        // trigger context was captured for the EventContextAmount continuation.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseFromZoneChoice { .. }
+            ),
+            "expected ChooseFromZoneChoice pause, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            runner.state().pending_choose_zone_trigger_context.is_some(),
+            "the resolving trigger context must be captured across the pause"
+        );
+
+        crate::game::engine::apply(
+            runner.state_mut(),
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![suspended],
+            },
+        )
+        .expect("selecting the suspended card must succeed");
+
+        // EventContextAmount = 2 combat damage → 3 - 2 = 1 left on the CHOSEN card.
+        // `== 1` rejects a spurious batched `match_count` of 1 (which would leave 2)
+        // and proves the §D rebinding put the counters on the chosen card, not Amy.
+        assert_eq!(
+            runner.state().objects[&suspended]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "removed exactly the combat-damage amount (2) from the chosen card"
+        );
+        assert_eq!(
+            runner.state().objects[&amy]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "Amy Pond's own counters are untouched"
+        );
+        assert!(
+            runner.state().pending_choose_zone_trigger_context.is_none(),
+            "the stash is consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn amy_pond_removes_all_time_counters_when_damage_equals_counters() {
+        use crate::types::actions::GameAction;
+
+        let (mut runner, _amy, suspended) = amy_pond_setup(2, 2);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+
+        crate::game::engine::apply(
+            runner.state_mut(),
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![suspended],
+            },
+        )
+        .expect("selecting the suspended card must succeed");
+
+        // EventContextAmount = 2 → removes the last 2 of 2 time counters → 0 left
+        // (CR 702.62a free-cast on last-counter removal is existing behavior).
+        assert_eq!(
+            runner.state().objects[&suspended]
+                .counters
+                .get(&CounterType::Time)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "all time counters removed when damage equals the counter count"
+        );
     }
 
     #[test]
@@ -873,6 +1085,126 @@ mod tests {
             }
             other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
         }
+    }
+
+    /// CR 400.1 + CR 607.2a: `ZoneOwner::AllOwners` scans a shared zone across
+    /// EVERY owner and lets the `TargetFilter` perform all scoping — the
+    /// per-owner gate in `object_ids_in_player_zone` is bypassed. Building-block
+    /// proof for the category "membership is defined by the filter, not by
+    /// ownership" (Koh, the Face Stealer: a creature card exiled with Koh, where
+    /// Koh typically exiles *opponents'* creatures).
+    ///
+    /// Discriminating on two axes: (1) an opponent-owned linked card MUST be
+    /// offered under `AllOwners` but is DROPPED under the old `Controller` scope
+    /// (the bug); (2) an opponent-owned *unlinked* exiled card must be excluded,
+    /// proving `AllOwners` does not over-collect — the `ExiledBySource` filter
+    /// still narrows the whole-zone scan.
+    #[test]
+    fn all_owners_scope_enumerates_exile_across_owners() {
+        let mut state = GameState::new_two_player(42);
+
+        // The linked-exile source (a Koh-like permanent under the controller).
+        let source = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Koh-like Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Two creature cards in the SHARED exile zone (CR 400.1), owned by
+        // different players, both linked to `source` (CR 607.2a).
+        let mine = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "My Exiled Face".to_string(),
+            Zone::Exile,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Exiled Face".to_string(),
+            Zone::Exile,
+        );
+        // An opponent-owned exiled card NOT linked to the source — the filter
+        // must exclude it even though `AllOwners` scans the whole zone.
+        let unlinked = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unlinked Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, mine, source);
+        crate::game::exile_links::push_tracked_by_source(&mut state, theirs, source);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::ExiledBySource),
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let filter = TargetFilter::ExiledBySource;
+
+        // AllOwners: BOTH owners' linked cards are offered; the unlinked card is
+        // filtered out. The opponent-owned card present here is the fix.
+        let all = collect_direct_zone_cards(
+            &state,
+            &ability,
+            Zone::Exile,
+            &[],
+            ZoneOwner::AllOwners,
+            Some(&filter),
+        )
+        .expect("AllOwners enumerates without routing through a single-owner resolver");
+        assert!(
+            all.contains(&mine),
+            "AllOwners offers the controller's own exiled card"
+        );
+        assert!(
+            all.contains(&theirs),
+            "AllOwners offers the OPPONENT-owned exiled card {theirs:?} (the fix)"
+        );
+        assert!(
+            !all.contains(&unlinked),
+            "AllOwners excludes the unlinked exiled card {unlinked:?} — the filter still scopes"
+        );
+        assert_eq!(
+            all.len(),
+            2,
+            "exactly the two linked cards regardless of owner, got {all:?}"
+        );
+
+        // Controller (the old scope): the owner gate drops the opponent-owned
+        // linked card, leaving only the controller's own — exactly the bug that
+        // `AllOwners` fixes. Asserted so a regression into owner-gating fails.
+        let controller_only = collect_direct_zone_cards(
+            &state,
+            &ability,
+            Zone::Exile,
+            &[],
+            ZoneOwner::Controller,
+            Some(&filter),
+        )
+        .expect("Controller scope resolves to a single owner");
+        assert_eq!(
+            controller_only,
+            vec![mine],
+            "Controller scope offers only the controller's own exiled card — \
+             the opponent-owned linked card {theirs:?} is wrongly dropped"
+        );
     }
 
     #[test]
@@ -1345,6 +1677,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],

@@ -287,6 +287,8 @@ pub(crate) enum ContinuationAst {
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
+    /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
+    BecomesForetold,
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -1036,6 +1038,10 @@ pub(crate) enum UtilityImperativeAst {
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,
+        /// CR 115.1d: "attach up to N target ..." / "attach any number of
+        /// target ..." cardinality belongs to the ability's target selection,
+        /// not the `Effect::Attach` payload.
+        multi_target: Option<MultiTargetSpec>,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1077,6 +1083,11 @@ pub(crate) enum HandRevealImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ChooseImperativeAst {
+    /// CR 609.7a: "choose a source [you control|...]" — interactive damage-source
+    /// selection, distinct from permanent targeting (`TargetOnly`).
+    DamageSource {
+        source_filter: TargetFilter,
+    },
     TargetOnly {
         target: TargetFilter,
     },

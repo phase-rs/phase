@@ -8,7 +8,7 @@ mod prelude {
 
     pub(super) use crate::parser::oracle_nom::error::OracleError;
     pub(super) use nom::branch::alt;
-    pub(super) use nom::bytes::complete::{tag, tag_no_case, take_until};
+    pub(super) use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
     pub(super) use nom::character::complete::{alpha1, space0, space1};
     pub(super) use nom::combinator::{all_consuming, eof, map, opt, recognize, rest, value};
     pub(super) use nom::multi::{many0, separated_list1};
@@ -55,14 +55,14 @@ mod prelude {
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
-    pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType};
+    pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
     pub(super) use crate::types::statics::{
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
-        HandSizeModification, ProhibitionScope, StaticMode, TriggerCause,
+        HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -116,9 +116,10 @@ mod support {
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
-        apply_spell_keyword_subject_constraints, parse_chosen_qualifier_subject,
-        parse_continuous_modifications, parse_quoted_ability_modifications,
-        push_grant_clause_modifications, split_keyword_list, RuleStaticPredicate,
+        apply_spell_keyword_subject_constraints, fold_grant_cap_rider,
+        parse_chosen_qualifier_subject, parse_continuous_modifications,
+        parse_quoted_ability_modifications, push_grant_clause_modifications, split_keyword_list,
+        RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,

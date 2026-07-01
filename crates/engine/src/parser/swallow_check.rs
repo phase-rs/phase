@@ -303,12 +303,13 @@ fn detect_optional_you_may(
         // allow-noncombinator: swallow detector marker scan on classified text
         return;
     }
-    // CR 305.2: "you may play additional lands" is encoded as
-    // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
-    // static, not a def-level optional effect.
+    // CR 305.2: "you may play additional lands" / "any number of lands" is
+    // encoded as a land-drop static, which is an optional permission static,
+    // not a def-level optional effect.
     // allow-noncombinator: swallow detector marker scan on classified text
     if cleaned.contains("you may play") // allow-noncombinator: swallow detector marker scan on classified text
-        && cleaned.contains("additional land")
+        && (cleaned.contains("additional land") // allow-noncombinator: swallow detector marker scan on classified text
+            || cleaned.contains("any number of lands"))
     // allow-noncombinator: swallow detector marker scan on classified text
     {
         return;
@@ -542,15 +543,42 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
-/// effect? This single Effect variant simultaneously encodes a replacement
-/// effect (CR 614.1a "instead"), a conditional gate ("if [target] would die"),
-/// and an EOT duration (the carried replacement's `expiry: EndOfTurn`). Its
-/// presence satisfies the Replacement_Instead, Condition_If, and
-/// Duration_ThisTurn detectors when the original text matches the
-/// "die this turn, exile instead" rider grammar.
+/// or `CreateDamageReplacement` effect? This single Effect variant simultaneously
+/// encodes a replacement effect (CR 614.1a "instead"), a conditional gate
+/// ("if [target] would die"), and an EOT duration (the carried replacement's
+/// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
+/// Condition_If, and Duration_ThisTurn detectors when the original text matches
+/// the "die this turn, exile instead" rider grammar. Flip-coin branches
+/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// Flip-coin branch payloads may carry one-shot damage replacements.
+fn flip_branch_has_target_replacement(
+    win_effect: &Option<Box<AbilityDefinition>>,
+    lose_effect: &Option<Box<AbilityDefinition>>,
+) -> bool {
+    win_effect
+        .as_deref()
+        .is_some_and(def_tree_has_target_replacement)
+        || lose_effect
+            .as_deref()
+            .is_some_and(def_tree_has_target_replacement)
+}
+
 fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::AddTargetReplacement { .. }) {
-        return true;
+    match def.effect.as_ref() {
+        Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
+            return true
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } if flip_branch_has_target_replacement(win_effect, lose_effect) => return true,
+        _ => {}
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_target_replacement(sub) {
@@ -598,7 +626,14 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             | StaticMode::MayLookAtFaceDown
             | StaticMode::MayChooseNotToUntap
             | StaticMode::MayPlayAdditionalLand
+            | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: "The top card of your
+            // library has plot" / "You may plot [filter] cards from the top of
+            // your library" — opt-in plot-from-library (Fblthp). The plot special
+            // action (CR 702.170b) is taken at the player's discretion.
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             // CR 702.8: "You may cast this spell as though it had flash" —
             // opt-in cast-timing permission.
             | StaticMode::CastWithFlash
@@ -647,6 +682,14 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
             // activated abilities; the permission is opt-in by the "you may" surface.
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            // CR 118.9 + CR 118.9b: "You may cast [this] without paying its mana
+            // cost" / "you may pay {0} rather than pay the mana cost" is an
+            // alternative cost, and alternative costs are generally optional — the
+            // "you may" permission is the static's entire semantic content
+            // (Omniscience, As Foretold, Zaffai). Mirrors the sibling permission
+            // modes above; without it the swallow auditor false-positives an
+            // Optional_YouMay clause and demotes the card from "supported."
+            | StaticMode::CastFromHandFree { .. }
     )
 }
 
@@ -1440,6 +1483,13 @@ fn detect_dynamic_qty(
         "SelfManaCost",
         "SelfManaValue",
         "TargetManaCost",
+        // CR 702.170a: "The plot cost is equal to its mana cost" — the plot cost
+        // is intrinsic to the `TopOfLibraryHasPlot` static (computed at synthesis
+        // from the live top card's mana_cost), not a stored `QuantityExpr`. The
+        // static's presence in the AST is the coverage marker, mirroring the
+        // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
+        // cost" (Fblthp, Lost on the Range).
+        "TopOfLibraryHasPlot",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -2590,6 +2640,12 @@ fn detect_duration_this_turn(
         // to the one-shot effect (it expires at cleanup, CR 514.2), not a
         // separate `duration` slot.
         "CreateDamageReplacement",
+        // CR 614.11 + CR 514.2: `CreateDrawReplacement` is the one-shot draw
+        // replacement for "the next time you would draw a card this turn,
+        // [effect] instead" (Words of Worship/Wilding). Its "this turn" lifetime
+        // is inherent to the one-shot effect (expires at cleanup), not a
+        // separate `duration` slot — same as `CreateDamageReplacement` above.
+        "CreateDrawReplacement",
         "AddTargetReplacement",
         // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
         // IS the "next [event] this turn" delayed-trigger scope (Chandra,
@@ -3166,6 +3222,84 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
+    /// CR 611.3: equipment and creature statics that fold "as long as" qualifiers
+    /// into attached-subject filters must not trip Condition_AsLongAs warnings
+    /// (issue #2234).
+    #[test]
+    fn condition_as_long_as_accepts_bronze_horse_and_champions_helm() {
+        use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::ContinuousModification;
+
+        let bronze = parse_named(
+            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
+            "Bronze Horse",
+            &["Artifact", "Creature"],
+        );
+        assert!(
+            !bronze
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Bronze Horse replacement must parse without Unimplemented"
+        );
+        let as_long_as = "as long as";
+        assert!(
+            bronze.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && matches!(r.shield_kind, ShieldKind::Prevention { .. })
+                    && r.description
+                        .as_deref()
+                        .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
+            }),
+            "expected gated damage-prevention replacement, got {:#?}",
+            bronze.replacements
+        );
+        assert!(!has_swallowed_detector(&bronze, "Condition_AsLongAs"));
+
+        let helm = parse_named(
+            "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
+            "Champion's Helm",
+            &["Artifact", "Equipment"],
+        );
+        assert!(
+            !helm.abilities.iter().any(def_tree_has_unimplemented)
+                && !helm
+                    .triggers
+                    .iter()
+                    .any(|t| t.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Champion's Helm must parse without Unimplemented"
+        );
+        assert!(
+            helm.statics.iter().any(|s| {
+                matches!(s.mode, crate::types::statics::StaticMode::Continuous)
+                    && matches!(
+                        &s.affected,
+                        Some(TargetFilter::Typed(TypedFilter {
+                            properties,
+                            ..
+                        })) if properties.contains(&FilterProp::EquippedBy)
+                            && properties.contains(&FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary
+                            })
+                    )
+                    && s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Hexproof
+                            }
+                        )
+                    })
+            }),
+            "expected legendary-equipped hexproof static, got {:#?}",
+            helm.statics
+        );
+        assert!(!has_swallowed_detector(&helm, "Condition_AsLongAs"));
+    }
+
     #[test]
     fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
         // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
@@ -3215,6 +3349,27 @@ mod tests {
             &["Instant"],
         );
 
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_any_number_land_drop_static() {
+        let parsed = parse_named(
+            "You may play any number of lands on each of your turns.\n\
+             Whenever you play a land, if it wasn't the first land you played this turn, \
+             this enchantment deals 1 damage to you.",
+            "Fastbond",
+            &["Enchantment"],
+        );
+
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| s.mode == (StaticMode::AdditionalLandDrop { count: u8::MAX })),
+            "expected Fastbond land-drop permission to parse as a static, got: {:#?}",
+            parsed.statics
+        );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
@@ -3615,6 +3770,154 @@ mod tests {
             other => panic!("expected SearchOutsideGame, got {other:?}"),
         }
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 611.2a: Amplifire — upkeep P/T set uses "until your next turn" duration
+    /// on a layer effect; must not trip Duration_NextTurn swallow warnings (issue #2239).
+    #[test]
+    fn duration_next_turn_accepts_amplifire_upkeep_pt_set() {
+        use crate::types::ability::{ContinuousModification, Duration, PlayerScope};
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature card. Until your next turn, this creature's base power becomes twice that card's power and its base toughness becomes twice that card's toughness. Put the revealed cards on the bottom of your library in a random order.",
+            "Amplifire",
+            &["Creature"],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Amplifire upkeep trigger");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Amplifire trigger must parse without Unimplemented"
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::RevealUntil { .. }),
+            "Amplifire head must be RevealUntil, got {:?}",
+            execute.effect
+        );
+        fn find_timed_pt_layer(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            let has_pt_layer = matches!(
+                def.effect.as_ref(),
+                Effect::GenericEffect {
+                    static_abilities,
+                    ..
+                } if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::SetPowerDynamic { .. }
+                                | ContinuousModification::SetToughnessDynamic { .. }
+                        )
+                    })
+                })
+            );
+            if has_pt_layer
+                && matches!(
+                    def.duration,
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller
+                    })
+                )
+            {
+                return Some(def);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_timed_pt_layer)
+                .or_else(|| def.else_ability.as_deref().and_then(find_timed_pt_layer))
+        }
+        assert!(
+            find_timed_pt_layer(execute).is_some(),
+            "expected until-your-next-turn duration on the P/T layer clause, got {execute:#?}",
+        );
+        assert!(!has_swallowed_detector(&parsed, "Duration_NextTurn"));
+    }
+
+    /// CR 400.11 + CR 701.23j: Wish-cycle and planeswalker wishboard fetches must
+    /// lower to SearchOutsideGame without Optional_YouMay swallow warnings (issue #2276).
+    #[test]
+    fn optional_you_may_accepts_wishboard_creature_or_land_and_loyalty_fetches() {
+        let living_wish = parse_named(
+            "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile Living Wish.",
+            "Living Wish",
+            &["Sorcery"],
+        );
+        assert!(
+            !living_wish.abilities.iter().any(def_tree_has_unimplemented),
+            "Living Wish must parse without Unimplemented"
+        );
+        let living = living_wish
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Living Wish outside-game search");
+        assert!(matches!(living, Effect::SearchOutsideGame { count, .. } if count.is_up_to()));
+        assert!(!has_swallowed_detector(&living_wish, "Optional_YouMay"));
+
+        let karn = parse_named(
+            "[−2]: You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
+            "Karn, the Great Creator",
+            &["Planeswalker"],
+        );
+        assert!(
+            !karn.abilities.iter().any(def_tree_has_unimplemented),
+            "Karn -2 must parse without Unimplemented"
+        );
+        let karn_search = karn
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("Karn -2 outside-game search");
+        assert!(matches!(
+            karn_search,
+            Effect::SearchOutsideGame {
+                source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
+                ..
+            }
+        ));
+        assert!(!has_swallowed_detector(&karn, "Optional_YouMay"));
+
+        let vivien = parse_named(
+            "[−5]: You may reveal a creature card you own from outside the game and put it into your hand.",
+            "Vivien, Arkbow Ranger",
+            &["Planeswalker"],
+        );
+        assert!(
+            !vivien.abilities.iter().any(def_tree_has_unimplemented),
+            "Vivien -5 must parse without Unimplemented"
+        );
+        assert!(vivien
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::SearchOutsideGame { .. })));
+        assert!(!has_swallowed_detector(&vivien, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
+        use crate::types::ability::PlayerFilter;
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.",
+            "Protection Racket",
+            &["Enchantment"],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Protection Racket upkeep trigger execute");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Protection Racket trigger must parse without Unimplemented"
+        );
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "repeat-for-each-opponent-in-turn-order must stamp player_scope = Opponent"
+        );
+        assert!(!has_swallowed_detector(&parsed, "APNAP"));
     }
 
     #[test]
@@ -4700,6 +5003,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
+    /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
+    /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
+    /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
+    /// raise a DynamicQty swallow warning — the static's presence is the carrier
+    /// (mirrors the SelfManaCost precedent). Reverting the marker re-reds Fblthp.
+    #[test]
+    fn dynamic_qty_accepts_plot_cost_equal_to_mana_cost() {
+        let parsed = parse_named(
+            "You may look at the top card of your library any time.\n\
+             The top card of your library has plot. The plot cost is equal to its mana cost.\n\
+             You may plot nonland cards from the top of your library.",
+            "Fblthp, Lost on the Range",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
     #[test]
     fn dynamic_qty_accepts_choose_and_sacrifice_rest_for_each_player() {
         let parsed = parse_named(
@@ -5120,6 +5441,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 id: TrackedSetId(0),
             },
             cost: ManaCost::zero(),
+            count: None,
         };
         assert!(super::effect_has_internal_optionality(&effect));
     }
@@ -5476,5 +5798,158 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 
         // No swallowed-clause diagnostic for the dropped EOT duration.
         assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    fn flip_branch_has_create_damage_replacement(
+        win_effect: &Option<Box<AbilityDefinition>>,
+        lose_effect: &Option<Box<AbilityDefinition>>,
+    ) -> bool {
+        win_effect
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || lose_effect
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+    }
+
+    fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
+        match def.effect.as_ref() {
+            Effect::CreateDamageReplacement { .. } => return true,
+            Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            }
+            | Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } if flip_branch_has_create_damage_replacement(win_effect, lose_effect) => return true,
+            _ => {}
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement)
+    }
+
+    /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
+    /// one-shot damage replacements; the Replacement_Instead detector must walk
+    /// `FlipCoin` payloads (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
+        let parsed = parse_named(
+            "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
+            "Desperate Gambit",
+            &["Instant"],
+        );
+        assert!(
+            !parsed.abilities.iter().any(def_tree_has_unimplemented),
+            "Desperate Gambit must parse without Unimplemented"
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement),
+            "expected CreateDamageReplacement in flip-coin branches, got {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    /// CR 614.1a: Edge of Malacol untap replacement and Jinnie Fay token
+    /// replacement choice must not trip Replacement_Instead (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_untap_and_token_choice_replacements() {
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let edge = parse_named(
+            "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+            "Edge of Malacol",
+            &["Enchantment"],
+        );
+        assert!(
+            !edge
+                .replacements
+                .iter()
+                .any(|r| { r.execute.as_deref().is_some_and(def_tree_has_unimplemented) }),
+            "Edge of Malacol replacement must parse without Unimplemented"
+        );
+        assert!(
+            edge.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::Untap
+                    && r.condition == Some(ReplacementCondition::DuringUntapStep)
+                    && r.execute.is_some()
+            }),
+            "expected untap-step replacement AST, got {:#?}",
+            edge.replacements
+        );
+        assert!(!has_swallowed_detector(&edge, "Replacement_Instead"));
+
+        let doubling = parse_named(
+            "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.",
+            "Doubling Season",
+            &["Enchantment"],
+        );
+        assert!(
+            doubling.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken && r.quantity_modification.is_some()
+            }),
+            "expected CreateToken quantity-modifier replacement AST, got {:#?}",
+            doubling.replacements
+        );
+        assert!(!has_swallowed_detector(&doubling, "Replacement_Instead"));
+
+        let jinnie = parse_named(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !jinnie
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Jinnie Fay replacement must parse without Unimplemented"
+        );
+        fn def_tree_has_create_token_choice(def: &AbilityDefinition) -> bool {
+            match &*def.effect {
+                Effect::ChooseOneOf { branches, .. } => branches
+                    .iter()
+                    .any(|branch| matches!(&*branch.effect, Effect::Token { .. })),
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    def_tree_has_create_token_choice(effect)
+                }
+                _ => {
+                    def.sub_ability
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+                        || def
+                            .else_ability
+                            .as_deref()
+                            .is_some_and(def_tree_has_create_token_choice)
+                }
+            }
+        }
+        assert!(
+            jinnie.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken
+                    && r.execute
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+            }),
+            "expected CreateToken replacement-choice AST, got {:#?}",
+            jinnie.replacements
+        );
+        assert!(!has_swallowed_detector(&jinnie, "Replacement_Instead"));
     }
 }

@@ -74,7 +74,6 @@
     "resolveTooltip": "Passa la priorità così l'oggetto in cima alla pila può risolversi se anche tutti i giocatori passano. Scorciatoia: Spazio.",
     "resolveAll": "Risolvi tutto",
     "resolveAllTooltip": "Continua a passare la priorità mentre la pila si risolve. Una scelta richiesta o uno stop possono interromperla.",
-    "waiting": "In attesa",
     "priorityTooltip": "Passa la priorità. Se la pila è vuota, questo avanza attraverso la finestra di priorità corrente. Scorciatoia: Spazio.",
     "pass": "Passa",
     "passToEndTooltip": "Passa automaticamente fino al passo finale a meno che una scelta, uno stop o il Controllo totale non interrompa. Scorciatoia: Invio.",
@@ -341,7 +340,20 @@
     "pendingFlash": "La prossima magia può essere lanciata come se avesse lampo",
     "pendingFree": "La prossima magia senza pagare il suo costo di mana",
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
-    "companion": "Compagno"
+    "companion": "Compagno",
+    "unboundedTooltip": "{{resource}} illimitato (∞)",
+    "unboundedManaPoolMarker": "Mana illimitato (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "punti vita",
+    "unboundedDamage": "danni",
+    "unboundedMill": "macina",
+    "unboundedCounters": "segnalini",
+    "unboundedTokens": "pedine",
+    "unboundedCards": "carte",
+    "unboundedCasts": "lanci",
+    "unboundedCombats": "combattimenti",
+    "unboundedTurns": "turni",
+    "unboundedTriggers": "inneschi"
   },
   "avatar": {
     "underAttack": "{{name}} è sotto attacco"
@@ -960,6 +972,7 @@
       "manifest": "Manifesta",
       "untap": "Stappa",
       "tap": "Tappa",
+      "attach": "Attach",
       "crew": "Equipaggio ({{power}})",
       "saddle": "Sella ({{power}})",
       "station": "Stazione (+{{power}})"
@@ -1067,6 +1080,7 @@
       "titleHand": "Restituisci",
       "titleUntap": "Stappa",
       "titleTap": "Tappa",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Scegli {{count}} permanente da sacrificare",
       "subtitleSacrificeExact_other": "Scegli {{count}} permanenti da sacrificare",
       "subtitleSacrificeUpTo_one": "Scegli fino a {{count}} permanente da sacrificare",
@@ -1103,6 +1117,12 @@
       "subtitleTapUpTo_other": "Scegli fino a {{count}} permanenti da tappare",
       "subtitleTapRange_one": "Scegli {{min}}-{{count}} permanente da tappare",
       "subtitleTapRange_other": "Scegli {{min}}-{{count}} permanenti da tappare",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Salta",
       "labelDecline": "Rifiuta",
       "labelPutOnTop": "Metti in cima ({{order}})",
@@ -1110,6 +1130,7 @@
       "labelTop": "Cima ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Cima"
     },
     "drawnThisTurn": {
@@ -1571,6 +1592,7 @@
     "copyDiagnostic": "Copia diagnostica",
     "copied": "Copiato!",
     "reportOnGithub": "Segnala su GitHub",
+    "continueWaiting": "Continua ad attendere",
     "reload": "Ricarica",
     "reportTitle": "Crash del motore: {{summary}}",
     "reportConnectionSummary": "Connessione al motore persa",
@@ -1860,5 +1882,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for {{player}}",
+    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

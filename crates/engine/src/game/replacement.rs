@@ -502,6 +502,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Loyalty { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::PayEnergy { .. }
@@ -4865,6 +4866,25 @@ pub fn find_applicable_replacements(
                     // it).
                     let source_controller =
                         repl_def.source_controller.unwrap_or(state.active_player);
+                    // CR 614.1a: Draw replacements hosted in pending state
+                    // (Words of Worship/Wilding) scope by the installing player
+                    // captured at resolution, not the source permanent's live
+                    // controller.
+                    if let ProposedEvent::Draw { player_id, .. } = event {
+                        let player_ok = match &repl_def.valid_player {
+                            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
+                                *player_id != source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::You) => {
+                                *player_id == source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
+                            None => *player_id == source_controller,
+                        };
+                        if !player_ok {
+                            continue;
+                        }
+                    }
                     if !apply_state_level_gates(
                         repl_def,
                         event,
@@ -5403,12 +5423,21 @@ fn apply_single_replacement(
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
                 ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
             };
-            // CR 510.2 + CR 615.13: A `Prevention::All` shield firing inside an
-            // active combat-damage batch must NOT stash its rider per-source —
-            // the rider fires once post-batch (`combat_damage.rs`) against the
-            // summed prevented amount. Suppress the per-event stash here so the
-            // batch step owns the single continuation.
+            // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
+            // resolving spell (e.g. Inkshield) captures a `runtime_execute`
+            // rider at resolution time and fires it once post-batch against the
+            // aggregate prevented amount. Suppress the per-event stash here for
+            // such shields so `fire_combat_prevention_riders` owns the single
+            // continuation.
+            //
+            // Static permanent-ability shields (e.g. Weeping Angel's "prevent
+            // that damage and that creature's owner shuffles it into their
+            // library") only carry an `execute` AST template — no
+            // `runtime_execute`. These must fire per-event inline so the event
+            // target (`PostReplacementDamageTarget`) is correctly populated for
+            // each victim creature. Do NOT suppress their stash.
             let batched_combat_all_shield = state.combat_prevention_tally.is_some()
+                && repl_def.runtime_execute.is_some()
                 && matches!(
                     repl_def.shield_kind,
                     ShieldKind::Prevention {
@@ -5445,24 +5474,38 @@ fn apply_single_replacement(
                                     .clone()
                                     .map(PostReplacementContinuation::Template);
                             }
-                            // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
-                            // PutCounter/ChangeZone) in the sub_ability chain to find
-                            // the first non-modifier work. Covers both the existing
+                            // CR 615.5: for Damage event replacements, `ChangeZone`
+                            // (and other effects classified as "event modifiers") in
+                            // the follow-up chain are SIDE EFFECTS of the prevention
+                            // — they do not modify the damage event itself. Stash the
+                            // full `def` chain so every link (ChangeZone → Shuffle,
+                            // etc.) fires as a post-replacement continuation.
+                            //
+                            // Without this guard, `first_non_modifier_ability` skips
+                            // the ChangeZone prefix (treating it as a Damage-event
+                            // modifier, which has no meaning) and stashes only the
+                            // Shuffle tail — leaving the creature on the battlefield.
+                            //
+                            // CR 614.1c: for non-Damage events, walk past modifier-
+                            // only effects (Tap/Untap/PutCounter/ChangeZone) to find
+                            // the first non-modifier work. Covers the existing
                             // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
                             // back) and composed replacements like Tap → BecomeCopy
                             // (Vesuva "enter tapped as a copy").
-                            match EventModifiers::first_non_modifier_ability(Some(def)) {
-                                Some(real_work) => Some(PostReplacementContinuation::Template(
-                                    Box::new(real_work.clone()),
-                                )),
-                                None if !is_damage
-                                    && EventModifiers::has_only_event_modifier(Some(def)) =>
-                                {
-                                    None
+                            if is_damage {
+                                Some(PostReplacementContinuation::Template(Box::new(def.clone())))
+                            } else {
+                                match EventModifiers::first_non_modifier_ability(Some(def)) {
+                                    Some(real_work) => Some(PostReplacementContinuation::Template(
+                                        Box::new(real_work.clone()),
+                                    )),
+                                    None if EventModifiers::has_only_event_modifier(Some(def)) => {
+                                        None
+                                    }
+                                    _ => Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    ))),
                                 }
-                                _ => Some(PostReplacementContinuation::Template(Box::new(
-                                    def.clone(),
-                                ))),
                             }
                         })
                     }
@@ -5478,14 +5521,28 @@ fn apply_single_replacement(
             // the accept-side AST. The `draw_replacement_count` guard preserves
             // the count-modifier path (Alhammarret's Archive: count -> 2*count).
             if matches!(proposed, ProposedEvent::Draw { .. }) {
-                if let Some(def) = ability {
-                    let is_non_draw_substitute = !matches!(*def.effect, Effect::Draw { .. })
-                        && !EventModifiers::has_only_event_modifier(Some(def))
-                        && draw_replacement_count(state, rid, &proposed).is_none();
-                    if is_non_draw_substitute {
-                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
-                            *count = 0;
-                        }
+                // CR 614.6 + CR 614.11: A one-shot draw replacement
+                // (Words of Worship/Wilding) carries its substitute in
+                // `runtime_execute` (`execute` is `None`), so the `ability`
+                // binding above is `None`. Inspect that slot too — a non-Draw,
+                // non-event-modifier substitute (GainLife / Token) must still
+                // pre-zero the draw, or the card is drawn AND the substitute
+                // runs (double). Damage/Jace/Abundance use `execute`, so
+                // `ability` is `Some` and this `runtime` branch never engages.
+                let is_non_draw_substitute = match ability {
+                    Some(def) => {
+                        !matches!(*def.effect, Effect::Draw { .. })
+                            && !EventModifiers::has_only_event_modifier(Some(def))
+                            && draw_replacement_count(state, rid, &proposed).is_none()
+                    }
+                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                        !matches!(runtime.effect, Effect::Draw { .. })
+                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                    }),
+                };
+                if is_non_draw_substitute {
+                    if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                        *count = 0;
                     }
                 }
             }
@@ -6832,6 +6889,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -8025,6 +8083,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
@@ -8600,6 +8659,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ))
@@ -13874,6 +13934,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ))
@@ -13904,6 +13965,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 },
             ))

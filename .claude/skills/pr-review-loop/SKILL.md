@@ -43,11 +43,12 @@ python3 scripts/pr_review.py compact
 ## Sweep Protocol
 
 1. Resolve the acting identity from GitHub. Do not review PRs authored by the acting login.
-2. Run `scan`. Treat its result as a triage packet, not a final approval gate.
+2. Run `scan`. Use `action_counts` / `candidates_by_action` for routing; do not infer legacy bucket names. Treat its result as a triage packet, not a final approval gate.
 3. For each candidate:
    - `hard_stop` / `request_changes` — surface the precise blocker; do not enqueue.
+   - `blocked` — current head already has blocking maintainer feedback; wait for a new head or author follow-up.
    - `defer` — record the deferral event; do not approve, label, enqueue, or merge.
-   - `hold_ci` — record a non-terminal hold and wait for exact-head CI to finish.
+   - `hold_ci` — record a non-terminal hold only when the packet is incomplete or an external condition prevents review. CI being pending, unknown, or red is not itself a review/enqueue blocker; merge-when-ready will wait for required checks.
    - `dequeue_stale_for_handler` / `update_branch_for_handler` / `approve_ready_for_handler` — advisory only; delegate execution to `pr-contribution-handler` in authorized mode.
    - `review` — fetch an `inspect --mode full` packet, then run `review-impl` against the current head and GitHub API/local diff evidence.
 4. Record every material outcome with `record`; regenerate summaries with `compact` when useful.
@@ -63,7 +64,7 @@ The CLI models freshness using:
 - author follow-ups;
 - substantive vs merge-only commits;
 - review decision;
-- CI status;
+- CI status as evidence only, not as a pre-review or merge-when-ready gate;
 - labels and merge-queue membership.
 
 ## Review Bar

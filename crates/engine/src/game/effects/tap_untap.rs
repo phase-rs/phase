@@ -15,6 +15,16 @@ use crate::types::zones::Zone;
 ///
 /// - `SelfRef` → the source object — the printed-name "tap ~"/"untap ~"
 ///   anaphor that always refers to the source regardless of `ability.targets`.
+///   A chained "untap him"/"untap it" anaphor after a `SelfRef`-subject head
+///   (The Incredible Hulk: "put a +1/+1 counter on him ... untap him") is
+///   rewritten from `ParentTarget` to `SelfRef` at parse time by
+///   `sequence::patch_self_ref_head_tap_anaphor`, so it arrives here as
+///   `SelfRef` and binds the source. Resolving the anaphor at parse time (where
+///   the head's subject is still visible) is mandatory: by resolution time the
+///   discriminator is erased — a declined "up to one target" anaphor (Tyvar
+///   Kell) reaches the `_` arm with the SAME empty `ability.targets`, and per
+///   CR 608.2b that case must do nothing, so a blanket source fallback here
+///   would wrongly untap the source.
 /// - `TrackedSet` → the chain's tracked object set published by a preceding
 ///   effect (e.g. `ChooseObjectsIntoTrackedSet`'s "untap those creatures"
 ///   tail). The `TrackedSetId(0)` sentinel binds to the highest tracked-set
@@ -248,6 +258,8 @@ fn prompt_resolution_tap_untap_choice(
         track_exiled_by_source: false,
         // CR 708.2a: tap/untap selection is not a face-down entry.
         face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
@@ -429,6 +441,158 @@ mod tests {
         assert!(
             state.objects[&obj_id].tapped,
             "SelfRef tap must tap the source object"
+        );
+    }
+
+    /// CR 608.2b: a chained tap/untap anaphor that lowers to `ParentTarget` with
+    /// an EMPTY `ability.targets` slot must be an inert NO-OP. This is the
+    /// *declined optional-target* case — Tyvar Kell "Put a +1/+1 counter on up to
+    /// one target Elf. Untap it." with no Elf chosen: the anaphor "it" has no
+    /// referent, so per CR 608.2b the part of the effect that needs it doesn't
+    /// happen. (Hulk's `SelfRef`-head "untap him" never reaches this arm — it is
+    /// rewritten to `SelfRef` at parse time by
+    /// `sequence::patch_self_ref_head_tap_anaphor`, then binds the source via the
+    /// `SelfRef` arm above.)
+    ///
+    /// Discrimination: this is the regression fence for the rejected
+    /// `ParentTarget | None if ability.targets.is_empty() => source` arm —
+    /// reintroduce it and the source is wrongly untapped AND a spurious
+    /// `PermanentUntapped` event fires, flipping BOTH assertions red.
+    #[test]
+    fn untap_parent_target_with_empty_targets_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tyvar Kell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().tapped = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![], // declined optional target — the anaphor "it" has no referent
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&obj_id].tapped,
+            "declined optional-target anaphor (ParentTarget + empty slot) must NOT untap the source (CR 608.2b)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
+            "no PermanentUntapped event may fire for a declined-optional no-op"
+        );
+    }
+
+    /// NARROWNESS FENCE — guards against an OVER-BROAD "`ParentTarget` always →
+    /// source" resolver arm. When a parent target WAS chosen, `ParentTarget`
+    /// binds that object via the chosen-targets `_` arm, and the source must stay
+    /// untouched. Discrimination: any arm that maps `ParentTarget` to the source
+    /// regardless of `ability.targets` would untap the source here, flipping the
+    /// second assertion red.
+    #[test]
+    fn untap_parent_target_with_chosen_object_does_not_untap_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().tapped = true;
+        state.objects.get_mut(&other).unwrap().tapped = true;
+        assert_ne!(source, other);
+
+        let ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![TargetRef::Object(other)], // a parent target WAS chosen
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.objects[&other].tapped,
+            "the chosen parent-target object must be untapped"
+        );
+        assert!(
+            state.objects[&source].tapped,
+            "the source must stay tapped: the empty-slot fallback must NOT fire when a target was chosen"
+        );
+    }
+
+    /// CR 608.2b: class fence. `TriggeringSource` is an event-context filter
+    /// resolved from `ability.targets`; a `SelfRef`-head → `TriggeringSource`
+    /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
+    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot has no
+    /// materialized event object, so per CR 608.2b it must stay an inert no-op —
+    /// it must NOT untap the source.
+    ///
+    /// Discrimination: any over-broad arm mapping `ParentTarget`/`None`/
+    /// `TriggeringSource` to the source on an empty slot would untap the source
+    /// here and emit a spurious event, flipping both assertions red. The `_` arm
+    /// reads `ability.targets` → `[]` → no-op.
+    #[test]
+    fn untap_triggering_source_with_empty_targets_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Blistercoil Weird".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().tapped = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![], // empty — no event-context object is materialized into the slot
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&obj_id].tapped,
+            "TriggeringSource with an empty target slot must stay a no-op (source stays tapped)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
+            "no PermanentUntapped event may fire for a TriggeringSource no-op"
         );
     }
 

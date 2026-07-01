@@ -700,6 +700,8 @@ fn pay_ability_cost_inner(
                     owner_library: false,
                     track_exiled_by_source: true,
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: true,
@@ -984,8 +986,13 @@ fn pay_ability_cost_inner(
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
+        // CR 117.1 + CR 601.2b: `ExileWithAggregate` (Baron Helmut Zemo's Boast)
+        // is paid by the `WaitingFor::PayCost { kind: ExileAggregate }` detour
+        // before this resume runs; this arm is an idempotent no-op (mirrors the
+        // `CollectEvidence`/`ExileMaterials` interactive-cost arms).
         AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
@@ -1149,6 +1156,10 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1 + CR 601.2b: `ExileWithAggregate` is an activation-only cost
+        // (paid by the interactive `PayCost { ExileAggregate }` detour); it has
+        // no resolution-time payment path.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -1287,6 +1298,8 @@ fn can_pay_resolution(
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1: `ExileWithAggregate` is paid at activation, not resolution.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -1356,6 +1369,16 @@ mod tests {
                 count: CostObjectCount::default(),
             },
             AbilityCost::CollectEvidence { .. } => AbilityCost::CollectEvidence { amount: 1 },
+            AbilityCost::ExileWithAggregate { .. } => AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::Any,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaSymbolCount(
+                    crate::types::mana::ManaColor::Black,
+                ),
+                comparator: crate::types::ability::Comparator::GE,
+                value: 1,
+                zone: Zone::Graveyard,
+            },
             AbilityCost::TapCreatures { .. } => AbilityCost::TapCreatures {
                 requirement: TapCreaturesRequirement::count(1),
                 filter: TargetFilter::Any,
@@ -1457,6 +1480,16 @@ mod tests {
                 count: CostObjectCount::default(),
             },
             AbilityCost::CollectEvidence { amount: 0 },
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::Any,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaSymbolCount(
+                    crate::types::mana::ManaColor::Black,
+                ),
+                comparator: crate::types::ability::Comparator::GE,
+                value: 0,
+                zone: Zone::Graveyard,
+            },
             AbilityCost::TapCreatures {
                 requirement: TapCreaturesRequirement::count(0),
                 filter: TargetFilter::Any,

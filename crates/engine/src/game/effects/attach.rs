@@ -1,9 +1,10 @@
+use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -139,6 +140,26 @@ fn current_attachment_target(state: &GameState, attachment_id: ObjectId) -> Opti
         .map(target_ref_from_attach_target)
 }
 
+fn attachment_tree_contains(state: &GameState, root_id: ObjectId, candidate_id: ObjectId) -> bool {
+    let mut remaining = vec![root_id];
+    let mut visited = Vec::new();
+
+    while let Some(id) = remaining.pop() {
+        if visited.contains(&id) {
+            continue;
+        }
+        if id == candidate_id {
+            return true;
+        }
+        visited.push(id);
+        if let Some(object) = state.objects.get(&id) {
+            remaining.extend(object.attachments.iter().copied());
+        }
+    }
+
+    false
+}
+
 /// CR 608.2d + CR 601.2c: Optional or activation-deferred attach sub-instructions
 /// (Nahiri, the Lithomancer +2) choose the Equipment only after the controller
 /// accepts at resolution. When multiple Equipment match, prompt instead of
@@ -147,7 +168,7 @@ fn prompt_resolution_attachment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     attachment_filter: &TargetFilter,
-    events: &mut Vec<GameEvent>,
+    _events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
     if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
         return Ok(false);
@@ -165,15 +186,11 @@ fn prompt_resolution_attachment_choice(
         .filter(|id| matches_target_filter(state, *id, &effective, &ctx))
         .collect();
 
-    match eligible.len() {
-        0 => {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::Attach,
-                source_id: ability.source_id,
-            });
-            Ok(true)
-        }
-        1 => Ok(false),
+    let bounds = attachment_choice_bounds(state, ability, eligible.len())?;
+
+    match (eligible.len(), bounds.min, bounds.max) {
+        (_, 0, 0) | (0, 0, _) => Ok(true),
+        (1, 1, 1) => Ok(false),
         _ => {
             // Replace any stale continuation (e.g. a deferred optional sub stashed
             // by the parent chain walker) with this exact attach instruction.
@@ -183,9 +200,9 @@ fn prompt_resolution_attachment_choice(
             state.waiting_for = WaitingFor::EffectZoneChoice {
                 player: ability.controller,
                 cards: eligible,
-                count: 1,
-                min_count: 1,
-                up_to: false,
+                count: bounds.max,
+                min_count: bounds.min,
+                up_to: bounds.min != bounds.max,
                 source_id: ability.source_id,
                 effect_kind: EffectKind::Attach,
                 zone: Zone::Battlefield,
@@ -197,6 +214,8 @@ fn prompt_resolution_attachment_choice(
                 owner_library: false,
                 track_exiled_by_source: false,
                 face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
                 is_cost_payment: false,
@@ -206,16 +225,39 @@ fn prompt_resolution_attachment_choice(
     }
 }
 
+fn attachment_choice_bounds(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    eligible_count: usize,
+) -> Result<MultiTargetBounds, EffectError> {
+    if let Some(spec) = &ability.multi_target {
+        return resolve_multi_target_bounds(state, ability, spec, eligible_count)
+            .map_err(|error| EffectError::InvalidParam(error.to_string()));
+    }
+    if ability.targeting_is_optional() {
+        let spec = MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 });
+        return resolve_multi_target_bounds(state, ability, &spec, eligible_count)
+            .map_err(|error| EffectError::InvalidParam(error.to_string()));
+    }
+    Ok(MultiTargetBounds { min: 1, max: 1 })
+}
+
 /// Resume an attach sub-instruction paused on `EffectZoneChoice`.
 pub(crate) fn complete_resolution_attachment_choice(
     state: &mut GameState,
-    mut ability: ResolvedAbility,
-    attachment_id: ObjectId,
+    ability: ResolvedAbility,
+    attachment_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    ability.sub_ability = None;
-    ability.targets.push(TargetRef::Object(attachment_id));
-    resolve(state, &ability, events)
+    for &attachment_id in attachment_ids {
+        let mut choice_ability = ability.clone();
+        choice_ability.sub_ability = None;
+        choice_ability
+            .targets
+            .push(TargetRef::Object(attachment_id));
+        resolve(state, &choice_ability, events)?;
+    }
+    Ok(())
 }
 
 fn explicit_attachment_target_chosen(
@@ -405,8 +447,17 @@ pub fn attach_to(
         return None;
     }
 
-    let old_target = current_attachment_target(state, attachment_id)
-        .filter(|target| *target != TargetRef::Object(target_id));
+    // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once. The timestamp
+    // bump (below) must distinguish first-attach (None) from a same-host re-attach
+    // (Some(host)); `old_target` collapses both to `None` and cannot. `old_target`
+    // is just the filtered view, so derive it from the single read rather than
+    // querying the attachment's host twice.
+    let prior_host = current_attachment_target(state, attachment_id);
+    // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
+    // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
+    // different host; false only on a same-host re-attach (CR 701.3b keeps the stamp).
+    let moving_to_new_host = prior_host != Some(TargetRef::Object(target_id));
+    let old_target = prior_host.filter(|target| *target != TargetRef::Object(target_id));
 
     // CR 701.3a: Attaching moves attachment onto target.
     // If already attached to something, detach first. We only need to clear an
@@ -427,6 +478,15 @@ pub fn attach_to(
     // (`attach_to_player`).
     if let Some(attachment) = state.objects.get_mut(&attachment_id) {
         attachment.attached_to = Some(target_id.into());
+    }
+
+    // CR 613.7e + CR 701.3c: first attach (None) or a move to a different host
+    // bumps the timestamp; a same-host re-attach (CR 701.3b) does not.
+    if moving_to_new_host {
+        let ts = state.next_timestamp();
+        if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+            attachment.timestamp = ts;
+        }
     }
 
     // Add to target's attachments list
@@ -474,6 +534,13 @@ pub(crate) fn attachment_illegality(
     // attached to itself.) Single-authority self-attach guard protecting both
     // `can_attach_to_object` and `attach_to`.
     if attachment_id == host_id {
+        return Some(AttachIllegality::Prohibited);
+    }
+    // CR 701.3b + CR 301.5c + CR 303.4d: an illegal attachment attempt does
+    // nothing. A host already attached, directly or indirectly, to the proposed
+    // attachment would make the attachment graph cyclic, the same invalid shape
+    // as self-attach.
+    if attachment_tree_contains(state, attachment_id, host_id) {
         return Some(AttachIllegality::Prohibited);
     }
     // CR 701.3a: `CantBeAttached` blocks any attachment from being attached to
@@ -637,8 +704,16 @@ pub fn attach_to_player(
         return None;
     }
 
-    let old_target = current_attachment_target(state, attachment_id)
-        .filter(|target| *target != TargetRef::Player(target_player));
+    // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once so a first-attach
+    // (None) and a same-player re-attach (Some(player)) are distinguishable —
+    // `old_target` collapses both to `None`. Derive the filtered view from the
+    // single read rather than querying the attachment's host twice.
+    let prior_host = current_attachment_target(state, attachment_id);
+    // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
+    // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
+    // different player; false only on a same-player re-attach (CR 701.3b keeps the stamp).
+    let moving_to_new_host = prior_host != Some(TargetRef::Player(target_player));
+    let old_target = prior_host.filter(|target| *target != TargetRef::Player(target_player));
 
     // CR 701.3a: If already attached to an object, detach from that object's
     // `attachments` list. Re-attaching to a player has no symmetric cleanup —
@@ -655,6 +730,15 @@ pub fn attach_to_player(
 
     if let Some(attachment) = state.objects.get_mut(&attachment_id) {
         attachment.attached_to = Some(AttachTarget::Player(target_player));
+    }
+
+    // CR 613.7e + CR 701.3c: first attach (None) or a move to a different player
+    // host bumps the timestamp; a same-player re-attach (CR 701.3b) does not.
+    if moving_to_new_host {
+        let ts = state.next_timestamp();
+        if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+            attachment.timestamp = ts;
+        }
     }
 
     crate::game::layers::mark_layers_full(state);
@@ -904,6 +988,56 @@ mod tests {
         assert_eq!(
             state.objects.get(&creature).unwrap().attachments,
             vec![sword, shield]
+        );
+    }
+
+    /// E1: re-attaching Equipment to a DIFFERENT host issues a new timestamp on
+    /// each attach — CR 613.7e (first attach) then CR 701.3c (move to a
+    /// different host). Reverting Step 2 leaves the timestamp at 0 throughout,
+    /// so both strict-increase asserts fail.
+    #[test]
+    fn reattach_to_different_host_bumps_timestamp() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let bear_a = spawn_creature(&mut state, "Bear A");
+        let bear_b = spawn_creature(&mut state, "Bear B");
+
+        let ts_initial = state.objects[&sword].timestamp;
+
+        attach_to(&mut state, sword, bear_a);
+        let ts_after_a = state.objects[&sword].timestamp;
+        assert!(
+            ts_after_a > ts_initial,
+            "first attach must issue a new timestamp (CR 613.7e)"
+        );
+
+        attach_to(&mut state, sword, bear_b);
+        let ts_after_b = state.objects[&sword].timestamp;
+        assert!(
+            ts_after_b > ts_after_a,
+            "moving to a different host must issue a new timestamp (CR 701.3c)"
+        );
+    }
+
+    /// E2: re-attaching to the SAME host issues no new timestamp — CR 701.3b
+    /// (the effect does nothing). This row discriminates the LOW-1 fix: the gate
+    /// reads the UNFILTERED prior host, so a same-host re-attach is recognized as
+    /// a no-op. Reverting to the filtered `old_target` local collapses the
+    /// same-host case to `None`, which compares unequal and would bump.
+    #[test]
+    fn reattach_to_same_host_does_not_bump_timestamp() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let bear = spawn_creature(&mut state, "Bear");
+
+        attach_to(&mut state, sword, bear);
+        let ts_after_first = state.objects[&sword].timestamp;
+
+        attach_to(&mut state, sword, bear);
+        let ts_after_second = state.objects[&sword].timestamp;
+        assert_eq!(
+            ts_after_first, ts_after_second,
+            "re-attaching to the same host must not issue a new timestamp (CR 701.3b)"
         );
     }
 
@@ -1249,7 +1383,7 @@ mod tests {
         assert!(state.pending_continuation.is_some());
 
         let cont = state.pending_continuation.take().unwrap();
-        complete_resolution_attachment_choice(&mut state, *cont.chain, second, &mut events)
+        complete_resolution_attachment_choice(&mut state, *cont.chain, &[second], &mut events)
             .unwrap();
 
         assert_eq!(
@@ -1257,6 +1391,129 @@ mod tests {
             Some(AttachTarget::Object(host))
         );
         assert!(state.objects.get(&first).unwrap().attached_to.is_none());
+    }
+
+    #[test]
+    fn optional_multi_attach_prompts_with_zero_minimum() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Mockingbird");
+        state.last_created_token_ids = vec![host];
+        let first = spawn_equipment(&mut state, "Spy Kit", 10);
+        let second = spawn_equipment(&mut state, "Energy Daggers", 11);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                up_to,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(*effect_kind, EffectKind::Attach);
+                assert_eq!(*count, 2);
+                assert_eq!(*min_count, 0);
+                assert!(*up_to);
+                assert!(cards.contains(&first));
+                assert!(cards.contains(&second));
+            }
+            other => panic!("expected optional Attach EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complete_resolution_attachment_choice_attaches_multiple_equipment() {
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Mockingbird");
+        state.last_created_token_ids = vec![host];
+        let first = spawn_equipment(&mut state, "Spy Kit", 10);
+        let second = spawn_equipment(&mut state, "Energy Daggers", 11);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, &[first, second], &mut events)
+            .unwrap();
+
+        assert_eq!(
+            state.objects.get(&first).unwrap().attached_to,
+            Some(AttachTarget::Object(host))
+        );
+        assert_eq!(
+            state.objects.get(&second).unwrap().attached_to,
+            Some(AttachTarget::Object(host))
+        );
+    }
+
+    #[test]
+    fn optional_attach_with_no_eligible_equipment_is_noop_without_attach_event() {
+        use crate::types::ability::TypeFilter;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Mockingbird");
+        state.last_created_token_ids = vec![host];
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    ..
+                }
+            )),
+            "no-op optional Attach must not emit an attachment event"
+        );
+        assert!(state.objects.get(&host).unwrap().attachments.is_empty());
     }
 
     #[test]
@@ -1281,7 +1538,8 @@ mod tests {
         );
 
         let mut events = vec![];
-        complete_resolution_attachment_choice(&mut state, ability, equipment, &mut events).unwrap();
+        complete_resolution_attachment_choice(&mut state, ability, &[equipment], &mut events)
+            .unwrap();
 
         assert_eq!(
             state.objects.get(&equipment).unwrap().attached_to,
@@ -1314,7 +1572,7 @@ mod tests {
         );
 
         let mut events = vec![];
-        complete_resolution_attachment_choice(&mut state, ability, chosen, &mut events).unwrap();
+        complete_resolution_attachment_choice(&mut state, ability, &[chosen], &mut events).unwrap();
 
         assert_eq!(
             state.objects.get(&chosen).unwrap().attached_to,
@@ -1654,6 +1912,38 @@ mod tests {
             state.objects.get(&equip).unwrap().attachments.is_empty(),
             "self-attach adds nothing to attachments"
         );
+    }
+
+    #[test]
+    fn attachment_cycle_is_prohibited_and_no_op() {
+        let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bearer");
+        let equipment = spawn_equipment(&mut state, "Assassin Gauntlet", 10);
+
+        attach_to(&mut state, equipment, creature);
+
+        assert_eq!(
+            attachment_illegality(&state, creature, equipment),
+            Some(AttachIllegality::Prohibited),
+            "attaching a host to its own attachment would create a cycle"
+        );
+        assert!(!can_attach_to_object(&state, creature, equipment));
+        assert_eq!(attach_to(&mut state, creature, equipment), None);
+        assert_eq!(state.objects.get(&creature).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+        assert_eq!(
+            state.objects.get(&creature).unwrap().attachments,
+            vec![equipment]
+        );
+        assert!(state
+            .objects
+            .get(&equipment)
+            .unwrap()
+            .attachments
+            .is_empty());
     }
 
     #[test]

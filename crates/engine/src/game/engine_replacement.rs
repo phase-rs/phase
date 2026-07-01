@@ -1884,6 +1884,229 @@ mod tests {
         );
     }
 
+    /// Install Displaced Dinosaurs on the battlefield under `controller`, carrying
+    /// the parsed "As a historic permanent you control enters, it becomes a 7/7
+    /// Dinosaur creature in addition to its other types" replacement. Returns the
+    /// host's ObjectId.
+    fn install_displaced_dinosaurs(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let host = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Displaced Dinosaurs".to_string(),
+            Zone::Battlefield,
+        );
+        let repl = parse_replacement_line(
+            "As a historic permanent you control enters, it becomes a 7/7 Dinosaur \
+             creature in addition to its other types.",
+            "Displaced Dinosaurs",
+        )
+        .expect("Displaced Dinosaurs replacement must parse");
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .replacement_definitions = vec![repl].into();
+        host
+    }
+
+    /// CR 614.1c + CR 614.12 + CR 700.6 + CR 205.1b + CR 208.2b: end-to-end
+    /// runtime proof for Displaced Dinosaurs' non-self "becomes-in-addition"
+    /// replacement. A historic ENTRANT (here a plain artifact — historic via its
+    /// artifact card type, CR 700.6) entering under the host's controller is
+    /// animated into a 7/7 Dinosaur creature that RETAINS its prior artifact type
+    /// (CR 205.1b), and the animation persists after the host leaves (CR 208.2b /
+    /// 707.2).
+    ///
+    /// This is the gate confirming the "no runtime edits" hypothesis: a non-self
+    /// `Moved` replacement whose execute is a `GenericEffect` post-replacement
+    /// continuation binds its `SelfRef` "becomes" to the separate entrant (CR
+    /// 614.12a) and the layer system applies it. Mirrors
+    /// `resumed_entry_receives_enters_with_additional_counters_static`.
+    #[test]
+    fn displaced_dinosaurs_animates_historic_entrant_and_persists() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let host = install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a plain artifact (historic via its artifact card type),
+        // P0-owned, entering from hand.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mishra's Bauble".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entrant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "a single Mandatory becomes replacement must deliver the entry without parking"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "entrant must be on the battlefield"
+        );
+        // CR 613.4b: base power/toughness set to 7/7.
+        assert_eq!(obj.power, Some(7), "entrant power must be set to 7");
+        assert_eq!(obj.toughness, Some(7), "entrant toughness must be set to 7");
+        // CR 613.1d: Creature type added.
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "entrant must become a creature"
+        );
+        // CR 205.1b: prior artifact type retained (additive).
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Artifact),
+            "CR 205.1b: entrant must retain its artifact type"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "entrant must gain the Dinosaur subtype"
+        );
+
+        // CR 208.2b + CR 707.2: the characteristics are locked in at entry and
+        // persist after the host (Displaced Dinosaurs) leaves the battlefield —
+        // the becomes continuous is sourced on the entrant, not the host.
+        state.battlefield.retain(|id| *id != host);
+        state.objects.remove(&host);
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(7),
+            "CR 208.2b: 7/7 must persist after the host leaves"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "CR 208.2b: Dinosaur subtype must persist after the host leaves"
+        );
+    }
+
+    /// CR 700.6: a non-historic entrant (a vanilla creature — no artifact,
+    /// legendary, or Saga) is NOT animated by Displaced Dinosaurs' historic-only
+    /// replacement. Discriminates the `FilterProp::Historic` subject guard.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_nonhistoric_entrant() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a vanilla 2/2 creature (non-historic), P0-owned.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "entry must complete"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(2),
+            "non-historic creature power must be unchanged"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "non-historic creature toughness must be unchanged"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "non-historic creature must not gain the Dinosaur subtype"
+        );
+    }
+
+    /// CR 603.6d: the replacement applies only as a permanent ENTERS. An artifact
+    /// already on the battlefield when Displaced Dinosaurs is present is never
+    /// animated — there is no entry event for it.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_preexisting_artifact() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // A historic artifact already on the battlefield (no entry event fires).
+        let preexisting = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&preexisting)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&preexisting];
+        assert_ne!(
+            obj.power,
+            Some(7),
+            "a pre-existing artifact must not be animated into a 7/7"
+        );
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "a pre-existing artifact must not become a creature"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "a pre-existing artifact must not gain the Dinosaur subtype"
+        );
+    }
+
     /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
     /// spell's ETB is fully prevented after a replacement choice
     /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
@@ -1938,6 +2161,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 ))]
@@ -2237,6 +2461,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 ))
@@ -2562,6 +2787,71 @@ mod tests {
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
         );
+    }
+
+    /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
+    /// creature card in exile with a takeover counter on it". `find_copy_targets`
+    /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
+    /// `FilterProp::Counters` predicate, returning only the marked exile card and
+    /// excluding an unmarked exile creature (and the battlefield entirely). This
+    /// is the runtime proof that the parsed source filter selects correctly.
+    #[test]
+    fn find_copy_targets_honors_exile_zone_and_takeover_counter_predicate() {
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_creature = |state: &mut GameState, card: u64, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Bear {card}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let marked_exile = make_creature(&mut state, 1, Zone::Exile);
+        state
+            .objects
+            .get_mut(&marked_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("takeover".to_string()), 1);
+        let unmarked_exile = make_creature(&mut state, 2, Zone::Exile);
+        let bf_creature = make_creature(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The Master".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "a creature card in exile with a takeover counter on it"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone { zone: Zone::Exile },
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("takeover".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert_eq!(
+            targets,
+            vec![marked_exile],
+            "only the takeover-marked exile creature is a legal copy source"
+        );
+        assert!(!targets.contains(&unmarked_exile));
+        assert!(!targets.contains(&bf_creature));
     }
 
     /// 2026-05-09 audit M4 regression: the unified

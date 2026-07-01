@@ -47,6 +47,51 @@ pub(crate) fn allowed_draw_count(
     allowed
 }
 
+/// CR 121.1 + CR 613.11: True when an active `DrawFromBottom` static redirects
+/// `player_id`'s draws to the bottom of their library. Mirrors the
+/// `battlefield_active_statics` scan in [`allowed_draw_count`].
+pub(crate) fn draws_from_bottom(
+    state: &GameState,
+    player_id: crate::types::player::PlayerId,
+) -> bool {
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
+    // command-zone / condition gate.
+    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        if let StaticMode::DrawFromBottom { ref who } = def.mode {
+            if prohibition_scope_matches_player(who, player_id, source_obj.id, state) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CR 121.1 + CR 121.2 + CR 613.11: SINGLE AUTHORITY for which library cards a
+/// draw pulls. Every draw-delivery path (spell/ability resolution, the
+/// turn-based draw step, connive, gift) MUST call this for card selection so a
+/// `DrawFromBottom` static is honored uniformly.
+///
+/// Returns up to `count` object ids, pulled from the BOTTOM (CR 121.2: cards are
+/// drawn one at a time, each taking the then-current bottommost card →
+/// `.rev().take(n)`) when an active `DrawFromBottom` matches the player,
+/// otherwise from the TOP (CR 121.1, `library[0]`). Partial draws
+/// (`count > library.len()`) return all available ids; an empty library returns
+/// an empty vec — empty-library SBA handling (CR 704.5b) stays at the call site.
+pub(crate) fn select_cards_to_draw(
+    state: &GameState,
+    player_id: crate::types::player::PlayerId,
+    count: usize,
+) -> Vec<crate::types::identifiers::ObjectId> {
+    let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+        return Vec::new();
+    };
+    if draws_from_bottom(state, player_id) {
+        player.library.iter().rev().take(count).copied().collect()
+    } else {
+        player.library.iter().take(count).copied().collect()
+    }
+}
+
 /// CR 121.1: Draw a card — put the top card of library into hand.
 ///
 /// CR 601.2c + CR 115.1: When the parsed `Effect::Draw { target }` is a
@@ -185,16 +230,9 @@ pub fn apply_draw_after_replacement(
     };
 
     let allowed_count = allowed_draw_count(state, player_id, count);
-    let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-        return;
-    };
-
-    let cards_to_draw: Vec<_> = player
-        .library
-        .iter()
-        .take(allowed_count as usize)
-        .copied()
-        .collect();
+    // CR 121.1 + CR 613.11: card selection routes through the single
+    // `select_cards_to_draw` authority so a `DrawFromBottom` static is honored.
+    let cards_to_draw = select_cards_to_draw(state, player_id, allowed_count as usize);
 
     // CR 704.5b: If library has fewer cards than requested, mark the player.
     // CR 121.4: Partial draws are legal — draw what's available.
@@ -873,6 +911,129 @@ mod tests {
             "non-first-drawn miracle card must not queue an offer"
         );
     }
+
+    /// Seed a player's library in deterministic top→bottom order. `create_object`
+    /// appends (push_back), and `library[0]` is the top, so the first name is the
+    /// top card and the last name is the bottom card.
+    fn seed_library(state: &mut GameState, player: PlayerId, names: &[&str]) -> Vec<ObjectId> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                create_object(
+                    state,
+                    CardId(1000 + i as u64),
+                    player,
+                    name.to_string(),
+                    Zone::Library,
+                )
+            })
+            .collect()
+    }
+
+    fn push_draw_from_bottom(state: &mut GameState, controller: PlayerId, who: ProhibitionScope) {
+        let source = create_object(
+            state,
+            CardId(9000),
+            controller,
+            "River Song".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::DrawFromBottom { who }));
+    }
+
+    /// CR 121.1: with no `DrawFromBottom` static, `select_cards_to_draw` pulls
+    /// from the TOP (`library[0]`) in order; `count > len` returns all available.
+    #[test]
+    fn select_pulls_from_top_without_static() {
+        let mut state = GameState::new_two_player(42);
+        let lib = seed_library(&mut state, PlayerId(0), &["top", "mid", "bottom"]);
+
+        assert!(!draws_from_bottom(&state, PlayerId(0)));
+        assert_eq!(select_cards_to_draw(&state, PlayerId(0), 1), vec![lib[0]]);
+        assert_eq!(
+            select_cards_to_draw(&state, PlayerId(0), 2),
+            vec![lib[0], lib[1]]
+        );
+        // count > len → all available, no panic.
+        assert_eq!(select_cards_to_draw(&state, PlayerId(0), 99), lib);
+    }
+
+    /// CR 121.1 + CR 121.2: with a controller-scoped `DrawFromBottom` static,
+    /// selection pulls from the BOTTOM one at a time (bottommost first, then
+    /// next-from-bottom). Empty library returns an empty vec.
+    #[test]
+    fn select_pulls_from_bottom_with_controller_static() {
+        let mut state = GameState::new_two_player(42);
+        let lib = seed_library(&mut state, PlayerId(0), &["top", "mid", "bottom"]);
+        push_draw_from_bottom(&mut state, PlayerId(0), ProhibitionScope::Controller);
+
+        assert!(draws_from_bottom(&state, PlayerId(0)));
+        // lib = [top, mid, bottom]; bottom is the last element.
+        assert_eq!(select_cards_to_draw(&state, PlayerId(0), 1), vec![lib[2]]);
+        assert_eq!(
+            select_cards_to_draw(&state, PlayerId(0), 2),
+            vec![lib[2], lib[1]]
+        );
+
+        state.players[0].library.clear();
+        assert!(select_cards_to_draw(&state, PlayerId(0), 1).is_empty());
+    }
+
+    /// CR 613.11: `DrawFromBottom { Opponents }` redirects an opponent's draws
+    /// but NOT the source-controller's — scope correctness across both players.
+    #[test]
+    fn select_scope_opponents_only() {
+        let mut state = GameState::new_two_player(42);
+        let p0_lib = seed_library(&mut state, PlayerId(0), &["p0top", "p0bottom"]);
+        let p1_lib = seed_library(&mut state, PlayerId(1), &["p1top", "p1bottom"]);
+        // Source controlled by P0, scoping its OPPONENTS (P1).
+        push_draw_from_bottom(&mut state, PlayerId(0), ProhibitionScope::Opponents);
+
+        // P1 (the opponent) draws from the bottom.
+        assert!(draws_from_bottom(&state, PlayerId(1)));
+        assert_eq!(
+            select_cards_to_draw(&state, PlayerId(1), 1),
+            vec![p1_lib[1]]
+        );
+        // P0 (the controller) is unaffected — top.
+        assert!(!draws_from_bottom(&state, PlayerId(0)));
+        assert_eq!(
+            select_cards_to_draw(&state, PlayerId(0), 1),
+            vec![p0_lib[0]]
+        );
+    }
+
+    /// CR 121.1 + CR 121.2 + CR 613.11: the spell/ability draw path
+    /// (`apply_draw_after_replacement`) honors `DrawFromBottom` — a draw-2 pulls
+    /// the bottommost then next-from-bottom, leaving the top card in the library.
+    #[test]
+    fn spell_draw_pulls_bottom_under_static() {
+        let mut state = GameState::new_two_player(42);
+        let lib = seed_library(&mut state, PlayerId(0), &["top", "mid", "bottom"]);
+        push_draw_from_bottom(&mut state, PlayerId(0), ProhibitionScope::Controller);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &make_ability(2), &mut events).unwrap();
+
+        assert!(
+            state.players[0].hand.contains(&lib[2]),
+            "bottom card must be drawn first"
+        );
+        assert!(
+            state.players[0].hand.contains(&lib[1]),
+            "next-from-bottom must be drawn second"
+        );
+        assert!(
+            state.players[0].library.contains(&lib[0]),
+            "top card must remain in the library"
+        );
+    }
 }
 
 /// CR 121.1 + CR 614.5: tranche-4 draw-pipeline migration coverage. These drive
@@ -1003,6 +1164,7 @@ mod tranche4_draw_pipeline_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );
@@ -1073,6 +1235,7 @@ mod tranche4_draw_pipeline_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         );

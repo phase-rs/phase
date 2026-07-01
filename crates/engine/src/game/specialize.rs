@@ -185,6 +185,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: vec![],
             counters: Default::default(),
+            tapped: false,
         }
     }
 

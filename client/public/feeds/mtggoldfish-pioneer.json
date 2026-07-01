@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-27T00:00:00Z",
+  "updated": "2026-06-30T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -151,7 +151,7 @@
       "main": [
         {
           "count": 1,
-          "name": "Overgrown Tomb"
+          "name": "Restless Cottage"
         },
         {
           "count": 4,
@@ -159,99 +159,23 @@
         },
         {
           "count": 1,
-          "name": "Overgrown Tomb"
+          "name": "Duress"
         },
         {
           "count": 1,
           "name": "Boseiju, Who Endures"
         },
         {
-          "count": 1,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Abundance"
-        },
-        {
-          "count": 1,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
           "count": 3,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Wastes"
-        },
-        {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Professor Dellian Fel"
-        },
-        {
-          "count": 4,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 2,
-          "name": "Sentinel of the Nameless City"
+          "name": "Darkbore Pathway"
         },
         {
           "count": 3,
           "name": "Sheoldred, the Apocalypse"
         },
         {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 1,
-          "name": "Tear Asunder"
-        },
-        {
-          "count": 1,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 3,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 1,
-          "name": "Wastewood Verge"
-        },
-        {
-          "count": 2,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
-          "name": "Restless Cottage"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "name": "Urborg, Tomb of Yawgmoth"
         },
         {
           "count": 4,
@@ -259,16 +183,76 @@
         },
         {
           "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 3,
+          "name": "Professor Dellian Fel"
+        },
+        {
+          "count": 4,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 3,
+          "name": "Llanowar Wastes"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 2,
+          "name": "Tear Asunder"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 3,
+          "name": "Sentinel of the Nameless City"
+        },
+        {
+          "count": 1,
+          "name": "Witherbloom Charm"
+        },
+        {
+          "count": 1,
+          "name": "Sheoldred's Edict"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 2,
+          "name": "Culling Ritual"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Duress"
         },
         {
@@ -288,16 +272,16 @@
           "name": "Sheoldred's Edict"
         },
         {
-          "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 2,
-          "name": "Withering Curse"
-        },
-        {
           "count": 1,
-          "name": "Duress"
+          "name": "Ashiok, Dream Render"
+        },
+        {
+          "count": 2,
+          "name": "Extinction Event"
+        },
+        {
+          "count": 2,
+          "name": "Culling Ritual"
         }
       ]
     },
@@ -456,18 +440,6 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
           "count": 1,
           "name": "Den of the Bugbear"
         },
@@ -476,48 +448,16 @@
           "name": "Mountain"
         },
         {
-          "count": 2,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
           "count": 3,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Spirebluff Canal"
+          "name": "Experimental Synthesizer"
         },
         {
           "count": 4,
           "name": "Flow State"
         },
         {
-          "count": 3,
-          "name": "Reckless Rage"
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 3,
@@ -525,25 +465,53 @@
         },
         {
           "count": 3,
-          "name": "Experimental Synthesizer"
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 2,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
         }
       ],
       "sideboard": [
         {
           "count": 1,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 1,
           "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
         },
         {
           "count": 1,
@@ -551,11 +519,11 @@
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
-          "name": "Octopus Form"
+          "name": "Firebending Lesson"
         },
         {
           "count": 1,
@@ -563,19 +531,27 @@
         },
         {
           "count": 1,
-          "name": "Abandon Attachments"
+          "name": "Iroh's Demonstration"
         },
         {
-          "count": 3,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         },
         {
           "count": 2,
           "name": "Redcap Melee"
         },
         {
-          "count": 1,
-          "name": "Disdainful Stroke"
+          "count": 3,
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -591,40 +567,24 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Arclight Phoenix"
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
-        },
-        {
-          "count": 2,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
+          "name": "Vibrant Outburst"
         },
         {
           "count": 3,
-          "name": "Lightning Axe"
+          "name": "Traumatic Critique"
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 4,
+          "name": "Ledger Shredder"
         },
         {
           "count": 1,
@@ -632,77 +592,109 @@
         },
         {
           "count": 4,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Charm"
-        },
-        {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
           "name": "Steam Vents"
         },
         {
-          "count": 1,
-          "name": "Stormcarved Coast"
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 2,
+          "name": "Thing in the Ice"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
         },
         {
           "count": 4,
           "name": "Treasure Cruise"
         },
         {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Abrade"
+          "name": "Abandon Attachments"
         },
         {
           "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 3,
           "name": "Brazen Borrower"
         },
         {
           "count": 1,
-          "name": "Flowstone Infusion"
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "Into the Flood Maw"
+          "name": "Negate"
         },
         {
-          "count": 3,
-          "name": "Ledger Shredder"
+          "count": 1,
+          "name": "Disdainful Stroke"
         },
         {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Rending Volley"
+          "count": 1,
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -809,19 +801,19 @@
       "sideboard": [
         {
           "count": 1,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 2,
-          "name": "Path of Peril"
+          "name": "Bitter Triumph"
         },
         {
           "count": 1,
-          "name": "Languish"
+          "name": "Path of Peril"
         },
         {
           "count": 2,
-          "name": "Graveyard Trespasser"
+          "name": "Languish"
+        },
+        {
+          "count": 1,
+          "name": "Gix's Command"
         },
         {
           "count": 3,
@@ -841,7 +833,11 @@
         },
         {
           "count": 1,
-          "name": "Bitter Triumph"
+          "name": "End of the Hunt"
+        },
+        {
+          "count": 1,
+          "name": "Preacher of the Schism"
         }
       ]
     },
@@ -1119,8 +1115,8 @@
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Pest Control"
+          "count": 4,
+          "name": "Doorkeeper Thrull"
         },
         {
           "count": 2,
@@ -1135,8 +1131,8 @@
           "name": "Loran of the Third Path"
         },
         {
-          "count": 4,
-          "name": "Doorkeeper Thrull"
+          "count": 2,
+          "name": "Ral Zarek, Guest Lecturer"
         },
         {
           "count": 2,
@@ -1144,7 +1140,7 @@
         },
         {
           "count": 2,
-          "name": "Ral Zarek, Guest Lecturer"
+          "name": "Pest Control"
         }
       ]
     },
