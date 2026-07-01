@@ -6891,6 +6891,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         ))
     }
@@ -8085,6 +8086,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let mut mill = AbilityDefinition::new(
@@ -8661,6 +8663,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -13936,6 +13939,7 @@ mod tests {
                     enter_with_counters: Vec::new(),
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .condition(ReplacementCondition::EnteredFromZone {
@@ -13967,6 +13971,7 @@ mod tests {
                     enter_with_counters: Vec::new(),
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .condition(ReplacementCondition::EnteredFromZone {

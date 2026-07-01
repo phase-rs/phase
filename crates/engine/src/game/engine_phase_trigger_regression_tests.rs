@@ -76,6 +76,7 @@ fn hand_to_battlefield_choice_ability(
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![],
         source_id,
@@ -2463,6 +2464,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
     state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
@@ -2536,6 +2538,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
 
     let result = apply_as_current(
@@ -2585,6 +2588,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
@@ -3757,6 +3761,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let reflexive = crate::types::ability::AbilityDefinition {
@@ -3949,6 +3954,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
         };

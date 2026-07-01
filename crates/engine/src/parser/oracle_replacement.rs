@@ -908,6 +908,7 @@ fn parse_self_enters_pay_cost_replacement(
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
 
@@ -3742,6 +3743,7 @@ fn parse_creature_die_exile_replacement(
                 enter_with_counters: anaphor.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a
@@ -4015,6 +4017,7 @@ fn self_die_exile_anaphor_execute(
             enter_with_counters: anaphor.enter_with_counters,
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     let continuation = anaphor.continuation.original.trim();
@@ -4209,6 +4212,7 @@ fn parse_graveyard_exile_replacement(
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
 

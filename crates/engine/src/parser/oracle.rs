@@ -49,7 +49,7 @@ use super::oracle_classifier::{
     should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
-use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
+use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
@@ -538,6 +538,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             enter_with_counters,
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description(line.to_string());
@@ -1234,6 +1235,19 @@ fn strip_instead_clause(
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
     if let Some((before, after)) = tp.rsplit_around(" instead if ") {
         let condition_text = after.lower.trim().trim_end_matches('.');
+        // CR 614.1a + CR 608.2c: an inverted "instead if <cond>" followed by a further
+        // printed instruction (Throw from the Saddle: "… instead if it's a Mount. Then it
+        // deals damage …") is an INTRA-CHAIN override, not a whole-line replacement. The
+        // condition region then carries an internal sentence boundary; defer the whole line
+        // to the chain parser (mirrors the pattern-3 intra-chain guard at the `" instead"`
+        // branch below) so the trailing independent clause is not swallowed. Operates on the
+        // post-keyword-exclusion joined `effect_line`, so trailing keyword lines (Flashback)
+        // never reach here.
+        if condition_text.contains('.') {
+            // allow-noncombinator: structural sentence-boundary split (mirrors the
+            // pattern-3 `before_trim.contains('.')` guard below), not parsing dispatch
+            return (text.to_string(), None, false);
+        }
         let condition = parse_inner_condition(condition_text)
             .ok()
             .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
@@ -4621,31 +4635,66 @@ pub(super) fn find_activated_colon(line: &str) -> Option<usize> {
     None
 }
 
-/// Whether the text preceding a top-level colon reads as an activation cost
-/// (mana symbols or a cost-starter verb). Shared by `find_activated_colon` so
-/// the bare and ability-word-prefixed paths apply identical cost recognition.
+/// Whether the text preceding a top-level colon reads as an activation cost.
+/// Shared by `find_activated_colon` (and, transitively,
+/// `strip_activated_cost_label`) so the bare and ability-word-prefixed paths
+/// apply identical cost recognition.
+///
+/// Three admitting signals, in precedence order:
+///  1. mana symbols (`'{'` fast path);
+///  2. a cost-starter verb prefix (the original allowlist) — admits the
+///     effect-shaped activation costs ("Put a -1/-1 counter on ~", "Return ~ to
+///     its owner's hand") whose `parse_single_cost` form is an `EffectCost`;
+///  3. a `parse_single_cost` probe that yields a concrete cost which is neither
+///     `Unimplemented` nor `EffectCost`.
+///
+/// Signal 3 is the K0 widening: it admits keyword-action and other named
+/// activation costs — "Collect evidence N" (CR 701.59a, Kylox's Voltstrider line
+/// 0), Mill, Exert, Behold, Reveal, etc. — that a hardcoded verb list would
+/// miss, without a fixed keyword list. `EffectCost` is deliberately EXCLUDED
+/// from signal 3: that arm of `parse_single_cost` parses an arbitrary effect, so
+/// an effect fragment that happens to precede an EMBEDDED colon — "...or Magic:
+/// The Gathering Online avatar" (Clear, Fair Magic), "...at random: Ash Zealot;
+/// ..." (The Ash Lizard) — would otherwise be misread as a cost and split the
+/// line at the wrong colon. The legitimate effect-shaped costs are recovered by
+/// signal 2's verb allowlist (those prefixes start with a cost verb; the
+/// embedded-colon effect fragments do not). The card-data coverage-regression
+/// gate covers the corpus-wide blast radius of signal 3.
 fn cost_prefix_is_activated(prefix: &str) -> bool {
-    // Contains mana symbols
+    // Contains mana symbols — fast path (skips the lowercase/parse work below).
     if prefix.contains('{') {
         return true;
     }
-
-    // Starts with cost-like words (all ASCII — case-insensitive prefix check)
     let trimmed = prefix.trim();
-    let cost_starters = [
-        "sacrifice",
-        "discard",
-        "pay",
-        "remove",
-        "exile",
-        "return",
-        "tap",
-        "untap",
-        "put",
-    ];
-    // Only lowercase when needed (skipped entirely if '{' was found above)
-    let lower_prefix = trimmed.to_lowercase();
-    cost_starters.iter().any(|s| lower_prefix.starts_with(s))
+    // CR 602.1: cost-starter verbs — the effect-shaped activation costs whose
+    // `parse_single_cost` form is an `EffectCost` (excluded from the probe).
+    // Recognized with a nom `alt`/`tag` combinator over the lowercased prefix
+    // (the parser is the detector; no `starts_with` dispatch).
+    let starts_with_cost_verb = nom_on_lower(trimmed, &trimmed.to_lowercase(), |i| {
+        value(
+            (),
+            alt((
+                tag("sacrifice"),
+                tag("discard"),
+                tag("pay"),
+                tag("remove"),
+                tag("exile"),
+                tag("return"),
+                tag("tap"),
+                tag("untap"),
+                tag("put"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if starts_with_cost_verb {
+        return true;
+    }
+    !matches!(
+        parse_single_cost(trimmed),
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. }
+    )
 }
 
 /// CR 207.2c / CR 207.2d: an ability word (<=4 words) or a flavor word (Universes

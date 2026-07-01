@@ -114,6 +114,7 @@ fn finish_encode_records_no_link_when_redirected_away_from_exile() {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
         );

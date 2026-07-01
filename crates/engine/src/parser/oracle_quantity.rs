@@ -2527,6 +2527,50 @@ fn parse_spell_history_clause(
     None
 }
 
+/// CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" → count only the
+/// tracked-set members matching <TYPE> (`FilteredTrackedSetSize`), so
+/// "for each creature card put into a graveyard this way" makes a token per
+/// creature milled, not per card (Dread Summons, #4678-adjacent #4697). A bare
+/// "card" (`TypeFilter::Card`) or a typeless clause is the unfiltered count and
+/// returns `None`, so the caller keeps `TrackedSetSize`. Building block for the
+/// whole "for each <filter> card <verb> this way" class (creature / land /
+/// artifact / … milled / exiled / destroyed / put into a graveyard).
+/// `caused_by: None` counts every filtered member of the most recent tracked set
+/// (the cards moved "this way").
+fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
+    let (filter, rest) = parse_type_phrase(clause);
+    let TargetFilter::Typed(ref typed) = filter else {
+        return None;
+    };
+    // Only a SPECIFIC card type filters the set; a typeless clause or the generic
+    // "card" (`TypeFilter::Card`) is the unfiltered `TrackedSetSize` count.
+    if typed.type_filters.is_empty()
+        || typed
+            .type_filters
+            .iter()
+            .all(|t| matches!(t, TypeFilter::Card))
+    {
+        return None;
+    }
+    // The remainder must be a "<zone-move verb> this way" tracked-set phrase
+    // (e.g. "put into a graveyard this way", "milled this way", "exiled this
+    // way"): nom `take_until("this way") + tag`, with nothing after it.
+    let terminates_this_way = (
+        take_until::<_, _, OracleError<'_>>("this way"),
+        tag::<_, _, OracleError<'_>>("this way"),
+    )
+        .parse(rest.trim())
+        .map(|(after, _)| after.trim().is_empty())
+        .unwrap_or(false);
+    if !terminates_this_way {
+        return None;
+    }
+    Some(QuantityRef::FilteredTrackedSetSize {
+        filter: Box::new(filter),
+        caused_by: None,
+    })
+}
+
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     parse_for_each_clause_with_they_controller(
         clause,
@@ -2696,6 +2740,14 @@ fn parse_for_each_clause_with_they_controller(
         if let Ok(("", qty)) =
             crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(&lower)
         {
+            return Some(qty);
+        }
+        // CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" for the remaining
+        // zone-move verbs (put into a graveyard / milled / exiled …) — count only
+        // the members of that card type (Dread Summons #4697). Mirrors the
+        // revealed/destroyed helpers above; a bare "card" returns `None` and keeps
+        // the unfiltered `TrackedSetSize` fallback below.
+        if let Some(qty) = parse_filtered_tracked_set_this_way(&lower) {
             return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
@@ -6625,6 +6677,37 @@ mod tests {
             }
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
+    }
+
+    /// CR 608.2c + CR 400.7 (#4697): "for each CREATURE card put into a graveyard
+    /// this way" (Dread Summons) counts only the creature cards milled, not every
+    /// card. The generic ref parser dropped the "creature" type and yielded the
+    /// unfiltered `TrackedSetSize`; it must now be `FilteredTrackedSetSize`.
+    #[test]
+    fn creature_card_put_into_graveyard_this_way_uses_filtered_tracked_set() {
+        let qty = parse_for_each_clause("creature card put into a graveyard this way")
+            .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "filter must be Creature; got {tf:?}"
+                ),
+                other => panic!("expected Typed(Creature), got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Regression: a bare "card put into a graveyard this way" (no card type)
+    /// counts EVERY tracked-set member and must keep the unfiltered
+    /// `TrackedSetSize`.
+    #[test]
+    fn bare_card_put_into_graveyard_this_way_keeps_tracked_set_size() {
+        assert_eq!(
+            parse_for_each_clause("card put into a graveyard this way"),
+            Some(QuantityRef::TrackedSetSize),
+        );
     }
 
     /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"

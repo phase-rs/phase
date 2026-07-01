@@ -263,6 +263,7 @@ fn prompt_resolution_tap_untap_choice(
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
     true
 }

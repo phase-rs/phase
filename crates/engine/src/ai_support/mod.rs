@@ -308,6 +308,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::DiscoverChoice { .. },
         )
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            },
+            GameAction::GraveyardPaidCastChoice { .. },
+        )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
         | (

@@ -792,6 +792,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             mut moved_count,
             face_down_profile,
             library_placement,
+            enters_modified_if,
             effect_kind,
         } = pending;
         // CR 608.2c: the object that paused this iteration on a replacement CHOICE
@@ -852,6 +853,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
                 face_down_profile: face_down_profile.clone(),
                 library_placement: library_placement.clone(),
+                // CR 614.12: thread the moved-object type gate into the per-object
+                // resume ctx so a resumed member is still gated on its type
+                // (Summoner's Grimoire), matching the synchronous move path.
+                enters_modified_if: enters_modified_if.clone(),
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -901,6 +906,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
+                            // CR 614.12: preserve the moved-object type gate
+                            // across a further pause.
+                            enters_modified_if: ctx.enters_modified_if.clone(),
                             effect_kind,
                         });
                     paused = true;
@@ -928,6 +936,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
+                            // CR 614.12: preserve the moved-object type gate
+                            // across a further pause.
+                            enters_modified_if: ctx.enters_modified_if.clone(),
                             effect_kind,
                         });
                     // CR 608.2c: a further member paused mid-move on a replacement
@@ -1825,6 +1836,10 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Discover { .. },
                 ..
             }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
@@ -1858,6 +1873,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::EachPlayerCopyChosenSelection { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::LearnChoice { .. }
             // Digital-only Alchemy spellbook choice pauses resolution; stash
             // the printed tail until SubmitSpellbookDraft resumes the chain.
@@ -1908,13 +1924,13 @@ pub(super) fn resolve_optional_effect_decision(
                     // separate sentence (issue #3179: Swashbuckler
                     // Extraordinaire's declined Treasure sacrifice must not
                     // resolve the double-strike reflexive). CastFromZone's
-                    // graveyard-exile rider is not a printed follow-up to
+                    // graveyard-redirect rider is not a printed follow-up to
                     // execute on decline; it is permission metadata consumed
                     // only if the graveyard spell is actually cast.
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && !sub_ability_is_reflexive(sub)
                         && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                            && (cast_from_zone::is_graveyard_exile_rider_subability(sub)
+                            && (cast_from_zone::graveyard_destination_rider(sub).is_some()
                                 // CR 614.1c + CR 122.1: the enters-with-counter
                                 // rider is permission metadata (Osteomancer
                                 // Adept, The Tomb of Aclazotz), not a printed
@@ -2216,6 +2232,11 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
             | AbilityCondition::CastDuringPhase { .. }
+            // CR 608.2c: a live current-phase gate, not a decline-alternative
+            // selector — declining the optional effect does not pick a
+            // `CurrentPhaseIs` branch. Dose of Dawnglow's `Not`-wrapped form is
+            // classified earlier by the `Some(Not { .. }) => false` arm above.
+            | AbilityCondition::CurrentPhaseIs { .. }
             | AbilityCondition::CastTimingPermission { .. }
             | AbilityCondition::ManaColorSpent { .. }
             | AbilityCondition::RevealedHasCardType { .. }
@@ -4937,21 +4958,27 @@ fn previous_effect_amount_from_events(
                 .sum()
         }
         Effect::Fight { .. } => {
-            let fight_target = ability.targets.iter().find_map(|target| match target {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            });
+            // CR 120.10 + CR 701.14a: "add that much {R}" (The Last Agni Kai)
+            // reads the excess dealt to the *fought* creature — the fight's
+            // damage recipient, which in a dual-target fight is the second
+            // chosen target, not the fighting subject. Use the shared fighter
+            // resolver so this stays in lockstep with
+            // `previous_effect_excess_amount_from_events`.
+            let fought_creature = fight::resolve_fight_fighters(state, ability)
+                .ok()
+                .flatten()
+                .map(|(_subject, fought)| fought);
             events
                 .iter()
-                .filter_map(|event| match (event, fight_target) {
+                .filter_map(|event| match (event, fought_creature) {
                     (
                         GameEvent::DamageDealt {
                             target: TargetRef::Object(id),
                             excess,
                             ..
                         },
-                        Some(fight_target),
-                    ) if *id == fight_target => {
+                        Some(fought_creature),
+                    ) if *id == fought_creature => {
                         Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
                     }
                     _ => None,
@@ -4991,6 +5018,72 @@ fn previous_effect_amount_from_events(
     };
 
     (amount > 0).then_some(amount)
+}
+
+/// CR 120.10: Resolution-local excess-damage twin of
+/// `previous_effect_amount_from_events`. Sums the `excess` channel of the
+/// `DamageDealt` events produced by the preceding damage effect so the
+/// "if excess damage was dealt … this way" condition class (CR 120.10) reads
+/// overkill-beyond-lethal rather than the total (CR 120.6). `Fight` is included
+/// and scoped to the fight target, mirroring the `Fight` arm of
+/// `previous_effect_amount_from_events`.
+///
+/// Kept as a sibling of `previous_effect_amount_from_events` (which stays
+/// byte-unchanged) because the channel is a property of the *downstream*
+/// `PreviousEffectAmount` condition, not known at stamp time: both channels are
+/// stamped eagerly and `evaluate_condition` selects. Returns `None` when no
+/// excess was dealt.
+fn previous_effect_excess_amount_from_events(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    events: &[GameEvent],
+) -> Option<i32> {
+    let excess: i32 = match &ability.effect {
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::DamageDealt { excess, .. } => {
+                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
+                    }
+                    _ => None,
+                })
+                .sum()
+        }
+        Effect::Fight { .. } => {
+            // CR 120.10 + CR 701.14a: The Fight excess condition names the
+            // *fought* creature (The Last Agni Kai: "if the creature the
+            // opponent controls is dealt excess damage this way"), which is the
+            // fight's damage recipient — never the fighting subject. Read the
+            // recipient from the shared fighter resolver so a dual-target fight
+            // ("target creature you control fights target creature an opponent
+            // controls") sums excess dealt to the correct creature instead of
+            // the first chosen target.
+            let fought_creature = fight::resolve_fight_fighters(state, ability)
+                .ok()
+                .flatten()
+                .map(|(_subject, fought)| fought);
+            events
+                .iter()
+                .filter_map(|event| match (event, fought_creature) {
+                    (
+                        GameEvent::DamageDealt {
+                            target: TargetRef::Object(id),
+                            excess,
+                            ..
+                        },
+                        Some(fought_creature),
+                    ) if *id == fought_creature => {
+                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
+                    }
+                    _ => None,
+                })
+                .sum()
+        }
+        _ => 0,
+    };
+
+    (excess > 0).then_some(excess)
 }
 
 fn previous_effect_counts_by_player_from_events(
@@ -5059,6 +5152,8 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
+        // CR 120.10: resolution-local excess channel resets with its total twin.
+        state.last_effect_excess_amount = None;
         // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
         // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
         // (the prelude runs once at chain top, before `RollDie` executes), so
@@ -5603,6 +5698,12 @@ fn resolve_chain_body(
             previous_effect_amount_from_events(state, &scoped_template, scoped_events)
         {
             state.last_effect_amount = Some(amount);
+            // CR 120.10: stamp the resolution-local excess channel alongside the
+            // CR 120.6 total so a follow-up "if excess damage was dealt this way"
+            // condition reads overkill-beyond-lethal.
+            let excess =
+                previous_effect_excess_amount_from_events(state, &scoped_template, scoped_events);
+            state.last_effect_excess_amount = excess;
         }
         let affected_with_causes =
             if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
@@ -6411,6 +6512,11 @@ fn resolve_chain_body(
         state.last_effect_counts_by_player = counts_by_player;
     } else if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
         state.last_effect_amount = Some(amount);
+        // CR 120.10: stamp the resolution-local excess channel alongside the
+        // CR 120.6 total so a follow-up "if excess damage was dealt this way"
+        // condition reads overkill-beyond-lethal.
+        let excess = previous_effect_excess_amount_from_events(state, ability, parent_events);
+        state.last_effect_excess_amount = excess;
     }
 
     // CR 608.2c: Populate last_zone_changed_ids for ZoneChangedThisWay condition evaluation.
@@ -6601,17 +6707,19 @@ fn resolve_chain_body(
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
-        // CR 614.1a + CR 608.2c: CastFromZone consumes the Toshiro/Gearhulk
-        // exile-instead rider by stamping the granted casting permission. Do
-        // not also execute the parser's structural `ChangeZone { ParentTarget }`
-        // rider as an immediate move, or the graveyard card leaves before the
-        // player can cast it. Counter consumes the same structural rider during
-        // `counter::resolve` (stack -> exile directly) — skip the follow-up
-        // graveyard -> exile move so the spell never passes through the graveyard.
-        if matches!(
-            &ability.effect,
-            Effect::CastFromZone { .. } | Effect::Counter { .. }
-        ) && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+        // CR 614.1a + CR 608.2c: CastFromZone consumes the Torrential/Kylox
+        // graveyard-redirect rider by stamping the granted casting permission. Do
+        // not also execute the parser's structural rider (`ChangeZone` /
+        // `PutAtLibraryPosition` targeting `ParentTarget`) as an immediate move,
+        // or the graveyard card leaves before the player can cast it. CastFromZone
+        // recognizes any redirect destination (exile / library / hand); Counter
+        // only ever carries the exile sub-ability rider (its library/hand redirect
+        // rides `countered_spell_zone`) and consumes it during `counter::resolve`
+        // (stack -> exile directly) — skip the follow-up move either way.
+        if (matches!(&ability.effect, Effect::CastFromZone { .. })
+            && cast_from_zone::graveyard_destination_rider(sub).is_some())
+            || (matches!(&ability.effect, Effect::Counter { .. })
+                && cast_from_zone::is_graveyard_exile_rider_subability(sub))
         {
             return Ok(());
         }
@@ -6693,6 +6801,67 @@ fn resolve_chain_body(
                             Some(PendingContinuation::new(Box::new(resolved)));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                    }
+                } else if let Some(ref tail) = sub.sub_ability {
+                    // CR 608.2c (read the whole text; follow instructions in the order
+                    // written): a `SequentialSibling` clause printed AFTER the "instead"
+                    // sentence is an INDEPENDENT instruction — the "instead" replaced only
+                    // the prior sentence, so the tail runs in BOTH branches. The swap branch
+                    // runs it as the swapped node's sub via the general sub path below
+                    // (including the one-sided-fight source prepend at the swap block ~6844);
+                    // mirror that delivery here for the not-swap branch so the tail is not
+                    // silently dropped (Throw from the Saddle / Evil's Thrall / Take the
+                    // Fall / That's Rough Buddy). This `else if` fires only when
+                    // `else_ability` is None: a card carrying a distinct else-chain (From
+                    // Father to Son: else = ChangeZone→Hand, a DISTINCT node from its
+                    // Shuffle sibling) takes the else path above and never reaches here, so
+                    // there is no double-run. Such a card's trailing sibling is deliberately
+                    // not run in this branch (out of scope; the only corpus member is From
+                    // Father to Son, whose from-hand shuffle is supplied by SearchLibrary's
+                    // auto-shuffle).
+                    // GUARDS: (1) `SequentialSibling` only — a `ContinuationStep` sub is part
+                    // of the REPLACED clause and must NOT run when the swap didn't fire;
+                    // (2) never run an `Unimplemented` tail — no speculative semantics
+                    // (Increasing Vengeance's "copy with new targets").
+                    if tail.sub_link == SubAbilityLink::SequentialSibling
+                        && !matches!(tail.effect, Effect::Unimplemented { .. })
+                    {
+                        let mut resolved = tail.as_ref().clone();
+                        // CR 120.1 + CR 115.10a + CR 601.2c: a one-sided-fight
+                        // `DealDamage { damage_source: Target }` tail ("It deals damage equal
+                        // to its power …") names the boosted creature (the base's chosen
+                        // object) as the SOURCE; the tail carries only its fresh recipient
+                        // slot, so prepend the base's object => targets = [source(own),
+                        // recipient(foe)] — the exact contract the swap path's one-sided-fight
+                        // block builds (CR 208.1: power read live at resolution). Otherwise
+                        // (a target-less anaphoric tail — "Untap that creature." / "Draw a
+                        // card.") inherit the base's targets, exactly as the else path does
+                        // above.
+                        if is_one_sided_fight_damage_sub(&tail.effect) && !tail.targets.is_empty() {
+                            if let Some(source) = first_object_target(&ability.targets) {
+                                if first_object_target(&resolved.targets) != Some(source) {
+                                    resolved.targets.insert(0, TargetRef::Object(source));
+                                }
+                            }
+                        } else if resolved.targets.is_empty() && !ability.targets.is_empty() {
+                            resolved.targets = ability.targets.clone();
+                        }
+                        apply_parent_chain_context(
+                            &mut resolved,
+                            ability,
+                            effect_context_object.as_ref(),
+                            state,
+                        );
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            debug_assert!(
+                                state.pending_continuation.is_none(),
+                                "pending_continuation overwritten before consumption — instead-tail chain will be lost"
+                            );
+                            state.pending_continuation =
+                                Some(PendingContinuation::new(Box::new(resolved)));
+                        } else {
+                            resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                        }
                     }
                 }
                 return Ok(());
@@ -7545,12 +7714,49 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::SourceEnteredThisTurn => {
             eval_source_entered_this_turn(state, ability.source_id)
         }
-        // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid"
-        AbilityCondition::CastVariantPaid { variant } => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
-            .unwrap_or(false),
+        // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was
+        // paid" (Source) / CR 115.1 + CR 608.2c + CR 702.185a: "if that creature
+        // was cast for its warp cost" (Target — Full Bore). `subject` selects
+        // which object's `cast_variant_paid` marker is read, mirroring the
+        // `AdditionalCostPaid { subject }` evaluator above.
+        AbilityCondition::CastVariantPaid { variant, subject } => {
+            // CR 113.7: Source-relative markers live on the resolving ability's
+            // own source permanent. `Anaphoric`/`Demonstrative` "it"/"that spell"
+            // back-references resolve to the source here, mirroring the
+            // AdditionalCostPaid Source branch and the trigger path.
+            let object_id = match subject {
+                crate::types::ability::ObjectScope::Source
+                | crate::types::ability::ObjectScope::Anaphoric
+                | crate::types::ability::ObjectScope::Demonstrative => Some(ability.source_id),
+                // CR 115.1 + CR 608.2c: Target-relative marker — "that creature"
+                // anaphors to the first object target (the +3/+2 target permanent
+                // on Full Bore), so read THAT object's stamped warp marker, not the
+                // source's. CR 702.185a: a warp permanent is exiled at the
+                // beginning of the next end step, so it can only be read on its
+                // cast turn — the `== Some((variant, turn_number))` turn-bound
+                // below is therefore sound for Warp. A FUTURE cross-turn
+                // target-scoped "was cast for its X cost" consumer (a variant that
+                // persists past its cast turn) must drop the turn component for
+                // that variant.
+                crate::types::ability::ObjectScope::Target => {
+                    ability.targets.iter().find_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                }
+                // No cast-variant-marker read semantics exist for these scopes:
+                // the "was cast for its X cost" question is only ever asked of the
+                // resolving permanent (Source) or the targeted permanent (Target).
+                crate::types::ability::ObjectScope::Recipient
+                | crate::types::ability::ObjectScope::EventSource
+                | crate::types::ability::ObjectScope::CostPaidObject
+                | crate::types::ability::ObjectScope::EventTarget => None,
+            };
+            object_id
+                .and_then(|id| state.objects.get(&id))
+                .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
+                .unwrap_or(false)
+        }
         // CR 608.2c: General quantity comparison on trigger/effect context.
         AbilityCondition::QuantityCheck {
             lhs,
@@ -7567,8 +7773,21 @@ pub(crate) fn evaluate_condition(
                 crate::game::quantity::resolve_quantity_for_ability_condition(state, rhs, ability);
             comparator.evaluate(l, r)
         }
-        AbilityCondition::PreviousEffectAmount { comparator, rhs } => {
-            let l = state.last_effect_amount.unwrap_or(0);
+        AbilityCondition::PreviousEffectAmount {
+            comparator,
+            rhs,
+            channel,
+        } => {
+            // CR 120.10 (Excess) reads the overkill-beyond-lethal channel;
+            // CR 120.6 (Total) reads the total marked-damage channel.
+            let l = match channel {
+                crate::types::ability::DamageChannel::Excess => {
+                    state.last_effect_excess_amount.unwrap_or(0)
+                }
+                crate::types::ability::DamageChannel::Total => {
+                    state.last_effect_amount.unwrap_or(0)
+                }
+            };
             let r = crate::game::quantity::resolve_quantity(
                 state,
                 rhs,
@@ -7788,6 +8007,12 @@ pub(crate) fn evaluate_condition(
         // turn" gates the additional-end-step follow-up (Y'shtola Rhul); only
         // the first end step schedules another, preventing an infinite loop.
         AbilityCondition::FirstEndStepOfTurn => state.end_steps_started_this_turn == 1,
+        // CR 505.1 + CR 505.1a + CR 500.1 + CR 608.2c: "if it is[n't] your
+        // [phase]" reads the live current phase at resolution (CR 608.2c). The
+        // grouped "main phase" phrase carries both `PreCombatMain` and
+        // `PostCombatMain` (CR 505.1/505.1a), so membership covers either. The
+        // "your" possessive is composed separately via `IsYourTurn`.
+        AbilityCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 608.2c: "If a [noun] was [verb]ed this way" — check if any zone-changed
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.
@@ -8967,6 +9192,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,
@@ -9040,6 +9266,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,
@@ -9118,6 +9345,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .optional(),
@@ -9209,6 +9437,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .optional(),
@@ -9241,6 +9470,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         crate::game::engine::apply(
@@ -10011,6 +10241,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(100),
@@ -10389,6 +10620,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(victim)],
             ObjectId(100),
@@ -10874,6 +11106,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(creature)],
             ObjectId(100),
@@ -10941,6 +11174,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -11033,6 +11267,7 @@ mod tests {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
                 uses_tracked_set: false,
@@ -11062,6 +11297,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(creature)],
             source,
@@ -11165,6 +11401,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(equipment)],
             source,
@@ -11260,6 +11497,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -11779,6 +12017,7 @@ mod tests {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -11801,6 +12040,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -11852,6 +12092,7 @@ mod tests {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
                 uses_tracked_set: false,
@@ -11874,6 +12115,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -12456,6 +12698,7 @@ mod tests {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -12478,6 +12721,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![], // no targets
             ObjectId(100),
@@ -12665,8 +12909,9 @@ mod tests {
                         resolution_cleanup: None,
                         duration: None,
 
-                        exile_instead_of_graveyard_on_resolve: false,
+                        graveyard_replacement: None,
                         enters_with_counter: None,
+                        mana_spend_permission: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -12762,8 +13007,9 @@ mod tests {
                         resolution_cleanup: None,
                         duration: None,
 
-                        exile_instead_of_graveyard_on_resolve: false,
+                        graveyard_replacement: None,
                         enters_with_counter: None,
+                        mana_spend_permission: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -12833,8 +13079,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -13072,6 +13319,106 @@ mod tests {
             state.players[0].hand.len(),
             1,
             "Expected 1 card drawn from base continuation chain"
+        );
+    }
+
+    /// Drive the not-swap `ConditionInstead` tail-runner (the new `else if`
+    /// branch) and return P0's hand size. The override carries a false condition
+    /// (`Not{IsYourTurn}` while it IS P0's turn) so the swap does NOT fire; its
+    /// `else_ability` is None so the tail-runner is the live path.
+    fn run_condition_instead_not_swap_tail(
+        link: SubAbilityLink,
+        unimplemented_tail: bool,
+    ) -> usize {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(i + 70),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        let tail_effect = if unimplemented_tail {
+            Effect::Unimplemented {
+                name: "speculative".to_string(),
+                description: None,
+            }
+        } else {
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }
+        };
+        let mut tail = ResolvedAbility::new(tail_effect, vec![], ObjectId(100), PlayerId(0));
+        tail.sub_link = link;
+
+        let mut instead_sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }),
+        });
+        instead_sub.sub_ability = Some(Box::new(tail));
+        instead_sub.else_ability = None;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(instead_sub));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        state.players[0].hand.len()
+    }
+
+    /// CR 608.2c — building-block guard for the not-swap `ConditionInstead`
+    /// tail-runner. A `SequentialSibling` tail printed AFTER the override is an
+    /// INDEPENDENT instruction and MUST run in the not-swap branch; a
+    /// `ContinuationStep` sub is part of the REPLACED clause and MUST NOT run when
+    /// the swap did not fire; an `Unimplemented` tail MUST never run (no
+    /// speculative semantics). Each arm flips a single gate in the new branch.
+    #[test]
+    fn condition_instead_not_swap_tail_runner_honors_gates() {
+        // Positive control — a SequentialSibling tail runs (the Draw fires).
+        assert_eq!(
+            run_condition_instead_not_swap_tail(SubAbilityLink::SequentialSibling, false),
+            1,
+            "SequentialSibling tail must run in the not-swap branch (Draw fires). \
+             Removing the new else-if branch makes this 0."
+        );
+        // Negative (row 9) — a ContinuationStep sub must NOT run.
+        assert_eq!(
+            run_condition_instead_not_swap_tail(SubAbilityLink::ContinuationStep, false),
+            0,
+            "ContinuationStep sub belongs to the REPLACED clause and must NOT run when \
+             the swap did not fire. Loosening the `sub_link == SequentialSibling` gate \
+             makes this 1."
+        );
+        // Negative (row 8) — an Unimplemented SequentialSibling tail must NOT run
+        // (and must not panic).
+        assert_eq!(
+            run_condition_instead_not_swap_tail(SubAbilityLink::SequentialSibling, true),
+            0,
+            "Unimplemented tail must never run. Removing the `!Unimplemented` guard \
+             would attempt speculative semantics."
         );
     }
 
@@ -13726,6 +14073,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -13766,6 +14114,7 @@ mod tests {
                 count_param: 0,
                 library_position: None,
                 is_cost_payment: false,
+                enters_modified_if: None,
             },
             GameAction::SelectCards {
                 cards: vec![second],
@@ -13887,6 +14236,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(9000),
@@ -14097,6 +14447,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(9000),
@@ -14872,6 +15223,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -15465,6 +15817,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(1),
@@ -16866,6 +17219,82 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_condition_current_phase_is_your_main_phase_dose_gate() {
+        // CR 505.1 + CR 505.1a + CR 102.1: Dose of Dawnglow's blight gate is
+        // Not(And([CurrentPhaseIs{[PreCombatMain, PostCombatMain]}, IsYourTurn])).
+        // "if it isn't your main phase" is true exactly when the live phase is
+        // NOT one of the controller's two main phases.
+        let mut state = GameState::new_two_player(42);
+        // The ability's controller is PlayerId(0), so "your" = PlayerId(0)'s turn.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let dose_gate = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::CurrentPhaseIs {
+                        phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+                    },
+                    AbilityCondition::IsYourTurn,
+                ],
+            }),
+        };
+
+        // (1) Your precombat main → inner And true → Not false (blight suppressed).
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        assert!(!evaluate_condition(&dose_gate, &state, &ability));
+
+        // (2) CR 505.1a: your postcombat main also satisfies the grouped "main
+        // phase" set → inner And true → Not false (blight suppressed).
+        state.phase = Phase::PostCombatMain;
+        assert!(!evaluate_condition(&dose_gate, &state, &ability));
+
+        // (3) Your end step → not a main phase → Not true (blight fires).
+        state.phase = Phase::End;
+        assert!(evaluate_condition(&dose_gate, &state, &ability));
+
+        // (4) CR 102.1: opponent's precombat main (active = PlayerId(1)) →
+        // IsYourTurn false → inner And false → Not true (blight fires). Proves
+        // the IsYourTurn conjunct is load-bearing: a main phase that isn't YOURS
+        // still counts as "isn't your main phase".
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+        assert!(evaluate_condition(&dose_gate, &state, &ability));
+    }
+
+    #[test]
+    fn evaluate_condition_bare_current_phase_is_reads_live_phase() {
+        // CR 500.1 + CR 608.2c: bare CurrentPhaseIs membership against the live
+        // resolution-time phase, independent of whose turn it is.
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let cond = AbilityCondition::CurrentPhaseIs {
+            phases: vec![Phase::PreCombatMain],
+        };
+        state.phase = Phase::PreCombatMain;
+        assert!(evaluate_condition(&cond, &state, &ability));
+        state.phase = Phase::PostCombatMain;
+        assert!(!evaluate_condition(&cond, &state, &ability));
+        state.phase = Phase::End;
+        assert!(!evaluate_condition(&cond, &state, &ability));
+    }
+
+    #[test]
     fn evaluate_condition_is_monarch_checks_ability_controller() {
         let mut state = GameState::new_two_player(42);
         state.monarch = Some(PlayerId(0));
@@ -17017,6 +17446,100 @@ mod tests {
         assert!(
             !evaluate_condition(&source_condition, &state, &counter_kicked),
             "Source subject must ignore the target's kicker and read the (empty) own context"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2c + CR 702.185a: `CastVariantPaid { subject }` reads the
+    /// *target permanent's* `cast_variant_paid` marker under `ObjectScope::Target`
+    /// (Full Bore's "if that creature was cast for its warp cost") and the
+    /// resolving ability's own source under `ObjectScope::Source`. The
+    /// discriminating fixture: the SOURCE (the Full Bore spell, ObjectId 99) was
+    /// NOT warp-cast — only the TARGET creature was — so a Source-scope read
+    /// returns the WRONG answer and only the Target branch is correct. Reverting
+    /// the evaluator's Target branch to read the source flips the first assertion
+    /// to false.
+    #[test]
+    fn evaluate_condition_cast_variant_paid_target_reads_target_object() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 7;
+
+        // Target creature that WAS warp-cast this turn.
+        let mut warped = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Warped Brute".to_string(),
+            Zone::Battlefield,
+        );
+        warped.cast_variant_paid = Some((crate::types::ability::CastVariantPaid::Warp, 7));
+        state.objects.insert(ObjectId(7), warped);
+
+        // Target creature that was hard-cast — no warp marker.
+        let hard_cast = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(700),
+            PlayerId(0),
+            "Hard-cast Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(8), hard_cast);
+
+        // Source spell (Full Bore) — never warp-cast, no marker.
+        let full_bore = crate::game::game_object::GameObject::new(
+            ObjectId(99),
+            CardId(999),
+            PlayerId(0),
+            "Full Bore".to_string(),
+            Zone::Stack,
+        );
+        state.objects.insert(ObjectId(99), full_bore);
+
+        let target_condition = AbilityCondition::CastVariantPaid {
+            variant: crate::types::ability::CastVariantPaid::Warp,
+            subject: crate::types::ability::ObjectScope::Target,
+        };
+
+        // Target subject reads the +3/+2 target's marker — true for the warp-cast
+        // creature even though the source spell (ObjectId 99) was NOT warp-cast.
+        let on_warped = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(ObjectId(7))],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        assert!(
+            evaluate_condition(&target_condition, &state, &on_warped),
+            "Target subject must read the warp-cast target's marker (true) even though \
+             the source spell was not warp-cast"
+        );
+
+        let on_hard = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(ObjectId(8))],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        assert!(
+            !evaluate_condition(&target_condition, &state, &on_hard),
+            "Target subject must report false when the target was not warp-cast"
+        );
+
+        // Source subject reads the source spell (ObjectId 99) — never warp-cast —
+        // so it is false even while targeting the warp-cast creature. This is the
+        // proof that reading the source is the WRONG answer for Full Bore.
+        let source_condition = AbilityCondition::CastVariantPaid {
+            variant: crate::types::ability::CastVariantPaid::Warp,
+            subject: crate::types::ability::ObjectScope::Source,
+        };
+        assert!(
+            !evaluate_condition(&source_condition, &state, &on_warped),
+            "Source subject must read the source spell's (empty) marker, not the target's"
         );
     }
 
@@ -17200,6 +17723,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -17458,6 +17982,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -20347,6 +20872,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
         );
         let dig_def = AbilityDefinition::new(

@@ -177,6 +177,8 @@ pub(crate) fn put_face_up_exile_into(
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
+        // CR 614.12: search-from-outside carries no moved-object type gate.
+        enters_modified_if: None,
     };
     Ok(change_zone::process_one_zone_move(
         state, &ctx, object_id, events,
@@ -333,6 +335,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,

@@ -2044,6 +2044,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
             // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
             face_down_profile: face_down.then(crate::types::ability::FaceDownProfile::vanilla_2_2),
+            enters_modified_if: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -2063,6 +2064,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
             target,
@@ -2138,8 +2140,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
-                exile_instead_of_graveyard_on_resolve: false,
+                graveyard_replacement: None,
                 enters_with_counter: None,
+                mana_spend_permission: None,
             },
             target,
             grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
@@ -3896,12 +3899,14 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
             categories,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
             ..
         } => ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::ControllerForAll,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         },
         other => other,
     })
@@ -3953,6 +3958,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
                     chooser_scope: CategoryChooserScope::EachPlayerSelf,
                     choose_filter: permanent_filter(),
                     sacrifice_filter: permanent_filter(),
+                    total_power_cap: None,
                 });
             }
         }
@@ -3969,6 +3975,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
             sacrifice_filter: choose_filter.clone(),
             choose_filter,
+            total_power_cap: None,
         });
     }
 
@@ -3985,7 +3992,43 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
             sacrifice_filter: choose_filter.clone(),
             choose_filter,
+            total_power_cap: None,
         });
+    }
+
+    // Pattern 4 (Slaughter the Strong): "any number of creatures they control with
+    // total power N or less" — CR 107.1c + CR 701.21a. Each chooser keeps a chosen
+    // subset of their creatures whose combined power is at most N, then sacrifices
+    // all other creatures they control. `categories` is empty in this mode; the
+    // total-power cap drives an interactive subset choice in the resolver.
+    if let Ok((rest, _)) =
+        preceded(opt(tag::<_, _, E>("any number of ")), tag("creatures ")).parse(rest_lower)
+    {
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, E>("they control"),
+            tag("you control"),
+            tag("that player controls"),
+        ))
+        .parse(rest)
+        {
+            if let Ok((rest, cap)) = preceded(
+                tag::<_, _, E>(" with total power "),
+                nom_primitives::parse_number,
+            )
+            .parse(rest)
+            {
+                if tag::<_, _, E>(" or less").parse(rest).is_ok() {
+                    let creatures = TargetFilter::Typed(TypedFilter::creature());
+                    return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                        categories: Vec::new(),
+                        chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                        choose_filter: creatures.clone(),
+                        sacrifice_filter: creatures,
+                        total_power_cap: Some(QuantityExpr::Fixed { value: cap as i32 }),
+                    });
+                }
+            }
+        }
     }
 
     None
@@ -4190,11 +4233,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser_scope,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         } => Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
             choose_filter,
             sacrifice_filter,
+            total_power_cap,
         },
         // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
         // lowering surfaces only the first slot — the chained `TargetOnly`
@@ -5449,6 +5494,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enter_with_counters,
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 }
             }
         }
@@ -6029,6 +6075,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -6082,6 +6129,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 };
                 // CR 115.1d: propagate the "up to N target" count so the cast
                 // surfaces N target slots (Memory's Journey: up to three).
@@ -6199,6 +6247,7 @@ pub(super) fn lower_multi_filter_search_library(
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
@@ -10351,6 +10400,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enter_with_counters,
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 }
             }
         }
@@ -14613,6 +14663,7 @@ mod tests {
                 chooser_scope,
                 choose_filter,
                 sacrifice_filter,
+                ..
             }) => {
                 assert_eq!(
                     categories,
