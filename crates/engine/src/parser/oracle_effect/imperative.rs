@@ -2828,10 +2828,13 @@ pub(super) fn parse_hand_reveal_ast(
         value((), alt((tag("reveal "), tag("reveals ")))).parse(input)
     })?;
 
-    // CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
-    // "reveal those cards" — reveals a specific card identified by the parent
-    // effect's affected IDs. Common in "look at top → reveal it" sequences
-    // (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    // CR 701.20a: Back-reference reveal — reveals a specific card identified by
+    // the parent effect's affected IDs. Common in "look at top → reveal it"
+    // sequences (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    //
+    // The pronoun/demonstrative forms ("it" / "that card" / "those cards") are
+    // matched as a clause prefix, as they have been historically: no real card
+    // continues them with a divergent effect, so a prefix match is safe.
     let after_reveal_lower = &lower[lower.len() - after_reveal.len()..];
     if alt((
         tag::<_, _, OracleError<'_>>("it"),
@@ -2841,6 +2844,21 @@ pub(super) fn parse_hand_reveal_ast(
     .parse(after_reveal_lower)
     .is_ok()
     {
+        return Some(HandRevealImperativeAst::RevealBackRef);
+    }
+
+    // The definite-article forms ("the card" / "the cards") are the same
+    // back-reference, but far more collision-prone at the prefix than the
+    // pronoun forms: "reveal the cards you want to splice onto it" and "reveal
+    // the cards in your library" are distinct effects that merely share the
+    // prefix. Anchor them to a whole-clause match so only a bare
+    // "Reveal the card." / "Reveal the cards." clause lowers to
+    // `Effect::Reveal { ParentTarget }` (instead of `Effect::Unimplemented`),
+    // while compound reveal clauses fall through to their own recognizers.
+    if matches!(
+        after_reveal_lower.trim().trim_end_matches('.').trim(),
+        "the card" | "the cards"
+    ) {
         return Some(HandRevealImperativeAst::RevealBackRef);
     }
 
