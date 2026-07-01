@@ -38,6 +38,13 @@ interface AttackTargetPickerProps {
  *
  * Frontend display layer only: it merely arranges the attacker→target choices
  * the player makes and hands the flat array to the engine, which validates it.
+ *
+ * Layout mirrors {@link DialogShell}: a `relative` wrapper hosts the `PeekTab`
+ * as a sibling OUTSIDE the `overflow-hidden` card, and the card is a flex column
+ * with a pinned header, a single scrollable body, and a pinned footer. Keeping
+ * the tab out of the scroll container is what stops its ~12px `translate-x-1/3`
+ * overhang from forcing a stray horizontal scrollbar; making the body the only
+ * scroll region keeps the actions on-screen and any needed scrollbar thin.
  */
 export function AttackTargetPicker({
   validTargets,
@@ -195,10 +202,12 @@ export function AttackTargetPicker({
     ? { x: "calc(100vw - 32px)" }
     : { x: 0 };
 
+  const sidePadding = mode === "all" ? "px-8" : "px-4 sm:px-6";
+
   return (
     <>
       <motion.div
-        className="fixed inset-0 z-40 flex items-center justify-center bg-black/60"
+        className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-3"
         style={{ pointerEvents: peeked ? "none" : undefined }}
         animate={slideTransform}
         transition={
@@ -207,282 +216,304 @@ export function AttackTargetPicker({
             : { type: "spring", stiffness: 320, damping: 32 }
         }
       >
+        {/* Wrapper: positioning context for the PeekTab, which sits at the
+            wrapper's right edge OUTSIDE the card. The card clips its own overflow
+            (overflow-hidden), so the tab's ~12px `translate-x-1/3` overhang no
+            longer forces a stray horizontal scrollbar the way it did when the tab
+            lived inside the scroll container. Mirrors DialogShell. `w-full` +
+            `max-w-*` lets the card shrink to fit narrow phones instead of forcing
+            a fixed 420px that would overflow. */}
         <div
-          className={`relative max-h-[85vh] overflow-y-auto rounded-xl border border-gray-600 bg-gray-900/95 py-5 shadow-2xl backdrop-blur-sm ${
-            mode === "all" ? "w-[420px] px-8" : "w-[min(94vw,760px)] px-4 sm:px-6"
-          }`}
+          className={`relative w-full ${mode === "all" ? "max-w-[420px]" : "max-w-[760px]"}`}
         >
-          <h3 className="mb-4 text-center text-lg font-bold text-gray-100">
-            {t("attackTargetPicker.heading")}
-          </h3>
+          <div className="flex max-h-[85vh] flex-col overflow-hidden rounded-xl border border-gray-600 bg-gray-900/95 shadow-2xl backdrop-blur-sm">
+            {/* Header — pinned, never scrolls */}
+            <div className={`shrink-0 pt-5 ${sidePadding}`}>
+              <h3 className="mb-4 text-center text-lg font-bold text-gray-100">
+                {t("attackTargetPicker.heading")}
+              </h3>
 
-          {/* Mode toggle */}
-          <div className="mb-4 flex justify-center gap-2">
-            <button
-              onClick={() => setMode("all")}
-              className={gameButtonClass({
-                tone: mode === "all" ? "blue" : "slate",
-                size: "sm",
-              })}
-            >
-              {t("attackTargetPicker.attackAll")}
-            </button>
-            <button
-              onClick={() => setMode("distribute")}
-              className={gameButtonClass({
-                tone: mode === "distribute" ? "blue" : "slate",
-                size: "sm",
-              })}
-            >
-              {t("attackTargetPicker.distribute")}
-            </button>
-          </div>
-
-          {mode === "all" ? (
-            /* Attack All mode: one button per target */
-            <div className="flex flex-col gap-2">
-              {sortedTargets.map((target) => {
-                const color = getTargetSeatColor(target);
-                return (
-                  <button
-                    key={attackTargetKey(target)}
-                    onClick={() => handleAttackAll(target)}
-                    className={gameButtonClass({ tone: "red", size: "md" })}
-                  >
-                    <Trans
-                      t={t}
-                      i18nKey="attackTargetPicker.attackWith"
-                      count={selectedAttackers.length}
-                      values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
-                      components={{
-                        name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
-                      }}
-                    />
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            /* Distribute mode: per-target buckets with steppers + shortcuts */
-            <div className="flex flex-col gap-3">
-              {/* Global shortcuts + gate hint */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className={`text-xs font-medium ${unassignedTotal > 0 ? "text-amber-300" : "text-emerald-300"}`}>
-                  {unassignedTotal > 0
-                    ? t("attackTargetPicker.unassignedRemaining", { count: unassignedTotal })
-                    : t("attackTargetPicker.allAssigned")}
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    onClick={spreadAll}
-                    disabled={sortedTargets.length === 0}
-                    className={gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}
-                  >
-                    {t("attackTargetPicker.evenSplitAll")}
-                  </button>
-                  <button
-                    onClick={resetAll}
-                    disabled={unassignedTotal === selectedAttackers.length}
-                    className={gameButtonClass({ tone: "slate", size: "xs", disabled: unassignedTotal === selectedAttackers.length })}
-                  >
-                    {t("attackTargetPicker.resetAssignments")}
-                  </button>
-                </div>
+              {/* Mode toggle */}
+              <div className="flex justify-center gap-2">
+                <button
+                  onClick={() => setMode("all")}
+                  className={gameButtonClass({
+                    tone: mode === "all" ? "blue" : "slate",
+                    size: "sm",
+                  })}
+                >
+                  {t("attackTargetPicker.attackAll")}
+                </button>
+                <button
+                  onClick={() => setMode("distribute")}
+                  className={gameButtonClass({
+                    tone: mode === "distribute" ? "blue" : "slate",
+                    size: "sm",
+                  })}
+                >
+                  {t("attackTargetPicker.distribute")}
+                </button>
               </div>
+            </div>
 
-              {/* Desktop: stacks (rows) × buckets (columns) matrix */}
-              <div className="hidden overflow-x-auto md:block">
-                <table className="w-full border-separate border-spacing-0 text-sm">
-                  <thead>
-                    <tr>
-                      <th className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5 text-left text-xs font-semibold text-gray-400">
-                        {t("attackTargetPicker.attackersColumn")}
-                      </th>
-                      <th className="px-2 py-1.5 text-center text-xs font-semibold text-gray-400">
-                        {t("attackTargetPicker.unassigned")}
-                      </th>
-                      {sortedTargets.map((target) => {
-                        const color = getTargetSeatColor(target);
-                        return (
-                          <th key={attackTargetKey(target)} className="px-2 py-1.5 text-center align-top">
-                            <div className="flex flex-col items-center gap-1">
-                              <span
-                                className="inline-flex items-center gap-1 text-xs font-semibold"
-                                style={color ? { color } : undefined}
-                              >
-                                <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => allStacksToTarget(target)}
-                                className="rounded border border-gray-600 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 hover:border-gray-400 hover:bg-white/10"
-                              >
-                                {t("attackTargetPicker.allHere")}
-                              </button>
-                            </div>
+            {/* Body — the ONLY scroll region. `overflow-x-hidden` pins the cross
+                axis so a marginally-wide child can't sprout the very horizontal
+                scrollbar this layout removes (the desktop matrix keeps its own
+                `overflow-x-auto`); `overscroll-contain` stops a mobile scroll from
+                chaining to the board behind; `thin-scrollbar` keeps any needed
+                scrollbar unobtrusive. */}
+            <div className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain thin-scrollbar pb-2 pt-4 ${sidePadding}`}>
+              {mode === "all" ? (
+                /* Attack All mode: one button per target */
+                <div className="flex flex-col gap-2">
+                  {sortedTargets.map((target) => {
+                    const color = getTargetSeatColor(target);
+                    return (
+                      <button
+                        key={attackTargetKey(target)}
+                        onClick={() => handleAttackAll(target)}
+                        className={gameButtonClass({ tone: "red", size: "md" })}
+                      >
+                        <Trans
+                          t={t}
+                          i18nKey="attackTargetPicker.attackWith"
+                          count={selectedAttackers.length}
+                          values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
+                          components={{
+                            name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
+                          }}
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* Distribute mode: per-target buckets with steppers + shortcuts */
+                <div className="flex flex-col gap-3">
+                  {/* Global shortcuts + gate hint */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className={`text-xs font-medium ${unassignedTotal > 0 ? "text-amber-300" : "text-emerald-300"}`}>
+                      {unassignedTotal > 0
+                        ? t("attackTargetPicker.unassignedRemaining", { count: unassignedTotal })
+                        : t("attackTargetPicker.allAssigned")}
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        onClick={spreadAll}
+                        disabled={sortedTargets.length === 0}
+                        className={gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}
+                      >
+                        {t("attackTargetPicker.evenSplitAll")}
+                      </button>
+                      <button
+                        onClick={resetAll}
+                        disabled={unassignedTotal === selectedAttackers.length}
+                        className={gameButtonClass({ tone: "slate", size: "xs", disabled: unassignedTotal === selectedAttackers.length })}
+                      >
+                        {t("attackTargetPicker.resetAssignments")}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Desktop: stacks (rows) × buckets (columns) matrix */}
+                  <div className="hidden overflow-x-auto overscroll-x-contain thin-scrollbar md:block">
+                    <table className="w-full border-separate border-spacing-0 text-sm">
+                      <thead>
+                        <tr>
+                          <th className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5 text-left text-xs font-semibold text-gray-400">
+                            {t("attackTargetPicker.attackersColumn")}
                           </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
+                          <th className="px-2 py-1.5 text-center text-xs font-semibold text-gray-400">
+                            {t("attackTargetPicker.unassigned")}
+                          </th>
+                          {sortedTargets.map((target) => {
+                            const color = getTargetSeatColor(target);
+                            return (
+                              <th key={attackTargetKey(target)} className="px-2 py-1.5 text-center align-top">
+                                <div className="flex flex-col items-center gap-1">
+                                  <span
+                                    className="inline-flex items-center gap-1 text-xs font-semibold"
+                                    style={color ? { color } : undefined}
+                                  >
+                                    <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
+                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => allStacksToTarget(target)}
+                                    className="rounded border border-gray-600 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 hover:border-gray-400 hover:bg-white/10"
+                                  >
+                                    {t("attackTargetPicker.allHere")}
+                                  </button>
+                                </div>
+                              </th>
+                            );
+                          })}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {stacks.map((stack) => {
+                          const unassigned = countUnassigned(stack);
+                          return (
+                            <tr key={stack.key} className="border-t border-white/5">
+                              <td className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5">
+                                <div className="flex items-center gap-2">
+                                  <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
+                                  <button
+                                    type="button"
+                                    onClick={() => spreadStack(stack)}
+                                    disabled={sortedTargets.length === 0}
+                                    title={t("attackTargetPicker.spreadEvenly")}
+                                    className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 hover:border-gray-400 hover:bg-white/10 disabled:opacity-30"
+                                  >
+                                    {t("attackTargetPicker.spread")}
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5 text-center">
+                                <span
+                                  className={`inline-block min-w-[1.5rem] rounded px-1.5 py-0.5 text-sm font-semibold tabular-nums ${
+                                    unassigned > 0 ? "bg-amber-900/60 text-amber-100" : "text-gray-600"
+                                  }`}
+                                >
+                                  {unassigned}
+                                </span>
+                              </td>
+                              {sortedTargets.map((target) => {
+                                const count = countOnTarget(stack, target);
+                                const label = getTargetLabel(target);
+                                return (
+                                  <td key={attackTargetKey(target)} className="px-2 py-1.5">
+                                    <StepperCell
+                                      count={count}
+                                      color={getTargetSeatColor(target)}
+                                      canDec={count > 0}
+                                      canInc={unassigned > 0}
+                                      onDec={() => decFromTarget(stack, target)}
+                                      onInc={() => incOnTarget(stack, target)}
+                                      onAll={() => allOfStackToTarget(stack, target)}
+                                      decTitle={t("attackTargetPicker.removeOne", { label })}
+                                      incTitle={t("attackTargetPicker.assignOne", { label })}
+                                      allTitle={t("attackTargetPicker.assignAllHere", { label })}
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Mobile: per-stack accordion driving the same assignment state */}
+                  <div className="flex flex-col gap-2 md:hidden">
                     {stacks.map((stack) => {
                       const unassigned = countUnassigned(stack);
+                      const expanded = expandedStack === stack.key;
                       return (
-                        <tr key={stack.key} className="border-t border-white/5">
-                          <td className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5">
-                            <div className="flex items-center gap-2">
-                              <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
+                        <div key={stack.key} className="overflow-hidden rounded-lg border border-gray-700">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedStack((cur) => (cur === stack.key ? null : stack.key))}
+                            aria-expanded={expanded}
+                            className="flex w-full items-center gap-2 px-2 py-2.5 text-left hover:bg-white/5"
+                          >
+                            <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
+                            <span
+                              className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                unassigned > 0 ? "bg-amber-900/70 text-amber-100" : "bg-emerald-900/70 text-emerald-100"
+                              }`}
+                            >
+                              {unassigned > 0
+                                ? t("attackTargetPicker.unassignedRemaining", { count: unassigned })
+                                : t("attackTargetPicker.assignedBadge")}
+                            </span>
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 16 16"
+                              fill="currentColor"
+                              className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`}
+                            >
+                              <path fillRule="evenodd" d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                          {expanded && (
+                            <div className="flex flex-col gap-1.5 border-t border-white/10 px-2 py-2">
                               <button
                                 type="button"
                                 onClick={() => spreadStack(stack)}
                                 disabled={sortedTargets.length === 0}
-                                title={t("attackTargetPicker.spreadEvenly")}
-                                className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 hover:border-gray-400 hover:bg-white/10 disabled:opacity-30"
+                                className={`self-start ${gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}`}
                               >
-                                {t("attackTargetPicker.spread")}
+                                {t("attackTargetPicker.spreadEvenly")}
                               </button>
+                              <div className="flex items-center justify-between gap-2 rounded px-1 py-1">
+                                <span className="text-sm text-gray-400">{t("attackTargetPicker.unassigned")}</span>
+                                <span
+                                  className={`min-w-[1.5rem] rounded px-1.5 py-0.5 text-center text-sm font-semibold tabular-nums ${
+                                    unassigned > 0 ? "bg-amber-900/60 text-amber-100" : "text-gray-600"
+                                  }`}
+                                >
+                                  {unassigned}
+                                </span>
+                              </div>
+                              {sortedTargets.map((target) => {
+                                const color = getTargetSeatColor(target);
+                                const count = countOnTarget(stack, target);
+                                const label = getTargetLabel(target);
+                                return (
+                                  <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
+                                    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>
+                                      <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
+                                      <span className="truncate">{label}</span>
+                                    </span>
+                                    <StepperCell
+                                      count={count}
+                                      color={color}
+                                      canDec={count > 0}
+                                      canInc={unassigned > 0}
+                                      onDec={() => decFromTarget(stack, target)}
+                                      onInc={() => incOnTarget(stack, target)}
+                                      onAll={() => allOfStackToTarget(stack, target)}
+                                      decTitle={t("attackTargetPicker.removeOne", { label })}
+                                      incTitle={t("attackTargetPicker.assignOne", { label })}
+                                      allTitle={t("attackTargetPicker.assignAllHere", { label })}
+                                    />
+                                  </div>
+                                );
+                              })}
                             </div>
-                          </td>
-                          <td className="px-2 py-1.5 text-center">
-                            <span
-                              className={`inline-block min-w-[1.5rem] rounded px-1.5 py-0.5 text-sm font-semibold tabular-nums ${
-                                unassigned > 0 ? "bg-amber-900/60 text-amber-100" : "text-gray-600"
-                              }`}
-                            >
-                              {unassigned}
-                            </span>
-                          </td>
-                          {sortedTargets.map((target) => {
-                            const count = countOnTarget(stack, target);
-                            const label = getTargetLabel(target);
-                            return (
-                              <td key={attackTargetKey(target)} className="px-2 py-1.5">
-                                <StepperCell
-                                  count={count}
-                                  color={getTargetSeatColor(target)}
-                                  canDec={count > 0}
-                                  canInc={unassigned > 0}
-                                  onDec={() => decFromTarget(stack, target)}
-                                  onInc={() => incOnTarget(stack, target)}
-                                  onAll={() => allOfStackToTarget(stack, target)}
-                                  decTitle={t("attackTargetPicker.removeOne", { label })}
-                                  incTitle={t("attackTargetPicker.assignOne", { label })}
-                                  allTitle={t("attackTargetPicker.assignAllHere", { label })}
-                                />
-                              </td>
-                            );
-                          })}
-                        </tr>
+                          )}
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
+                  </div>
+                </div>
+              )}
+            </div>
 
-              {/* Mobile: per-stack accordion driving the same assignment state */}
-              <div className="flex flex-col gap-2 md:hidden">
-                {stacks.map((stack) => {
-                  const unassigned = countUnassigned(stack);
-                  const expanded = expandedStack === stack.key;
-                  return (
-                    <div key={stack.key} className="overflow-hidden rounded-lg border border-gray-700">
-                      <button
-                        type="button"
-                        onClick={() => setExpandedStack((cur) => (cur === stack.key ? null : stack.key))}
-                        aria-expanded={expanded}
-                        className="flex w-full items-center gap-2 px-2 py-2 text-left hover:bg-white/5"
-                      >
-                        <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
-                        <span
-                          className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                            unassigned > 0 ? "bg-amber-900/70 text-amber-100" : "bg-emerald-900/70 text-emerald-100"
-                          }`}
-                        >
-                          {unassigned > 0
-                            ? t("attackTargetPicker.unassignedRemaining", { count: unassigned })
-                            : t("attackTargetPicker.assignedBadge")}
-                        </span>
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 16 16"
-                          fill="currentColor"
-                          className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`}
-                        >
-                          <path fillRule="evenodd" d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                      {expanded && (
-                        <div className="flex flex-col gap-1.5 border-t border-white/10 px-2 py-2">
-                          <button
-                            type="button"
-                            onClick={() => spreadStack(stack)}
-                            disabled={sortedTargets.length === 0}
-                            className={`self-start ${gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}`}
-                          >
-                            {t("attackTargetPicker.spreadEvenly")}
-                          </button>
-                          <div className="flex items-center justify-between gap-2 rounded px-1 py-1">
-                            <span className="text-sm text-gray-400">{t("attackTargetPicker.unassigned")}</span>
-                            <span
-                              className={`min-w-[1.5rem] rounded px-1.5 py-0.5 text-center text-sm font-semibold tabular-nums ${
-                                unassigned > 0 ? "bg-amber-900/60 text-amber-100" : "text-gray-600"
-                              }`}
-                            >
-                              {unassigned}
-                            </span>
-                          </div>
-                          {sortedTargets.map((target) => {
-                            const color = getTargetSeatColor(target);
-                            const count = countOnTarget(stack, target);
-                            const label = getTargetLabel(target);
-                            return (
-                              <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
-                                <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>
-                                  <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                  <span className="truncate">{label}</span>
-                                </span>
-                                <StepperCell
-                                  count={count}
-                                  color={color}
-                                  canDec={count > 0}
-                                  canInc={unassigned > 0}
-                                  onDec={() => decFromTarget(stack, target)}
-                                  onInc={() => incOnTarget(stack, target)}
-                                  onAll={() => allOfStackToTarget(stack, target)}
-                                  decTitle={t("attackTargetPicker.removeOne", { label })}
-                                  incTitle={t("attackTargetPicker.assignOne", { label })}
-                                  allTitle={t("attackTargetPicker.assignAllHere", { label })}
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
+            {/* Footer — pinned actions, so Confirm/Cancel never scroll away */}
+            <div className={`shrink-0 border-t border-white/10 pb-5 pt-3 ${sidePadding}`}>
+              {mode === "distribute" && (
+                <button
+                  onClick={handleDistributeConfirm}
+                  disabled={unassignedTotal > 0}
+                  className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 })}`}
+                >
+                  {unassignedTotal > 0
+                    ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
+                    : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
+                </button>
+              )}
               <button
-                onClick={handleDistributeConfirm}
-                disabled={unassignedTotal > 0}
-                className={gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 })}
+                onClick={onCancel}
+                className={`w-full ${mode === "distribute" ? "mt-2" : ""} ${gameButtonClass({ tone: "slate", size: "sm" })}`}
               >
-                {unassignedTotal > 0
-                  ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
-                  : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
+                {t("common:actions.cancel")}
               </button>
             </div>
-          )}
-
-          <button
-            onClick={onCancel}
-            className={`mt-3 w-full ${gameButtonClass({ tone: "slate", size: "sm" })}`}
-          >
-            {t("common:actions.cancel")}
-          </button>
+          </div>
           <PeekTab onClick={() => setPeeked(true)} />
         </div>
       </motion.div>
@@ -601,7 +632,9 @@ interface StepperCellProps {
 }
 
 /** `[ − ] N [ + ]` for one (stack, bucket) cell. The count doubles as a button
- *  that sends the whole stack to this bucket. */
+ *  that sends the whole stack to this bucket. Buttons are enlarged below `md`
+ *  (the breakpoint where the mobile accordion — not the compact desktop matrix —
+ *  is shown) for comfortable touch targets without widening the desktop table. */
 function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTitle, incTitle, allTitle }: StepperCellProps) {
   return (
     <div className="flex items-center justify-center gap-1">
@@ -611,7 +644,7 @@ function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTit
         disabled={!canDec}
         title={decTitle}
         aria-label={decTitle}
-        className="flex h-6 w-6 items-center justify-center rounded border border-gray-600 text-base leading-none text-gray-200 hover:border-gray-400 hover:bg-white/10 disabled:cursor-default disabled:opacity-30"
+        className="flex h-11 w-11 items-center justify-center rounded border border-gray-600 text-lg leading-none text-gray-200 hover:border-gray-400 hover:bg-white/10 disabled:cursor-default disabled:opacity-30 md:h-6 md:w-6 md:text-base"
       >
         −
       </button>
@@ -620,7 +653,7 @@ function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTit
         onClick={onAll}
         title={allTitle}
         aria-label={allTitle}
-        className={`min-w-[1.9rem] rounded px-1 py-0.5 text-center text-sm font-semibold tabular-nums hover:bg-white/10 ${count > 0 ? "text-gray-100" : "text-gray-500"}`}
+        className={`min-w-[2.75rem] rounded px-1 py-2.5 text-center text-sm font-semibold tabular-nums hover:bg-white/10 md:min-w-[1.9rem] md:py-0.5 ${count > 0 ? "text-gray-100" : "text-gray-500"}`}
         style={count > 0 && color ? { color } : undefined}
       >
         {count}
@@ -631,7 +664,7 @@ function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTit
         disabled={!canInc}
         title={incTitle}
         aria-label={incTitle}
-        className="flex h-6 w-6 items-center justify-center rounded border border-gray-600 text-base leading-none text-gray-200 hover:border-gray-400 hover:bg-white/10 disabled:cursor-default disabled:opacity-30"
+        className="flex h-11 w-11 items-center justify-center rounded border border-gray-600 text-lg leading-none text-gray-200 hover:border-gray-400 hover:bg-white/10 disabled:cursor-default disabled:opacity-30 md:h-6 md:w-6 md:text-base"
       >
         +
       </button>
