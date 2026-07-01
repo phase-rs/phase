@@ -746,7 +746,7 @@ use crate::types::ability::{
     PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
     SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::Supertype;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaExpiry};
