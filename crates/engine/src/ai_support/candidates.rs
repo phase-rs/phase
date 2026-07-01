@@ -1430,6 +1430,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             modal,
             unavailable_modes,
+            is_activated,
             ..
         } => {
             let available: Vec<usize> = (0..modal.mode_count)
@@ -1467,7 +1468,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // CR 700.2i: For pawprint points-budget modals, prune to budget-legal
             // mode sequences. Index the UNFILTERED `modal` (real indices
             // 0..mode_count). No-op for non-pawprint modals.
-            if modal.mode_pawprints.is_empty() {
+            let mut actions = if modal.mode_pawprints.is_empty() {
                 actions
             } else {
                 actions
@@ -1479,7 +1480,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         _ => true,
                     })
                     .collect()
+            };
+            // CR 602.2b: An activated modal ability can be cancelled at the mode-choice
+            // sub-step (see engine.rs). Surfacing CancelCast here feeds BOTH the AI search
+            // and the multiplayer exact-legal-actions gate (candidate_actions_broad flows
+            // through candidate_actions → validated_candidate_actions → flat_priority_actions
+            // → legal_actions_full), so a human in MP can submit cancel. Triggered modal
+            // abilities (CR 603.3c) must choose a mode — no cancel.
+            if *is_activated {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
             }
+            actions
         }
         WaitingFor::ConniveDiscard {
             player,

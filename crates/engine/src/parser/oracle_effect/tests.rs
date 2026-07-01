@@ -683,6 +683,145 @@ fn stensian_class_builds_whenever_event_this_combat_delayed_trigger() {
     );
 }
 
+/// CR 601.2c + CR 508.1d + CR 509.1c: A dual-target combat compound —
+/// "up to one target creature [combat compulsion] and up to one target creature
+/// [combat prohibition]" — must split into two independently-targeted conjuncts
+/// so BOTH combat requirements parse (Boros Battleshaper). Regression for the
+/// clause-splitter `starts_up_to_target_combat_clause_lower` arm: before the
+/// fix the bare-`and` splitter left the RHS noun-phrase subject un-split, the
+/// leading-conditional detector swallowed the "if able" force half, and only
+/// the CantAttack prohibition survived.
+#[test]
+fn boros_battleshaper_dual_target_combat_compound_splits_both_halves() {
+    use crate::types::statics::StaticMode;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, up to one target creature attacks or blocks this combat if able and up to one target creature can't attack or block this combat.",
+        "Boros Battleshaper",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "expected one combat trigger");
+    let exec = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("beginning-of-combat trigger should carry an execute body");
+
+    // Walk the serialized effect tree and collect every StaticMode name that
+    // appears, without hardcoding the nested sequence shape. Unit StaticMode
+    // variants serialize as bare JSON strings; data-carrying ones as object
+    // keys — searching both covers the whole family.
+    fn collect_modes(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| collect_modes(x, out)),
+            serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push(k.clone());
+                collect_modes(x, out);
+            }),
+            _ => {}
+        }
+    }
+    let json = serde_json::to_value(exec).expect("effect should serialize");
+    let mut modes = Vec::new();
+    collect_modes(&json, &mut modes);
+
+    // Force half → attack/block compulsion (CR 508.1d/509.1c).
+    let must_attack = format!("{:?}", StaticMode::MustAttack);
+    let must_block = format!("{:?}", StaticMode::MustBlock);
+    assert!(
+        modes.contains(&must_attack),
+        "force half should grant MustAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.contains(&must_block),
+        "force half should grant MustBlock; modes = {modes:?}"
+    );
+    // Prohibition half → can't attack or block (CantAttack + CantBlock). Assert
+    // BOTH so a regression to half-parsed output ("can't attack" only) is caught.
+    assert!(
+        modes.iter().any(|m| m == "CantAttack"),
+        "prohibition half should grant CantAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantBlock"),
+        "prohibition half should grant CantBlock; modes = {modes:?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 601.2c + CR 508.1d + CR 509.1c: the same dual-target combat compound in
+/// its UNNUMBERED form — bare `"target creature …"` on both conjuncts, with no
+/// `"up to <n>"` count. matthewevans/gemini review: the splitter must model the
+/// whole target-combat clause class, not just the counted Boros shape, so an
+/// unnumbered second conjunct ("… and target creature can't attack or block …")
+/// is a fresh independently-targeted clause and both halves must parse. This is
+/// the Boros text with "up to one" stripped, exercising the optional-number
+/// subject arm of `starts_up_to_target_combat_clause_lower`.
+#[test]
+fn dual_target_combat_compound_splits_both_halves_unnumbered() {
+    use crate::types::statics::StaticMode;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, target creature attacks or blocks this combat if able and target creature can't attack or block this combat.",
+        "Unnumbered Dual-Target Combat",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "expected one combat trigger");
+    let exec = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("beginning-of-combat trigger should carry an execute body");
+
+    fn collect_modes(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| collect_modes(x, out)),
+            serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push(k.clone());
+                collect_modes(x, out);
+            }),
+            _ => {}
+        }
+    }
+    let json = serde_json::to_value(exec).expect("effect should serialize");
+    let mut modes = Vec::new();
+    collect_modes(&json, &mut modes);
+
+    let must_attack = format!("{:?}", StaticMode::MustAttack);
+    let must_block = format!("{:?}", StaticMode::MustBlock);
+    assert!(
+        modes.contains(&must_attack),
+        "force half should grant MustAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.contains(&must_block),
+        "force half should grant MustBlock; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantAttack"),
+        "prohibition half should grant CantAttack; modes = {modes:?}"
+    );
+    assert!(
+        modes.iter().any(|m| m == "CantBlock"),
+        "prohibition half should grant CantBlock; modes = {modes:?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
 /// filter must not put the clause splitter into quote mode and thereby
 /// swallow a later sentence boundary (a text-structure concern with no
