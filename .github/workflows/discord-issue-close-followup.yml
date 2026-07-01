@@ -22,4 +22,8 @@ jobs:
       - name: Post Discord follow-up
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          # Optional repo/org Actions variable holding the #bugreports channel id.
+          # When set, the follow-up links it as a <#id> mention; unset arrives as
+          # "" and the script falls back to a plain "#bugreports".
+          DISCORD_BUGREPORTS_CHANNEL_ID: ${{ vars.DISCORD_BUGREPORTS_CHANNEL_ID }}
         run: bun scripts/notify-discord-issue-closed.ts

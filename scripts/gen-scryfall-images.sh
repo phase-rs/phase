@@ -112,7 +112,12 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
     select(. != null) |
     {key: ., value: $entry}
   ]) +
-  # Token entries (keyed with "token:" prefix)
+  # Token entries (keyed with "token:" prefix).
+  # Only single-face layout == "token" tokens are included; double_faced_token is
+  # in $exclude above and has no top-level oracle_text, so DFC tokens are not
+  # supported here. oracle_text carries the token rules text (e.g. the Pilot
+  # token crew ability) so the /card bot can show it. It is a VALUE, not a lookup
+  # key, so the js_downcase/ascii_downcase distinction does not apply.
   ([.[] |
     select(.layout == "token") |
     select(.image_uris.normal != null) |
@@ -126,6 +131,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       mana_cost: "",
       cmc: 0,
       type_line: $tok.type_line,
+      oracle_text: ($tok.oracle_text // null),
       colors: ($tok.colors // []),
       color_identity: ($tok.color_identity // []),
       keywords: ($tok.keywords // []),

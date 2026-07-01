@@ -14,6 +14,9 @@ interface GithubIssue {
   html_url?: string;
   number?: number;
   title?: string;
+  // GitHub sends one of "completed" | "not_planned" | "duplicate" on a closed
+  // issue. Only "completed" means a fix shipped and is worth asking users to test.
+  state_reason?: string | null;
 }
 
 interface GithubEventPayload {
@@ -137,13 +140,35 @@ function extractDiscordRef(body: string): DiscordRef | null {
   return null;
 }
 
-function buildFollowupMessage(issue: GithubIssue): string {
+// An unset GitHub Actions variable arrives as "" (not undefined), so treat empty
+// the same as missing and fall back to a plain, non-linking channel name.
+function resolveBugreportsMention(): string {
+  const channelId = Bun.env.DISCORD_BUGREPORTS_CHANNEL_ID;
+  if (channelId !== undefined && channelId !== "") {
+    return `<#${channelId}>`;
+  }
+  return "#bugreports";
+}
+
+function buildFollowupMessage(issue: GithubIssue, bugreportsMention: string): string {
   const issueNumber = Number(issue.number ?? 0);
   const issueLabel = issueNumber > 0 ? `#${issueNumber}` : "The GitHub issue";
   const issueUrl = issue.html_url ?? "";
+  const closeLine = `${issueLabel} tracking this report was closed${issueUrl === "" ? "." : `: ${issueUrl}`}`;
+
+  // Only a "completed" close means a fix shipped — that's the one case where we
+  // ask the reporter to retest. Every other reason (not_planned, duplicate)
+  // gets neutral wording with no "please test" ask. Either way the thread is
+  // resolved (archived by main()), so we point future reports at a fresh thread.
+  if (issue.state_reason === "completed") {
+    return [
+      closeLine,
+      `Please test the fix in the latest build. If it's still broken, open a **new thread** in ${bugreportsMention} — this thread is now resolved.`,
+    ].join("\n");
+  }
   return [
-    `${issueLabel} tracking this report was closed${issueUrl === "" ? "." : `: ${issueUrl}`}`,
-    "Can you check whether this is fixed in the latest build? Reply here if it still happens.",
+    closeLine,
+    `This thread is now resolved. If you have new information, please open a **new thread** in ${bugreportsMention}.`,
   ].join("\n");
 }
 
@@ -196,12 +221,15 @@ async function createMessage(
   );
 }
 
-async function unarchiveThread(token: string, threadId: string): Promise<void> {
+// PATCH a thread's archived state. Unarchiving a non-locked thread only needs
+// send permission; ARCHIVING a thread the bot does not own requires
+// MANAGE_THREADS in the channel — callers that archive must tolerate failure.
+async function setThreadArchived(token: string, threadId: string, archived: boolean): Promise<void> {
   await discordRequest<unknown>(
     token,
     "PATCH",
     `/channels/${threadId}`,
-    { archived: false },
+    { archived },
   );
 }
 
@@ -218,7 +246,7 @@ async function postFollowup(
       throw error;
     }
     console.log(`Thread ${threadId} is archived; unarchiving before posting follow-up.`);
-    await unarchiveThread(token, threadId);
+    await setThreadArchived(token, threadId, false);
     return createMessage(token, threadId, content);
   }
 }
@@ -233,9 +261,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const content = buildFollowupMessage(issue);
+  const content = buildFollowupMessage(issue, resolveBugreportsMention());
   if (args.dryRun) {
-    console.log(`Dry run: would post to Discord thread ${discordRef.threadId} (${discordRef.source}).`);
+    console.log(
+      `Dry run: would post to Discord thread ${discordRef.threadId} (${discordRef.source}), then archive it to mark it resolved.`,
+    );
     console.log(content);
     return;
   }
@@ -247,6 +277,21 @@ async function main(): Promise<void> {
 
   const posted = await postFollowup(token, discordRef.threadId, content);
   console.log(`Posted Discord issue-close follow-up ${posted.id} to thread ${discordRef.threadId}.`);
+
+  // Archive the thread to mark it resolved. This is best-effort: if the bot
+  // lacks MANAGE_THREADS the follow-up message has already posted, so a failed
+  // archive must not fail the workflow (which would leave partial state and
+  // could double-post on a rerun).
+  try {
+    await setThreadArchived(token, discordRef.threadId, true);
+    console.log(`Archived thread ${discordRef.threadId} to mark the report resolved.`);
+  } catch (error) {
+    console.warn(
+      `Could not archive thread ${discordRef.threadId} (does the bot have MANAGE_THREADS?): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 main().catch((error: unknown) => {

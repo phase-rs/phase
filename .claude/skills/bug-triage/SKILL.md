@@ -262,17 +262,35 @@ gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-ver
 
 `.github/workflows/discord-issue-close-followup.yml` runs whenever a
 `source:discord` GitHub issue is closed. It reads the Discord thread id from
-the issue body and posts back into that Discord thread:
+the issue body and posts back into that Discord thread, then **archives the
+thread to mark the report resolved** — closing the loop so the reporter is
+told the outcome and the thread stops showing as open.
 
-> GitHub issue #N tracking this report was closed: <issue-url>
-> Can you check whether this is fixed in the latest build? Reply here if it still happens.
+The message wording depends on `issue.state_reason`:
 
-The parser accepts the new hidden metadata comments, the visible
-`**Discord thread id:**` field, and the older `discord: <thread>/<message>`
-footer, so older script-created issues still work when they contain that
-footer. The workflow requires the repository secret `DISCORD_BOT_TOKEN`. If the
-thread is archived, `scripts/notify-discord-issue-closed.ts` unarchives it and
-then posts the follow-up.
+- **Closed as completed** (a fix shipped):
+  > #N tracking this report was closed: <issue-url>
+  > Please test the fix in the latest build. If it's still broken, open a **new thread** in #bugreports — this thread is now resolved.
+- **Closed for any other reason** (`not_planned`, `duplicate`) — neutral, no retest ask:
+  > #N tracking this report was closed: <issue-url>
+  > This thread is now resolved. If you have new information, please open a **new thread** in #bugreports.
+
+The parser accepts the hidden `phase-discord-thread-id` metadata comment, the
+visible `**Discord thread id:**` field, and the older
+`discord: <thread>/<message>` footer, so older script-created issues still work
+when they contain that footer. If the thread is archived, the script unarchives
+it before posting, then re-archives it afterward.
+
+**Ops preconditions:**
+- Repository secret `DISCORD_BOT_TOKEN` — required to post.
+- Repository/org Actions variable `DISCORD_BUGREPORTS_CHANNEL_ID` (optional) —
+  when set, the "#bugreports" ask renders as a clickable `<#id>` channel
+  mention; unset falls back to the plain text `#bugreports`. **Create this
+  variable manually** (Settings → Secrets and variables → Actions → Variables).
+- The bot must have **MANAGE_THREADS** in the #bugreports channel to archive
+  threads. Archiving is best-effort: if the permission is missing the follow-up
+  message still posts and the workflow logs a warning instead of failing (so it
+  never double-posts on a rerun).
 
 ### Mandatory Pre-Implementation Plan Review Gate — Independent Review ROUNDS Until Clean
 
@@ -781,6 +799,20 @@ commands generate the `.jsonl` files; `triage/llm-triage-items.jsonl`,
 | `triage/sync-state.json` | Incremental fetch cursors + `published_threads` map | `fetch` / `publish` | yes |
 | `triage/dashboard.md` | Generated dashboard | `render` | yes |
 | `triage/triage-dashboard.md` | Triage-classified dashboard (only when triage data exists) | `render` | yes |
+
+### Card detection in `extract`
+
+`extract` finds card names three ways (see `scripts/lib/cardNames.ts`): a raw
+substring scan (noisy — yields single-word false positives like "x"/"life"),
+plus explicit `[[Card Name]]` brackets and Scryfall card URLs resolved against a
+punctuation-normalized index. Normalization collapses `. . .`, `//`, commas, and
+hyphens so `[[welcome to...]]` and the slug `welcome-to-jurassic-park` both match
+the card-data key `welcome to . . .`; a double-faced combined name resolves to
+both face keys. Report items carry an optional `explicitCards` field — the
+trusted bracket/URL subset of `cards` — which `publish` always includes in the
+issue's verified-oracle section (bypassing the false-positive filter). The field
+is optional, so `triage` still reads `report-items.jsonl` written before it
+existed; a fresh `extract` rewrites the file and repopulates it.
 
 ## Label Taxonomy
 

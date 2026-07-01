@@ -20,6 +20,7 @@ import {
   type DiscordMessage,
 } from "./lib/discord.ts";
 import { extractReports } from "./lib/extract.ts";
+import { normalizeCardName } from "./lib/cardNames.ts";
 import { triageReports } from "./lib/triage.ts";
 import { renderDashboard, renderTriageDashboard } from "./lib/render.ts";
 import { crossReference, type CrossrefItem } from "./lib/crossref.ts";
@@ -540,6 +541,16 @@ function containsCardReference(text: string, card: string, allowSingleWord: bool
   const bracketed = new RegExp(`\\[\\[\\s*${escapeRegex(card)}\\s*\\]\\]`, "i");
   if (bracketed.test(text)) return true;
 
+  // Punctuation-tolerant bracket match: the card-data key can spell punctuation
+  // differently from what the user typed (key "welcome to . . ." vs the message
+  // "[[welcome to...]]"). Compare normalized forms of every [[...]] reference.
+  const normalizedCard = normalizeCardName(card);
+  if (normalizedCard !== "") {
+    for (const match of text.matchAll(/\[\[(.+?)\]\]/g)) {
+      if (normalizeCardName(match[1]) === normalizedCard) return true;
+    }
+  }
+
   const cardWords = card.trim().split(/\s+/);
   if (!allowSingleWord && cardWords.length === 1) return false;
 
@@ -554,9 +565,14 @@ function selectRelevantOracleCards(item: TriageItem): string[] {
     .join("\n");
   const searchableText = `${item.thread_name}\n${item.summary}\n${rawText}`;
   const threadTitle = item.thread_name.trim().toLowerCase();
+  // Cards named explicitly via [[...]] / Scryfall links are trusted — they were
+  // resolved against card-data at extraction time, so they bypass the text
+  // re-scan (which can't re-match a truncated/punctuation-variant reference).
+  const explicit = new Set((item.explicitCards ?? []).map((card) => card.trim().toLowerCase()));
 
   return [...new Set(item.cards.map((card) => card.trim()).filter(Boolean))].filter((card) => {
     const normalized = card.toLowerCase();
+    if (explicit.has(normalized)) return true;
     const exactThreadTitle = normalized === threadTitle;
     return exactThreadTitle || containsCardReference(searchableText, card, false);
   });
@@ -702,11 +718,18 @@ function resolveIssue(
 }
 
 // Phase 2 of publish: react 👀 on the thread starter, post the tracking link.
-// Does NOT auto-unarchive: in this server, archive is the maintainer's manual
-// "resolved" signal. If we hit Discord error 50083 (Thread is archived) at
-// this point it means the operator archived the thread between the LLM's
+// Does NOT auto-unarchive: at PUBLISH time a live thread is expected, so an
+// already-archived thread means the operator archived it between the LLM's
 // judgment and the publish call — that's a strong "skip, leave it alone"
-// signal, and the caller logs it without touching the archive state.
+// signal, and the caller logs the Discord error 50083 without touching the
+// archive state.
+//
+// NOTE: archiving means "resolved" here, but the two ends of the pipeline reach
+// it differently. At publish (issue OPEN) the thread should stay live, so we
+// never archive and treat an archive as a manual skip. At issue CLOSE the loop
+// is done, so `scripts/notify-discord-issue-closed.ts` DOES archive the thread
+// (unarchiving first if needed) to mark the report resolved. Same end-state,
+// opposite trigger — don't "fix" this asymmetry into a contradiction.
 async function writeDiscordTracking(
   threadId: string,
   issueUrl: string,
