@@ -12,7 +12,8 @@ use super::counter::{
     try_parse_multiply_pt_effect, try_parse_put_counter, try_parse_remove_counter,
 };
 use super::lower::{
-    parse_for_each_multiplier_prefix, parse_where_x_quantity_expression, strip_trailing_where_x,
+    parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
+    parse_where_x_quantity_expression, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
@@ -2038,6 +2039,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
+            conditional_enter_with_counters: vec![],
             // CR 708.2a + CR 708.3: a "face down" return seeds the default
             // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
             // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
@@ -2059,6 +2061,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
@@ -4472,12 +4475,18 @@ pub(super) fn parse_utility_imperative_ast(
     // CR 400.7j + CR 608.2h: Zack Fair — "attach an Equipment that was attached
     // to ~ to that creature". The attachment is battlefield Equipment whose
     // host was the ability source (including LKI after self-sacrifice).
-    if let Some(((), recipient_text)) = nom_on_lower(text, lower, |input| {
+    if let Some((multi_target, recipient_text)) = nom_on_lower(text, lower, |input| {
         let (input, _) = tag("attach ").parse(input)?;
-        let (input, _) = opt(alt((tag("an "), tag("up to one ")))).parse(input)?;
+        let (input, _) = opt(tag("an ")).parse(input)?;
+        let (input, multi_target) = opt(value(
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }),
+            tag("up to one "),
+        ))
+        .parse(input)?;
         let (input, _) = tag("equipment that was attached to ").parse(input)?;
         let (input, _) = alt((tag("~"), tag("this equipment"))).parse(input)?;
-        value((), tag(" to ")).parse(input)
+        let (input, _) = tag(" to ").parse(input)?;
+        Ok((input, multi_target))
     }) {
         let (target, _target_rem) = parse_attach_recipient(recipient_text, ctx);
         #[cfg(debug_assertions)]
@@ -4490,6 +4499,7 @@ pub(super) fn parse_utility_imperative_ast(
                         .properties(vec![FilterProp::AttachedToSource]),
                 ),
                 target,
+                multi_target,
             });
         }
     }
@@ -4497,10 +4507,14 @@ pub(super) fn parse_utility_imperative_ast(
         preceded(tag("attach "), parse_attach_anaphor_to_token).parse(input)
     }) {
         if rem.trim().is_empty() {
-            return Some(UtilityImperativeAst::Attach { attachment, target });
+            return Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target: None,
+            });
         }
     }
-    if let Some(((attachment_text, target_text), rem)) =
+    if let Some(((attachment_text, target_text, multi_target), rem)) =
         nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
         if rem.trim().is_empty() {
@@ -4510,7 +4524,11 @@ pub(super) fn parse_utility_imperative_ast(
             assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_target_rem, text);
-            return Some(UtilityImperativeAst::Attach { attachment, target });
+            return Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target,
+            });
         }
     }
     if let Some((_, rest)) =
@@ -4525,6 +4543,7 @@ pub(super) fn parse_utility_imperative_ast(
         return Some(UtilityImperativeAst::Attach {
             attachment: TargetFilter::SelfRef,
             target,
+            multi_target: None,
         });
     }
     None
@@ -4590,19 +4609,44 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
 
 fn parse_explicit_targeted_attach(
     input: &str,
-) -> nom::IResult<&str, (String, String), OracleError<'_>> {
+) -> nom::IResult<&str, (String, String, Option<MultiTargetSpec>), OracleError<'_>> {
     let (input, _) = tag("attach ").parse(input)?;
-    let (input, _) = opt(alt((
-        tag("up to one "),
-        tag("up to two "),
-        tag("up to three "),
-        tag("any number of "),
-    )))
-    .parse(input)?;
+    let (input, multi_target) = parse_attach_target_quantifier(input)?;
     let (input, attachment) = take_until(" to ").parse(input)?;
     let (input, _) = tag(" to ").parse(input)?;
     let (input, target) = rest.parse(input)?;
-    Ok((input, (attachment.to_string(), target.to_string())))
+    Ok((
+        input,
+        (attachment.to_string(), target.to_string(), multi_target),
+    ))
+}
+
+fn parse_attach_target_quantifier(
+    input: &str,
+) -> nom::IResult<&str, Option<MultiTargetSpec>, OracleError<'_>> {
+    let any_number = |input| {
+        let (input, _) = tag("any number of ").parse(input)?;
+        let (_, _) = peek(alt((
+            tag("target "),
+            tag("other target "),
+            tag("another target "),
+        )))
+        .parse(input)?;
+        Ok((input, MultiTargetSpec::unlimited(0)))
+    };
+    let up_to = |input| {
+        let (input, _) = tag("up to ").parse(input)?;
+        let (input, max) = parse_multi_target_count_expr(input)?;
+        let (input, _) = space1.parse(input)?;
+        let (_, _) = peek(alt((
+            tag("target "),
+            tag("other target "),
+            tag("another target "),
+        )))
+        .parse(input)?;
+        Ok((input, MultiTargetSpec::up_to(max)))
+    };
+    opt(alt((any_number, up_to))).parse(input)
 }
 
 fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
@@ -4673,9 +4717,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
-        UtilityImperativeAst::Attach { attachment, target } => {
-            Effect::Attach { attachment, target }
-        }
+        UtilityImperativeAst::Attach {
+            attachment, target, ..
+        } => Effect::Attach { attachment, target },
         UtilityImperativeAst::UnattachAll { attachment, target } => {
             Effect::UnattachAll { attachment, target }
         }
@@ -5445,6 +5489,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 }
             }
@@ -6024,6 +6069,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
@@ -6076,6 +6122,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 };
                 // CR 115.1d: propagate the "up to N target" count so the cast
@@ -6192,6 +6239,7 @@ pub(super) fn lower_multi_filter_search_library(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
     };
 
@@ -7875,6 +7923,90 @@ pub(super) fn parse_imperative_family_ast(
                         None
                     } else {
                         Some(ImperativeFamilyAst::TurnFaceUp { target })
+                    }
+                }
+                _ => None,
+            }
+        }
+
+        // CR 708.2a: "Turn <permanent> face down" — a resolving effect that turns
+        // the named/targeted face-up permanent(s) face down. This is ALWAYS a
+        // resolving spell/ability effect, never a special action: the morph,
+        // cloak, and disguise special actions only ever turn a permanent face UP
+        // (CR 702.37e / CR 701.58b / CR 702.168d), so "turn ... face down" has no
+        // special-action wording to collide with. The subject may therefore be a
+        // target (Cyber Conversion — "Turn target creature face down"), a
+        // self-reference (Mischievous Quanar / Wall of Deceit — "{cost}: Turn
+        // this creature face down"; Obscuring Aether — "Turn this enchantment
+        // face down"; Skittish Valesk's coin-flip trigger), or a mass non-target
+        // form ("turn all other ... creatures face down"). `parse_target` maps
+        // each form, including "~" / "this <type>" → `SelfRef` (resolved at
+        // runtime via `resolved_battlefield_object_ids`); self-references are NOT
+        // rejected. Mirrors the general face-up extraction: anchored/all-consuming
+        // so the combined two-sentence input ("... face down. It's a 2/2 Cyberman
+        // artifact creature.") fails here and is left for the chain splitter,
+        // which re-attaches the trailing body sentence as a `FaceDownProfileSpec`
+        // continuation (CR 205.1a). The seed `Some(vanilla_2_2())` profile
+        // (CR 708.2a sentence 1) is overwritten by that continuation when present.
+        "turn" | "turns" if nom_primitives::scan_contains(lower, "face down") => {
+            let text_trim = text.trim();
+            let lower_trim = lower.trim();
+            let parsed = (|| {
+                let (rest, _) = alt((
+                    tag::<_, _, OracleError<'_>>("turn "),
+                    tag("turns "),
+                ))
+                .parse(lower_trim)?;
+                all_consuming(terminated(
+                    take_until::<_, _, OracleError<'_>>(" face down"),
+                    preceded(tag(" face down"), opt(tag("."))),
+                ))
+                .parse(rest)
+                .and_then(|(_, mid)| {
+                    // Slice the original-cased middle by the lowercase byte
+                    // offsets; `.get()` guards against non-ASCII boundary shifts.
+                    let start = lower_trim.len() - rest.len();
+                    text_trim.get(start..start + mid.len()).ok_or_else(|| {
+                        nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail))
+                    })
+                })
+            })();
+            match parsed {
+                Ok(mid_orig) if !mid_orig.trim().is_empty() => {
+                    // `parse_target` maps the subject to a `TargetFilter` AND
+                    // reports the unconsumed remainder. CR 115.1d: recover the
+                    // target-count quantifier ("any number of target", "N target")
+                    // separately via the shared subject building block so a plural
+                    // subject (Illithid Harvester) surfaces a `MultiTargetSpec`
+                    // instead of collapsing to one slot; single subjects (Cyber
+                    // Conversion, self-references) yield `None`.
+                    let (target, remainder) = parse_target(mid_orig);
+                    // The count quantifier is derived purely from the subject's
+                    // count phrase, not from enclosing context, so a throwaway
+                    // context (mirroring the `parse_target` wrapper above) keeps
+                    // the caller's `ctx` diagnostics untouched.
+                    let multi_target = super::subject::parse_subject_application(
+                        mid_orig,
+                        &mut ParseContext::default(),
+                    )
+                    .and_then(|app| app.multi_target);
+                    // CR 608.2b: only emit `TurnFaceDown` when `parse_target`
+                    // consumed the ENTIRE subject. A non-empty remainder means an
+                    // unmodeled target restriction ("with a morph ability" —
+                    // Backslide) was silently dropped, which would illegally widen
+                    // the legal-target set (any creature would become a legal
+                    // target). Fall through to Unimplemented rather than ship an
+                    // over-broad / illegal target.
+                    if matches!(target, TargetFilter::None) || !remainder.trim().is_empty() {
+                        None
+                    } else {
+                        Some(ImperativeFamilyAst::TurnFaceDown {
+                            target,
+                            profile: Some(
+                                crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                            ),
+                            multi_target,
+                        })
                     }
                 }
                 _ => None,
@@ -9746,10 +9878,36 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 115.1d + CR 708.2a: "turn any number of target … face down" /
+        // "turn N target … face down" (Illithid Harvester). The target-count
+        // quantifier is an ability-level field (`ParsedEffectClause.multi_target`
+        // → `AbilityDefinition.multi_target`), not an `Effect::TurnFaceDown`
+        // field, so intercept here where a `ParsedEffectClause` is in scope and
+        // stamp the spec — mirroring the `Fight` / `PutCounterList` clause-field
+        // arms above. `None` (single subject — Cyber Conversion) leaves the
+        // clause's default unchanged.
+        ImperativeFamilyAst::TurnFaceDown {
+            target,
+            profile,
+            multi_target,
+        } => {
+            let mut clause = parsed_clause(Effect::TurnFaceDown { target, profile });
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 601.2d + CR 615.7: "prevent N damage divided/distributed among [targets]"
         // — intercepted here so `distribute` and `multi_target` propagate to
         // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
         // cannot carry these fields. Mirrors the ZoneCounter { unless_pay } intercept above.
+        ImperativeFamilyAst::Structured(ImperativeAst::Utility(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        })) => {
+            let mut clause = parsed_clause(Effect::Attach { attachment, target });
+            clause.multi_target = multi_target;
+            clause
+        }
         ImperativeFamilyAst::Structured(ImperativeAst::Utility(
             UtilityImperativeAst::Prevent { ref text },
         )) => {
@@ -9842,6 +10000,15 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
         // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
+        // CR 708.2a: Turn target permanent(s) face down (Cyber Conversion).
+        // `multi_target` is a clause-level field stamped in
+        // `lower_imperative_family_ast`'s intercept arm; the bare-Effect path
+        // (used by unit tests that inspect only the `Effect`) cannot carry it.
+        ImperativeFamilyAst::TurnFaceDown {
+            target,
+            profile,
+            multi_target: _,
+        } => Effect::TurnFaceDown { target, profile },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
@@ -10224,6 +10391,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
                 }
             }
@@ -11446,11 +11614,17 @@ mod tests {
     fn parse_attach_triggering_object_to_last_created_token() {
         let input = "attach it to the token";
         let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(attachment, TargetFilter::TriggeringSource);
         assert_eq!(target, TargetFilter::LastCreated);
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11458,7 +11632,12 @@ mod tests {
         let input = "attach up to one target Equipment you control to her";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(
@@ -11470,6 +11649,38 @@ mod tests {
             )
         );
         assert_eq!(target, TargetFilter::SelfRef);
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+    }
+
+    #[test]
+    fn parse_attach_up_to_one_other_target_preserves_other_filter() {
+        let input = "attach up to one other target Equipment you control to her";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        let TargetFilter::Typed(typed) = attachment else {
+            panic!("expected typed Equipment filter, got {attachment:?}");
+        };
+        assert!(typed.type_filters.iter().any(
+            |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Equipment")
+        ));
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]
@@ -11477,7 +11688,12 @@ mod tests {
         let input = "attach an Equipment that was attached to ~ to that creature";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         match attachment {
@@ -11491,6 +11707,7 @@ mod tests {
             other => panic!("expected typed Equipment filter, got {other:?}"),
         }
         assert!(matches!(target, TargetFilter::ParentTarget));
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11498,7 +11715,12 @@ mod tests {
         let input = "attach target Equipment you control to target creature you control";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(
@@ -11513,6 +11735,7 @@ mod tests {
             target,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+        assert_eq!(multi_target, None);
     }
 
     #[test]
@@ -11554,7 +11777,12 @@ mod tests {
         let input = "attach one of them to a Samurai you control";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert!(
@@ -11574,6 +11802,7 @@ mod tests {
             ),
             "expected Samurai you control attach target, got {target:?}"
         );
+        assert_eq!(multi_target, None);
     }
 
     /// CR 608.2k regression — issue #319 sibling.
@@ -11605,11 +11834,13 @@ mod tests {
             let Some(UtilityImperativeAst::Attach {
                 attachment: _,
                 target,
+                multi_target,
             }) = result
             else {
                 panic!("{input}: expected Attach, got {result:?}");
             };
             assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+            assert_eq!(multi_target, None);
         }
     }
 
@@ -13879,6 +14110,81 @@ mod tests {
             );
         }
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    }
+
+    /// CR 115.1d + CR 708.2a: "turn any number of target … face down" (Illithid
+    /// Harvester) is a plural-subject turn-face-down. The target-count quantifier
+    /// must survive lowering as `ParsedEffectClause.multi_target` (unlimited,
+    /// min 0) so the cast surfaces every chosen target rather than collapsing to
+    /// one slot — the bare `Effect::TurnFaceDown` cannot carry the cardinality.
+    /// The single-subject form (Cyber Conversion) carries `None`, pinning the
+    /// other end of the axis.
+    #[test]
+    fn turn_face_down_any_number_of_target_carries_multi_target() {
+        let text = "turn any number of target tapped nontoken creatures face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("plural turn-face-down should parse");
+        assert!(
+            matches!(
+                &ast,
+                ImperativeFamilyAst::TurnFaceDown {
+                    multi_target: Some(_),
+                    ..
+                }
+            ),
+            "expected TurnFaceDown with a multi_target, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast);
+        assert!(
+            matches!(clause.effect, Effect::TurnFaceDown { .. }),
+            "expected Effect::TurnFaceDown, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "any number of target → unlimited (min 0) multi-target"
+        );
+
+        // Single-subject form carries no multi-target.
+        let text = "turn target creature face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("single turn-face-down should parse");
+        let clause = lower_imperative_family_ast(ast);
+        assert_eq!(
+            clause.multi_target, None,
+            "single 'target creature' must not carry a multi-target spec"
+        );
+    }
+
+    /// CR 608.2b: "turn target creature with a morph ability face down" (Backslide)
+    /// carries a target restriction ("with a morph ability") the parser cannot
+    /// model. Rather than silently drop it — which would illegally widen the
+    /// legal-target set to any creature — the verb arm must reject the clause
+    /// (returning `None`) so it falls through to `Unimplemented`. The unrestricted
+    /// "turn target creature face down" still parses, pinning the guard's other
+    /// end.
+    #[test]
+    fn turn_face_down_with_unmodeled_restriction_falls_through() {
+        let text = "turn target creature with a morph ability face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            ast.is_none(),
+            "an unmodeled target restriction must not silently widen the target; \
+             expected fall-through to Unimplemented, got {ast:?}"
+        );
+
+        // The unrestricted subject still parses to TurnFaceDown.
+        let text = "turn target creature face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            matches!(ast, Some(ImperativeFamilyAst::TurnFaceDown { .. })),
+            "unrestricted 'target creature' must still parse to TurnFaceDown, got {ast:?}"
+        );
     }
 
     /// CR 115.6: "it fights up to one target creature …" allows zero targets.

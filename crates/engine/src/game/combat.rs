@@ -6078,6 +6078,177 @@ mod tests {
         );
     }
 
+    /// CR 702.16 + CR 105.4 (issue #4371): Mother of Runes — when a creature is
+    /// granted `Protection(ChosenColor)` via a transient continuous effect whose
+    /// source carries a `ChosenAttribute::Color`, the layer applier bakes
+    /// `Protection(ChosenColor)` → `Protection(Color(<chosen>))` at apply-time
+    /// (layers.rs). The high-level `protection_prevents_from` query then prevents
+    /// a source of the chosen color and allows a source of any other color.
+    /// This proves the runtime half of the #4371 fix: the parser injects a
+    /// `Choose(Color)` ahead of the grant so this `chosen_color` is populated.
+    #[test]
+    fn granted_protection_from_chosen_color_bakes_in_at_apply_time() {
+        use crate::types::ability::{
+            ChosenAttribute, ContinuousModification, Duration, TargetFilter,
+        };
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Mother of Runes", 1, 1);
+        let granted = create_creature(&mut state, PlayerId(0), "Protected Creature", 2, 2);
+        let red_source = create_creature(&mut state, PlayerId(1), "Red Source", 2, 2);
+        let blue_source = create_creature(&mut state, PlayerId(1), "Blue Source", 2, 2);
+        state
+            .objects
+            .get_mut(&red_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+        state
+            .objects
+            .get_mut(&blue_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        // The `Choose a color` resolver stores the chosen color on the granting
+        // source (Mother of Runes). Issue #4371's parser fix injects that choice.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        // Grant `Protection(ChosenColor)` to the target — exactly what the
+        // injected grant sub-ability produces when it resolves.
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: granted },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+            }],
+            None,
+        );
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let granted_obj = state.objects.get(&granted).unwrap();
+        let red_obj = state.objects.get(&red_source).unwrap();
+        let blue_obj = state.objects.get(&blue_source).unwrap();
+        // Red source matches the chosen color → protection prevents it.
+        assert!(
+            crate::game::keywords::protection_prevents_from(granted_obj, red_obj),
+            "protection from chosen color (red) should prevent a red source"
+        );
+        // Blue source differs → not prevented.
+        assert!(
+            !crate::game::keywords::protection_prevents_from(granted_obj, blue_obj),
+            "protection from chosen color (red) should NOT prevent a blue source"
+        );
+    }
+
+    /// CR 607.2d + CR 613.1 + CR 702.16 (issue #4371): end-to-end production
+    /// path for Mother of Runes. Unlike `granted_protection_from_chosen_color_
+    /// bakes_in_at_apply_time` (which hand-seeds the chosen color via
+    /// `chosen_attributes.push`), this drives the REAL runtime: parse the Oracle
+    /// text, activate the `{T}` ability, target the creature, resolve, then
+    /// answer the injected `Choose(Color)` through the actual `ChooseOption`
+    /// action. The injected choice must persist (`persist: true`) so the resolver
+    /// stores its `source_id`; answering it routes through `bind_named_choice`,
+    /// which writes `ChosenAttribute::Color` onto Mother of Runes and re-runs
+    /// layers — baking `Protection(ChosenColor)` → `Protection(Color(White))` on
+    /// the target. With `persist: false` the source carried no color and the
+    /// grant was a silent no-op (the bug this test guards against).
+    #[test]
+    fn mother_of_runes_chosen_color_protection_resolves_through_choose_option() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::ChoiceType;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mother = scenario
+            .add_creature_from_oracle(
+                PlayerId(0),
+                "Mother of Runes",
+                1,
+                1,
+                "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
+            )
+            .id();
+        let granted = scenario
+            .add_creature(PlayerId(0), "Protected Creature", 2, 2)
+            .id();
+        let white_source = scenario
+            .add_creature(PlayerId(1), "White Source", 2, 2)
+            .id();
+        let blue_source = scenario.add_creature(PlayerId(1), "Blue Source", 2, 2).id();
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&white_source)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&blue_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        // Activate + target + resolve up to the injected color choice. The
+        // resolution driver does not answer `NamedChoice`, so it stops there,
+        // leaving `runner` parked on the prompt for the manual answer below.
+        runner.activate(mother, 0).target_object(granted).resolve();
+
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::NamedChoice {
+                    choice_type: ChoiceType::Color { .. },
+                    source_id: Some(id),
+                    ..
+                } if *id == mother
+            ),
+            "resolving Mother of Runes' ability must pause on a persisted color \
+             choice keyed to the granting source, got {:?}",
+            runner.state().waiting_for
+        );
+
+        // Answer the prompt through the real production action.
+        runner
+            .act(GameAction::ChooseOption {
+                choice: "White".to_string(),
+            })
+            .expect("choosing a color for the protection grant must be accepted");
+
+        let granted_obj = runner.state().objects.get(&granted).unwrap();
+        let white_obj = runner.state().objects.get(&white_source).unwrap();
+        let blue_obj = runner.state().objects.get(&blue_source).unwrap();
+        // The chosen color (white) is now baked in → a white source is prevented.
+        assert!(
+            crate::game::keywords::protection_prevents_from(granted_obj, white_obj),
+            "after answering the color choice with White, the target must have \
+             effective protection from white"
+        );
+        // An off-color (blue) source is unaffected.
+        assert!(
+            !crate::game::keywords::protection_prevents_from(granted_obj, blue_obj),
+            "protection from the chosen color (white) must NOT prevent a blue source"
+        );
+    }
+
     #[test]
     fn source_power_block_restriction_scopes_to_attackers_you_control() {
         let mut state = setup();

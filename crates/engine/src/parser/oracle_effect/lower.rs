@@ -50,8 +50,8 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
     contains_implicit_tracked_set_pronoun, each_target_filter_mut, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, mark_uses_tracked_set, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     publishes_tracked_set_from_resolution, refine_damage_target_remainder,
     replace_player_anaphor_with_parent_target, retarget_counter_additional_cost_to_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
@@ -1882,6 +1882,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    // CR 105.4 + CR 702.16: inject a color choice ahead of a "gains
+    // protection/hexproof from the color of your choice" grant so the source
+    // carries a chosen color for the layer applier to bake in.
+    inject_chosen_color_choice_grant(&mut result, false);
     rewrite_that_type_mana_instead(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
@@ -1912,6 +1916,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     fold_token_it_has_grants_into_token_statics(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
+    fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
     // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
@@ -2062,6 +2067,66 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
+/// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
+/// additional +1/+1 counter on it" riders on a parent battlefield zone change
+/// are entry replacement properties, not post-move `PutCounter` subs.
+fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
+    let parent_moves_to_battlefield = matches!(
+        *def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } | Effect::Dig {
+            destination: Some(Zone::Battlefield),
+            ..
+        }
+    );
+    if !parent_moves_to_battlefield {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            fold_enters_this_way_counter_rider(sub);
+        }
+        if let Some(else_branch) = def.else_ability.as_mut() {
+            fold_enters_this_way_counter_rider(else_branch);
+        }
+        return;
+    }
+
+    let Some(mut sub) = def.sub_ability.take() else {
+        return;
+    };
+
+    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = sub.condition.clone() else {
+        def.sub_ability = Some(sub);
+        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+        return;
+    };
+
+    if let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::ParentTarget,
+    } = &*sub.effect
+    {
+        if let Effect::ChangeZone {
+            conditional_enter_with_counters,
+            ..
+        } = &mut *def.effect
+        {
+            conditional_enter_with_counters.push((filter, counter_type.clone(), count.clone()));
+            def.sub_ability = sub.sub_ability.take();
+            if let Some(nested) = def.sub_ability.as_mut() {
+                fold_enters_this_way_counter_rider(nested);
+            }
+            return;
+        }
+    }
+
+    def.sub_ability = Some(sub);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_enters_this_way_counter_rider(sub);
+    }
+}
+
 fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
@@ -3371,6 +3436,22 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
+/// Parse the player anchor in an "each player other than ⟨anchor⟩" subject into
+/// the `PlayerFilter` whose population is excluded. Composable `alt()` so future
+/// anchors ("you", "that player") slot in without new `PlayerFilter` variants.
+fn parse_excluded_player_anchor(i: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((
+        // CR 109.4 + CR 608.2h: "its controller" = controller of the targeted
+        // permanent named earlier in the spell (the exiled object for Fractured
+        // Identity), resolved via `PlayerFilter::ParentObjectTargetController`.
+        value(
+            PlayerFilter::ParentObjectTargetController,
+            tag("its controller"),
+        ),
+    ))
+    .parse(i)
+}
+
 pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
@@ -3380,7 +3461,32 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 tag("each player with the highest speed among players "),
             ),
             value(PlayerFilter::Opponent, tag("each other player ")),
+            // CR 102.2 + CR 603.2: "each of that player's opponents" — the
+            // caster's opponents (mandatory variant), fanned out per-player.
+            // Apostrophe variants: ASCII ' and curly U+2019 '.
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player's opponents "),
+            ),
+            value(
+                PlayerFilter::OpponentOfTriggeringPlayer,
+                tag("each of that player\u{2019}s opponents "),
+            ),
             value(PlayerFilter::Opponent, tag("each opponent ")),
+            // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than <ref>" —
+            // all players except the anchor's player (resolved with last-known
+            // information when the anchor object has left the battlefield, e.g.
+            // Fractured Identity's exiled permanent). Placed before the bare
+            // "each player " arm so the longer prefix wins.
+            map(
+                preceded(
+                    tag("each player other than "),
+                    terminated(parse_excluded_player_anchor, tag(" ")),
+                ),
+                |anchor| PlayerFilter::AllExcept {
+                    exclude: Box::new(anchor),
+                },
+            ),
             value(PlayerFilter::All, tag("each player ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
@@ -7133,6 +7239,32 @@ pub(super) fn apply_where_x_quantity_expression(
             divisor,
             rounding,
         },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .collect(),
+        },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .collect(),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(apply_where_x_quantity_expression(*left, where_x_expression)),
+            right: Box::new(apply_where_x_quantity_expression(
+                *right,
+                where_x_expression,
+            )),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(apply_where_x_quantity_expression(
+                *exponent,
+                where_x_expression,
+            )),
+        },
         other => other,
     }
 }
@@ -7153,7 +7285,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
-        | Effect::Dig { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -7179,6 +7310,22 @@ pub(super) fn apply_where_x_effect_expression(
         // `SearchLibrary`/`Seek` filter rewrite above.
         Effect::ChangeZone { target, .. } => {
             *target = apply_where_x_to_filter(target.clone(), where_x_expression);
+        }
+        Effect::Destroy { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CastFromZone { target, .. } => {
+            *target = apply_where_x_to_filter(target.clone(), where_x_expression);
+        }
+        Effect::Dig {
+            count,
+            player,
+            filter,
+            ..
+        } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+            *player = apply_where_x_to_filter(player.clone(), where_x_expression);
+            *filter = apply_where_x_to_filter(filter.clone(), where_x_expression);
         }
         Effect::Scry { count, .. } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
@@ -7300,6 +7447,11 @@ fn apply_where_x_continuous_modification(
         // the counter/enter-with parser paths before this continuous grant pass.
         ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. } => {}
+        ContinuousModification::GrantTrigger { trigger } => {
+            if let Some(execute) = trigger.execute.as_mut() {
+                apply_where_x_ability_expression(execute, where_x_expression);
+            }
+        }
         // Non-dynamic modifications carry fixed integers, enum payloads, or
         // nested definitions that are already parsed/lowered independently.
         // Keep this wildcard-free so a future QuantityExpr-carrying variant
@@ -7315,7 +7467,6 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
@@ -7599,6 +7750,15 @@ pub(crate) fn apply_where_x_to_filter(
         TargetFilter::Not { filter } => TargetFilter::Not {
             filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
         },
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id,
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
+            caused_by,
+        },
         other => other,
     }
 }
@@ -7623,6 +7783,48 @@ fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&st
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
             comparator,
             value: apply_where_x_quantity_expression(value, where_x_expression),
+        },
+        FilterProp::Counters {
+            counters,
+            comparator,
+            count,
+        } => FilterProp::Counters {
+            counters,
+            comparator,
+            count: apply_where_x_quantity_expression(count, where_x_expression),
+        },
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value: apply_where_x_quantity_expression(value, where_x_expression),
+        },
+        FilterProp::CanEnchant { target } => FilterProp::CanEnchant {
+            target: Box::new(apply_where_x_to_filter(*target, where_x_expression)),
+        },
+        FilterProp::DifferentNameFrom { filter } => FilterProp::DifferentNameFrom {
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
+        },
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => FilterProp::SharesQuality {
+            quality,
+            reference: reference
+                .map(|filter| Box::new(apply_where_x_to_filter(*filter, where_x_expression))),
+            relation,
+        },
+        FilterProp::TargetsOnly { filter } => FilterProp::TargetsOnly {
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
+        },
+        FilterProp::Targets { filter } => FilterProp::Targets {
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
         },
         FilterProp::AnyOf { props } => FilterProp::AnyOf {
             props: props
@@ -8145,6 +8347,29 @@ mod tests {
         );
     }
 
+    // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than its controller
+    // <verb>" strips to `PlayerFilter::AllExcept { ParentObjectTargetController }`
+    // and leaves the deconjugated imperative residual. The "each player other
+    // than " arm must beat the bare "each player " arm. Building block for
+    // Fractured Identity and the "each player other than ⟨ref⟩ does X" class.
+    #[test]
+    fn each_player_other_than_its_controller_strips_to_all_except_scope() {
+        use crate::types::ability::PlayerFilter;
+        let (scope, residual) = super::strip_each_player_subject(
+            "each player other than its controller creates a token that's a copy of it.",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            }),
+        );
+        assert_eq!(
+            residual, "create a token that's a copy of it.",
+            "residual must be the deconjugated imperative with the exclusion stripped"
+        );
+    }
+
     // CR 406.2 + CR 610.3: "the owner of each card exiled with ~ " strips to the
     // OwnersOfCardsExiledBySource player scope. Building block for Trial of a Time
     // Lord IV (and unblocks the Possibility Storm owner-of-exiled sibling).
@@ -8627,9 +8852,12 @@ mod tests {
 mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
-        ControllerRef, Duration, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter,
+        AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
+        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
 
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
     /// binds X to the rolled value via `EventContextAmount` — the same channel
@@ -8872,6 +9100,153 @@ mod where_x_tests {
         assert_eq!(
             constraint,
             TargetSelectionConstraint::DifferentObjectControllers
+        );
+    }
+
+    #[test]
+    fn apply_where_x_quantity_expression_recurses_sum_max_difference_power() {
+        fn x_ref() -> QuantityExpr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            }
+        }
+
+        let expression = QuantityExpr::Sum {
+            exprs: vec![
+                x_ref(),
+                QuantityExpr::Max {
+                    exprs: vec![
+                        x_ref(),
+                        QuantityExpr::Difference {
+                            left: Box::new(x_ref()),
+                            right: Box::new(QuantityExpr::Power {
+                                base: 2,
+                                exponent: Box::new(x_ref()),
+                            }),
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let rewritten = super::apply_where_x_quantity_expression(expression, Some("the result"));
+        let QuantityExpr::Sum { exprs } = rewritten else {
+            panic!("expected Sum");
+        };
+        assert!(
+            exprs.iter().all(|expr| !expr.contains_x()),
+            "all nested X refs must be rewritten, got {exprs:?}"
+        );
+        fn has_event_context_amount(expr: &QuantityExpr) -> bool {
+            match expr {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                } => true,
+                QuantityExpr::Offset { inner, .. }
+                | QuantityExpr::ClampMin { inner, .. }
+                | QuantityExpr::Multiply { inner, .. }
+                | QuantityExpr::DivideRounded { inner, .. }
+                | QuantityExpr::UpTo { max: inner }
+                | QuantityExpr::Power {
+                    exponent: inner, ..
+                } => has_event_context_amount(inner),
+                QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                    exprs.iter().any(has_event_context_amount)
+                }
+                QuantityExpr::Difference { left, right } => {
+                    has_event_context_amount(left) || has_event_context_amount(right)
+                }
+                QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+            }
+        }
+
+        assert!(
+            exprs.iter().all(has_event_context_amount),
+            "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    #[test]
+    fn where_x_rewrites_grant_trigger_execute_for_emergent_woodwurm() {
+        fn x_ref() -> QuantityExpr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            }
+        }
+
+        let mut effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::GrantTrigger {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::Attacks).execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::Dig {
+                                player: TargetFilter::Controller,
+                                count: x_ref(),
+                                destination: Some(Zone::Battlefield),
+                                keep_count: Some(1),
+                                up_to: true,
+                                filter: TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Permanent).properties(vec![
+                                        FilterProp::Cmc {
+                                            comparator: Comparator::LE,
+                                            value: x_ref(),
+                                        },
+                                    ]),
+                                ),
+                                rest_destination: Some(Zone::Library),
+                                reveal: true,
+                                enter_tapped: false,
+                                source: DigSource::Library,
+                            },
+                        ),
+                    )),
+                },
+            ])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        };
+
+        super::apply_where_x_effect_expression(&mut effect, Some("its power"));
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected GenericEffect");
+        };
+        let [static_def] = static_abilities.as_slice() else {
+            panic!("expected one static definition, got {static_abilities:?}");
+        };
+        let [ContinuousModification::GrantTrigger { trigger }] =
+            static_def.modifications.as_slice()
+        else {
+            panic!(
+                "expected one GrantTrigger, got {:?}",
+                static_def.modifications
+            );
+        };
+        let execute = trigger.execute.as_ref().expect("grant trigger execute");
+        let Effect::Dig { count, filter, .. } = execute.effect.as_ref() else {
+            panic!("expected Dig execute, got {:?}", execute.effect);
+        };
+        assert!(
+            !count.contains_x(),
+            "Dig count must bind where-X: {count:?}"
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed Dig filter, got {filter:?}");
+        };
+        let Some(FilterProp::Cmc { value, .. }) = typed
+            .properties
+            .iter()
+            .find(|prop| matches!(prop, FilterProp::Cmc { .. }))
+        else {
+            panic!("expected Cmc filter property, got {:?}", typed.properties);
+        };
+        assert!(
+            !value.contains_x(),
+            "Dig filter Cmc must bind where-X: {value:?}"
         );
     }
 }

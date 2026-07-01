@@ -1501,13 +1501,19 @@ pub(crate) fn push_grant_clause_modifications(
     // Skirmisher: "choose first strike, vigilance, or lifelink. Creatures you
     // control gain that ability ..."; Linvala, Shield of Sea Gate: "choose
     // hexproof or indestructible. Creatures you control gain that ability
-    // ..."). Emits `AddChosenKeyword`, which reads the granting source's
-    // `ChosenAttribute::Keyword` at layer evaluation — the additive mirror of
-    // `RemoveChosenKeyword` (Urborg / Walking Sponge). Checked before
-    // `map_keyword` so the anaphor is never mis-classified as an unknown
-    // keyword. Builds for the whole "gain the chosen keyword" class.
+    // ..."). The plural forms — "each of the chosen abilities" / "the chosen
+    // abilities" — refer back to a multi-keyword choice (Greymond, Avacyn's
+    // Stalwart: "choose two abilities ... Humans you control have each of the
+    // chosen abilities"); the same `AddChosenKeyword` reads ALL persisted
+    // `ChosenAttribute::Keyword` entries at layer evaluation. Emits
+    // `AddChosenKeyword`, the additive mirror of `RemoveChosenKeyword` (Urborg /
+    // Walking Sponge). Checked before `map_keyword` so the anaphor is never
+    // mis-classified as an unknown keyword. Builds for the whole "gain the
+    // chosen keyword(s)" class.
     if alt((
         tag::<_, _, OracleError<'_>>("that ability"),
+        tag("each of the chosen abilities"),
+        tag("the chosen abilities"),
         tag("the chosen ability"),
         tag("the chosen keyword"),
     ))

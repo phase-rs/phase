@@ -2700,6 +2700,8 @@ fn push_ability_entry(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: Classify loyalty vs. normal from the source ability cost.
+        kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
@@ -6342,6 +6344,7 @@ fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -7867,7 +7870,8 @@ pub fn finalize_mana_payment(
                 .chosen_x
                 .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
 
-            let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
+            // CR 601.2c + CR 601.2d: Divide only among the distributing effect's own targets.
+            let targets = super::ability_utils::distribution_targets(&pending.ability);
             // Store pending cast for post-distribution resumption. Use `ManaCost::NoCost`
             // since mana was already paid above — `finalize_cast` must not re-deduct.
             let mut pending_resumed = PendingCast::new(
@@ -8063,7 +8067,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 .chosen_x
                 .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
 
-            let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
+            // CR 601.2c + CR 601.2d: Divide only among the distributing effect's own targets.
+            let targets = super::ability_utils::distribution_targets(&pending.ability);
             let mut pending_resumed = PendingCast::new(
                 pending.object_id,
                 pending.card_id,
@@ -8536,6 +8541,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
                         },
                     ))

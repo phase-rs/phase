@@ -74,7 +74,6 @@
     "resolveTooltip": "Pasa la prioridad para que el objeto superior de la pila se resuelva si todos los jugadores también pasan. Atajo: Espacio.",
     "resolveAll": "Resolver todo",
     "resolveAllTooltip": "Sigue pasando la prioridad mientras se resuelve la pila. Una elección obligatoria o una parada pueden interrumpirlo.",
-    "waiting": "Esperando",
     "priorityTooltip": "Pasa la prioridad. Si la pila está vacía, esto avanza por la ventana de prioridad actual. Atajo: Espacio.",
     "pass": "Pasar",
     "passToEndTooltip": "Pasar automáticamente hasta el paso final a menos que lo interrumpa una elección, una parada o el Control total. Atajo: Intro.",
@@ -342,7 +341,20 @@
     "pendingFlash": "El próximo hechizo puede lanzarse como si tuviera destello",
     "pendingFree": "El próximo hechizo sin pagar su coste de maná",
     "pendingCheaper": "El próximo hechizo cuesta {{amount}} menos",
-    "companion": "Compañero"
+    "companion": "Compañero",
+    "unboundedTooltip": "{{resource}} ilimitado (∞)",
+    "unboundedManaPoolMarker": "Maná ilimitado (∞)",
+    "unboundedMana": "maná",
+    "unboundedLife": "vidas",
+    "unboundedDamage": "daño",
+    "unboundedMill": "molienda",
+    "unboundedCounters": "contadores",
+    "unboundedTokens": "fichas",
+    "unboundedCards": "cartas",
+    "unboundedCasts": "lanzamientos",
+    "unboundedCombats": "combates",
+    "unboundedTurns": "turnos",
+    "unboundedTriggers": "disparos"
   },
   "avatar": {
     "underAttack": "{{name}} está bajo ataque"
@@ -961,6 +973,7 @@
       "manifest": "Manifestar",
       "untap": "Enderezar",
       "tap": "Girar",
+      "attach": "Attach",
       "crew": "Tripular ({{power}})",
       "saddle": "Ensillar ({{power}})",
       "station": "Estación (+{{power}})"
@@ -1039,10 +1052,19 @@
       "subtitleManaValueUpTo_other": "Elige hasta {{count}} cartas dentro del límite de valor de maná"
     },
     "searchPartition": {
-      "title": "Elige cartas para el campo de batalla",
-      "subtitle_one": "Elige {{count}} carta para poner en el campo de batalla{{tapped}}; el resto va a tu mano",
-      "subtitle_other": "Elige {{count}} cartas para poner en el campo de batalla{{tapped}}; el resto va a tu mano",
-      "tapped": "giradas"
+      "title": "Elegir cartas",
+      "subtitle_one": "Elige {{count}} carta para poner {{primary}}{{tapped}}; el resto se pone {{rest}}",
+      "subtitle_other": "Elige {{count}} cartas para poner {{primary}}{{tapped}}; el resto se pone {{rest}}",
+      "tapped": " giradas",
+      "zones": {
+        "Library": "en tu biblioteca",
+        "Hand": "en tu mano",
+        "Battlefield": "en el campo de batalla",
+        "Graveyard": "en tu cementerio",
+        "Stack": "en la pila",
+        "Exile": "en el exilio",
+        "Command": "en la Zona de Mando"
+      }
     },
     "outsideGame": {
       "title": "Elegir del banquillo",
@@ -1068,6 +1090,7 @@
       "titleHand": "Devolver",
       "titleUntap": "Enderezar",
       "titleTap": "Girar",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Elige {{count}} permanente para sacrificar",
       "subtitleSacrificeExact_other": "Elige {{count}} permanentes para sacrificar",
       "subtitleSacrificeUpTo_one": "Elige hasta {{count}} permanente para sacrificar",
@@ -1104,6 +1127,12 @@
       "subtitleTapUpTo_other": "Elige hasta {{count}} permanentes para girar",
       "subtitleTapRange_one": "Elige {{min}}-{{count}} permanente para girar",
       "subtitleTapRange_other": "Elige {{min}}-{{count}} permanentes para girar",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Omitir",
       "labelDecline": "Rechazar",
       "labelPutOnTop": "Poner encima ({{order}})",
@@ -1111,6 +1140,7 @@
       "labelTop": "Superior ({{selected}}/{{count}})",
       "labelPut": "Poner ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Superior"
     },
     "drawnThisTurn": {
@@ -1572,6 +1602,7 @@
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "¡Copiado!",
     "reportOnGithub": "Informar en GitHub",
+    "continueWaiting": "Seguir esperando",
     "reload": "Recargar",
     "reportTitle": "Bloqueo del motor: {{summary}}",
     "reportConnectionSummary": "Se perdió la conexión con el motor",
@@ -1864,5 +1895,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

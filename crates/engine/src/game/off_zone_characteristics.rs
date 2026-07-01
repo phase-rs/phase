@@ -146,17 +146,20 @@ fn apply_keyword_modification(
                 keywords.retain(|existing| existing != kw);
             }
         }
-        // CR 608.2d + CR 613.1f: Grant the *exact* keyword chosen at
-        // resolution time — the additive mirror of `RemoveChosenKeyword`,
-        // matching the `AddKeyword` upsert semantics above. No-op when the
-        // source has no stored chosen keyword.
+        // CR 608.2d + CR 613.1f: Grant EACH keyword chosen at resolution time —
+        // the additive mirror of `RemoveChosenKeyword`, matching the `AddKeyword`
+        // upsert semantics above. Reads the PLURAL list so a multi-keyword choice
+        // (Greymond's "each of the chosen abilities") grants every chosen ability
+        // off-zone, not just the first. No-op when the source has no stored
+        // chosen keyword. Source-scoped via `effect.source_id`.
         ContinuousModification::AddChosenKeyword => {
-            if let Some(kw) = state
+            let chosen: Vec<Keyword> = state
                 .objects
                 .get(&effect.source_id)
-                .and_then(|src| src.chosen_keyword())
-            {
-                upsert_keyword(keywords, kw.clone());
+                .map(|src| src.chosen_keywords().into_iter().cloned().collect())
+                .unwrap_or_default();
+            for kw in chosen {
+                upsert_keyword(keywords, kw);
             }
         }
         _ => {}
@@ -334,6 +337,43 @@ mod tests {
             Some(Keyword::Flashback(FlashbackCost::Mana(
                 ManaCost::SelfManaCost
             )))
+        );
+    }
+
+    /// V8 — CR 608.2d + CR 613.1f: the off-zone `AddChosenKeyword` arm must read
+    /// the PLURAL chosen-keyword list off the granting source (Greymond's two
+    /// chosen abilities), not just the first. A battlefield source carrying TWO
+    /// `ChosenAttribute::Keyword` grants both to an off-battlefield recipient.
+    #[test]
+    fn add_chosen_keyword_off_zone_reads_all_chosen_keywords() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(&mut state, PlayerId(0), "Greymond", Zone::Battlefield);
+        let target_id = create_card(&mut state, PlayerId(0), "Exiled Human", Zone::Exile);
+
+        // Two abilities chosen as Greymond entered.
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::FirstStrike));
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Lifelink));
+        }
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::AddChosenKeyword],
+            None,
+        );
+
+        let kws = effective_off_zone_keywords(&state, target_id);
+        assert!(
+            kws.contains(&Keyword::FirstStrike) && kws.contains(&Keyword::Lifelink),
+            "off-zone AddChosenKeyword must surface BOTH chosen keywords, got {kws:?}"
         );
     }
 

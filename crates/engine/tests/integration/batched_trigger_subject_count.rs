@@ -71,6 +71,7 @@ fn build_batched_attack_trigger() -> TriggerDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         )
