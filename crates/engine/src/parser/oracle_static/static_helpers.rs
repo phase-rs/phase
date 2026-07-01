@@ -290,6 +290,9 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 303.4b: Enchanted-player scope is not supported for cost statics;
             // fall back to untyped filter (same as TriggeringPlayer).
             Some(ControllerRef::EnchantedPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: Effect-recipient scope is not supported for cost statics;
+            // fall back to untyped filter (same as EnchantedPlayer).
+            Some(ControllerRef::RecipientController) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -661,6 +664,9 @@ pub(crate) fn try_parse_cost_modification(
             // CR 303.4b: Enchanted-player scope is not supported for cost statics;
             // fall back to untyped filter (same as TriggeringPlayer).
             Some(ControllerRef::EnchantedPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: Effect-recipient scope is not supported for cost statics;
+            // fall back to untyped filter (same as EnchantedPlayer).
+            Some(ControllerRef::RecipientController) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };

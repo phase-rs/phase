@@ -869,7 +869,14 @@ fn entered_object_contributes_devotion(
 
 pub(crate) fn filter_uses_recipient(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(filter_prop_uses_recipient),
+        // CR 109.4: "its controller controls" (`ControllerRef::RecipientController`)
+        // is resolved from the effect recipient, so a filter carrying it must
+        // bind a recipient even when no recipient-relative *property* is present
+        // (e.g. "for each creature its controller controls").
+        TargetFilter::Typed(tf) => {
+            matches!(tf.controller, Some(ControllerRef::RecipientController))
+                || tf.properties.iter().any(filter_prop_uses_recipient)
+        }
         TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_uses_recipient)
@@ -2975,6 +2982,9 @@ fn resolve_ref(
                             )
                             .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 109.4: A leaving-object attachment count has no
+                        // per-recipient context. Fail closed.
+                        Some(ControllerRef::RecipientController) => false,
                     })
                     .count(),
             )
@@ -3046,6 +3056,14 @@ fn damage_source_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|player| actual == player),
+        // CR 109.4: Damage source controlled by the effect recipient's
+        // controller. Resolve via the recipient object when present; fail closed
+        // outside a per-recipient context.
+        ControllerRef::RecipientController => ctx
+            .recipient
+            .and_then(|rid| state.objects.get(&rid))
+            .map(|r| r.controller)
+            .is_some_and(|pid| actual == pid),
     }
 }
 
@@ -4769,6 +4787,28 @@ mod tests {
             .unwrap()
             .mana_spent_source_snapshots
             .push(ManaSpentSourceSnapshot { source_id, lki });
+    }
+
+    /// CR 109.4: A `Typed` filter carrying `ControllerRef::RecipientController`
+    /// must report `filter_uses_recipient() == true` even when it has no
+    /// recipient-relative *property*, so the pump/layer paths bind a recipient
+    /// ("for each creature its controller controls").
+    #[test]
+    fn filter_uses_recipient_detects_recipient_controller_scope() {
+        let with_controller = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::RecipientController),
+            properties: Vec::new(),
+        });
+        assert!(filter_uses_recipient(&with_controller));
+
+        // A source-scoped controller with no recipient property must NOT bind.
+        let source_scoped = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: Vec::new(),
+        });
+        assert!(!filter_uses_recipient(&source_scoped));
     }
 
     #[test]

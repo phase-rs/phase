@@ -746,6 +746,12 @@ pub(crate) fn controller_ref_player(
             .get(&source_id)
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player()),
+        // CR 109.4: The recipient of an effect/layer is not available in this
+        // generic source-scoped helper (it lacks a `recipient_id` parameter).
+        // The per-recipient count path resolves this variant through
+        // `filter_inner_for_object`, which threads `recipient_id`; here it fails
+        // closed so no player is produced outside that context.
+        ControllerRef::RecipientController => None,
     }
 }
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -961,6 +967,14 @@ fn stack_entry_controller_matches(
             .get(&ctx.source_id)
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player())
+            .is_some_and(|pid| pid == entry_controller),
+        // CR 109.4: The controller of the effect recipient (the affected
+        // object). Available via `ctx.recipient_id`, so resolve it; fails
+        // closed outside a per-recipient context.
+        Some(ControllerRef::RecipientController) => ctx
+            .recipient_id
+            .and_then(|rid| state.objects.get(&rid))
+            .map(|r| r.controller)
             .is_some_and(|pid| pid == entry_controller),
     }
 }
@@ -1615,6 +1629,20 @@ fn filter_inner_for_object(
                             .get(&source_id)
                             .and_then(|source| source.attached_to)
                             .and_then(|host| host.as_player())
+                        {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 109.4 + CR 613.4c: "its controller controls" — the
+                    // object's controller must equal the controller of the
+                    // effect recipient (the affected object receiving the
+                    // layer-7c P/T bonus). Fail closed outside a per-recipient
+                    // context (no `recipient_id`), so the population is empty.
+                    ControllerRef::RecipientController => {
+                        match recipient_id
+                            .and_then(|rid| state.objects.get(&rid))
+                            .map(|r| r.controller)
                         {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -2323,6 +2351,10 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TriggeringPlayer => return false,
                     // CR 303.4b: Resolve enchanted player via source's attached_to.
                     ControllerRef::EnchantedPlayer => return false,
+                    // CR 109.4: A recipient-scoped filter has no meaning for a
+                    // spell-history record (no effect recipient context). Fail
+                    // closed.
+                    ControllerRef::RecipientController => return false,
                 }
             }
 
@@ -3465,6 +3497,10 @@ fn matches_filter_prop(
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
                     // CR 303.4b: Resolve enchanted player via source's attached_to.
                     (Some(ControllerRef::EnchantedPlayer), Some(pid)) => perm.controller == pid,
+                    // CR 109.4: A recipient-scoped name match is not produced by
+                    // any name-comparison pattern (`controller_ref_player` yields
+                    // `None` for this variant). Fail closed.
+                    (Some(ControllerRef::RecipientController), _) => false,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -3529,6 +3565,9 @@ fn matches_filter_prop(
                 &ControllerRef::EnchantedPlayer,
             )
             .is_some_and(|pid| pid == obj.owner),
+            // CR 109.4: Ownership relative to the effect recipient is not
+            // produced by any "owned by" pattern. Fail closed.
+            ControllerRef::RecipientController => false,
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -4151,6 +4190,9 @@ fn zone_change_record_matches_property(
                 controller_ref_player(state, source.id, source.controller, source.ability, &ControllerRef::EnchantedPlayer)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 109.4: Ownership relative to the effect recipient is not
+            // produced by any zone-change-record "owned by" pattern. Fail closed.
+            ControllerRef::RecipientController => false,
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
         // applied to the snapshot subtypes, including changeling snapshots.
@@ -4416,6 +4458,9 @@ fn attachment_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|pid| pid == attachment_controller),
+        // CR 109.4: An attachment-controller scope relative to the effect
+        // recipient is not produced by any attachment filter. Fail closed.
+        Some(ControllerRef::RecipientController) => false,
     }
 }
 
@@ -4989,6 +5034,9 @@ fn player_matches_target_filter_with(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Resolve enchanted player via source's attached_to.
             Some(ControllerRef::EnchantedPlayer) => false,
+            // CR 109.4: Recipient scope has no meaning without effect-recipient
+            // context here. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::RecipientController) => false,
             None => true,
         },
         // Typed filters with type_filters don't match players

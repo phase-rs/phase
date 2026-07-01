@@ -108,6 +108,9 @@ fn resolve_sacrifice_scope(
         )
         .map(|pid| vec![pid])
         .unwrap_or_default(),
+        // CR 109.4: The effect-recipient's controller is not a sacrifice-scope
+        // selector — no "its controller sacrifices" pattern exists. Fail closed.
+        Some(ControllerRef::RecipientController) => Vec::new(),
     }
 }
 

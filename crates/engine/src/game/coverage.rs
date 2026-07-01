@@ -780,6 +780,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TriggeringPlayer => "triggering player's",
                     // CR 303.4b: Display label for enchanted-player controller scope.
                     ControllerRef::EnchantedPlayer => "enchanted player's",
+                    // CR 109.4 + CR 613.4c: Display label for the effect
+                    // recipient's controller (possessive form).
+                    ControllerRef::RecipientController => "its controller's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -915,6 +918,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TriggeringPlayer => "triggering player",
                 // CR 303.4b: Display label for enchanted-player controller scope.
                 ControllerRef::EnchantedPlayer => "enchanted player",
+                // CR 109.4 + CR 613.4c: Player label for the effect recipient's
+                // controller; mirrors `PlayerScope::RecipientController`.
+                ControllerRef::RecipientController => "recipient's controller",
             };
             parts.push(label.into());
         } else {
@@ -987,6 +993,9 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TriggeringPlayer => "triggering player controls",
         // CR 303.4b: Display label for enchanted-player controller scope.
         ControllerRef::EnchantedPlayer => "enchanted player controls",
+        // CR 109.4 + CR 613.4c: "controls" form for the effect recipient's
+        // controller ("for each other creature its controller controls").
+        ControllerRef::RecipientController => "its controller controls",
     }
     .into()
 }

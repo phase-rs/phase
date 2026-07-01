@@ -179,7 +179,9 @@ pub fn apnap_order_from(
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
-            | ControllerRef::EnchantedPlayer,
+            | ControllerRef::EnchantedPlayer
+            // CR 109.4: Effect-recipient scope is not an APNAP start anchor.
+            | ControllerRef::RecipientController,
         ) => state.active_player,
     };
 

@@ -2940,6 +2940,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
+        // CR 109.4: "[other] <type> its controller controls [that shares ...]" —
+        // per-recipient count scoped to the affected object's controller. Placed
+        // before the battlefield / "you control" arms; its distinctive
+        // " its controller controls" tag cannot collide with them.
+        parse_for_each_recipient_controlled_shared_quality,
         parse_for_each_recipient_shared_quality,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
@@ -3902,6 +3907,48 @@ fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, Quantity
     ))
 }
 
+/// CR 109.4 + CR 613.4c: "[other] <type> its controller controls [that shares a
+/// <quality> with it]" — a per-recipient object count scoped to the affected
+/// object's controller. "its"/"it" bind to the effect recipient, mirroring
+/// `PlayerScope::RecipientController` / `FilterProp::AttachedToRecipient`.
+/// Powers "Whenever a creature attacks, it gets +1/+1 ... for each other
+/// creature its controller controls that shares a creature type with it"
+/// (Mondassian Colony Ship) and its static sibling. The shared-quality clause is
+/// optional so the bare "for each other <type> its controller controls" form is
+/// also covered. The distinctive " its controller controls" tag disambiguates
+/// from `parse_for_each_controlled_type` (" you control") and the battlefield
+/// arms (" on the battlefield"); `alt` backtracks on the recoverable mismatch.
+fn parse_for_each_recipient_controlled_shared_quality(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, type_filter) = parse_type_filter_word(rest)?;
+    let (rest, _) = tag(" its controller controls").parse(rest)?;
+    let (rest, shared) = opt(preceded(tag(" "), |i| {
+        parse_shared_quality_clause(i, &ParseContext::default())
+    }))
+    .parse(rest)?;
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    if let Some(prop) = shared {
+        properties.push(prop);
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![type_filter],
+                controller: Some(ControllerRef::RecipientController),
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, has_other) =
         opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
@@ -4848,6 +4895,68 @@ mod tests {
                 },
                 other => panic!("expected ObjectCount, got {other:?}"),
             }
+        }
+    }
+
+    /// CR 109.4 + CR 613.4c: "[other] <type> its controller controls [that
+    /// shares a <quality> with it]" is a per-recipient object count scoped to
+    /// the affected object's controller. Exercises every axis of the new
+    /// combinator: the "other" prefix (`FilterProp::Another`), the
+    /// `RecipientController` controller scope, and the optional shared-quality
+    /// clause (present, and bare). Powers Mondassian Colony Ship and its static
+    /// sibling — the building block, not the card.
+    #[test]
+    fn parse_for_each_recipient_controlled_shared_type() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "other creature its controller controls that shares a creature type with it",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+            } => {
+                assert_eq!(type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(controller, Some(ControllerRef::RecipientController));
+                assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
+                assert!(properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::CreatureType,
+                        reference: Some(reference),
+                        relation: SharedQualityRelation::Shares,
+                    } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                )));
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// The bare "for each <type> its controller controls" form (no "other", no
+    /// shared-quality clause) still yields a `RecipientController`-scoped count.
+    #[test]
+    fn parse_for_each_recipient_controlled_bare() {
+        let (rest, q) = parse_for_each_clause_ref("creature its controller controls").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+            } => {
+                assert_eq!(type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(controller, Some(ControllerRef::RecipientController));
+                assert!(properties.is_empty());
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
         }
     }
 

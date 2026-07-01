@@ -2641,6 +2641,15 @@ pub enum ControllerRef {
     /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
     /// watches objects controlled by the enchanted player.
     EnchantedPlayer,
+    /// CR 109.4 + CR 613.4c: Filter controller is the controller of the object
+    /// currently receiving this effect/layer (the "recipient"). Binds the
+    /// "its" in "for each other creature its controller controls that shares a
+    /// creature type with it" to the affected object, not the source. The
+    /// `ControllerRef` analogue of `PlayerScope::RecipientController` and the
+    /// recipient counterpart of `ParentTargetController`; resolved at filter
+    /// time from `FilterContext::recipient_id` (the affected object). Yields
+    /// `None` outside a per-recipient context, so the population is empty there.
+    RecipientController,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.

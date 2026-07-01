@@ -3453,6 +3453,56 @@ fn hammer_helper_die_result_pump_parses_dynamic_power_no_warning() {
     );
 }
 
+/// CR 109.4 + CR 613.4c: Mondassian Colony Ship's attack trigger — "it gets
+/// +1/+1 until end of turn for each other creature its controller controls that
+/// shares a creature type with it" — must lower the "for each" clause to a
+/// dynamic `PtValue::Quantity(ObjectCount{RecipientController, ...})`, NOT drop
+/// it to a flat +1/+1 with a swallowed-clause warning. Tests the building block
+/// (per-recipient "its controller controls" count), not just this card.
+#[test]
+fn mondassian_colony_ship_recipient_controlled_pump_no_dynamic_qty_warning() {
+    let r = parse(
+        "Whenever a creature attacks, it gets +1/+1 until end of turn for each other creature its controller controls that shares a creature type with it.",
+        "Mondassian Colony Ship",
+        &[],
+        &["Plane"],
+        &[],
+    );
+    assert!(
+        r.parse_warnings
+            .iter()
+            .all(|warning| warning.to_string().split_whitespace().next()
+                != Some("Swallow:DynamicQty")),
+        "unexpected DynamicQty warning: {:?}",
+        r.parse_warnings
+    );
+    let execute = r.triggers[0]
+        .execute
+        .as_ref()
+        .expect("attack trigger should have execute");
+    let Effect::Pump {
+        power, toughness, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected Pump, got {:?}", execute.effect);
+    };
+    let assert_recipient_count = |pt: &PtValue, label: &str| match pt {
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) => match filter {
+            TargetFilter::Typed(tf) => assert_eq!(
+                tf.controller,
+                Some(ControllerRef::RecipientController),
+                "{label} should be RecipientController-scoped"
+            ),
+            other => panic!("{label}: expected Typed filter, got {other:?}"),
+        },
+        other => panic!("{label}: expected dynamic ObjectCount pump, got {other:?}"),
+    };
+    assert_recipient_count(power, "power");
+    assert_recipient_count(toughness, "toughness");
+}
+
 #[test]
 fn bhaal_myrkul_half_starting_life_static_has_typed_condition_no_dynamic_qty_warning() {
     for (name, subject) in [

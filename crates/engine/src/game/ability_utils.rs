@@ -2828,6 +2828,9 @@ pub(crate) fn collect_player_targets(
                         .and_then(|host| host.as_player())
                         == Some(p.id)
                 }
+                // CR 109.4: Effect-recipient scope is not a player-population
+                // selector (mirrors TargetPlayer). Fail closed.
+                Some(ControllerRef::RecipientController) => false,
                 None => true,
             })
             .map(|p| p.id)

@@ -1,5 +1,8 @@
 use crate::game::filter;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{
+    quantity_expr_uses_recipient, resolve_quantity_with_targets,
+    resolve_quantity_with_targets_and_recipient,
+};
 use crate::types::ability::{
     ContinuousModification, DoublePTMode, Duration, Effect, EffectError, EffectKind, PtValue,
     ResolvedAbility, TargetFilter,
@@ -38,18 +41,30 @@ pub fn resolve(
         crate::game::targeting::resolved_targets(ability, &target_filter, state);
     let ids = crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
 
-    let modifications = pt_modifications(power, toughness, state, ability);
+    // CR 611.2c: The bonus is fixed as the effect begins. When the quantity
+    // references the affected object ("its controller controls", "for each
+    // other ... with it"), the count differs per pumped creature, so resolve it
+    // per object with that object bound as recipient. Otherwise resolve once and
+    // share (the common source-scoped fast path).
+    let uses_recipient = matches!(power, PtValue::Quantity(e) if quantity_expr_uses_recipient(e))
+        || matches!(toughness, PtValue::Quantity(e) if quantity_expr_uses_recipient(e));
+    let shared_mods =
+        (!uses_recipient).then(|| pt_modifications(power, toughness, state, ability, None));
 
     for obj_id in ids {
         if !state.objects.contains_key(&obj_id) {
             return Err(EffectError::ObjectNotFound(obj_id));
         }
+        let modifications = match &shared_mods {
+            Some(m) => m.clone(),
+            None => pt_modifications(power, toughness, state, ability, Some(obj_id)),
+        };
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
             dur.clone(),
             TargetFilter::SpecificObject { id: obj_id },
-            modifications.clone(),
+            modifications,
             None,
         );
     }
@@ -81,7 +96,22 @@ pub fn resolve_all(
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
-    let modifications = pt_modifications(power, toughness, state, ability);
+    // CR 611.2c: PumpAll's population is a single filter shared across all
+    // affected creatures; the bonus is uniform, so resolve the quantity once
+    // (no per-recipient anaphor in this class — the static "for each ... its
+    // controller controls" sibling routes through the layer system's
+    // `AddDynamicPower`/`AddDynamicToughness`, never PumpAll). Guard the
+    // assumption: a per-recipient anaphor here would fail-closed to +0/+0 under
+    // the compute-once path, so surface it loudly in debug builds rather than
+    // silently mis-resolving. Add per-recipient PumpAll resolution before
+    // shipping a card that reaches this assert.
+    debug_assert!(
+        !matches!(power, PtValue::Quantity(e) if quantity_expr_uses_recipient(e))
+            && !matches!(toughness, PtValue::Quantity(e) if quantity_expr_uses_recipient(e)),
+        "PumpAll quantity references the affected object (per-recipient anaphor); \
+         the compute-once path would fail-closed to +0/+0"
+    );
+    let modifications = pt_modifications(power, toughness, state, ability, None);
 
     // Collect matching object IDs first to avoid borrow conflicts.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
@@ -246,14 +276,29 @@ fn double_modifications(
 }
 
 /// Build `ContinuousModification` entries for a P/T pump effect.
-/// Fixed values become `AddPower`/`AddToughness`; dynamic quantities
-/// become `AddDynamicPower`/`AddDynamicToughness` for layer evaluation.
+/// Fixed values become `AddPower`/`AddToughness`; dynamic quantities are
+/// resolved to concrete `AddPower`/`AddToughness` amounts now (CR 611.2c: the
+/// bonus is fixed as the one-shot continuous effect begins). `recipient` binds
+/// the affected object so per-recipient anaphors ("its controller controls",
+/// "for each ... with it") resolve against the pumped creature; `None` keeps the
+/// compute-once path for source-scoped quantities.
 fn pt_modifications(
     power: &PtValue,
     toughness: &PtValue,
     state: &GameState,
     ability: &ResolvedAbility,
+    recipient: Option<ObjectId>,
 ) -> Vec<ContinuousModification> {
+    let resolve_dynamic = |expr: &PtValue| -> Option<i32> {
+        let PtValue::Quantity(expr) = expr else {
+            return None;
+        };
+        Some(match recipient {
+            Some(rid) => resolve_quantity_with_targets_and_recipient(state, expr, ability, rid),
+            None => resolve_quantity_with_targets(state, expr, ability),
+        })
+    };
+
     let mut mods = Vec::new();
     match power {
         PtValue::Fixed(n) if *n != 0 => {
@@ -266,10 +311,11 @@ fn pt_modifications(
                 }
             }
         }
-        PtValue::Quantity(expr) => {
-            let resolved = resolve_quantity_with_targets(state, expr, ability);
-            if resolved != 0 {
-                mods.push(ContinuousModification::AddPower { value: resolved });
+        PtValue::Quantity(_) => {
+            if let Some(resolved) = resolve_dynamic(power) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddPower { value: resolved });
+                }
             }
         }
         _ => {}
@@ -285,10 +331,11 @@ fn pt_modifications(
                 }
             }
         }
-        PtValue::Quantity(expr) => {
-            let resolved = resolve_quantity_with_targets(state, expr, ability);
-            if resolved != 0 {
-                mods.push(ContinuousModification::AddToughness { value: resolved });
+        PtValue::Quantity(_) => {
+            if let Some(resolved) = resolve_dynamic(toughness) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddToughness { value: resolved });
+                }
             }
         }
         _ => {}
@@ -310,7 +357,10 @@ mod tests {
     use super::*;
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
-    use crate::types::ability::{PtValue, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, PtValue, QuantityExpr, QuantityRef, SharedQuality,
+        SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -331,6 +381,21 @@ mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         obj.card_types.core_types.push(CoreType::Creature);
+        id
+    }
+
+    /// Helper: `make_creature` plus creature subtypes (for shared-type filters).
+    fn make_typed_creature(
+        state: &mut GameState,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        owner: PlayerId,
+        subtypes: &[&str],
+    ) -> ObjectId {
+        let id = make_creature(state, name, power, toughness, owner);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.subtypes = subtypes.iter().map(|s| s.to_string()).collect();
         id
     }
 
@@ -356,6 +421,65 @@ mod tests {
 
         assert_eq!(state.objects[&obj_id].power, Some(5));
         assert_eq!(state.objects[&obj_id].toughness, Some(5));
+    }
+
+    /// CR 611.2c + CR 109.4 + CR 613.4c: A per-recipient dynamic pump — "it gets
+    /// +1/+1 ... for each other creature its controller controls that shares a
+    /// creature type with it" (Mondassian Colony Ship) — resolves the count
+    /// against the affected object (the attacker), not the source. Only same-
+    /// typed OTHER creatures controlled by the attacker's controller count: a
+    /// differently-typed creature and an opponent-controlled same-typed creature
+    /// are both excluded. This is the runtime proof that `RecipientController` +
+    /// `Another` + `SharesQuality { ParentTarget }` resolve against the recipient.
+    #[test]
+    fn pump_dynamic_recipient_controlled_shared_type() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Human".to_string(), "Beast".to_string()];
+
+        let attacker = make_typed_creature(&mut state, "Attacker", 1, 1, PlayerId(0), &["Human"]);
+        // Two OTHER Human creatures the attacker's controller controls → count.
+        make_typed_creature(&mut state, "Ally A", 1, 1, PlayerId(0), &["Human"]);
+        make_typed_creature(&mut state, "Ally B", 2, 2, PlayerId(0), &["Human"]);
+        // Different creature type — must NOT count (no shared creature type).
+        make_typed_creature(&mut state, "Beast Decoy", 3, 3, PlayerId(0), &["Beast"]);
+        // Same type but opponent-controlled — must NOT count (RecipientController).
+        make_typed_creature(&mut state, "Enemy Human", 4, 4, PlayerId(1), &["Human"]);
+
+        let count_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::RecipientController),
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            reference: Some(Box::new(TargetFilter::ParentTarget)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ],
+                }),
+            },
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Quantity(count_expr.clone()),
+                toughness: PtValue::Quantity(count_expr),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(attacker)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // Exactly the two same-typed allies count → +2/+2.
+        assert_eq!(state.objects[&attacker].power, Some(3));
+        assert_eq!(state.objects[&attacker].toughness, Some(3));
     }
 
     #[test]

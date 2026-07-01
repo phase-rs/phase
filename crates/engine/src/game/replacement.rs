@@ -3867,6 +3867,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TriggeringPlayer) => false,
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
                 Some(ControllerRef::EnchantedPlayer) => false,
+                // CR 109.4: Effect-recipient scope is undefined at
+                // replacement-check time (no effect recipient). Fail closed.
+                Some(ControllerRef::RecipientController) => false,
                 None => true,
             };
             if !turn_ok {
@@ -3905,6 +3908,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TriggeringPlayer) => false,
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
                 Some(ControllerRef::EnchantedPlayer) => false,
+                // CR 109.4: Effect-recipient scope is undefined at
+                // replacement-check time (no effect recipient). Fail closed.
+                Some(ControllerRef::RecipientController) => false,
                 None => true,
             };
             if !turn_ok {
@@ -4065,7 +4071,10 @@ fn evaluate_replacement_condition(
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
-                | ControllerRef::EnchantedPlayer => false,
+                | ControllerRef::EnchantedPlayer
+                // CR 109.4: Effect-recipient scope is undefined at
+                // replacement-check time. Fail closed.
+                | ControllerRef::RecipientController => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -4598,6 +4607,9 @@ pub fn find_applicable_replacements(
                                 crate::types::ability::ControllerRef::TriggeringPlayer => false,
                                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
                                 crate::types::ability::ControllerRef::EnchantedPlayer => false,
+                                // CR 109.4: Effect-recipient scope has no meaning
+                                // for static token-creation replacements. Fail closed.
+                                crate::types::ability::ControllerRef::RecipientController => false,
                             };
                             if !matches {
                                 continue;

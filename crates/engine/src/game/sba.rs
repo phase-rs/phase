@@ -414,6 +414,9 @@ fn static_affects_player(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Enchanted-player scope has no SBA context. Fail closed.
             Some(ControllerRef::EnchantedPlayer) => false,
+            // CR 109.4: Effect-recipient scope has no static-ability player
+            // scoping context. Fail closed.
+            Some(ControllerRef::RecipientController) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,
