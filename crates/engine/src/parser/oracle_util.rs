@@ -1876,11 +1876,15 @@ mod tests {
             normalize_card_name_refs("Regenerate target creature.", "Regenerate"),
             "Regenerate target creature."
         );
-        // A non-verb self-reference elsewhere still normalizes (guard against
-        // over-masking): only free-standing "regenerate" occurrences are spared.
+        // Longer words containing the keyword phrase are not masked (guard
+        // against over-masking): only free-standing "regenerate" occurrences are
+        // spared.
         assert_eq!(
-            normalize_card_name_refs("Regenerate target creature you control.", "Regenerate"),
-            "Regenerate target creature you control."
+            normalize_card_name_refs(
+                "Regenerate target creature. When it's regenerated, tap it.",
+                "Regenerate"
+            ),
+            "Regenerate target creature. When it's regenerated, tap it."
         );
     }
 
