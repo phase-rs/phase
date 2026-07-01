@@ -24556,6 +24556,87 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn cant_cast_spells_during_that_players_next_turn() {
+    // CR 514.2 + CR 500.7: Sphinx's Decree / Azor — "Each opponent can't cast
+    // instant or sorcery spells during that player's next turn." The trailing
+    // next-turn duration must be captured (not dropped into an Unimplemented
+    // sub_ability), yielding a next-turn-expiring prohibition rather than an
+    // end-of-current-turn one.
+    let def = parse_effect_chain(
+        "Each opponent can't cast instant or sorcery spells during that player's next turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // The duration drives the runtime expiry (fill_runtime_fields lowers this to
+    // RestrictionExpiry::UntilEndOfNextTurnOf); it must NOT be dropped.
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    // The next-turn clause is consumed, not left as an Unimplemented sub_ability.
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_during_their_next_turn_determiner_variant() {
+    // The "during their next turn" determiner is the sibling surface form of
+    // "during that player's next turn" and resolves to the same duration.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells during their next turn.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_this_turn_keeps_end_of_turn_expiry() {
+    // Regression guard: the plain "this turn" form must NOT be rewritten to a
+    // next-turn duration by the new trailing-duration arm.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                expiry: RestrictionExpiry::EndOfTurn,
+                ..
+            }
+        }
+    ));
+    assert_ne!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+}
+
+#[test]
 fn abeyance_clause_chain_parses_both_restrictions() {
     let def = parse_effect_chain(
             "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities. Draw a card.",

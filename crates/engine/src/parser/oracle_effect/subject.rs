@@ -616,6 +616,91 @@ fn parse_base_pt_set_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
     Some((BasePtSetValue::Dynamic(expr), ""))
 }
 
+/// CR 208.1 + CR 613.4b: Parse the copula that separates a base-P/T subject from
+/// its value. The intransitive "become[s] " form and the transitive
+/// "change … to " form (Riptide Mangler, Shape Stealer, Halfdane) share one
+/// downstream value/emission path; `is_change` selects the token so the two
+/// surface verbs are a single parameterized copula rather than duplicated arms.
+fn parse_base_pt_copula(input: &str, is_change: bool) -> OracleResult<'_, ()> {
+    if is_change {
+        value((), tag(" to ")).parse(input)
+    } else {
+        value((), (tag(" become"), opt(tag("s")), tag(" "))).parse(input)
+    }
+}
+
+/// CR 208.1 + CR 613.4b: value side of the transitive "change <subject>'s base
+/// power [and toughness] to <value>" frame. Unlike the "become[s] equal to"
+/// copula, the "change … to" frame introduces the value with a bare " to ", so
+/// the value is a fixed "N/M" (Brine Hag), a paired "<X>'s power and toughness"
+/// referent (Shape Stealer, Halfdane), or a bare single-axis quantity (Riptide
+/// Mangler). Each form routes to the exact same building block the copula form
+/// uses — no value grammar is duplicated.
+fn parse_change_base_pt_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
+    if let Some((power, toughness, after)) =
+        super::animation::parse_fixed_become_pt_prefix(remainder)
+    {
+        return Some((BasePtSetValue::Fixed { power, toughness }, after));
+    }
+    if let Some((power, toughness)) = parse_pt_pair_referent(remainder) {
+        return Some((BasePtSetValue::SplitDynamic { power, toughness }, ""));
+    }
+    let tail = remainder.trim().trim_end_matches('.').trim();
+    let expr = parse_base_pt_axis_quantity(tail)?;
+    Some((BasePtSetValue::Dynamic(expr), ""))
+}
+
+/// CR 208.1: Resolve a paired "<X>'s power and toughness" / "the power and
+/// toughness of <X>" referent into its two single-axis quantities, both reading
+/// the same object `X` (its power feeds base power, its toughness feeds base
+/// toughness). Rather than duplicate the referent-scope grammar (event-context
+/// "that creature", "target creature", source), each axis is resolved by feeding
+/// the reconstructed single-axis phrase back through `parse_base_pt_axis_quantity`
+/// — the same combinator the copula form already uses — so every recognized
+/// referent scope composes automatically.
+fn parse_pt_pair_referent(tail: &str) -> Option<(QuantityExpr, QuantityExpr)> {
+    let trimmed = tail.trim().trim_end_matches('.').trim();
+    let lower = trimmed.to_lowercase();
+
+    // Possessive: "<X>'s power and toughness" (ASCII or Unicode apostrophe).
+    // Capture the possessor with nom `take_until` up to the "'s power and
+    // toughness" tail (prefix-oriented, mirroring the possessive subject
+    // grammar), requiring the tail to consume the remainder so only a genuine
+    // suffix matches. `apostrophe` re-attaches the possessive marker when
+    // reconstructing each single-axis referent.
+    for (marker, apostrophe) in [
+        ("'s power and toughness", "'s"),
+        ("\u{2019}s power and toughness", "\u{2019}s"),
+    ] {
+        if let Ok((rest_lower, possessor_lower)) =
+            (take_until::<_, _, OracleError<'_>>(marker), tag(marker))
+                .map(|(possessor, _)| possessor)
+                .parse(lower.as_str())
+        {
+            if !rest_lower.is_empty() {
+                continue;
+            }
+            let possessor = &trimmed[..possessor_lower.len()];
+            let power = parse_base_pt_axis_quantity(&format!("{possessor}{apostrophe} power"))?;
+            let toughness =
+                parse_base_pt_axis_quantity(&format!("{possessor}{apostrophe} toughness"))?;
+            return Some((power, toughness));
+        }
+    }
+
+    // Inverted genitive: "the power and toughness of <X>".
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("the power and toughness of ").parse(lower.as_str())
+    {
+        let object = &trimmed[trimmed.len() - rest.len()..];
+        let power = parse_base_pt_axis_quantity(&format!("the power of {object}"))?;
+        let toughness = parse_base_pt_axis_quantity(&format!("the toughness of {object}"))?;
+        return Some((power, toughness));
+    }
+
+    None
+}
+
 /// Parse a single-axis base-P/T quantity tail, including "twice that card's power"
 /// where the inner referent is event-context scoped (Amplifire).
 fn parse_base_pt_axis_quantity(tail: &str) -> Option<QuantityExpr> {
@@ -690,68 +775,103 @@ fn try_parse_subject_base_pt_set_clause_ast(
 
     let lower = body.to_lowercase();
 
+    // CR 613.4b: two verb surface forms set base P/T with no type change:
+    //   (a) the intransitive "become[s] <value>" copula (Moon Girl, Pupu, Sita
+    //       Varma), and
+    //   (b) the transitive "change <subject>'s base power [and toughness] to
+    //       <value>" frame (Riptide Mangler, Shape Stealer, Halfdane, Eldrazi
+    //       Mimic).
+    // Strip the optional "change"/"you may change" verb so the shared possessive
+    // subject/axes grammar below applies to both forms; the copula token is then
+    // " to " (transitive) instead of " become[s] ", and the value side is bare
+    // (no "equal to" lead-in). Only the possessive subject form takes the
+    // transitive verb — the inverted-genitive "the base power and toughness of
+    // <subject>" would read the value through " to ", which collides with a
+    // " to " inside the subject (Brine Hag: "creatures that dealt damage to it"),
+    // so the inverted form stays copula-only.
+    let (parse_lower, is_change) = match alt((
+        tag::<_, _, VE>("you may change "),
+        tag::<_, _, VE>("change "),
+    ))
+    .parse(lower.as_str())
+    {
+        Ok((rest, _)) => (rest, true),
+        Err(_) => (lower.as_str(), false),
+    };
+    // Recover the original-case body at the same offset (the verb prefix, if
+    // any, is ASCII so the byte length delta is identical in `body`).
+    let parse_body = &body[body.len() - parse_lower.len()..];
+
     // Two surface forms, each yielding `(subject_text, axes, value_remainder)`:
-    //   1. Possessive:  "<subject>'s base power [and toughness] become[s] <value>"
+    //   1. Possessive:  "<subject>'s base power [and toughness] <copula> <value>"
     //   2. Inverted:    "the base power and toughness of <subject> become[s] <value>"
     // The possessive marker may be ASCII `'s` or the Unicode right single quote
     // `\u{2019}s`. `to_lowercase` preserves byte length/offsets for this text
-    // (ASCII letters, apostrophes, digits, slashes), so a span taken from `lower`
-    // indexes the same bytes in `body`.
-    let (subject, axes, remainder) = if let Ok((rest_lower, (axes, _, subject_lower, _, _, _))) =
+    // (ASCII letters, apostrophes, digits, slashes), so a span taken from
+    // `parse_lower` indexes the same bytes in `parse_body`.
+    let inverted = if is_change {
+        // The inverted genitive is copula-only (see the `is_change` note above).
+        None
+    } else {
         // Inverted genitive: "the base power and toughness of <subject> become[s] "
         (
-                preceded(tag::<_, _, VE>("the "), parse_base_pt_axes),
-                tag(" of "),
-                take_until::<_, _, VE>(" become"),
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .parse(lower.as_str())
-    {
-        // `subject_lower` is a sub-slice of `lower`; its byte offset is the
-        // pointer delta. Recover original case at the same span in `body`.
-        let subject_start = subject_lower.as_ptr() as usize - lower.as_ptr() as usize;
-        let subject = body
-            .get(subject_start..subject_start + subject_lower.len())?
-            .trim();
-        let remainder = &body[body.len() - rest_lower.len()..];
-        (subject, axes, remainder)
-    } else {
-        // Possessive: "<subject>'s base power [and toughness] become[s] "
-        let (rest_lower, (subject_lower, axes)) = alt((
-            (
-                take_until::<_, _, VE>("'s base power"),
-                tag("'s "),
-                parse_base_pt_axes,
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .map(|(subject, _, axes, _, _, _)| (subject, axes)),
-            (
-                take_until::<_, _, VE>("\u{2019}s base power"),
-                tag("\u{2019}s "),
-                parse_base_pt_axes,
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .map(|(subject, _, axes, _, _, _)| (subject, axes)),
-        ))
-        .parse(lower.as_str())
-        .ok()?;
-        let subject = body[..subject_lower.len()].trim();
-        let remainder = &body[body.len() - rest_lower.len()..];
-        (subject, axes, remainder)
+            preceded(tag::<_, _, VE>("the "), parse_base_pt_axes),
+            tag(" of "),
+            take_until::<_, _, VE>(" become"),
+            tag(" become"),
+            opt(tag("s")),
+            tag(" "),
+        )
+            .parse(parse_lower)
+            .ok()
     };
+    let (subject, axes, remainder) =
+        if let Some((rest_lower, (axes, _, subject_lower, _, _, _))) = inverted {
+            // `subject_lower` is a sub-slice of `parse_lower`; its byte offset is
+            // the pointer delta. Recover original case at the same span.
+            let subject_start = subject_lower.as_ptr() as usize - parse_lower.as_ptr() as usize;
+            let subject = parse_body
+                .get(subject_start..subject_start + subject_lower.len())?
+                .trim();
+            let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
+            (subject, axes, remainder)
+        } else {
+            // Possessive: "<subject>'s base power [and toughness]" followed by the
+            // copula (" to " for the transitive "change" frame, else "become[s] ").
+            let (rest_lower, (subject_lower, axes)) = alt((
+                (
+                    take_until::<_, _, VE>("'s base power"),
+                    tag("'s "),
+                    parse_base_pt_axes,
+                )
+                    .map(|(subject, _, axes)| (subject, axes)),
+                (
+                    take_until::<_, _, VE>("\u{2019}s base power"),
+                    tag("\u{2019}s "),
+                    parse_base_pt_axes,
+                )
+                    .map(|(subject, _, axes)| (subject, axes)),
+            ))
+            .parse(parse_lower)
+            .ok()?;
+            let (rest_lower, ()) = parse_base_pt_copula(rest_lower, is_change).ok()?;
+            let subject = parse_body[..subject_lower.len()].trim();
+            let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
+            (subject, axes, remainder)
+        };
 
-    // Parse the value side (fixed N/M, shared dynamic, or split per-axis dynamic).
-    let (value, after_pt) = parse_base_pt_set_value(remainder).or_else(|| {
-        parse_split_base_pt_dynamic_values(remainder).map(|(power, toughness, after)| {
-            (BasePtSetValue::SplitDynamic { power, toughness }, after)
-        })
-    })?;
+    // Parse the value side. The transitive "change … to" frame carries a bare
+    // value (fixed, paired referent, or single-axis quantity); the copula form
+    // carries "[each] equal to <quantity>" or an Amplifire-style per-axis split.
+    let (value, after_pt) = if is_change {
+        parse_change_base_pt_value(remainder)?
+    } else {
+        parse_base_pt_set_value(remainder).or_else(|| {
+            parse_split_base_pt_dynamic_values(remainder).map(|(power, toughness, after)| {
+                (BasePtSetValue::SplitDynamic { power, toughness }, after)
+            })
+        })?
+    };
 
     // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
     let keywords = parse_base_pt_set_trailing_keywords(after_pt);
@@ -7247,6 +7367,95 @@ mod tests {
         assert!(!mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 208.1 + CR 613.4b: the transitive "change <subject>'s base power [and
+    // toughness] to <value>" surface form. Same layer-7b set-base-P/T primitives
+    // as the "become[s]" copula, reached through the "change … to" verb frame.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn change_base_power_to_target_power_single_axis() {
+        // Riptide Mangler: "{1}{U}: Change ~'s base power to target creature's
+        // power." Only the power axis is set; the value reads the object target.
+        let (mods, _) = base_pt_set_mods("Change ~'s base power to target creature's power");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Target,
+                    },
+                },
+            }],
+            "power-only change clause should emit exactly one SetPowerDynamic",
+        );
+    }
+
+    #[test]
+    fn change_base_power_to_offset_aggregate() {
+        // Arni Brokenbrow: "you may change ~'s base power to 1 plus the greatest
+        // power among other creatures you control …". Exercises the "you may
+        // change" verb variant and an offset-aggregate value. The trailing
+        // duration is stripped by the effect pipeline before this function runs,
+        // so it is absent here.
+        let (mods, _) = base_pt_set_mods(
+            "you may change ~'s base power to 1 plus the greatest power among other creatures you control",
+        );
+        assert!(
+            matches!(
+                mods.as_slice(),
+                [ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Offset { offset: 1, .. }
+                }]
+            ),
+            "expected a single SetPowerDynamic(Offset +1), got {mods:?}",
+        );
+    }
+
+    #[test]
+    fn change_base_pt_to_paired_referent_dual_axis() {
+        // Shape Stealer / Eldrazi Mimic: "change ~'s base power and toughness to
+        // that creature's power and toughness". The paired referent splits into a
+        // per-axis SetPowerDynamic / SetToughnessDynamic reading the same object.
+        let (mods, _) = base_pt_set_mods(
+            "change ~'s base power and toughness to that creature's power and toughness",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPowerDynamic { .. })),
+            "expected SetPowerDynamic, got {mods:?}",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { .. })),
+            "expected SetToughnessDynamic, got {mods:?}",
+        );
+    }
+
+    #[test]
+    fn change_base_pt_to_fixed_value() {
+        // Fixed "N/M" value under the transitive verb frame — the same building
+        // block as "become N/M", reached via "change … to".
+        let (mods, _) = base_pt_set_mods("change ~'s base power and toughness to 0/2");
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 2 }));
+    }
+
+    #[test]
+    fn change_verb_frame_requires_base_pt_subject() {
+        // Guard: the "change" verb must not swallow unrelated "change … to"
+        // clauses that are not base-P/T sets (no "'s base power" subject).
+        let mut ctx = ParseContext::default();
+        assert!(
+            try_parse_subject_base_pt_set_clause_ast(
+                "change the target of target spell to another creature",
+                &mut ctx,
+            )
+            .is_none(),
+            "non-base-P/T change clause must not match",
+        );
     }
 
     // -----------------------------------------------------------------------

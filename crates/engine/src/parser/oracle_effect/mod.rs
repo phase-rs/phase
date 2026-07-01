@@ -2747,6 +2747,35 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         return None;
     }
 
+    // CR 514.2 + CR 500.7 + CR 109.5: a TRAILING "during their next turn" /
+    // "during that player's next turn" clause (Sphinx's Decree, Azor) makes the
+    // prohibition expire at the affected player's next turn — the cast-branch
+    // mirror of `try_parse_that_player_cant_attack_prohibition`. Without it the
+    // duration was dropped into an `Unimplemented` sub_ability and the ban
+    // wrongly ended at the CURRENT turn's cleanup. `UntilEndOfNextTurnOf` anchors
+    // on the controller for the opponents scope: each opponent's single
+    // intervening next turn precedes the controller's next turn, so the
+    // controller-anchored window covers exactly those turns (see
+    // `add_restriction::fill_runtime_fields`, and the `EndOfTurn` placeholder
+    // below is overridden there from `ability.duration`).
+    let (duration, remaining) = match nom_on_lower(remaining, remaining_lower, |input| {
+        value(
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            alt((
+                tag(" during their next turn"),
+                tag(" during that player's next turn"),
+            )),
+        )
+        .parse(input)
+    }) {
+        Some((next_turn_duration, rest)) if rest.trim_matches(['.', ' ']).is_empty() => {
+            (Some(next_turn_duration), rest)
+        }
+        _ => (duration, remaining),
+    };
+
     let spell_filter = match spell_filter_text {
         None => None,
         Some(text) => {

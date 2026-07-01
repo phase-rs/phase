@@ -524,12 +524,21 @@ fn is_blocked_by_cant_cast_spells(
         let GameRestriction::ProhibitActivity {
             source,
             affected_players,
+            expiry,
             activity: ProhibitedActivity::CastSpells { spell_filter },
-            ..
         } = restriction
         else {
             return false;
         };
+        // CR 514.2 + CR 500.7: a still-pre-armed `UntilEndOfNextTurnOf` cast ban
+        // ("Each opponent can't cast … during that player's next turn" — Sphinx's
+        // Decree / Azor, fanned out per opponent) is not yet in force; it takes
+        // effect only once the restricted player's untap step converts it to
+        // `EndOfTurn` (turns.rs). Mirror the activate-abilities gate so the ban
+        // does not leak onto the creating turn.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            return false;
+        }
         let source_controller = state
             .objects
             .get(source)
