@@ -8731,13 +8731,27 @@ pub enum Effect {
         /// card-defined ("If <B> gets more votes or the vote is tied, …").
         /// `VoteTally::PerVote` (Council's-dilemma classics — Tivit, Capital
         /// Punishment) resolves `per_choice_effect[i]` once per vote tallied
-        /// for `choices[i]`. `VoteTally::Threshold { tie_breaker_index }`
-        /// (Will-of-the-council — Plea for Power, Split Decision, Coercive
-        /// Portal, Trial of a Time Lord IV) resolves exactly ONE
-        /// `per_choice_effect` — the choice with the most votes, with ties
-        /// broken in favor of `tie_breaker_index` ("...or the vote is tied").
+        /// for `choices[i]`. `VoteTally::TopVotes { tie }` (Will-of-the-council
+        /// — Plea for Power, Split Decision, Council Guardian, Council's
+        /// Judgment) resolves the winning choice(s): `TieResolution::Breaker`
+        /// resolves exactly ONE outcome (the most votes, ties broken in favor
+        /// of the index), `TieResolution::AllTied` resolves every choice tied
+        /// for the most votes.
         #[serde(default)]
         tally_mode: VoteTally,
+        /// CR 701.38b: What the listed choices are. `VoteSubject::Named` (the
+        /// default) votes among the static `choices` words. `VoteSubject::Objects`
+        /// votes among battlefield objects enumerated at resolution — `choices`
+        /// / `per_choice_effect` are empty and the winner(s) drive
+        /// `outcome_template` (Council's Judgment, Prime Minister's Cabinet
+        /// Room).
+        #[serde(default)]
+        subject: VoteSubject,
+        /// Card-defined: whether votes are public as cast (`VoteVisibility::Open`,
+        /// the default) or each player votes secretly with a simultaneous reveal
+        /// (`VoteVisibility::Secret` — Truth or Consequences).
+        #[serde(default)]
+        visibility: VoteVisibility,
     },
     /// CR 700.3 + CR 608: Separate objects into two piles, have another player
     /// choose one of them, and apply a sub-effect to the chosen pile. The
@@ -11324,6 +11338,28 @@ pub enum VoterScope {
     ControllerLabels,
 }
 
+/// Card-defined: how a completed top-tally vote selects winners among the
+/// choices tied for the maximum tally. The CR defines only the vote *procedure*
+/// (CR 701.38a: starting player + turn order); the "most votes or tied" winner
+/// selection below is card-defined text, NOT a CR rule. This enum is the single
+/// structural axis that distinguished the former `Threshold` from the "most
+/// votes or tied" family (winner cardinality under a tie).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TieResolution {
+    /// Card-defined "...or the vote is tied": exactly ONE winner. The unique
+    /// holder of the max tally wins; on a tie (or empty ballot set) the choice
+    /// at this index wins (the historical `Threshold` behavior). Plea for
+    /// Power, Split Decision, Coercive Portal, Magister of Worth, Tyrant's
+    /// Choice, Trial of a Time Lord IV.
+    Breaker(u8),
+    /// Card-defined "...or tied for most votes": EVERY choice tied for the max
+    /// tally wins and resolves once (inclusive tie; no tie-breaker). Council
+    /// Guardian, Council's Judgment, Prime Minister's Cabinet Room, Custodi
+    /// Squire.
+    AllTied,
+}
+
 /// CR 701.38a: How a completed `Effect::Vote` tally maps onto its
 /// `per_choice_effect` slots. CR 701.38 defines only the vote procedure; the
 /// strict-majority / tie-break outcome semantics below are card-defined, not a
@@ -11335,25 +11371,60 @@ pub enum VoterScope {
 /// choice. This is the historical `Effect::Vote` behavior and the serde
 /// default, so pre-existing serialized votes deserialize unchanged.
 ///
-/// `Threshold` is the Will-of-the-council family (Plea for Power, Split
-/// Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, Trial of a
-/// Time Lord IV): the players vote between two named outcomes and exactly ONE
-/// `per_choice_effect` resolves — the choice with strictly more votes. Ties
-/// resolve to `tie_breaker_index`, matching the Oracle phrasing "If <B> gets
-/// more votes **or the vote is tied**, <effect-B>".
+/// `TopVotes { tie }` is the Will-of-the-council / "most votes or tied" family.
+/// The vote *procedure* is CR 701.38a; the winner-selection is card text.
+/// `tie` parameterizes winner cardinality under a tie:
+/// * `TieResolution::Breaker(idx)` — exactly ONE winner (Plea for Power, Split
+///   Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, Trial of a
+///   Time Lord IV): the unique max wins, else `idx` ("...or the vote is tied").
+///   This is the historical `Threshold { tie_breaker_index }` behavior.
+/// * `TieResolution::AllTied` — every choice tied for the max wins and resolves
+///   once (Council Guardian, Council's Judgment, Prime Minister's Cabinet Room,
+///   Custodi Squire): "...or tied for most votes".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum VoteTally {
     /// CR 701.38a: Every per-choice effect resolves, fanning out per the
     /// tally for that choice. The historical default.
     #[default]
     PerVote,
-    /// CR 701.38a: The single winning choice's effect resolves once. The
-    /// strict-majority rule and tie behavior are card-defined (not a CR
-    /// subrule): on a tie, `tie_breaker_index` (the choice whose Oracle clause
-    /// reads "...or the vote is tied") wins. `u8` indexes `choices`; vote
-    /// cardinality is bounded by Magic card design.
-    Threshold { tie_breaker_index: u8 },
+    /// Card-defined top-tally selection (the vote procedure is CR 701.38a; the
+    /// winner-selection is card text). `tie` parameterizes winner cardinality.
+    TopVotes { tie: TieResolution },
+}
+
+/// CR 701.38b: What an `Effect::Vote`'s listed choices are. Orthogonal to
+/// [`VoteTally`] (how the tally resolves) and [`VoteVisibility`] (whether the
+/// votes are public).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum VoteSubject {
+    /// CR 701.38b: vote among the static `choices` words (existing behavior).
+    #[default]
+    Named,
+    /// CR 701.38b: vote among objects matching `candidate_filter`, enumerated
+    /// at resolution. `outcome_template` resolves once per winning object with
+    /// that object injected as its single target (see
+    /// `vote::resolve_top_votes_tally`). For object votes `choices` /
+    /// `per_choice_effect` are empty at parse time.
+    Objects {
+        candidate_filter: TargetFilter,
+        outcome_template: Box<AbilityDefinition>,
+    },
+}
+
+/// Card-defined: whether an `Effect::Vote`'s ballots are public as cast or
+/// collected secretly with a simultaneous reveal. Orthogonal to [`VoteTally`]
+/// and [`VoteSubject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum VoteVisibility {
+    /// CR 701.38a procedure: votes are public as cast (existing behavior).
+    #[default]
+    Open,
+    /// Card-defined: each player votes secretly; tallies are withheld until all
+    /// have voted, then revealed simultaneously (Truth or Consequences).
+    Secret,
 }
 
 impl TargetFilter {

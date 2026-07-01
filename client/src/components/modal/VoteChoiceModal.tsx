@@ -9,10 +9,17 @@ import type { WaitingFor } from "../../adapter/types.ts";
 type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
 
 /**
- * CR 701.38a: Council's-dilemma vote prompt. The engine collects one
- * `ChooseOption { choice }` action per vote; this modal renders the canonical
- * choice list (lowercase, from `data.options`) using the original-case
+ * CR 701.38a/b: Council's-dilemma vote prompt. The engine collects one ballot
+ * per vote; this modal renders the canonical choice list using the original-case
  * `data.option_labels` for display.
+ *
+ * Two ballot shapes (selection is always by index, so same-named object
+ * candidates are disambiguated):
+ *   - Named vote (`data.candidate_objects` empty): dispatch
+ *     `ChooseOption { choice }` with the canonical lowercase option word.
+ *   - Object-pool vote (`data.candidate_objects` non-empty — Council's
+ *     Judgment, Prime Minister's Cabinet Room): dispatch
+ *     `SubmitVoteCandidate { candidate_index }`.
  *
  * `data.actor` describes who submits the choice; `data.player` is the SUBJECT
  * being voted-for/labeled.
@@ -23,25 +30,34 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * Labeling mode is `data.actor.type === "Delegated"`.
  *
  * Display layer only — `remaining_votes`, the running tally, and the queued
- * voter list all come straight from the engine's `WaitingFor::VoteChoice`.
+ * voter list all come straight from the engine's `WaitingFor::VoteChoice`. For
+ * secret votes the engine delivers zeroed tallies, so the running-tally badge
+ * is naturally hidden.
  */
 export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
   // Frontend renders engine-provided state. The Player struct does not yet
   // carry a display name (would require lobby/persistence plumbing across
   // engine + server), so we fall back to the 1-indexed seat ordinal here.
   // Tracked as a follow-up; the engine-side `Player.name` field is the
   // correct long-term home for this label.
   const subjectName = t("voteChoice.subjectName", { number: data.player + 1 });
+  const isObjectVote = data.candidate_objects.length > 0;
 
   const handleConfirm = useCallback(() => {
-    if (selected !== null) {
-      dispatch({ type: "ChooseOption", data: { choice: selected } });
-      setSelected(null);
+    if (selected === null) return;
+    if (isObjectVote) {
+      dispatch({ type: "SubmitVoteCandidate", data: { candidate_index: selected } });
+    } else {
+      const choice = data.options[selected];
+      if (choice !== undefined) {
+        dispatch({ type: "ChooseOption", data: { choice } });
+      }
     }
-  }, [dispatch, selected]);
+    setSelected(null);
+  }, [dispatch, selected, isObjectVote, data.options]);
 
   const isLabelingMode = data.actor.type === "Delegated";
   const title = isLabelingMode ? t("voteChoice.titleLabel") : t("voteChoice.titleVote");
@@ -63,10 +79,10 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
         {data.options.map((option, index) => {
           const label = data.option_labels[index] ?? option;
           const tally = data.tallies[index] ?? 0;
-          const isSelected = selected === option;
+          const isSelected = selected === index;
           return (
             <motion.button
-              key={option}
+              key={index}
               className={`min-h-11 rounded-lg border-2 px-4 py-3 text-sm font-semibold transition sm:px-5 sm:text-base ${
                 isSelected
                   ? "border-emerald-400 bg-emerald-500/30 text-white"
@@ -76,7 +92,7 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
               whileHover={{ scale: 1.05 }}
-              onClick={() => setSelected(isSelected ? null : option)}
+              onClick={() => setSelected(isSelected ? null : index)}
             >
               {label}
               {tally > 0 ? (
