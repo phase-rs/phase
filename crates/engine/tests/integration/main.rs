@@ -374,6 +374,7 @@ mod issue_4000_dominating_licid;
 mod issue_4001_frolicking_familiar_adventure_instant;
 mod issue_4050_adamaro_extremum_hand_size;
 mod issue_4124_second_little_pig;
+mod issue_4220_agatha_soul_cauldron;
 mod issue_4226_elenda_azor_attack_pay_x;
 mod issue_4242_lagrella_crash;
 mod issue_4243_from_the_rubble;

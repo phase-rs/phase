@@ -3534,7 +3534,10 @@ mod tests {
         assert!(
             parsed.statics.iter().any(|s| matches!(
                 s.mode,
-                StaticMode::SpendManaAsAnyColor { spell_filter: None }
+                StaticMode::SpendManaAsAnyColor {
+                    spell_filter: None,
+                    activation_source_filter: None,
+                }
             )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
             parsed.statics

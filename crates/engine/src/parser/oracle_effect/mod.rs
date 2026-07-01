@@ -11290,6 +11290,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
             return parsed_clause(Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                     spell_filter: None,
+                    activation_source_filter: None,
                 })
                 .description(text.to_string())],
                 duration: None,

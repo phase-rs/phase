@@ -780,12 +780,21 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 609.4b: "You may spend mana as though it were mana of any color to
+    // activate abilities of <subject>." (Agatha's Soul Cauldron / Joiner Adept).
+    if let Some(def) = try_parse_spend_any_color_to_activate_abilities(&text, &tp) {
+        return Some(def);
+    }
+
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
         return Some(
-            StaticDefinition::new(StaticMode::SpendManaAsAnyColor { spell_filter: None })
-                .affected(TargetFilter::Player)
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+            })
+            .affected(TargetFilter::Player)
+            .description(text.to_string()),
         );
     }
 
