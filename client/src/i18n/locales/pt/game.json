@@ -1886,8 +1886,8 @@
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",
-    "waitingFor": "Waiting for {{player}}",
-    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
       "declareAttackers": "declaring attackers",
       "declareBlockers": "declaring blockers",
