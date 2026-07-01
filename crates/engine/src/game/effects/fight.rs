@@ -750,7 +750,11 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: *player,
             candidate_count: 1,
-            candidate_descriptions: vec!["Shield".to_string()],
+            candidates: vec![crate::types::game_state::ReplacementCandidateSummary {
+                source_id: bear,
+                source_name: String::new(),
+                description: "Shield".to_string(),
+            }],
         };
 
         // Accept the replacement for bear → wolf (first direction).

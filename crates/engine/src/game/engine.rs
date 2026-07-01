@@ -4113,6 +4113,23 @@ fn apply_action(
             indices,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2b: The controller chooses modes for an activated modal
+        // ability BEFORE any cost is paid, target is chosen, or stack object is created
+        // (those steps run later in engine_modes::handle_activated_mode_choice). At this
+        // pre-commit sub-step nothing has changed in the game state, so cancelling is a
+        // pure rollback to priority — mirroring the modal-spell (ModeChoice, CancelCast)
+        // and (ChoosePermanentTypeSlot, CancelCast) arms.
+        // CR 603.3c: A modal *triggered* ability's entry is already on the stack when the
+        // mode prompt appears; its controller MUST choose a mode. This arm is guarded to
+        // is_activated: true, so the triggered case falls through to the catch-all reject.
+        (
+            WaitingFor::AbilityModeChoice {
+                player,
+                is_activated: true,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => WaitingFor::Priority { player: *player },
         // CR 601.2c: Player selected targets from a multi-target set ("any number of").
         (WaitingFor::MultiTargetSelection { .. }, GameAction::SelectCards { cards: selected }) => {
             let waiting_for = state.waiting_for.clone();

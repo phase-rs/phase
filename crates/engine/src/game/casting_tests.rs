@@ -19378,6 +19378,292 @@ fn cancel_modal_returns_to_priority() {
     assert!(matches!(state.waiting_for, WaitingFor::ModeChoice { .. }));
 }
 
+/// Build an artifact with a modal ACTIVATED ability whose cost is paid AFTER
+/// the mode is chosen: "{T}, Sacrifice an artifact: Choose one — • You gain 2
+/// life. • You lose 2 life." Mirrors Lobelia, Defender of Bag End (issue
+/// #4695); the mode prompt (CR 602.2b + CR 601.2b) precedes cost payment and
+/// stack-object creation.
+fn create_modal_activated_artifact(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let source = create_object(
+        state,
+        CardId(90),
+        player,
+        "Modal Activated Artifact".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let mode0 = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let mode1 = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+        );
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "modal_activated_placeholder".to_string(),
+                    description: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        1,
+                    )),
+                ],
+            })
+            .with_modal(
+                ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    mode_descriptions: vec![
+                        "You gain 2 life.".to_string(),
+                        "You lose 2 life.".to_string(),
+                    ],
+                    ..Default::default()
+                },
+                vec![mode0, mode1],
+            ),
+        );
+    }
+    source
+}
+
+/// Construct an `AbilityModeChoice` for a modal *triggered* ability
+/// (`is_activated: false`) so the negative-path assertions can drive
+/// `CancelCast` against a mode prompt that CR 603.3c forbids cancelling.
+fn set_triggered_ability_mode_choice(state: &mut GameState, player: PlayerId, source_id: ObjectId) {
+    state.waiting_for = WaitingFor::AbilityModeChoice {
+        player,
+        modal: ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            mode_descriptions: vec![
+                "You gain 2 life.".to_string(),
+                "You lose 2 life.".to_string(),
+            ],
+            ..Default::default()
+        },
+        source_id,
+        mode_abilities: vec![
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: None,
+                },
+            ),
+        ],
+        is_activated: false,
+        ability_index: None,
+        ability_cost: None,
+        unavailable_modes: vec![],
+    };
+}
+
+/// CR 602.2b + CR 601.2b: Cancelling an ACTIVATED modal ability at the
+/// mode-choice sub-step is a pure rollback to priority — no cost is paid, no
+/// permanent is tapped or sacrificed, no stack object is created, and no life
+/// total changes. Re-activation must remain legal (proving the source was
+/// never committed). Issue #4695 (Lobelia, Defender of Bag End).
+#[test]
+fn cancel_activated_modal_ability_rolls_back_to_priority() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_modal_activated_artifact(&mut state, PlayerId(0));
+    // A second artifact to satisfy the "Sacrifice an artifact" cost.
+    let sac_artifact = create_object(
+        &mut state,
+        CardId(91),
+        PlayerId(0),
+        "Sacrificeable Artifact".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&sac_artifact)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+    let p0_life = state.players[0].life;
+    let p1_life = state.players[1].life;
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ..
+            }
+        ),
+        "activating the modal ability must prompt for a mode with is_activated: true"
+    );
+
+    apply_as_current(&mut state, GameAction::CancelCast).unwrap();
+
+    // Pure rollback to priority.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == PlayerId(0)),
+        "CancelCast at the activated mode-choice step returns priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        !state.objects.get(&source).unwrap().tapped,
+        "source must remain untapped — the {{T}} cost is paid after mode choice"
+    );
+    assert!(
+        state.objects.contains_key(&sac_artifact)
+            && state.objects.get(&sac_artifact).unwrap().zone == Zone::Battlefield,
+        "the artifact must not be sacrificed on cancel"
+    );
+    assert!(
+        state.stack.is_empty(),
+        "no stack object may have been created"
+    );
+    assert_eq!(state.players[0].life, p0_life, "controller life unchanged");
+    assert_eq!(state.players[1].life, p1_life, "opponent life unchanged");
+    assert!(state.pending_cast.is_none(), "pending_cast must be cleared");
+    assert!(
+        state.pending_trigger.is_none(),
+        "pending_trigger must be None"
+    );
+
+    // Re-activation is still legal: the source was never committed.
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        },
+    )
+    .expect("re-activating after cancel must succeed");
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ..
+            }
+        ),
+        "re-activation must re-enter the mode-choice prompt"
+    );
+}
+
+/// CR 603.3c: A modal *triggered* ability is already on the stack when its
+/// mode prompt appears; its controller MUST choose a mode. `CancelCast` is
+/// rejected (falls through to the catch-all), so there is no rollback.
+#[test]
+fn cancel_triggered_modal_ability_is_rejected() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(92),
+        PlayerId(0),
+        "Triggered Modal Source".to_string(),
+        Zone::Battlefield,
+    );
+    set_triggered_ability_mode_choice(&mut state, PlayerId(0), source);
+
+    let result = apply_as_current(&mut state, GameAction::CancelCast);
+    assert!(
+        result.is_err(),
+        "CancelCast against a triggered modal ability (is_activated: false) must be rejected"
+    );
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: false,
+                ..
+            }
+        ),
+        "the triggered mode prompt must persist after a rejected cancel"
+    );
+}
+
+/// The multiplayer exact-legal-actions gate and the AI candidate surface must
+/// both expose `CancelCast` for an activated modal ability at the mode-choice
+/// step, and must NOT expose it for a triggered one (CR 602.2b vs CR 603.3c).
+#[test]
+fn activated_modal_mode_choice_offers_cancel_in_legal_actions() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_modal_activated_artifact(&mut state, PlayerId(0));
+    let sac_artifact = create_object(
+        &mut state,
+        CardId(93),
+        PlayerId(0),
+        "Sacrificeable Artifact".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&sac_artifact)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ..
+            }
+        ),
+        "precondition: activated mode-choice prompt"
+    );
+    assert!(
+        crate::ai_support::legal_actions(&state).contains(&GameAction::CancelCast),
+        "activated modal mode choice must offer CancelCast"
+    );
+
+    // Triggered modal: no cancel.
+    set_triggered_ability_mode_choice(&mut state, PlayerId(0), source);
+    assert!(
+        !crate::ai_support::legal_actions(&state).contains(&GameAction::CancelCast),
+        "triggered modal mode choice (CR 603.3c) must NOT offer CancelCast"
+    );
+}
+
 // --- Adventure tests ---
 
 /// Create an Adventure card in hand: Bonecrusher Giant (creature) / Stomp (instant).

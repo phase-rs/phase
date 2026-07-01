@@ -2484,6 +2484,22 @@ pub struct PendingTriggerSummary {
     pub description: String,
 }
 
+/// CR 616.1 / CR 614: Display payload for one replacement-effect option — either
+/// one candidate in a CR 616.1 ordering prompt, or one branch (accept/decline)
+/// of an optional "you may" replacement. Engine-derived so the filtered state
+/// snapshot (multiplayer) and the frontend `ReplacementModal` never re-derive
+/// the source object/description from `state.objects`, exactly as
+/// [`PendingTriggerSummary`] does for CR 603.3b trigger ordering. For the
+/// optional case both branches carry the same `source_id` (one object, two
+/// outcomes); rule-based virtual replacements (shield counter, Umbra armor,
+/// Compleated, combat skip) still point at the object they act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementCandidateSummary {
+    pub source_id: ObjectId,
+    pub source_name: String,
+    pub description: String,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -3084,7 +3100,7 @@ pub enum WaitingFor {
         player: PlayerId,
         candidate_count: usize,
         #[serde(default)]
-        candidate_descriptions: Vec<String>,
+        candidates: Vec<ReplacementCandidateSummary>,
     },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
@@ -7459,10 +7475,10 @@ pub struct PendingReplacement {
 /// and addressed by the replacement pipeline via `ReplacementId { source:
 /// ObjectId(0), index }`.
 ///
-/// `description` is the player-facing string surfaced in `WaitingFor::
-/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
-/// the same emptying event and CR 616.1 requires the affected player to choose
-/// ordering.
+/// `description` (paired with `source`) is surfaced as a
+/// `ReplacementCandidateSummary` in `WaitingFor::ReplacementChoice::candidates`
+/// when multiple handlers apply to the same emptying event and CR 616.1
+/// requires the affected player to choose ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepEndManaScanEntry {
     pub source: ObjectId,
@@ -9121,7 +9137,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: vec![],
+            candidates: vec![],
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

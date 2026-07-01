@@ -343,6 +343,7 @@ mod issue_3654_nyxbloom_mana_reflection;
 mod issue_3655_sliver_gravemother_encore;
 mod issue_3660_paradigm_multiple_offers;
 mod issue_3665_smugglers_share;
+mod issue_3670_season_burrow;
 mod issue_3681_inferno_titan_divided_damage;
 mod issue_3817_sheoldred_apocalypse;
 mod issue_3862_ulvenwald_tracker_fight;
