@@ -2719,6 +2719,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::SearchDestination {
             destination,
             enter_tapped,
+            enters_under,
             reveal,
             attach_to_source,
         } => {
@@ -2738,7 +2739,12 @@ pub(super) fn apply_clause_continuation(
                     *existing_reveal |= reveal;
                     multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
-                apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
+                apply_search_destination_to_ability_chain(
+                    previous,
+                    destination,
+                    enter_tapped,
+                    enters_under.clone(),
+                );
             }
             let put_origin = if multi_zone_search {
                 None
@@ -2753,7 +2759,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    enters_under: None,
+                    enters_under,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enters_attacking: false,
                     up_to: false,
@@ -3745,6 +3751,7 @@ fn apply_search_destination_to_ability_chain(
     ability: &mut AbilityDefinition,
     destination: Zone,
     enter_tapped: bool,
+    enters_under: Option<ControllerRef>,
 ) {
     let mut cursor = Some(ability);
     while let Some(sub_ability) = cursor {
@@ -3752,12 +3759,17 @@ fn apply_search_destination_to_ability_chain(
             origin: Some(Zone::Library),
             destination: existing_destination,
             enter_tapped: existing_enter_tapped,
+            enters_under: existing_enters_under,
             ..
         } = &mut *sub_ability.effect
         {
             *existing_destination = destination;
             *existing_enter_tapped =
                 crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+            // CR 110.2a: only overwrite when the clause specified a controller, so a value set by an earlier clause is preserved.
+            if enters_under.is_some() {
+                *existing_enters_under = enters_under.clone();
+            }
         }
         cursor = sub_ability.sub_ability.as_deref_mut();
     }
@@ -3940,6 +3952,9 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
+                // CR 110.2a: "... under your control" routes the found card to the ability controller.
+                enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
+                    .then_some(ControllerRef::You),
                 reveal,
                 attach_to_source,
             })

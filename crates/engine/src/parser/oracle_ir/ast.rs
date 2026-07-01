@@ -206,6 +206,8 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
+        enters_under: Option<ControllerRef>,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
         /// When true, the found card enters "attached to" the search source.
