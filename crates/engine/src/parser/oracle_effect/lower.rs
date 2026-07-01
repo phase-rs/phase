@@ -7129,6 +7129,35 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     {
         return None;
     }
+    // CR 608.2c + CR 115.10a + CR 202.3: "that card's mana value" in a "where X
+    // is …" binding is anaphoric, not targeted. The revealed/looked-at card is
+    // an affected object introduced by an earlier instruction in the SAME
+    // ability (e.g. Twilight Prophet's "reveal the top card … Each opponent
+    // loses X life … where X is that card's mana value") — CR 115.10a: it is
+    // NOT a target (no "target" word), so it must resolve against the anaphoric
+    // referent, not the empty target slot. `parse_cda_quantity` (below) would
+    // hard-map "that card's mana value" to `ObjectScope::Target` (see
+    // `oracle_target::parse_mana_value_reference_qty`), which reads only the
+    // target slot and yields 0 at runtime. Route ONLY the literal "card"
+    // possessive through `parse_event_context_quantity`, which classifies the
+    // demonstrative referent as `ObjectScope::Demonstrative` (resolved via
+    // `effect_context_object` — the revealed card, LKI-snapshotted before it
+    // moves zones, CR 202.3 mana value). "card" is the only unambiguously-safe
+    // referent: unlike "creature"/"permanent"/"planeswalker" (which are correct
+    // `Target` for targeted where-X cards like Feeding Grounds) it is never a
+    // battlefield target here. "spell" is explicitly excluded — its current
+    // `EventSource` binding (Draining Whelk class) must be preserved, and
+    // `parse_event_context_quantity` would instead emit `Demonstrative` for it.
+    // Restricted to the mana-value property only (CR 202.3), never power /
+    // toughness.
+    if is_that_card_mana_value_where_x(expression_lower.as_str()) {
+        // Pass the already-trimmed `expression` (trailing `.` stripped at the top
+        // of this fn), not the raw `where_x_expression`: the guard matches the
+        // trimmed phrase, so a punctuation-bearing input like "that card's mana
+        // value." must resolve through the same trimmed text or the demonstrative
+        // binding would fall back to `None` and the bug would survive.
+        return parse_event_context_quantity(expression);
+    }
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
@@ -7159,6 +7188,23 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
     // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
+}
+
+/// CR 608.2c + CR 202.3: Match EXACTLY `that card's mana value` (or its
+/// `converted mana cost` synonym; CR 202.3 defines the mana value) — the
+/// anaphoric "that card's MV"
+/// where-X referent. Matches only the literal `card` possessive (never `spell`,
+/// `creature`, `permanent`, or `planeswalker`) and only the mana-value property
+/// (never power/toughness). Callers route a positive match through
+/// `parse_event_context_quantity` so the referent classifies as
+/// `ObjectScope::Demonstrative` (CR 115.10a: not a target).
+fn is_that_card_mana_value_where_x(expression_lower: &str) -> bool {
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("that card's "),
+        alt((tag("mana value"), tag("converted mana cost"))),
+    ))
+    .parse(expression_lower)
+    .is_ok()
 }
 
 /// CR 107.3f + CR 113.7: Printed-name possessive in a where-X binding
@@ -9357,6 +9403,144 @@ mod where_x_tests {
         assert!(
             !value.contains_x(),
             "Dig filter Cmc must bind where-X: {value:?}"
+        );
+    }
+
+    /// Issue #1375 — CR 608.2c + CR 115.10a + CR 202.3: "where X is that card's
+    /// mana value" is an anaphoric reference to a card revealed by an earlier
+    /// instruction in the same ability (Twilight Prophet, Erratic Mutation, …),
+    /// NOT a target (CR 115.10a — no "target" word). It must bind to
+    /// `ObjectScope::Demonstrative` (resolved via `effect_context_object`), not
+    /// `Target` (which reads the empty target slot and yields 0). Reverting the
+    /// guard makes this bind `Target` — the failing assertion below.
+    #[test]
+    fn where_x_that_cards_mana_value_binds_demonstrative() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        // CR 202.3 synonym: "converted mana cost" routes identically.
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's converted mana cost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        // Trailing sentence punctuation must resolve identically — the guard
+        // matches the trimmed phrase, so the demonstrative binding must be built
+        // from the trimmed text, not the raw "that card's mana value." input.
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's mana value."),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+    }
+
+    /// G2 no-regression — "that spell's mana value" in the SAME where-X path
+    /// must stay on its current `EventSource` binding (Draining Whelk / Spell
+    /// Swindle class). The "that card's MV" guard matches only the literal
+    /// `card` possessive, never `spell`, so `parse_event_context_quantity`
+    /// (which would emit `Demonstrative` for "that spell's") is never consulted
+    /// for spells.
+    #[test]
+    fn where_x_that_spells_mana_value_stays_event_source() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that spell's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+            })
+        );
+    }
+
+    /// G1 safety proof — "that creature's mana value" (targeted where-X cards
+    /// like Feeding Grounds / Living Armor) must stay `Target`. The guard
+    /// deliberately excludes `creature`/`permanent`/`planeswalker` because those
+    /// are correctly the targeted object in these bindings; flipping them to
+    /// Demonstrative would regress those cards to 0.
+    #[test]
+    fn where_x_that_creatures_mana_value_stays_target() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that creature's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression("that permanent's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })
+        );
+    }
+
+    /// Issue #1375 full-card — Twilight Prophet's real Oracle text. BOTH the
+    /// upkeep trigger's `LoseLife.amount` and `GainLife.amount` must bind
+    /// `ObjectManaValue { scope: Demonstrative }` (was `Target` → 0/0 drain).
+    #[test]
+    fn twilight_prophet_upkeep_drains_bind_demonstrative_mana_value() {
+        use crate::types::ability::Effect;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Ascend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\nAt the beginning of your upkeep, if you have the city's blessing, reveal the top card of your library and put it into your hand. Each opponent loses X life and you gain X life, where X is that card's mana value.",
+            "Twilight Prophet",
+            &["Ascend".to_string()],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Cleric".to_string()],
+        );
+
+        // Walk the upkeep trigger's execute chain, collecting every LoseLife /
+        // GainLife amount. (test-only tree walk over parsed AbilityDefinitions —
+        // not parser dispatch.)
+        fn collect_life_amounts(
+            def: &crate::types::ability::AbilityDefinition,
+            lose: &mut Vec<QuantityExpr>,
+            gain: &mut Vec<QuantityExpr>,
+        ) {
+            match &*def.effect {
+                Effect::LoseLife { amount, .. } => lose.push(amount.clone()),
+                Effect::GainLife { amount, .. } => gain.push(amount.clone()),
+                _ => {}
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                collect_life_amounts(sub, lose, gain);
+            }
+        }
+
+        let mut lose = Vec::new();
+        let mut gain = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(exec) = trigger.execute.as_ref() {
+                collect_life_amounts(exec, &mut lose, &mut gain);
+            }
+        }
+
+        let demonstrative_mv = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        };
+        assert!(
+            lose.contains(&demonstrative_mv),
+            "each-opponent LoseLife.amount must bind Demonstrative mana value, got {lose:?}"
+        );
+        assert!(
+            gain.contains(&demonstrative_mv),
+            "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
     }
 }
