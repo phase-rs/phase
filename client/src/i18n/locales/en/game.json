@@ -1690,6 +1690,7 @@
       "numberRange": "Choose a Number",
       "labeled": "Make a Choice",
       "keyword": "Choose an Ability",
+      "counterKind": "Choose a Counter",
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",

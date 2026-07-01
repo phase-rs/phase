@@ -840,6 +840,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
+        // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
+        // counter placement fires `GameEvent::CounterAdded`, so no matcher
+        // dispatches on these `EffectResolved` kinds directly.
+        | EffectKind::ChooseCounterKind
+        | EffectKind::PutChosenCounter
         | EffectKind::ChooseAndSacrificeRest
         | EffectKind::Exploit
         | EffectKind::GainEnergy

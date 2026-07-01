@@ -30,6 +30,7 @@ const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
   NumberRange: "numberRange",
   Labeled: "labeled",
   Keyword: "keyword",
+  CounterKind: "counterKind",
 };
 
 /** Extract the string key from a ChoiceType value.

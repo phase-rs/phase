@@ -307,6 +307,29 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
+/// CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind on
+/// <anaphor>" → `Effect::PutChosenCounter` on the anaphoric object
+/// (`ParentTarget`). Reads the kind chosen by a preceding `ChooseCounterKind`
+/// at resolution; adds exactly one counter (The Caves of Androzani II/III).
+/// Combinator-based, fully consuming the residual. `input` is the clause with
+/// the leading "put " already stripped.
+pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
+    let parsed = |i| -> OracleResult<'_, ()> {
+        let (i, _) = opt(alt((tag("an "), tag("a ")))).parse(i)?;
+        let (i, _) = opt(tag("additional ")).parse(i)?;
+        let (i, _) = tag("counter of that kind on ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    parsed(input.trim()).ok()?;
+    Some(Effect::PutChosenCounter {
+        target: TargetFilter::ParentTarget,
+        count: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,

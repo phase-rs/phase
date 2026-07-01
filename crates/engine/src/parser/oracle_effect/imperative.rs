@@ -3097,6 +3097,15 @@ pub(super) fn parse_choose_ast(
             return Some(ast);
         }
 
+        // CR 608.2d + CR 122.1: "choose a counter on it / that permanent /
+        // target permanent" — pick one of the distinct counter kinds on the
+        // referenced object (The Caves of Androzani; Ichormoon Gauntlet). Routes
+        // to the counter-kind choice seam. Runs before `is_choose_as_targeting`
+        // so the "target permanent" form still declares its target here.
+        if let Some(ast) = try_parse_choose_counter_kind(rest, rest_lower, ctx) {
+            return Some(ast);
+        }
+
         if super::is_choose_as_targeting(rest_lower) {
             // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
             // two independent target slots on the same activated/triggered
@@ -3166,6 +3175,40 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     let source_filter =
         crate::parser::oracle_replacement::parse_choose_damage_source_candidate(rest)?;
     Some(ChooseImperativeAst::DamageSource { source_filter })
+}
+
+/// CR 608.2d + CR 122.1: "a counter on <object>" — the counter-kind choice head.
+/// The object is either a single-object anaphor (`it` / `that permanent` /
+/// `that creature` → `ParentTarget`, The Caves of Androzani II/III) or a real
+/// declared target (`target permanent`, Ichormoon Gauntlet), parsed by
+/// `parse_target` and surfaced as the ability's target slot. Combinator-based:
+/// `tag("a counter on ")` then the object phrase, consuming the entire residual.
+fn try_parse_choose_counter_kind(
+    rest: &str,
+    rest_lower: &str,
+    _ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    let anaphor = |i| -> OracleResult<'_, ()> {
+        let (i, _) = tag("a counter on ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    if anaphor(rest_lower.trim()).is_ok() {
+        return Some(ChooseImperativeAst::CounterKind {
+            target: TargetFilter::ParentTarget,
+        });
+    }
+    // Non-anaphoric object: "a counter on target permanent" (a declared target).
+    let (_, after_on) = nom_on_lower(rest, rest_lower, |i| {
+        value((), tag("a counter on ")).parse(i)
+    })?;
+    let (target, tail) = parse_target(after_on);
+    if matches!(target, TargetFilter::None) || !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    Some(ChooseImperativeAst::CounterKind { target })
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -4204,6 +4247,9 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
+        // CR 608.2d + CR 122.1: "choose a counter on it" → interactive
+        // counter-kind selection on the anaphoric object.
+        ChooseImperativeAst::CounterKind { target } => Effect::ChooseCounterKind { target },
     }
 }
 
@@ -10175,6 +10221,22 @@ pub(super) fn parse_zone_counter_ast(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
+        // CR 122.1 + CR 122.6: "put [a[n]] [additional] counter of that kind on
+        // <anaphor>" — add one counter of the kind chosen by a preceding
+        // `ChooseCounterKind` (The Caves of Androzani). Detected before the
+        // generic counter-type paths so "counter of that kind" is never mis-read
+        // as a literal counter name. `parse_target`/`try_parse_put_counter`
+        // cannot express "of that kind" (no CounterType), so this is a distinct
+        // seam.
+        if let Some(after_put) =
+            nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
+        {
+            if let Some(Effect::PutChosenCounter { target, count }) =
+                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            {
+                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+            }
+        }
         // Try move-counters first ("put its counters on ...")
         if let Some((
             Effect::MoveCounters {
@@ -10404,6 +10466,10 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
+        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
+            Effect::PutChosenCounter { target, count }
+        }
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here

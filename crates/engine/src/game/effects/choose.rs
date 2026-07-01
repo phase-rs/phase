@@ -241,6 +241,14 @@ pub(crate) fn bind_named_choice(
                     obj.chosen_attributes
                         .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
                 }
+                // CR 608.2d + CR 122.1: A per-iteration counter-kind choice (The
+                // Caves of Androzani) represents the CURRENT answer only —
+                // replace the prior `Counter` so `PutChosenCounter` reads this
+                // iteration's kind, not an accumulation across permanents.
+                if matches!(choice_type, ChoiceType::CounterKind { .. }) {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Counter(_)));
+                }
                 for attr in attrs {
                     obj.chosen_attributes.push(attr);
                 }
@@ -429,6 +437,12 @@ fn compute_options(
             } else {
                 options.iter().map(|kw| kw.to_string()).collect()
             }
+        }
+        // CR 608.2d + CR 122.1: the concrete counter-kind option list is baked
+        // into the `ChoiceType` at resolution by `choose_counter_kind::resolve`
+        // (enumerated from the target object's counters), so render it directly.
+        ChoiceType::CounterKind { options } => {
+            options.iter().map(|k| k.as_str().into_owned()).collect()
         }
     }
 }
