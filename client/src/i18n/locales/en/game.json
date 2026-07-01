@@ -74,7 +74,6 @@
     "resolveTooltip": "Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.",
     "resolveAll": "Resolve All",
     "resolveAllTooltip": "Keep passing priority while the stack resolves. A required choice or stop can interrupt it.",
-    "waiting": "Waiting",
     "priorityTooltip": "Pass priority. If the stack is empty, this advances through the current priority window. Shortcut: Space.",
     "pass": "Pass",
     "passToEndTooltip": "Auto-pass until the end step unless a choice, stop, or Full Control interrupts. Shortcut: Enter.",
@@ -1618,7 +1617,7 @@
     "connectionTitle": "Engine connection lost",
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
     "timeoutTitle": "Engine took too long",
-    "timeoutBody": "phase.rs couldn't finish computing this action within the time limit. This can happen on very complex boards (for example, hundreds of tokens). Your last saved turn is preserved — reload to restore the game, and consider exporting the state to report it.",
+    "timeoutBody": "phase.rs has been computing this action for a while. This can happen on very complex boards, and the operation is still running. You can keep waiting, or reload if you think it is stuck.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
     "exportGameState": "Export Game State",
@@ -1627,6 +1626,7 @@
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",
+    "continueWaiting": "Continue waiting",
     "reload": "Reload",
     "reportTitle": "Engine crash: {{summary}}",
     "reportConnectionSummary": "Engine connection lost",
@@ -1882,5 +1882,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for {{player}}",
+    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

@@ -158,6 +158,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
         | GameEvent::CreatureNoLongerSuspected { .. }
@@ -723,6 +724,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
+        }
+
+        GameEvent::TurnedFaceDown { object_id } => {
+            vec![card_seg(state, *object_id), text(" is turned face down")]
         }
 
         GameEvent::Regenerated { object_id } => {

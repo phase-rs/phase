@@ -74,7 +74,6 @@
     "resolveTooltip": "Passez la priorité afin que l'élément du dessus de la pile puisse se résoudre si tous les joueurs passent aussi. Raccourci : Espace.",
     "resolveAll": "Tout résoudre",
     "resolveAllTooltip": "Continuez de passer la priorité pendant que la pile se résout. Un choix requis ou un arrêt peut l'interrompre.",
-    "waiting": "En attente",
     "priorityTooltip": "Passez la priorité. Si la pile est vide, cela avance dans la fenêtre de priorité actuelle. Raccourci : Espace.",
     "pass": "Passer",
     "passToEndTooltip": "Passage automatique jusqu'à l'étape de fin sauf si un choix, un arrêt ou le Contrôle total interrompt. Raccourci : Entrée.",
@@ -1593,6 +1592,7 @@
     "copyDiagnostic": "Copier le diagnostic",
     "copied": "Copié !",
     "reportOnGithub": "Signaler sur GitHub",
+    "continueWaiting": "Continuer à attendre",
     "reload": "Recharger",
     "reportTitle": "Plantage du moteur : {{summary}}",
     "reportConnectionSummary": "Connexion au moteur perdue",
@@ -1882,5 +1882,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for {{player}}",
+    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

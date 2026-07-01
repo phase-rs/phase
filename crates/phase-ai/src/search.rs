@@ -4,13 +4,19 @@ use std::sync::Arc;
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
+use engine::types::ability::{
+    AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
+};
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
     CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
@@ -78,6 +84,7 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+const LARGE_BOARD_FAST_PRIORITY_OBJECTS: usize = 1000;
 
 fn pick_lowest_value_sacrifices(
     state: &GameState,
@@ -104,6 +111,10 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return Some(action);
+    }
+
     let session = AiSession::arc_from_game(state);
     choose_action_with_session(state, ai_player, config, rng, &session)
 }
@@ -187,6 +198,10 @@ pub fn choose_action_with_session(
         }
     }
 
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return Some(action);
+    }
+
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
@@ -205,6 +220,318 @@ pub fn choose_action_with_session(
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen
+}
+
+fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player {
+        return None;
+    }
+
+    if large_board_main_phase_has_no_development_sources(state, ai_player) {
+        return Some(GameAction::PassPriority);
+    }
+
+    let actions = engine::ai_support::flat_priority_actions(state);
+    low_value_priority_pass_from_actions(state, ai_player, &actions)
+        .or_else(|| large_board_main_phase_fast_action_from_actions(state, ai_player, &actions))
+}
+
+fn large_board_main_phase_has_no_development_sources(
+    state: &GameState,
+    ai_player: PlayerId,
+) -> bool {
+    if state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || state.active_player != ai_player
+        || !state.stack.is_empty()
+        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        return false;
+    }
+
+    let player = &state.players[ai_player.0 as usize];
+    if !player.hand.is_empty() || !player.graveyard.is_empty() {
+        return false;
+    }
+    if engine::game::planechase::can_roll_planar_die(state, ai_player) {
+        return false;
+    }
+
+    if state.exile.iter().any(|&object_id| {
+        state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.owner == ai_player || object.controller == ai_player)
+    }) {
+        return false;
+    }
+
+    let controlled_battlefield_is_inert = state.battlefield.iter().copied().all(|object_id| {
+        state.objects.get(&object_id).is_none_or(|object| {
+            object.controller != ai_player || object_has_no_development_source(object)
+        })
+    });
+    let controlled_command_zone_is_inert = state.command_zone.iter().copied().all(|object_id| {
+        state.objects.get(&object_id).is_none_or(|object| {
+            (object.owner != ai_player && object.controller != ai_player)
+                || object_has_no_development_source(object)
+        })
+    });
+
+    controlled_battlefield_is_inert && controlled_command_zone_is_inert
+}
+
+fn object_has_no_development_source(object: &engine::game::game_object::GameObject) -> bool {
+    object
+        .abilities
+        .iter()
+        .all(engine::game::mana_abilities::is_mana_ability)
+        && object.trigger_definitions.is_empty()
+        && object.replacement_definitions.is_empty()
+        && object.static_definitions.is_empty()
+        && object.prepared.is_none()
+        && object.room_unlocks.is_none()
+        && !object.keywords.iter().any(|keyword| {
+            matches!(
+                keyword,
+                engine::types::keywords::Keyword::Crew { .. }
+                    | engine::types::keywords::Keyword::Saddle(_)
+                    | engine::types::keywords::Keyword::Station
+            )
+        })
+}
+
+fn priority_action_is_safe_to_defer_on_own_stack(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => activated_ability_is_safe_to_defer(state, *source_id, *ability_index),
+        _ => false,
+    }
+}
+
+fn priority_action_is_safe_to_defer_empty_stack(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => empty_stack_activation_is_low_value(state, *source_id, *ability_index),
+        _ => false,
+    }
+}
+
+fn priority_action_is_pass_or_mana(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => activated_ability_definition(state, *source_id, *ability_index)
+            .is_some_and(engine::game::mana_abilities::is_mana_ability),
+        _ => false,
+    }
+}
+
+fn activated_ability_is_safe_to_defer(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    activated_ability_definition(state, source_id, ability_index)
+        .is_some_and(|ability| !ability_interacts_with_stack(ability))
+}
+
+fn empty_stack_activation_is_low_value(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    activated_ability_definition(state, source_id, ability_index).is_some_and(|ability| {
+        engine::game::mana_abilities::is_mana_ability(ability)
+            || ability_is_temporary_combat_modifier(ability)
+    })
+}
+
+fn activated_ability_definition(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<&AbilityDefinition> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|object| object.abilities.get(ability_index))
+}
+
+fn ability_interacts_with_stack(ability: &AbilityDefinition) -> bool {
+    effect_interacts_with_stack(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_interacts_with_stack)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_interacts_with_stack)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_interacts_with_stack)
+}
+
+fn effect_interacts_with_stack(effect: &Effect) -> bool {
+    matches!(effect, Effect::CounterAll { .. })
+        || effect
+            .target_filter()
+            .is_some_and(target_filter_interacts_with_stack)
+}
+
+fn target_filter_interacts_with_stack(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. }
+    ) || filter.extract_zones().contains(&Zone::Stack)
+}
+
+fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    ability_effect_is_temporary_combat_modifier(ability)
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_is_temporary_combat_modifier)
+}
+
+fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    match &*ability.effect {
+        Effect::Pump { .. } => matches!(ability.duration, Some(Duration::UntilEndOfTurn)),
+        effect => effect_is_temporary_combat_modifier(effect),
+    }
+}
+
+fn effect_is_temporary_combat_modifier(effect: &Effect) -> bool {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => static_abilities
+            .iter()
+            .all(static_definition_is_temporary_combat_modifier),
+        _ => false,
+    }
+}
+
+fn static_definition_is_temporary_combat_modifier(static_def: &StaticDefinition) -> bool {
+    matches!(static_def.mode, StaticMode::Continuous)
+        && static_def
+            .modifications
+            .iter()
+            .all(continuous_modification_is_temporary_combat_modifier)
+}
+
+fn continuous_modification_is_temporary_combat_modifier(
+    modification: &ContinuousModification,
+) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddKeyword { .. }
+    )
+}
+
+fn low_value_empty_stack_phase(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Upkeep | Phase::Draw | Phase::End | Phase::Cleanup
+    )
+}
+
+fn low_value_priority_pass_from_actions(
+    state: &GameState,
+    ai_player: PlayerId,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player
+        || !actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PassPriority))
+    {
+        return None;
+    }
+
+    let owns_entire_stack = !state.stack.is_empty()
+        && state
+            .stack
+            .iter()
+            .all(|entry| entry.controller == ai_player);
+    let own_stack_pass = owns_entire_stack
+        && actions
+            .iter()
+            .all(|action| priority_action_is_safe_to_defer_on_own_stack(state, action));
+    let empty_stack_pass = state.stack.is_empty()
+        && actions
+            .iter()
+            .all(|action| priority_action_is_safe_to_defer_empty_stack(state, action))
+        && (low_value_empty_stack_phase(state.phase)
+            || actions
+                .iter()
+                .all(|action| priority_action_is_pass_or_mana(state, action)));
+
+    if own_stack_pass || empty_stack_pass {
+        Some(GameAction::PassPriority)
+    } else {
+        None
+    }
+}
+
+fn large_board_main_phase_fast_action_from_actions(
+    state: &GameState,
+    ai_player: PlayerId,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player
+        || state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || state.active_player != ai_player
+        || !state.stack.is_empty()
+        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        return None;
+    }
+
+    if let Some(action) = prefer_land_drop(state, ai_player, actions) {
+        return Some(action);
+    }
+
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::CastSpell { object_id, .. } => {
+                Some((evaluate_card_value(state, *object_id), action.clone()))
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
+        .map(|(_, action)| action)
 }
 
 /// Emit a structured decision-trace event for the chosen tactical action.
@@ -1116,6 +1443,10 @@ pub fn score_candidates(
     ai_player: PlayerId,
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return vec![(action, 1.0)];
+    }
+
     let session = AiSession::arc_from_game(state);
     score_candidates_with_session(state, ai_player, config, &session)
 }
@@ -1126,6 +1457,10 @@ fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return vec![(action, 1.0)];
+    }
+
     let ctx = build_decision_context(state);
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
@@ -2218,9 +2553,13 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        CategoryChooserScope, EffectKind, TargetFilter, TargetRef, TypedFilter,
+        AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
+        Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::{StackEntry, StackEntryKind};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
@@ -2264,6 +2603,28 @@ mod tests {
         id
     }
 
+    fn add_spell_to_hand(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        generic_cost: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: Vec::new(),
+            generic: generic_cost,
+        };
+        id
+    }
+
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let p = &mut state.players[player.0 as usize];
         for _ in 0..count {
@@ -2277,6 +2638,41 @@ mod tests {
                 grants: vec![],
                 expiry: None,
             });
+        }
+    }
+
+    fn add_activated_ability(state: &mut GameState, source_id: ObjectId, effect: Effect) -> usize {
+        let object = state.objects.get_mut(&source_id).unwrap();
+        let abilities = Arc::make_mut(&mut object.abilities);
+        let index = abilities.len();
+        abilities.push(AbilityDefinition::new(AbilityKind::Activated, effect));
+        index
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
+    fn temporary_combat_modifier_effect() -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddKeyword {
+                    keyword: engine::types::keywords::Keyword::Haste,
+                },
+            ])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
         }
     }
 
@@ -2299,6 +2695,231 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(1);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         assert_eq!(action, Some(GameAction::PassPriority));
+    }
+
+    #[test]
+    fn low_value_priority_passes_over_board_activations_on_own_stack() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(&mut state, source_id, Effect::NoOp);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(0)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn low_value_priority_passes_empty_stack_upkeep_over_board_activations() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index =
+            add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn choose_action_passes_empty_stack_upkeep_before_search() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn score_candidates_passes_empty_stack_upkeep_before_search() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+
+        assert_eq!(
+            score_candidates(&state, PlayerId(0), &config),
+            vec![(GameAction::PassPriority, 1.0)]
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_spell_responses() {
+        let mut state = make_state();
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(0)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: ObjectId(20),
+                card_id: CardId(20),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_stack_interactive_activation() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(
+            &mut state,
+            source_id,
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+        );
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_permanent_progress_activation() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(
+            &mut state,
+            source_id,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("tower".to_string()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        );
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_opponent_stack() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(&mut state, source_id, Effect::NoOp);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn large_board_main_phase_fast_action_picks_best_cast_spell() {
+        let mut state = make_state();
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        let cheap = add_spell_to_hand(&mut state, PlayerId(0), "Cheap Spell", 1);
+        let expensive = add_spell_to_hand(&mut state, PlayerId(0), "Expensive Spell", 6);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: cheap,
+                card_id: CardId(cheap.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            GameAction::CastSpell {
+                object_id: expensive,
+                card_id: CardId(expensive.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::CastSpell {
+                object_id: expensive,
+                card_id: CardId(expensive.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+        );
+    }
+
+    #[test]
+    fn large_board_main_phase_fast_action_does_not_fire_off_turn() {
+        let mut state = make_state();
+        state.active_player = PlayerId(1);
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        let spell = add_spell_to_hand(&mut state, PlayerId(0), "Spell", 1);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
     }
 
     fn pending_cast_with_cost(

@@ -405,6 +405,63 @@ fn shintai_p1p1_counters(state: &GameState, id: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
+fn put_hidden_cruelty_go_shintai(state: &mut GameState) -> ObjectId {
+    let parsed = parse_oracle_text(
+        "Deathtouch\nAt the beginning of your end step, you may pay {1}. When you do, destroy target creature with toughness X or less, where X is the number of Shrines you control.",
+        "Go-Shintai of Hidden Cruelty",
+        &[],
+        &["Enchantment".to_string(), "Creature".to_string()],
+        &["Shrine".to_string(), "Spirit".to_string()],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "parser must produce the end-step trigger, got {parsed:?}"
+    );
+
+    let id = create_object(
+        state,
+        CardId(46630),
+        PlayerId(0),
+        "Go-Shintai of Hidden Cruelty".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Shrine".to_string());
+    obj.card_types.subtypes.push("Spirit".to_string());
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    for trigger in parsed.triggers {
+        obj.trigger_definitions.push(trigger);
+    }
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
+fn put_pt_creature(
+    state: &mut GameState,
+    card_id: u32,
+    controller: PlayerId,
+    name: &str,
+    power: i32,
+    toughness: i32,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(card_id.into()),
+        controller,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.power = Some(power);
+    obj.toughness = Some(toughness);
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
 /// Issue #1243 — class regression. "At the beginning of your end step, you
 /// may pay {1}. When you do, <effect>." parses into an end-step `Phase`
 /// trigger whose execute is an optional `PayCost` carrying a reflexive
@@ -494,6 +551,90 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         state.players[0].mana_pool.mana.len(),
         0,
         "the {{1}} must actually be paid on accept"
+    );
+}
+
+#[test]
+fn issue_4663_go_shintai_hidden_cruelty_optional_pay_target_list_uses_where_x() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::End;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    put_hidden_cruelty_go_shintai(&mut state);
+    let second_shrine = put_pt_creature(&mut state, 46631, PlayerId(0), "Second Shrine", 1, 1);
+    let second_shrine_obj = state.objects.get_mut(&second_shrine).unwrap();
+    second_shrine_obj
+        .card_types
+        .subtypes
+        .push("Shrine".to_string());
+    second_shrine_obj.base_card_types = second_shrine_obj.card_types.clone();
+    let low_toughness =
+        put_pt_creature(&mut state, 46632, PlayerId(1), "Legal Toughness Two", 1, 2);
+    let high_toughness = put_pt_creature(
+        &mut state,
+        46633,
+        PlayerId(1),
+        "Illegal Toughness Three",
+        1,
+        3,
+    );
+    state.players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Colorless,
+        ObjectId(46634),
+        false,
+        Vec::new(),
+    ));
+
+    let mut events = Vec::new();
+    crate::game::turns::auto_advance(&mut state, &mut events);
+
+    for _ in 0..20 {
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { player } => {
+                if state.stack.is_empty() {
+                    break;
+                }
+                apply(&mut state, player, GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::DecideOptionalEffect { accept: true },
+                )
+                .unwrap();
+            }
+            WaitingFor::TriggerTargetSelection { target_slots, .. }
+            | WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert!(
+                    target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Object(low_toughness)),
+                    "two Shrines should allow toughness-2 target: {:?}",
+                    target_slots[0].legal_targets
+                );
+                assert!(
+                    !target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Object(high_toughness)),
+                    "two Shrines should exclude toughness-3 target: {:?}",
+                    target_slots[0].legal_targets
+                );
+                return;
+            }
+            other => panic!("unexpected state while driving Hidden Cruelty trigger: {other:?}"),
+        }
+    }
+
+    panic!(
+        "never reached Hidden Cruelty reflexive target selection; final state = {:?}",
+        state.waiting_for
     );
 }
 

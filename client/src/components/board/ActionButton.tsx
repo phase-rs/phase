@@ -401,22 +401,29 @@ export function ActionButton() {
                 {t("actionButton.companionToHand")}
               </button>
             )}
-            <button
-              disabled={blocked}
-              onClick={() => dispatchAction({ type: "PassPriority" })}
-              aria-describedby={priorityTooltipId}
-              className={gameButtonClass({
-                tone: "emerald",
-                size: "md",
-                disabled: blocked,
-                className: `${primaryButtonClass} group relative`,
-              })}
-            >
-              {idle ? t("actionButton.waiting") : advanceLabel}
-              <GameplayTooltip id={priorityTooltipId}>
-                {t("actionButton.priorityTooltip")}
-              </GameplayTooltip>
-            </button>
+            {/* In idle (no priority), the "who/why" narration lives in
+                TurnStatusLine — rendering a disabled "Waiting" button here too
+                would duplicate it (and an empty/relabeled disabled control is
+                worse for screen readers). So show the actionable button only
+                when the local player actually has the priority window. */}
+            {!idle && (
+              <button
+                disabled={blocked}
+                onClick={() => dispatchAction({ type: "PassPriority" })}
+                aria-describedby={priorityTooltipId}
+                className={gameButtonClass({
+                  tone: "emerald",
+                  size: "md",
+                  disabled: blocked,
+                  className: `${primaryButtonClass} group relative`,
+                })}
+              >
+                {advanceLabel}
+                <GameplayTooltip id={priorityTooltipId}>
+                  {t("actionButton.priorityTooltip")}
+                </GameplayTooltip>
+              </button>
+            )}
             <button
               disabled={blocked}
               onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } })}

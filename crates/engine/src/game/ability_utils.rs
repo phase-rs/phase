@@ -1050,6 +1050,39 @@ pub fn has_legal_target_assignment_for_ability(
     has_legal_completion_with_specs(state, ability, &specs, target_slots, constraints, 0, &[])
 }
 
+pub fn simple_legal_target_assignment_exists_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    constraints: &[TargetSelectionConstraint],
+) -> Option<bool> {
+    if !constraints.is_empty() {
+        return None;
+    }
+
+    let specs = target_slot_specs(state, ability);
+    let [spec] = specs.as_slice() else {
+        return None;
+    };
+    if spec.optional {
+        return Some(true);
+    }
+    if target_filter_contains_chosen_x_ref(&spec.filter)
+        || relative_controller_kind(&spec.filter).is_some()
+        || target_filter_has_another_target_marker(&spec.filter)
+        || is_per_opponent_target_fanout(ability)
+        || matches!(ability.effect, Effect::PairWith { .. })
+        || damage_any_target_legal_targets(state, ability, &spec.filter).is_some()
+    {
+        return None;
+    }
+
+    Some(targeting::has_legal_target_for_ability(
+        state,
+        &spec.filter,
+        ability,
+    ))
+}
+
 /// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by
 /// uniformly choosing from each slot's legal-target set using the engine's
 /// seeded RNG (`state.rng`). The game (not the controller) makes the selection;
@@ -2399,10 +2432,17 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 /// `ChooseXValue` ahead of target selection.
 fn filter_prop_contains_chosen_x_ref(prop: &FilterProp) -> bool {
     match prop {
-        FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
-            value.contains_x()
-        }
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => value.contains_x(),
         FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_chosen_x_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_chosen_x_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_chosen_x_ref),
         FilterProp::Not { prop } => filter_prop_contains_chosen_x_ref(prop),
         _ => false,
     }
