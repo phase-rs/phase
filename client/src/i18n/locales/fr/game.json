@@ -1051,10 +1051,19 @@
       "subtitleManaValueUpTo_other": "Choisissez jusqu'à {{count}} cartes dans la limite de valeur de mana"
     },
     "searchPartition": {
-      "title": "Choisir des cartes pour le champ de bataille",
-      "subtitle_one": "Choisissez {{count}} carte à mettre sur le champ de bataille{{tapped}} ; le reste va dans votre main",
-      "subtitle_other": "Choisissez {{count}} cartes à mettre sur le champ de bataille{{tapped}} ; le reste va dans votre main",
-      "tapped": " engagée(s)"
+      "title": "Choisir des cartes",
+      "subtitle_one": "Choisissez {{count}} carte à mettre {{primary}}{{tapped}} ; le reste va {{rest}}",
+      "subtitle_other": "Choisissez {{count}} cartes à mettre {{primary}}{{tapped}} ; le reste va {{rest}}",
+      "tapped": " engagée(s)",
+      "zones": {
+        "Library": "dans votre bibliothèque",
+        "Hand": "dans votre main",
+        "Battlefield": "sur le champ de bataille",
+        "Graveyard": "dans votre cimetière",
+        "Stack": "sur la pile",
+        "Exile": "en exil",
+        "Command": "dans la zone de commandement"
+      }
     },
     "outsideGame": {
       "title": "Choisir depuis la réserve",

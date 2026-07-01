@@ -1051,10 +1051,19 @@
       "subtitleManaValueUpTo_other": "Scegli fino a {{count}} carte entro il limite di valore di mana"
     },
     "searchPartition": {
-      "title": "Scegli carte per il campo di battaglia",
-      "subtitle_one": "Scegli {{count}} carta da mettere sul campo di battaglia{{tapped}}; il resto va nella tua mano",
-      "subtitle_other": "Scegli {{count}} carte da mettere sul campo di battaglia{{tapped}}; il resto va nella tua mano",
-      "tapped": " TAPpate"
+      "title": "Scegli carte",
+      "subtitle_one": "Scegli {{count}} carta da mettere {{primary}}{{tapped}}; il resto va {{rest}}",
+      "subtitle_other": "Scegli {{count}} carte da mettere {{primary}}{{tapped}}; il resto va {{rest}}",
+      "tapped": " TAPpate",
+      "zones": {
+        "Library": "nella tua biblioteca",
+        "Hand": "nella tua mano",
+        "Battlefield": "sul campo di battaglia",
+        "Graveyard": "nel tuo cimitero",
+        "Stack": "sulla pila",
+        "Exile": "in esilio",
+        "Command": "nella zona di comando"
+      }
     },
     "outsideGame": {
       "title": "Scegli dalla sideboard",

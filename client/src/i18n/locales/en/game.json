@@ -1085,10 +1085,19 @@
       "subtitleManaValueUpTo_other": "Choose up to {{count}} cards within the mana value limit"
     },
     "searchPartition": {
-      "title": "Choose Cards for the Battlefield",
-      "subtitle_one": "Choose {{count}} card to put onto the battlefield{{tapped}}; the rest go to your hand",
-      "subtitle_other": "Choose {{count}} cards to put onto the battlefield{{tapped}}; the rest go to your hand",
-      "tapped": " tapped"
+      "title": "Choose Cards",
+      "subtitle_one": "Choose {{count}} card to put into {{primary}}{{tapped}}; the rest go to {{rest}}",
+      "subtitle_other": "Choose {{count}} cards to put into {{primary}}{{tapped}}; the rest go to {{rest}}",
+      "tapped": " tapped",
+      "zones": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "outsideGame": {
       "title": "Choose From Sideboard",

@@ -1051,10 +1051,19 @@
       "subtitleManaValueUpTo_other": "Wähle bis zu {{count}} Karten innerhalb des Manawert-Limits"
     },
     "searchPartition": {
-      "title": "Karten für das Schlachtfeld wählen",
-      "subtitle_one": "Wähle {{count}} Karte, um sie{{tapped}} auf das Schlachtfeld zu legen; der Rest geht auf deine Hand",
-      "subtitle_other": "Wähle {{count}} Karten, um sie{{tapped}} auf das Schlachtfeld zu legen; der Rest geht auf deine Hand",
-      "tapped": " getappt"
+      "title": "Karten wählen",
+      "subtitle_one": "Wähle {{count}} Karte, um sie{{tapped}} {{primary}} zu legen; der Rest geht {{rest}}",
+      "subtitle_other": "Wähle {{count}} Karten, um sie{{tapped}} {{primary}} zu legen; der Rest geht {{rest}}",
+      "tapped": " getappt",
+      "zones": {
+        "Library": "in deine Bibliothek",
+        "Hand": "auf deine Hand",
+        "Battlefield": "auf das Schlachtfeld",
+        "Graveyard": "in deinen Friedhof",
+        "Stack": "auf den Stapel",
+        "Exile": "ins Exil",
+        "Command": "in die Kommandozone"
+      }
     },
     "outsideGame": {
       "title": "Aus dem Sideboard wählen",

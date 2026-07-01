@@ -1051,10 +1051,19 @@
       "subtitleManaValueUpTo_other": "Escolha até {{count}} cartas dentro do limite de valor de mana"
     },
     "searchPartition": {
-      "title": "Escolher Cartas para o Campo de Batalha",
-      "subtitle_one": "Escolha {{count}} carta para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "subtitle_other": "Escolha {{count}} cartas para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "tapped": " viradas"
+      "title": "Escolher Cartas",
+      "subtitle_one": "Escolha {{count}} carta para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "subtitle_other": "Escolha {{count}} cartas para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "tapped": " viradas",
+      "zones": {
+        "Library": "na sua biblioteca",
+        "Hand": "na sua mão",
+        "Battlefield": "no campo de batalha",
+        "Graveyard": "no seu cemitério",
+        "Stack": "na pilha",
+        "Exile": "no exílio",
+        "Command": "na zona de comando"
+      }
     },
     "outsideGame": {
       "title": "Escolher do Sideboard",

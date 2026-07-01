@@ -1051,10 +1051,19 @@
       "subtitleManaValueUpTo_other": "Wybierz do {{count}} kart w granicach limitu wartości many"
     },
     "searchPartition": {
-      "title": "Wybierz karty na pole bitwy",
-      "subtitle_one": "Wybierz {{count}} kartę, aby położyć na pole bitwy{{tapped}}; reszta trafia do twojej ręki",
-      "subtitle_other": "Wybierz {{count}} kart, aby położyć na pole bitwy{{tapped}}; reszta trafia do twojej ręki",
-      "tapped": " obrócone"
+      "title": "Wybierz karty",
+      "subtitle_one": "Wybierz {{count}} kartę, która trafi {{primary}}{{tapped}}; reszta trafia {{rest}}",
+      "subtitle_other": "Wybierz {{count}} kart, które trafią {{primary}}{{tapped}}; reszta trafia {{rest}}",
+      "tapped": " obrócone",
+      "zones": {
+        "Library": "do twojej biblioteki",
+        "Hand": "do twojej ręki",
+        "Battlefield": "na pole bitwy",
+        "Graveyard": "na twój cmentarz",
+        "Stack": "na stos",
+        "Exile": "na wygnanie",
+        "Command": "do strefy dowodzenia"
+      }
     },
     "outsideGame": {
       "title": "Wybierz z sideboardu",
