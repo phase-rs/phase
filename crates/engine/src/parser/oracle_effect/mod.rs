@@ -21490,7 +21490,7 @@ pub(crate) fn parse_effect_chain_ir(
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
         {
-            strip_property_conditional(&text)
+            strip_property_conditional(&text, ctx)
         } else {
             (None, text)
         };
