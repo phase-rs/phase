@@ -2355,14 +2355,43 @@ fn parse_optional_offer_accepted_clause(
     Ok((input, (relation, PlayerActionKind::AcceptedOptionalEffect)))
 }
 
+/// CR 702.62b: A suspended card is a card in the exile zone that has suspend and
+/// has a time counter on it. This building block composes those observable axes
+/// (`InZone{Exile}` + `HasKeywordKind{Suspend}` + `Counters{Time ≥ 1}`) with an
+/// optional ownership qualifier into a typed card filter — the canonical filter for
+/// both the `for each suspended card you own` count clause (`parse_suspended_card_clause`)
+/// and the "choose a suspended card you own" interactive selection (Amy Pond's
+/// combat-damage trigger). When `owner` is `None` the filter covers any player's
+/// suspended cards (no ownership restriction). Never a one-off `Suspended` tag or a
+/// verbatim string match.
+pub(crate) fn suspended_card_filter(owner: Option<ControllerRef>) -> TargetFilter {
+    use crate::types::counter::{CounterMatch, CounterType};
+    let mut properties = vec![
+        // CR 400.1: in the exile zone.
+        FilterProp::InZone { zone: Zone::Exile },
+        // CR 702.62b: has suspend.
+        FilterProp::HasKeywordKind {
+            value: KeywordKind::Suspend,
+        },
+        // CR 702.62b: bears at least one time counter.
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Time),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+    ];
+    if let Some(o) = owner {
+        // CR 108.3: owned by the given player reference.
+        properties.push(FilterProp::Owned { controller: o });
+    }
+    TargetFilter::Typed(TypedFilter::card().properties(properties))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 /// CR 702.62b: A suspended card is a card in the exile zone with the suspend
 /// keyword and a time counter on it. Counting clauses (`for each suspended card
-/// you own`) compose those observable axes with the ownership qualifier.
-///
-/// Composes existing `FilterProp`s (`InZone`/`HasKeywordKind`/`Owned`/`Counters`)
-/// into a typed card filter — never a one-off `Suspended` tag or a verbatim
-/// string match.
+/// you own`) compose those observable axes with the ownership qualifier via the
+/// shared `suspended_card_filter` building block.
 fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("suspended ")
         .parse(clause)
@@ -2382,26 +2411,8 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
         return None;
     }
 
-    use crate::types::counter::{CounterMatch, CounterType};
     Some(QuantityRef::ObjectCount {
-        filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-            // CR 400.1: in the exile zone.
-            FilterProp::InZone { zone: Zone::Exile },
-            // CR 702.62b: has suspend.
-            FilterProp::HasKeywordKind {
-                value: KeywordKind::Suspend,
-            },
-            // CR 108.3: owned by the ability's controller.
-            FilterProp::Owned {
-                controller: ControllerRef::You,
-            },
-            // CR 702.62b: bears at least one time counter.
-            FilterProp::Counters {
-                counters: CounterMatch::OfType(CounterType::Time),
-                comparator: Comparator::GE,
-                count: QuantityExpr::Fixed { value: 1 },
-            },
-        ])),
+        filter: suspended_card_filter(Some(ControllerRef::You)),
     })
 }
 
@@ -6821,6 +6832,63 @@ mod tests {
             }),
             "must require at least one time counter (CR 702.62b)"
         );
+    }
+
+    // CR 702.62b: the shared `suspended_card_filter` building block is owner-
+    // parameterized — `Some(You)` for "a suspended card you own" (Amy Pond),
+    // `Some(Opponent)` for other ownership scopes, and `None` for "any player's
+    // suspended card" (no ownership restriction).
+    #[test]
+    fn suspended_card_filter_is_owner_parameterized() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        for owner in [
+            Some(ControllerRef::You),
+            Some(ControllerRef::Opponent),
+            None,
+        ] {
+            let TargetFilter::Typed(tf) = suspended_card_filter(owner.clone()) else {
+                panic!("expected a Typed filter for owner {owner:?}");
+            };
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }),
+                "owner {owner:?}: must require exile zone"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::HasKeywordKind {
+                    value: KeywordKind::Suspend,
+                }),
+                "owner {owner:?}: must require Suspend keyword"
+            );
+            // Check the counter requirement BEFORE the ownership match so that
+            // `owner` is not moved before this final assert.
+            assert!(
+                tf.properties.contains(&FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Time),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
+                "owner {owner:?}: must require at least one time counter (CR 702.62b)"
+            );
+            // Ownership check: `if let` moves `owner`, so it must come last.
+            // Clone `o` into the `contains` argument so the format string can
+            // still borrow it for the failure message.
+            if let Some(o) = owner {
+                assert!(
+                    tf.properties.contains(&FilterProp::Owned {
+                        controller: o.clone()
+                    }),
+                    "owner {o:?}: must require ownership by that player"
+                );
+            } else {
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Owned { .. })),
+                    "owner None: must NOT restrict by ownership"
+                );
+            }
+        }
     }
 
     // Rose Tyler's compound: "suspended card you own and each other permanent you

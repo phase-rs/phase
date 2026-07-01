@@ -877,6 +877,43 @@ mod tests {
         );
     }
 
+    /// MP COMMANDER SAFETY (the load-bearing firewall): a 4-player table with a single
+    /// faller (P1 drains, P0 gains) while P2 and P3 sit STATIC must NOT name a winner.
+    /// This is the partial-net-progress drain — only one opponent is draining, the other
+    /// two are untouched and alive — so a forced single-loser outcome is NOT determinate
+    /// (CR 104.2a is unambiguous only at two living players). The `living.len() != 2`
+    /// early-return is what holds the line; commander infinites that drain just one pod
+    /// member must not hand the game to P0 while the rest of the table is alive.
+    ///
+    /// REVERT-FAIL: delete the `living.len() != 2` gate in `live_mandatory_loop_winner`
+    /// WITHOUT adding an all-opponents-fall predicate ⇒ the single-faller path names
+    /// `Some(P0)` while P2/P3 live ⇒ this assertion flips. (Strengthens the 3-player
+    /// `live_winner_three_player_is_none` to the 4-player commander count.)
+    #[test]
+    fn mp_partial_net_progress_drain_no_premature_gameover() {
+        let mut end = GameState::new_two_player(7);
+        for seat in 2..=3u8 {
+            let mut p = end.players[1].clone();
+            p.id = pid(seat);
+            end.players.push(p);
+        }
+        assert_eq!(
+            end.players.iter().filter(|p| !p.is_eliminated).count(),
+            4,
+            "fixture sanity: four living players"
+        );
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1); // ONLY P1 drains
+        delta.life.insert(pid(0), 1); // P0 gains (the would-be winner)
+                                      // P2 and P3 carry no delta entry ⇒ static (map_delta drops zero-delta keys).
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a 4-player single-faller must not shortcut to a winner while P2/P3 are alive"
+        );
+    }
+
     /// U7 SOUNDNESS (CR 704.5c): opponent life ↓ AND a poison gain is a SECOND
     /// (unattributable) loss path ⇒ None. Revert: dropping `any_poison_gain`
     /// wrongly yields `Some(P0)`.

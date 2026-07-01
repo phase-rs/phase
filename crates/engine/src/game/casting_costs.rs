@@ -2297,6 +2297,17 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.170b: plot is a special action that never uses the stack — it is
+    // intercepted in `handle_activate_ability` before any stack push. No current
+    // plot cost can pause (mana auto-pays, the self-exile auto-moves), so this
+    // cost-pause resume path is unreachable for plot. If a future plot variant
+    // carries a pausing sub-cost it would reach here — relocate the special-action
+    // guard to this chokepoint then.
+    debug_assert!(
+        !super::casting::effect_is_plot_grant(&resolved.effect),
+        "plot special action reached the cost-pause resume path; relocate the CR 702.170b intercept to this chokepoint"
+    );
+
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
@@ -2689,6 +2700,8 @@ fn push_ability_entry(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: Classify loyalty vs. normal from the source ability cost.
+        kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
@@ -6331,6 +6344,7 @@ fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
         ))
@@ -8401,11 +8415,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
         StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
@@ -8524,6 +8539,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
                         },
                     ))
@@ -10898,6 +10914,103 @@ mod tests {
         assert_eq!(chosen_x, Some(2));
         assert_eq!(state.objects[&squirrel_a].zone, Zone::Graveyard);
         assert_eq!(state.objects[&squirrel_b].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn remove_counter_cost_count_feeds_that_many_token_count() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 3);
+        }
+
+        let token_effect = Effect::Token {
+            name: "Insect".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Insect".to_string()],
+            colors: vec![ManaColor::Green],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            token_effect.clone(),
+        )]);
+
+        let mut pending = make_pending(source);
+        pending.ability = ResolvedAbility::new(token_effect, Vec::new(), source, PlayerId(0));
+        pending.ability.set_chosen_x_recursive(2);
+        let legal = vec![source];
+        let chosen = vec![source];
+        let mut events = Vec::new();
+
+        handle_remove_counter_for_cost(
+            &mut state,
+            PlayerId(0),
+            pending,
+            2,
+            CounterMatch::OfType(CounterType::Plus1Plus1),
+            CounterCostSelection::SingleObject,
+            &legal,
+            &chosen,
+            &mut events,
+        )
+        .expect("remove-counter activation cost should be paid");
+
+        let Some(stack_entry) = state.stack.back() else {
+            panic!("activated ability should be pushed to the stack");
+        };
+        let chosen_x = match &stack_entry.kind {
+            StackEntryKind::ActivatedAbility { ability, .. } => ability.chosen_x,
+            other => panic!("expected activated ability on stack, got {other:?}"),
+        };
+        assert_eq!(chosen_x, Some(2));
+
+        super::stack::resolve_top(&mut state, &mut events);
+
+        let insects = state
+            .objects
+            .values()
+            .filter(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.name == "Insect"
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Insect")
+            })
+            .count();
+        assert_eq!(
+            insects, 2,
+            "that many must resolve to counters removed as a cost"
+        );
+        assert_eq!(
+            state.objects[&source]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
     }
 
     #[test]

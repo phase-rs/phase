@@ -169,6 +169,11 @@ pub(crate) fn apply_zone_exit_cleanup(
                 chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
+                // CR 110.5 + CR 110.5d: Capture tap status AT zone exit. Once the
+                // object leaves the battlefield it is neither tapped nor untapped,
+                // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
+                // this captured value instead of the live (now-absent) object.
+                tapped: obj.tapped,
             };
             state.lki_cache.insert(object_id, lki);
         }
@@ -669,11 +674,21 @@ pub fn move_to_zone(
         state.trigger_index.remove(object_id);
     }
 
+    // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
+    // stamps battlefield entries only, so only draw a timestamp on a battlefield
+    // entry — a graveyard/exile/hand/library move must not burn one. Computed
+    // before the `get_mut` borrow because `next_timestamp` takes `&mut self` over
+    // the whole GameState.
+    let entry_timestamp = (to == Zone::Battlefield).then(|| state.next_timestamp());
+
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
     if to == Zone::Battlefield {
-        obj_mut.reset_for_battlefield_entry(state.turn_number);
+        obj_mut.reset_for_battlefield_entry(
+            state.turn_number,
+            entry_timestamp.expect("battlefield entry draws a timestamp"),
+        );
         // CR 400.7: capture the entrant's incarnation AFTER the battlefield-entry
         // bump so a later leave + re-entry (same ObjectId, higher incarnation) is
         // distinguishable from the original entrant when an ETB intervening-if is

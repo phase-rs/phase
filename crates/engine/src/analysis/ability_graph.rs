@@ -921,6 +921,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExileResolvingSpellInsteadOfGraveyard
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
@@ -945,6 +946,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -1126,6 +1128,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(..)
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::Explored
@@ -2684,6 +2687,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
         }
     }

@@ -73,6 +73,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -91,6 +92,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -163,6 +165,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -273,6 +276,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -291,6 +295,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -374,6 +379,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -1717,6 +1723,23 @@ fn filter_inner_for_object(
         TargetFilter::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
             .is_some_and(|snapshot| snapshot.object_id == object_id),
+        // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
+        // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
+        // live each layer pass against `source_id` (the permanent that HAS the
+        // granting static — Koh), not the resolving `ability`, so the static grant
+        // resolves it. The `obj.zone == Zone::Exile` guard is the invalidation:
+        // a chosen card that leaves exile becomes a new object (CR 400.7) with a
+        // fresh id, so the stored id stops matching an exiled object and the grant
+        // drops. Re-choosing replaces the stored `Card` (RememberCard is
+        // replace-on-rechoose), so this always reflects the single latest choice.
+        TargetFilter::ChosenCard => {
+            obj.zone == Zone::Exile
+                && state.objects.get(&source_id).is_some_and(|src| {
+                    src.chosen_attributes
+                        .iter()
+                        .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == object_id))
+                })
+        }
         // CR 603.7: Match objects in a tracked set from the originating effect.
         TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
@@ -1824,7 +1847,8 @@ fn filter_inner_for_object(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageTarget => false,
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => false,
         // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
         // the comparison must mirror the spell-cast prohibition path
@@ -2086,6 +2110,7 @@ fn zone_change_filter_inner(
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -2102,6 +2127,7 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -2334,6 +2360,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -2351,6 +2378,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -2577,6 +2605,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -2594,6 +2623,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -2871,6 +2901,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -3258,6 +3289,13 @@ fn matches_filter_prop(
             .objects
             .get(&source.id)
             .is_some_and(|src| src.saddled_by.contains(&object_id)),
+        // CR 702.51c: a creature tapped to pay the source spell's convoke cost
+        // (recorded in the source's `convoked_creatures`). Source-relative,
+        // mirroring `SaddledSource`.
+        FilterProp::ConvokedSource => state
+            .objects
+            .get(&source.id)
+            .is_some_and(|src| src.convoked_creatures.contains(&object_id)),
         // CR 310.8a: "each battle they protect" — protector is an opponent of
         // the source controller (Joyful Stormsculptor class).
         FilterProp::ProtectorMatches { controller } => {
@@ -4204,9 +4242,10 @@ fn zone_change_record_matches_property(
             .get(&record.object_id)
             .is_some_and(|obj| obj.paired_with.is_none()),
 
-        // These predicates query live battlefield state (tap status, attachment,
-        // current counters, face-down). The snapshot has already left its public
-        // zone, so the predicate is semantically not applicable.
+        // CR 608.2h: predicates whose state IS captured into the exit-time LKI
+        // snapshot (counters, tap status) are answered from `lki_cache`, keyed by
+        // the record's object id. Predicates that are NOT snapshotted (attachment,
+        // face-down, etc.) fall through to the fail-closed group below.
         FilterProp::Counters {
             counters,
             comparator,
@@ -4230,11 +4269,29 @@ fn zone_change_record_matches_property(
             .damage_dealt_this_turn
             .iter()
             .any(|r| matches!(r.target, TargetRef::Object(id) if id == record.object_id)),
-        FilterProp::Tapped
-        | FilterProp::IsSaddled
+        // CR 110.5 + CR 110.5d + CR 608.2h: tap status is battlefield-only — once
+        // the object has left its public zone it is neither tapped nor untapped, so
+        // the live object can't answer a look-back "was tapped" rider (Brackish
+        // Blunder, evaluated after the bounce/exile). Read the exit-time tap state
+        // captured into the LKI snapshot at zone exit (zones.rs), keyed by the
+        // record's object id — mirrors the `Counters` arm's `lki_cache` lookup.
+        FilterProp::Tapped => state
+            .lki_cache
+            .get(&record.object_id)
+            .is_some_and(|lki| lki.tapped),
+        // CR 110.5 + CR 110.5d: symmetric sibling of `Tapped`. A look-back
+        // "was untapped" rider reads the exit-time tap state from the LKI
+        // snapshot and asserts it was NOT tapped. Fail-closed (no snapshot ⇒
+        // false) mirrors the `Tapped` arm: a card not on the battlefield is
+        // neither tapped nor untapped, so absence of a snapshot answers neither.
+        FilterProp::Untapped => state
+            .lki_cache
+            .get(&record.object_id)
+            .is_some_and(|lki| !lki.tapped),
+        FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
-        | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
@@ -5275,6 +5332,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![],
                 counters: Default::default(),
+                tapped: false,
             },
         );
 
@@ -8659,6 +8717,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: Default::default(),
+            tapped: false,
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -8701,6 +8760,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: Default::default(),
+            tapped: false,
         };
         let filter =
             TargetFilter::Typed(
@@ -8797,6 +8857,110 @@ mod tests {
             &FilterProp::Historic,
             &state,
             &vanilla_record,
+            &source_ctx,
+        ));
+    }
+
+    /// CR 110.5 + CR 110.5d + CR 400.7: the tap-status LKI-lookback arms of
+    /// `zone_change_record_matches_property` read exit-time tap state from the
+    /// snapshot. `Tapped` matches iff the snapshot recorded a tapped exit;
+    /// `Untapped` is the symmetric sibling, matching iff it recorded an untapped
+    /// exit. Both fail closed when no snapshot exists (a card off the battlefield
+    /// is neither tapped nor untapped, so absence answers neither — CR 110.5d).
+    ///
+    /// Revert-probe: returning `FilterProp::Untapped` to the fail-closed bucket
+    /// (its state on PR #4559 head 428481a) makes the `Untapped`/`untapped_record`
+    /// assertion fail — it returns false despite the snapshot recording an
+    /// untapped exit. This is the exact sibling gap the maintainer flagged.
+    #[test]
+    fn zone_change_record_tap_status_reads_lki_snapshot() {
+        use crate::types::game_state::{LKISnapshot, ZoneChangeRecord};
+
+        let mut state = GameState::default();
+        let source_ctx = SourceContext {
+            id: ObjectId(1),
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+
+        let lki = |tapped: bool| LKISnapshot {
+            name: "Tap Probe".to_string(),
+            power: None,
+            toughness: None,
+            base_power: None,
+            base_toughness: None,
+            mana_value: 0,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: vec![],
+            counters: Default::default(),
+            tapped,
+        };
+
+        // Left the battlefield TAPPED.
+        let tapped_id = ObjectId(60);
+        let tapped_record =
+            ZoneChangeRecord::test_minimal(tapped_id, Some(Zone::Battlefield), Zone::Hand);
+        state.lki_cache.insert(tapped_id, lki(true));
+
+        // Left the battlefield UNTAPPED.
+        let untapped_id = ObjectId(61);
+        let untapped_record =
+            ZoneChangeRecord::test_minimal(untapped_id, Some(Zone::Battlefield), Zone::Hand);
+        state.lki_cache.insert(untapped_id, lki(false));
+
+        // `Tapped`: matches the tapped exit, not the untapped exit.
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Tapped,
+            &state,
+            &tapped_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Tapped,
+            &state,
+            &untapped_record,
+            &source_ctx,
+        ));
+
+        // `Untapped` (new sibling): matches the untapped exit, not the tapped exit.
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Untapped,
+            &state,
+            &untapped_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Untapped,
+            &state,
+            &tapped_record,
+            &source_ctx,
+        ));
+
+        // Fail-closed symmetry: no snapshot ⇒ neither predicate matches.
+        let no_lki_record =
+            ZoneChangeRecord::test_minimal(ObjectId(62), Some(Zone::Battlefield), Zone::Hand);
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Tapped,
+            &state,
+            &no_lki_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Untapped,
+            &state,
+            &no_lki_record,
             &source_ctx,
         ));
     }
@@ -9594,6 +9758,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -9611,6 +9776,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         };
 
         let filter =
@@ -9753,6 +9919,7 @@ mod tests {
                 colors: vec![],
                 counters: Default::default(),
                 chosen_attributes: vec![],
+                tapped: false,
             },
         );
 
@@ -9820,6 +9987,7 @@ mod tests {
                 colors: vec![],
                 counters: Default::default(),
                 chosen_attributes: vec![],
+                tapped: false,
             },
         );
 

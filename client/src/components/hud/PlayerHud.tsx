@@ -12,7 +12,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
@@ -130,6 +130,11 @@ export function PlayerHud() {
                 condition={condition}
               />
             ))}
+            {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map(
+              (family) => (
+                <UnboundedBadge key={family} family={family} />
+              ),
+            )}
           </>
         }
       >

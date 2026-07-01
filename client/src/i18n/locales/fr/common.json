@@ -28,6 +28,12 @@
     "updateIssue": "problème de mise à jour",
     "updated": "à jour"
   },
+  "comboDetector": {
+    "label": "Détecteur de combos",
+    "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
+    "on": "Activé",
+    "off": "Désactivé"
+  },
   "gameMenu": {
     "menu": "Menu de la partie",
     "sandboxTools": "Outils bac à sable",

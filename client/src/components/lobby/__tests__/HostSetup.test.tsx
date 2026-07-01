@@ -118,6 +118,7 @@ describe("HostSetup", () => {
         formatConfig: FORMAT_DEFAULTS.TwoHeadedGiant,
         playerCount: 4,
         matchType: "Bo1",
+        loopDetection: { type: "Off" },
         isPublic: true,
         startWhenFull: true,
         ranked: false,

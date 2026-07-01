@@ -90,6 +90,36 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 305.2: static land-play permissions with an explicit additional-drop
+/// count greater than the ordinary +1 grant. `u8::MAX` represents "any
+/// number"; runtime summing saturates so it stays effectively unbounded when
+/// combined with ordinary extra drops.
+fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> {
+    all_consuming(terminated(
+        preceded(
+            (opt(tag("you may ")), tag("play ")),
+            alt((
+                value(u8::MAX, tag("any number of lands")),
+                value(2, tag("two additional lands")),
+            )),
+        ),
+        (
+            opt((
+                space1,
+                alt((
+                    tag("on each of your turns"),
+                    tag("on each of their turns"),
+                    tag("during each of your turns"),
+                    tag("during each of their turns"),
+                )),
+            )),
+            opt(tag(".")),
+            space0,
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 502.3: Trailing "during their untap step(s)" clause of the
 /// max-untap restriction (Smoke / Damping Field / Winter Orb class). The
 /// canonical printing uses the plural possessive "their untap steps", but the
@@ -669,6 +699,25 @@ pub(crate) fn parse_static_line_inner(
                     .description(text.to_string()),
             );
         }
+    }
+
+    // CR 702.170f: "You may plot [filter] cards from the top of your library."
+    // Plot-from-library permission (Fblthp, Lost on the Range). Dispatched
+    // BEFORE the cast-permission arm so plot lines are claimed by the plot
+    // parser. The cast arm anchors on "you may play"/"you may cast" while this
+    // anchors on "you may plot", so there is no real collision — ordering
+    // documents intent and guards against future drift. Plot is a CR 702.170
+    // special action (Library → Exile, later Exile → Stack), categorically
+    // distinct from the cast permission's CR 601.2a Library → Stack cast.
+    if let Some(result) = try_parse_top_of_library_plot_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 702.170f + CR 702.170a: "The top card of your library has plot[. The
+    // plot cost is equal to its mana cost]." Mechanic-establishing plot grant
+    // for the top library card (Fblthp). Also claimed ahead of the cast arm.
+    if let Some(result) = try_parse_top_of_library_has_plot(&text, &lower) {
+        return Some(result);
     }
 
     // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
@@ -1978,6 +2027,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "If an opponent/a player would search a library, that player searches the top N cards ... instead" ---
+    // CR 701.23f + CR 614.1a: Aven Mindcensor class. Replaces a SEARCHER-scoped
+    // library search with a top-N search. `who` scopes which searcher is
+    // restricted; `count` is the visible portion. Runtime enforcement is in
+    // game/effects/search_library.rs::library_search_top_limit.
+    if let Some(def) = parse_restrict_search_to_top(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
     // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
     // where `cause` identifies whose triggered abilities are muzzled and `affected`
@@ -2734,17 +2792,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "play an additional land" / "play two additional lands" ---
-    // CR 305.2: Determine the count at parse time and carry it as typed data.
-    if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
+    // --- "play any number of lands" / counted additional land-drop grants ---
+    // The ordinary +1 phrase ("play an additional land") is handled by the
+    // rule-static subject/predicate shell so embedded subjects such as
+    // "Each player who last chose green anchor ..." keep their affected filter.
+    if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "play an additional land") {
-        return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }

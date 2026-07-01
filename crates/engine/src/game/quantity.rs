@@ -459,6 +459,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -510,6 +511,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         }
         StaticCondition::Not { condition } => static_condition_uses_unspent_mana(condition),
         StaticCondition::DevotionGE { .. }
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::IsPresent { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
@@ -2293,6 +2295,11 @@ fn resolve_ref(
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
+            // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
+            // trigger/effect context, it may refer to the variable count chosen
+            // for the spell or activated ability's cost (for example, "Remove
+            // any number of counters: Create that many tokens.").
+            .or_else(|| chosen_x.map(u32_to_i32_saturating))
             // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
             // if it had one or more <X> counters on it, put that many <X> counters
             // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
@@ -4578,6 +4585,15 @@ pub(crate) fn resolve_player_count(
                                 )
                         }
                         PlayerFilter::All => true,
+                        // CR 608.2c + CR 109.4: all players except the anchor's
+                        // set (count context). Uses the generic predicate
+                        // authority; ability-target anchors are resolved by the
+                        // player_scope driver, not by this count helper.
+                        PlayerFilter::AllExcept { exclude } => {
+                            !crate::game::effects::matches_player_scope(
+                                state, p.id, exclude, controller, source_id,
+                            )
+                        }
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
                                 .players
@@ -4621,6 +4637,20 @@ pub(crate) fn resolve_player_count(
                                 triggering.is_none_or(|pid| pid != p.id)
                             }
                         }
+                        // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the
+                        // triggering (casting) player — count mirrors the
+                        // recipient set in `matches_player_scope`, including CR
+                        // 102.3 team-opponent handling via `players::is_opponent`.
+                        // Fail closed when no trigger event is in scope.
+                        PlayerFilter::OpponentOfTriggeringPlayer => state
+                            .current_trigger_event
+                            .as_ref()
+                            .and_then(|e| {
+                                crate::game::targeting::extract_player_from_event(e, state)
+                            })
+                            .is_some_and(|caster| {
+                                crate::game::players::is_opponent(state, caster, p.id)
+                            }),
                         // CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the
                         // triggering/attacking player who is NOT in that player's
                         // attacked-this-combat set (Suppressor Skyguard: "that
@@ -5017,6 +5047,7 @@ mod tests {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -10690,6 +10721,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         state.current_trigger_event =
@@ -10750,6 +10782,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let power = resolve_quantity_with_targets(
@@ -10895,6 +10928,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -10958,6 +10992,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         assert!(
@@ -11019,6 +11054,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11077,6 +11113,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11128,6 +11165,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11190,6 +11228,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11229,6 +11268,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -11847,6 +11887,7 @@ mod tests {
                     colors: vec![],
                     counters: Default::default(),
                     chosen_attributes: vec![],
+                    tapped: false,
                 },
             );
             state.exile_links.push(ExileLink {

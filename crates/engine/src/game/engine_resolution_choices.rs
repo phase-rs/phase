@@ -319,6 +319,7 @@ fn apply_search_partition(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             primary_targets,
@@ -2239,7 +2240,28 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
+            // CR 608.2: Restore the paused resolution's trigger context (captured
+            // at the `ChooseFromZone` raise) so an `EventContextAmount` ("that
+            // many") sub_ability reads the triggering event's amount — Amy Pond:
+            // "choose a suspended card you own and remove that many time counters
+            // from it". Save/restore (not a bare clear) keeps this re-entrant: a
+            // nested `ChooseFromZone` in the drained continuation re-captures, and
+            // the `prev` values are restored after the inner drain, leaving no
+            // stale leak past the action boundary. Mirrors
+            // `WaitingFor::ChooseObjectsSelection` and the
+            // `pending_optional_trigger_event` round-trip.
+            let prev_trigger_event = state.current_trigger_event.clone();
+            let prev_trigger_match_count = state.current_trigger_match_count;
+            let prev_die_result = state.die_result_this_resolution;
+            if let Some(ctx) = state.pending_choose_zone_trigger_context.take() {
+                state.current_trigger_event = ctx.event;
+                state.current_trigger_match_count = ctx.match_count;
+                state.die_result_this_resolution = ctx.die_result;
+            }
             effects::drain_pending_continuation(state, events);
+            state.current_trigger_event = prev_trigger_event;
+            state.current_trigger_match_count = prev_trigger_match_count;
+            state.die_result_this_resolution = prev_die_result;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2640,12 +2662,24 @@ pub(super) fn handle_resolution_choice(
                 owner_library: _,
                 track_exiled_by_source,
                 face_down_profile,
+                enter_with_counters,
+                conditional_enter_with_counters,
                 count_param,
                 library_position,
                 is_cost_payment,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            let legacy_optional_attach_empty = chosen.is_empty()
+                && matches!(effect_kind, EffectKind::Attach)
+                && !up_to
+                && min_count == 1
+                && count == 1
+                && state.pending_continuation.as_ref().is_some_and(|cont| {
+                    cont.chain.targeting_is_optional()
+                        && matches!(&cont.chain.effect, Effect::Attach { .. })
+                });
+
             if up_to {
                 if chosen.len() < min_count {
                     return Err(EngineError::InvalidAction(format!(
@@ -2661,7 +2695,7 @@ pub(super) fn handle_resolution_choice(
                         chosen.len()
                     )));
                 }
-            } else if chosen.len() != count {
+            } else if !legacy_optional_attach_empty && chosen.len() != count {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select exactly {} card(s), got {}",
                     count,
@@ -2722,6 +2756,16 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            if chosen.is_empty() && matches!(effect_kind, EffectKind::Attach) {
+                state.pending_continuation.take();
+                state.last_effect_count = Some(0);
+                set_priority(state, player);
+                resume_with_error_propagation(state, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             if chosen.is_empty() {
                 // Issue #423 audit: no cards chosen — this branch moves no
                 // objects and emits no battlefield-exit events, so no
@@ -2770,29 +2814,38 @@ pub(super) fn handle_resolution_choice(
                             "EffectZoneChoice missing destination for zone move".to_string(),
                         )
                     })?;
-                    let ctx = effects::change_zone::ChangeZoneIterationCtx {
-                        source_id,
-                        controller: player,
-                        origin: Some(zone),
-                        destination: dest_zone,
-                        enter_transformed,
-                        enter_tapped,
-                        enters_under_player,
-                        enters_attacking,
-                        enter_with_counters: vec![],
-                        duration: None,
-                        track_exiled_by_source,
-                        // CR 708.2a + CR 708.3: thread the face-down profile that
-                        // was carried across the `EffectZoneChoice` round-trip into
-                        // the move ctx, so a selected face-down `ChangeZone` card
-                        // (Yedora-style return paused for selection) enters FACE
-                        // DOWN with the specified characteristics instead of
-                        // resuming face up and exposing the real object.
-                        face_down_profile: face_down_profile.clone(),
-                        library_placement: None,
-                    };
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
+                        let per_obj_enter_counters =
+                            effects::change_zone::enter_with_counters_for_pending_object(
+                                state,
+                                source_id,
+                                *card_id,
+                                &enter_with_counters,
+                                &conditional_enter_with_counters,
+                            );
+                        let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                            source_id,
+                            controller: player,
+                            origin: Some(zone),
+                            destination: dest_zone,
+                            enter_transformed,
+                            enter_tapped,
+                            enters_under_player,
+                            enters_attacking,
+                            enter_with_counters: per_obj_enter_counters,
+                            conditional_enter_with_counters: vec![],
+                            duration: None,
+                            track_exiled_by_source,
+                            // CR 708.2a + CR 708.3: thread the face-down profile that
+                            // was carried across the `EffectZoneChoice` round-trip into
+                            // the move ctx, so a selected face-down `ChangeZone` card
+                            // (Yedora-style return paused for selection) enters FACE
+                            // DOWN with the specified characteristics instead of
+                            // resuming face up and exposing the real object.
+                            face_down_profile: face_down_profile.clone(),
+                            library_placement: None,
+                        };
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
                         ) {
@@ -2818,7 +2871,9 @@ pub(super) fn handle_resolution_choice(
                                         enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        enter_with_counters: enter_with_counters.clone(),
+                                        conditional_enter_with_counters:
+                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,
@@ -2850,7 +2905,9 @@ pub(super) fn handle_resolution_choice(
                                         enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        enter_with_counters: enter_with_counters.clone(),
+                                        conditional_enter_with_counters:
+                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,
@@ -2951,7 +3008,7 @@ pub(super) fn handle_resolution_choice(
                     effects::attach::complete_resolution_attachment_choice(
                         &mut *state,
                         *cont.chain,
-                        chosen[0],
+                        &chosen,
                         events,
                     )
                     .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
@@ -3054,6 +3111,7 @@ pub(super) fn handle_resolution_choice(
                         enters_under_player,
                         enters_attacking,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         duration: None,
                         track_exiled_by_source,
                         face_down_profile: face_down_profile.clone(),
@@ -3085,7 +3143,9 @@ pub(super) fn handle_resolution_choice(
                                         enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        enter_with_counters: enter_with_counters.clone(),
+                                        conditional_enter_with_counters:
+                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,
@@ -3114,7 +3174,9 @@ pub(super) fn handle_resolution_choice(
                                         enter_tapped: ctx.enter_tapped,
                                         enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
-                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        enter_with_counters: enter_with_counters.clone(),
+                                        conditional_enter_with_counters:
+                                            conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,

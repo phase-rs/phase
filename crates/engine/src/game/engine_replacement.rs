@@ -2161,6 +2161,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 ))]
@@ -2460,6 +2461,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                 ))
@@ -2785,6 +2787,71 @@ mod tests {
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
         );
+    }
+
+    /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
+    /// creature card in exile with a takeover counter on it". `find_copy_targets`
+    /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
+    /// `FilterProp::Counters` predicate, returning only the marked exile card and
+    /// excluding an unmarked exile creature (and the battlefield entirely). This
+    /// is the runtime proof that the parsed source filter selects correctly.
+    #[test]
+    fn find_copy_targets_honors_exile_zone_and_takeover_counter_predicate() {
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_creature = |state: &mut GameState, card: u64, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Bear {card}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let marked_exile = make_creature(&mut state, 1, Zone::Exile);
+        state
+            .objects
+            .get_mut(&marked_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("takeover".to_string()), 1);
+        let unmarked_exile = make_creature(&mut state, 2, Zone::Exile);
+        let bf_creature = make_creature(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The Master".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "a creature card in exile with a takeover counter on it"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone { zone: Zone::Exile },
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("takeover".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert_eq!(
+            targets,
+            vec![marked_exile],
+            "only the takeover-marked exile creature is a legal copy source"
+        );
+        assert!(!targets.contains(&unmarked_exile));
+        assert!(!targets.contains(&bf_creature));
     }
 
     /// 2026-05-09 audit M4 regression: the unified

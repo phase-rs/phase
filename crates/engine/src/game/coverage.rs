@@ -79,6 +79,20 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: the two nullary
+            // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
+            // "you may plot nonland cards" permission). The nonland scope is the
+            // permission's printed L4 filter (NOT a CR 702.170f clause) on
+            // `affected`; the plot cost is the top card's mana cost, computed
+            // live at synthesis. Runtime enforcement is end-to-end:
+            // casting.rs::top_of_library_plot_source requires both roles,
+            // runtime_granted_top_of_library_plot_abilities synthesizes the
+            // plot special action on the top card, candidates.rs offers it as
+            // ActivateAbility, and the existing Plotted later-cast lifecycle
+            // (CR 702.170d) is reused. Not registry-keyed (mirrors the
+            // cast-permission cluster).
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
             // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
             // play_mode, and the `without_paying_mana_cost` flag. Runtime
@@ -133,6 +147,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
+            // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop carries `who` +
+            // `count`. Runtime enforcement is in
+            // game/effects/search_library.rs::library_search_top_limit.
+            | StaticMode::RestrictLibrarySearchToTop { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -498,6 +516,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -514,6 +533,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "prevented event source's controller".into()
         }
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
+        TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::Neighbor { direction } => match direction {
@@ -566,6 +586,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::SaddledSource => parts.push("saddled the source".into()),
+            FilterProp::ConvokedSource => parts.push("convoked the source".into()),
             FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
@@ -1593,12 +1614,14 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             }
         },
         PlayerFilter::All => "each player",
+        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayer => "each of that player's opponents",
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
@@ -1784,7 +1807,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
         // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
-        ChoiceType::Keyword { options } => {
+        ChoiceType::Keyword { options, .. } => {
             return format!(
                 "ability from: {}",
                 options
@@ -1816,6 +1839,10 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         }
         DelayedTriggerCondition::WhenDiesOrExiled { .. } => "when dies or exiled".into(),
         DelayedTriggerCondition::WheneverEvent { .. } => "whenever event this turn".into(),
+        DelayedTriggerCondition::WhenNextEvent {
+            lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+            ..
+        } => "when next event (persistent)".into(),
         DelayedTriggerCondition::WhenNextEvent { .. } => "when next event this turn".into(),
     }
 }
@@ -2743,9 +2770,18 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("recipient_object_filter".into(), fmt_target(f)));
             }
         }
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
+        }
+        Effect::RememberCard { target } => {
+            d.push(("target".into(), fmt_target(target)));
         }
         Effect::ForEachCategoryExile { category, zone, .. } => {
             d.push((
@@ -3265,6 +3301,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
         }
+        AbilityCondition::HasObjectTarget => "has an object target".into(),
         AbilityCondition::TargetMatchesFilter { filter, .. } => {
             format!("target is {}", fmt_target(filter))
         }
@@ -3557,6 +3594,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
         SC::DuringYourTurn => "during your turn".into(),
+        SC::SharesColorWithMostCommonColorAmongPermanents => {
+            "shares a color with the most common color among all permanents".into()
+        }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
         SC::SourceHasDealtDamage => "source has dealt damage".into(),
         SC::WasCast { zone } => match zone {
@@ -3608,6 +3648,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
             "grant all activated abilities of".into()
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {
+            "grant all triggered abilities of".into()
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
@@ -6315,6 +6358,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
         // `evaluate_condition` (effects/mod.rs) with current-state and optional
         // LKI paths.
+        // CR 601.2c + CR 115.1: object-target presence guard — resolved by
+        // `evaluate_condition` (effects/mod.rs) against the ability's declared targets.
+        AbilityCondition::HasObjectTarget => ("HasObjectTarget", Handled),
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
         AbilityCondition::TriggeringSpellTargetsFilter { .. } => {
             ("TriggeringSpellTargetsFilter", Handled)
@@ -6522,6 +6568,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     use FeatureSupport::*;
     match scope {
         PlayerFilter::All => ("All", Handled),
+        PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -6537,6 +6584,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::OpponentOfTriggeringPlayer => ("OpponentOfTriggeringPlayer", Handled),
         // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
         // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
@@ -6576,6 +6624,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            ("SharesColorWithMostCommonColorAmongPermanents", Handled)
+        }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
@@ -7761,6 +7812,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
+            // CR 702.170a grant + CR 702.170f permission: plot-from-library
+            // (Fblthp). Both descriptions ("the top card of your library has
+            // plot" / "you may plot nonland cards from the top of your library")
+            // carry "plot" + "library". The role/discriminator is already
+            // enforced by the parser; coverage just needs a phrase the
+            // description will contain.
+            StaticMode::TopOfLibraryHasPlot | StaticMode::TopOfLibraryPlotPermission => {
+                effective_lower.contains("plot") && effective_lower.contains("library")
+            }
             // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
             // discriminator phrase ("from among cards exiled with") is
             // already enforced by the parser; coverage just needs a phrase
@@ -7851,6 +7911,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantUntap => {
                 effective_lower.contains("doesn't untap") || effective_lower.contains("don't untap")
             }
+            // CR 702.26a + CR 101.2: The Pandorica's "It can't phase in for as
+            // long as ~ remains tapped".
+            StaticMode::CantPhaseIn => effective_lower.contains("can't phase in"),
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
@@ -8937,9 +9000,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "unless [it/they] attacked or blocked" — combat state check
             || lower.contains("unless it attacked")
             || lower.contains("unless it blocked")
-            // "unless target opponent pays" — payment alternative
-            || lower.contains("unless target opponent pays")
-            || lower.contains("unless target opponent sacrifices")
             // "if you have a card in hand" — resolve-time hand check
             || lower.contains("if you have a card in hand")
             // "if you pay {N} more to cast" — additional cost condition (casting option)

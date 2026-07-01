@@ -1,13 +1,15 @@
 name: Clear Caches
 
-# Manually clear GitHub Actions caches when upstream data has changed
-# (e.g. MTGJSON published a new AtomicCards.json) and the weekly cache key
-# would otherwise keep serving stale data via the `mtgjson-` restore-keys
-# fallback in ci.yml / deploy.yml.
+# Manually clear GitHub Actions caches when upstream card data has changed
+# (e.g. MTGJSON published a new AtomicCards.json or Scryfall bulk data has
+# drifted) and the cache keys would otherwise keep serving stale data.
 #
 # Note: the `mtgjson` cache includes draft set data (data/mtgjson/sets/)
 # used by draft-pool-gen. Clearing `mtgjson` forces re-download of both
 # AtomicCards.json and all per-set draft files on the next run.
+#
+# MTGJSON and Scryfall are coupled data inputs for deploy artifacts, so clearing
+# either card-data source clears both `mtgjson-` and `scryfall-` caches.
 
 on:
   workflow_dispatch:
@@ -19,6 +21,7 @@ on:
         default: mtgjson
         options:
           - mtgjson
+          - scryfall
           - binaryen
           - rust
           - pnpm
@@ -41,11 +44,12 @@ jobs:
         id: prefixes
         run: |
           case "${{ inputs.target }}" in
-            mtgjson)  echo "patterns=mtgjson-" >> "$GITHUB_OUTPUT" ;;
+            mtgjson)  echo "patterns=mtgjson- scryfall-" >> "$GITHUB_OUTPUT" ;;
+            scryfall) echo "patterns=mtgjson- scryfall-" >> "$GITHUB_OUTPUT" ;;
             binaryen) echo "patterns=binaryen-version_" >> "$GITHUB_OUTPUT" ;;
             rust)     echo "patterns=rust-" >> "$GITHUB_OUTPUT" ;;
             pnpm)     echo "patterns=node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
-            all)      echo "patterns=mtgjson- binaryen-version_ rust- node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
+            all)      echo "patterns=mtgjson- scryfall- binaryen-version_ rust- node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Delete caches

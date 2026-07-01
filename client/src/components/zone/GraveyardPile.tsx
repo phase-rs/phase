@@ -5,6 +5,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
 import { cardImageLookup, type CardImageLookup } from "../../services/cardImageLookup.ts";
 
 const EMPTY: readonly number[] = [];
@@ -69,6 +70,29 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
     return gy.some((id) => objectChoiceIds.has(id));
   });
 
+  // CR 702.66: during a Delve payment the graveyard cards aren't shown in the
+  // hand fan (they carry only a mana-payment tap, excluded by
+  // useCastableZoneObjects), so glow the pile to invite the player to open the
+  // delve modal (ZoneViewer's `canDelveFromGraveyard`). Engine-authoritative:
+  // glow exactly when a graveyard card has a mana-payment (delve) action.
+  const hasDelveableCards = useGameStore((s) => {
+    if (!canActForWaitingState) return false;
+    if (s.waitingFor?.type !== "ManaPayment" || s.waitingFor.data.convoke_mode !== "Delve") {
+      return false;
+    }
+    const objects = s.gameState?.objects;
+    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    return gy.some((id) => {
+      const obj = objects?.[id];
+      return (
+        Boolean(obj) &&
+        collectObjectActions(s.legalActionsByObject, id).some((action) =>
+          isManaObjectAction(action, obj),
+        )
+      );
+    });
+  });
+
   const count = graveyard.length;
   if (count === 0) return null;
 
@@ -79,7 +103,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   return (
     <button
       onClick={onClick}
-      className={`group relative cursor-pointer ${hasTargetableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
+      className={`group relative cursor-pointer ${hasTargetableCards || hasDelveableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.graveyardTitle", { count })}
       data-graveyard-pile={playerId}
       style={{ width: w, height: h }}

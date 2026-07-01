@@ -3452,6 +3452,7 @@ mod tests {
                 condition: DelayedTriggerCondition::WhenNextEvent {
                     trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
@@ -3512,6 +3513,7 @@ mod tests {
                         trigger
                     }),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(copy_effect),
                 uses_tracked_set: false,
@@ -6123,6 +6125,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Object(lions)],
@@ -6278,6 +6281,7 @@ mod tests {
         let ev = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }
