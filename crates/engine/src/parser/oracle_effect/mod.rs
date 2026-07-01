@@ -11627,6 +11627,35 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
+        // and <zone>" (Identity Crisis) is a *union* of origin zones, not a
+        // compound of two effects. This is `try_split_targeted_compound`'s
+        // remainder probe: the generic parse below would leave " and <graveyard>"
+        // as the remainder, and the caller would mis-split it into an orphaned
+        // "graveyard" conjunct. Claiming the whole clause here (empty remainder)
+        // keeps it single — the actual `ChangeZoneAll { InAnyZone }` is built by
+        // `parse_exile_ast`, which mirrors this recognizer.
+        if let Some((owner, zones)) = imperative::try_parse_multi_zone_player_exile(rest_lower) {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(
+                    ZoneCounterImperativeAst::Exile {
+                        origin: None,
+                        target: TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::default()
+                                .controller(owner)
+                                .properties(vec![crate::types::ability::FilterProp::InAnyZone {
+                                    zones,
+                                }]),
+                        ),
+                        all: true,
+                        enter_with_counters: vec![],
+                    },
+                )),
+                // The matcher only claims a fully-consumed clause (trailing text
+                // is rejected), so there is no compound remainder to thread on.
+                "",
+            ));
+        }
         let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if scan_contains_phrase(rest_lower, "spell") {

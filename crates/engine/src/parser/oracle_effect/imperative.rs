@@ -2236,6 +2236,93 @@ pub(super) fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<Contro
     run(lower).ok().map(|(_, owner)| owner)
 }
 
+/// Parse output of the multi-zone player-exile recognizer: remaining input paired
+/// with the owner axis and the origin-zone union. Named so the inner `nom`
+/// combinator signature stays under `clippy::type_complexity`.
+type MultiZonePlayerExileParse<'a> = (&'a str, (ControllerRef, Vec<Zone>));
+
+/// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from `<possessive>` `<zone>` and
+/// `<zone>`" — mass exile of every card a player owns across a *union* of zones
+/// (Identity Crisis: "target player's hand and graveyard"). Mirrors the
+/// multi-zone origin handling of [`try_parse_multi_zone_same_name_exile`]: the
+/// zone union is encoded on the target filter via `InAnyZone`, and the
+/// `ChangeZoneAll` resolver reads the multi-zone origin from the filter (so the
+/// lowering passes `origin: None`).
+///
+/// Returns the owner axis and the origin zones (always `>= 2`). Declines
+/// (`None`) on a single zone so the generic single-origin `exile all` path keeps
+/// handling those, and on any trailing fragment so nothing is silently dropped.
+/// The leading noun is fixed to "cards"/"card" (CR 108.2 — every card, any
+/// type); a type-qualified variant ("all creature cards from …") is not claimed.
+pub(super) fn try_parse_multi_zone_player_exile(
+    rest_lower: &str,
+) -> Option<(ControllerRef, Vec<Zone>)> {
+    fn zone_word(input: &str) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
+        alt((
+            value(Zone::Graveyard, tag::<_, _, OracleError<'_>>("graveyard")),
+            value(Zone::Hand, tag("hand")),
+            value(Zone::Library, tag("library")),
+        ))
+        .parse(input)
+    }
+    fn run(input: &str) -> Result<MultiZonePlayerExileParse<'_>, nom::Err<OracleError<'_>>> {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("cards from "),
+            tag("card from "),
+        ))
+        .parse(input)?;
+        let (input, owner) = alt((
+            value(
+                ControllerRef::ParentTargetOwner,
+                tag::<_, _, OracleError<'_>>("its owner's "),
+            ),
+            value(
+                ControllerRef::ParentTargetController,
+                tag("its controller's "),
+            ),
+            value(ControllerRef::TargetPlayer, tag("their ")),
+            value(ControllerRef::TargetPlayer, tag("that player's ")),
+            value(ControllerRef::TargetPlayer, tag("target player's ")),
+            value(ControllerRef::Opponent, tag("target opponent's ")),
+            value(ControllerRef::Opponent, tag("an opponent's ")),
+            value(ControllerRef::You, tag("your ")),
+        ))
+        .parse(input)?;
+        let (mut input, first) = zone_word(input)?;
+        let mut zones = vec![first];
+        // Additional zones joined by " and " / ", and " / ", " (oxford comma).
+        loop {
+            let Ok((after_sep, _)) = alt((
+                tag::<_, _, OracleError<'_>>(" and "),
+                tag(", and "),
+                tag(", "),
+            ))
+            .parse(input) else {
+                break;
+            };
+            let Ok((after_zone, zone)) = zone_word(after_sep) else {
+                break;
+            };
+            if !zones.contains(&zone) {
+                zones.push(zone);
+            }
+            input = after_zone;
+        }
+        Ok((input, (owner, zones)))
+    }
+    let (rem, (owner, zones)) = run(rest_lower).ok()?;
+    if zones.len() < 2 {
+        return None;
+    }
+    // The clause must be fully consumed (only sentence punctuation may remain),
+    // so no trailing fragment is orphaned into an unsupported child node.
+    let tail = rem.trim_start().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
+    if !tail.is_empty() {
+        return None;
+    }
+    Some((owner, zones))
+}
+
 pub(super) fn parse_search_and_creation_ast(
     text: &str,
     lower: &str,
@@ -6629,6 +6716,25 @@ pub(super) fn parse_exile_ast(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
+        // and <zone>" (Identity Crisis) — a *union* of origin zones. Recognized
+        // before the generic single-origin path below, whose `infer_origin_zone`
+        // captures only the first zone and (via `try_split_targeted_compound`)
+        // orphans the trailing " and <zone>" as an unsupported child clause. The
+        // zone union rides on the target filter via `InAnyZone`; `origin: None`
+        // defers to it, matching the `MultiZoneSameNameExile` lowering.
+        if let Some((owner, zones)) = try_parse_multi_zone_player_exile(rest_lower) {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .controller(owner)
+                        .properties(vec![crate::types::ability::FilterProp::InAnyZone { zones }]),
+                ),
+                all: true,
+                enter_with_counters: vec![],
+            });
+        }
         // CR 205.2a + CR 205.3a + CR 608.2c: parse the full target as a
         // multi-type union so "exile all A except <X>, all B, and all C" lowers to
         // one `ChangeZoneAll { Or[…] }` instead of fragmenting the trailing
