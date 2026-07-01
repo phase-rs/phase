@@ -148,6 +148,12 @@ pub fn resolve(
                 .map(|o| o.owner)
                 .unwrap_or(ability.controller)
         });
+        // CR 702.143d: compute any effective foretell cost (printed OR granted by
+        // a static such as Singing Towers of Darillium, with its derived cost)
+        // BEFORE the mutable object borrow below — `foretell_cost` takes `&state`
+        // and would conflict with the live `&mut obj`. Used only by the Foretold
+        // branch; harmless to precompute for other permissions.
+        let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             let mut granted = permission.clone();
             if let CastingPermission::PlayFromExile {
@@ -227,7 +233,7 @@ pub fn resolve(
                 // the object has no Foretell keyword of its own, covering the
                 // CR 702.143d case where an effect grants a foretell cost to a
                 // card that lacks one.
-                if let Some(kw_cost) = crate::game::casting::foretell_cost(&*obj) {
+                if let Some(kw_cost) = derived_foretell.clone() {
                     *cost = kw_cost;
                 }
                 became_foretold = Some(obj_id);
@@ -469,12 +475,17 @@ mod tests {
             shards: vec![ManaCostShard::Green],
             generic: 1,
         };
-        state
-            .objects
-            .get_mut(&card)
-            .unwrap()
-            .keywords
-            .push(Keyword::Foretell(foretell_cost.clone()));
+        {
+            // Mirror production `create_object_from_card_face`, which populates
+            // BOTH the live and copiable-base keyword sets. `foretell_cost` reads
+            // the copiable base (`effective_off_zone_keywords`) for a
+            // non-battlefield card, so the printed foretell must be in
+            // `base_keywords`.
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.keywords.push(Keyword::Foretell(foretell_cost.clone()));
+            obj.base_keywords
+                .push(Keyword::Foretell(foretell_cost.clone()));
+        }
 
         // Empty target list + `source_id == card` mirrors the anaphoric "it"
         // trigger after the chained ChangeZone has moved the source to exile.

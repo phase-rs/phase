@@ -341,7 +341,14 @@ fn add_foretell_sorcery(state: &mut GameState) -> ObjectId {
     );
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.card_types.core_types.push(CoreType::Sorcery);
+    // Mirror production `create_object_from_card_face`, which populates BOTH the
+    // live and copiable-base keyword sets. The off-zone keyword query
+    // (`effective_off_zone_keywords`, consulted by `foretell_cost`) reads the
+    // copiable base for non-battlefield cards, so a printed foretell must live in
+    // `base_keywords`, not only `keywords`.
     obj.keywords.push(Keyword::Foretell(foretell_test_cost()));
+    obj.base_keywords
+        .push(Keyword::Foretell(foretell_test_cost()));
     object_id
 }
 

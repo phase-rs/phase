@@ -3370,6 +3370,7 @@ pub(super) fn handle_resolution_choice(
                 options,
                 choice_type,
                 source_id,
+                persist_player,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3397,7 +3398,13 @@ pub(super) fn handle_resolution_choice(
             // protection, Sewer Nemesis CDA, …), recompute layers for the
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
-            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            effects::choose::bind_named_choice(
+                state,
+                &choice_type,
+                &choice,
+                source_id,
+                persist_player,
+            );
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the

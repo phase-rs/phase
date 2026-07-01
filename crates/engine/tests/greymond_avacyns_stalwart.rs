@@ -440,6 +440,7 @@ fn ai_candidates_three_pairs_for_greymond_choice() {
             "Vigilance, Lifelink".to_string(),
         ],
         source_id: Some(greymond),
+        persist_player: None,
     };
 
     let actions = legal_actions(runner.state());

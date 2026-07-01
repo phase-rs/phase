@@ -87,6 +87,7 @@ fn drive_siege_choice(
         },
         options: vec!["Jeskai".to_string(), "Temur".to_string()],
         source_id: Some(siege),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {
@@ -516,6 +517,7 @@ fn cast_siege_from_hand(runner: &mut GameRunner, siege: ObjectId, chosen_label: 
             choice_type,
             options,
             source_id,
+            ..
         } => {
             assert_eq!(
                 *player, P0,

@@ -196,6 +196,7 @@ pub mod turn_face_up;
 mod spellbook_tests;
 pub mod surveil;
 pub mod suspect;
+pub mod swap_chosen_labels;
 pub mod switch_pt;
 pub mod tap_untap;
 pub mod time_travel;
@@ -3032,6 +3033,7 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Unsuspect { .. } => suspect::resolve_unsuspect(state, ability, events),

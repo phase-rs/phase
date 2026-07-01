@@ -24,7 +24,7 @@ pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Ve
     let ordered = order_active_continuous_effects(Layer::Ability, &effects, state);
 
     for effect in ordered {
-        apply_keyword_modification(state, &mut keywords, &effect);
+        apply_keyword_modification(state, object_id, &mut keywords, &effect);
     }
 
     keywords
@@ -96,6 +96,11 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
         ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::AddDynamicKeyword { .. }
+            // CR 702.143d: derived-cost cast-from-off-zone keyword grants are
+            // realized exclusively through this path (the recipient lives in a
+            // non-battlefield zone), so they must be retained by the off-zone
+            // collector.
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::RemoveAllAbilities
             // CR 608.2d + CR 613.1f: `RemoveChosenKeyword` strips by
             // discriminant the keyword stored in the source's
@@ -112,11 +117,26 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
 
 fn apply_keyword_modification(
     state: &GameState,
+    object_id: ObjectId,
     keywords: &mut Vec<Keyword>,
     effect: &ActiveContinuousEffect,
 ) {
     match &effect.modification {
         ContinuousModification::AddKeyword { keyword } => upsert_keyword(keywords, keyword.clone()),
+        // CR 702.143d + CR 702 (alt-cost off-zone family): grant a cost-bearing
+        // keyword whose cost is DERIVED from the recipient's mana cost. The
+        // "without foretell" clause is enforced per-recipient here: if the
+        // recipient already carries a keyword of this family (printed or granted),
+        // no-op so its existing cost is preserved (Singing Towers of Darillium).
+        ContinuousModification::AddKeywordWithDerivedCost { kind, derivation } => {
+            if keywords.iter().any(|k| kind.matches_keyword(k)) {
+                return;
+            }
+            if let Some(recipient) = state.objects.get(&object_id) {
+                let derived = derivation.derive(&recipient.mana_cost);
+                upsert_keyword(keywords, kind.with_cost(derived));
+            }
+        }
         ContinuousModification::RemoveKeyword { keyword } => {
             keywords.retain(|existing| {
                 std::mem::discriminant(existing) != std::mem::discriminant(keyword)
