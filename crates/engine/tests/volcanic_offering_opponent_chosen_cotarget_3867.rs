@@ -244,27 +244,30 @@ fn controller_chooses_non_first_opponent_as_announcer_in_three_player_game() {
         })
         .expect("casting the free instant must succeed");
 
-    // With two opponents, the controller is first asked which one announces.
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseAnnouncingOpponent {
-            player, candidates, ..
-        } => {
-            assert_eq!(
-                *player, P0,
-                "the controller chooses the announcing opponent"
-            );
-            assert!(
-                candidates.contains(&P1) && candidates.contains(&p2),
-                "both opponents are candidates, got {candidates:?}"
-            );
+    // With two opponents, the controller is asked which one announces EACH
+    // "of an opponent's choice" effect (the second land and the second creature
+    // are decided independently). Pick the NON-first opponent (P2) for both,
+    // proving the non-first selection is honored per effect.
+    for effect in ["second land", "second creature"] {
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseAnnouncingOpponent {
+                player, candidates, ..
+            } => {
+                assert_eq!(
+                    *player, P0,
+                    "the controller chooses the announcing opponent ({effect})"
+                );
+                assert!(
+                    candidates.contains(&P1) && candidates.contains(&p2),
+                    "both opponents are candidates ({effect}), got {candidates:?}"
+                );
+            }
+            other => panic!("expected ChooseAnnouncingOpponent for {effect}, got {other:?}"),
         }
-        other => panic!("expected ChooseAnnouncingOpponent, got {other:?}"),
+        runner
+            .act(GameAction::ChooseAnnouncingOpponent { opponent: p2 })
+            .expect("controller picks P2 as the announcer");
     }
-
-    // The controller picks the NON-first opponent (P2).
-    runner
-        .act(GameAction::ChooseAnnouncingOpponent { opponent: p2 })
-        .expect("controller picks P2 as the announcer");
 
     // Slot 0: controller announces a nonbasic land an opponent controls.
     assert_eq!(current_announcer(&runner.state().waiting_for), P0);
@@ -308,6 +311,110 @@ fn controller_chooses_non_first_opponent_as_announcer_in_three_player_game() {
         .expect("P2 announces the second creature");
 
     // CR 115.1: the spell is controlled by its controller, not the announcer.
+    let stack_entry = runner.state().stack.last().expect("spell is on the stack");
+    assert_eq!(stack_entry.controller, P0);
+}
+
+/// CR 601.2c + CR 115.1 (#4349): the controller may name DIFFERENT opponents for
+/// each "of an opponent's choice" effect — Volcanic Offering's rulings allow the
+/// same or different opponents for the second land vs. the second creature. Each
+/// effect is prompted/recorded independently, not one announcer stamped across
+/// the whole ability chain. Here P1 announces the second land and P2 the second
+/// creature.
+#[test]
+fn controller_may_choose_different_announcing_opponents_per_effect() {
+    let p2 = PlayerId(2);
+
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let land_p1 = nonbasic_land(&mut scenario, P1, "P1 Land");
+    let creature_p1 = scenario.add_creature(P1, "P1 Creature", 5, 5).id();
+    let land_p2 = nonbasic_land(&mut scenario, p2, "P2 Land");
+    let creature_p2 = scenario.add_creature(p2, "P2 Creature", 5, 5).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Volcanic Offering", true, VOLCANIC_OFFERING)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let spell_card = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free instant must succeed");
+
+    // First prompt — the second-LAND effect's announcer. Choose P1.
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseAnnouncingOpponent {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(candidates.contains(&P1) && candidates.contains(&p2));
+        }
+        other => panic!("expected ChooseAnnouncingOpponent (land), got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseAnnouncingOpponent { opponent: P1 })
+        .expect("P1 announces the second-land effect");
+
+    // Second prompt — the second-CREATURE effect's announcer. Choose P2.
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseAnnouncingOpponent { player, .. } => assert_eq!(*player, P0),
+        other => panic!("expected ChooseAnnouncingOpponent (creature), got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseAnnouncingOpponent { opponent: p2 })
+        .expect("P2 announces the second-creature effect");
+
+    // Slot 0: controller announces a nonbasic land an opponent controls.
+    assert_eq!(current_announcer(&runner.state().waiting_for), P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_p1)),
+        })
+        .expect("controller announces P1's land");
+
+    // Slot 1 (second land, "of an opponent's choice"): announced by P1.
+    assert_eq!(
+        current_announcer(&runner.state().waiting_for),
+        P1,
+        "the land effect's opponent-chosen slot is announced by P1"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_p2)),
+        })
+        .expect("P1 announces the second land");
+
+    // Slot 2: controller announces a creature an opponent controls.
+    assert_eq!(current_announcer(&runner.state().waiting_for), P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(creature_p1)),
+        })
+        .expect("controller announces P1's creature");
+
+    // Slot 3 (second creature, "of an opponent's choice"): announced by P2 — a
+    // DIFFERENT opponent than the land effect's announcer, which the old single
+    // `announcing_opponent` could not express.
+    assert_eq!(
+        current_announcer(&runner.state().waiting_for),
+        p2,
+        "the creature effect's opponent-chosen slot is announced by P2"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(creature_p2)),
+        })
+        .expect("P2 announces the second creature");
+
+    // CR 115.1: the spell is controlled by its controller, not either announcer.
     let stack_entry = runner.state().stack.last().expect("spell is on the stack");
     assert_eq!(stack_entry.controller, P0);
 }

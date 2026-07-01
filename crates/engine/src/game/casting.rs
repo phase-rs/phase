@@ -11078,10 +11078,10 @@ fn continue_with_prepared(
         // opponent's choice") and the controller has two or more opponents, the
         // controller first chooses which opponent announces. Defer target
         // declaration until that choice is recorded; a single-opponent cast has
-        // no decision and proceeds straight through.
-        if resolved.context.announcing_opponent.is_none()
-            && target_slots.iter().any(|slot| slot.chooser.is_some())
-        {
+        // no decision and proceeds straight through. Each opponent-choice effect
+        // is decided independently — `begin_deferred_target_selection` re-prompts
+        // for every remaining group after this first one is recorded.
+        if casting_costs::has_pending_announcing_opponent_choice(state, &resolved) {
             let candidates = crate::game::players::opponents(state, player);
             if candidates.len() >= 2 {
                 let mut pending = PendingCast::new(

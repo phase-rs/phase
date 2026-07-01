@@ -1189,12 +1189,78 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
         .unwrap_or(waiting_for)
 }
 
+/// CR 601.2c + CR 115.1: true while some "of an opponent's choice" slot group —
+/// an ability link whose `target_chooser` resolves to an opponent — still has no
+/// announcing opponent recorded. Each opponent-choice effect is decided
+/// independently, so the controller may name the same or different opponents per
+/// effect (e.g. Volcanic Offering's second land vs. its second creature). Paired
+/// with `assign_next_announcing_opponent` to drive one prompt per group.
+pub(crate) fn has_pending_announcing_opponent_choice(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if link.context.announcing_opponent.is_none() {
+            if let Some(filter) = link.target_chooser.as_ref() {
+                if crate::game::targeting::resolve_effect_player_ref(state, link, filter)
+                    .is_some_and(|chooser| chooser != link.controller)
+                {
+                    return true;
+                }
+            }
+        }
+        node = link.sub_ability.as_deref();
+    }
+    false
+}
+
+/// CR 601.2c + CR 115.1: record `chosen` as the announcing opponent for the first
+/// opponent-choice slot group that still lacks one, returning whether a link was
+/// stamped. Only that single group is assigned per call, so the state machine can
+/// re-prompt for each remaining group and let the controller pick a (possibly
+/// different) opponent for every "of an opponent's choice" effect.
+pub(crate) fn assign_next_announcing_opponent(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    chosen: PlayerId,
+) -> bool {
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        let needs = link.context.announcing_opponent.is_none()
+            && link.target_chooser.as_ref().is_some_and(|filter| {
+                crate::game::targeting::resolve_effect_player_ref(state, link, filter)
+                    .is_some_and(|chooser| chooser != link.controller)
+            });
+        if needs {
+            link.context.announcing_opponent = Some(chosen);
+            return true;
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+    false
+}
+
 pub(crate) fn begin_deferred_target_selection(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2c + CR 115.1: If an "of an opponent's choice" slot group still needs
+    // its announcing opponent chosen (and the controller has ≥2 opponents to pick
+    // among), raise that decision before declaring targets. This loops once per
+    // unassigned group, so each opponent-choice effect gets its own announcer.
+    let announcing_candidates = crate::game::players::opponents(state, player);
+    if announcing_candidates.len() >= 2
+        && has_pending_announcing_opponent_choice(state, &pending.ability)
+    {
+        return Ok(WaitingFor::ChooseAnnouncingOpponent {
+            player,
+            candidates: announcing_candidates,
+            pending_cast: Box::new(pending),
+        });
+    }
     pending.deferred_target_selection = false;
     // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
     // X (or any deferred cost), the mode-choice step recorded the chosen mode

@@ -4612,13 +4612,15 @@ fn apply_action(
             let caster = *player;
             let chosen = opponent;
             let mut pending = (**pending_cast).clone();
-            // Each ability link resolves its own slot chooser, so record the
-            // chosen announcer on every link in the chain (sub-abilities own the
-            // later "of an opponent's choice" slots).
-            let mut node = Some(&mut pending.ability);
-            while let Some(link) = node {
-                link.context.announcing_opponent = Some(chosen);
-                node = link.sub_ability.as_deref_mut();
+            // CR 601.2c + CR 115.1: Record the announcer for the FIRST still-
+            // unassigned "of an opponent's choice" slot group only. Each such
+            // effect is decided independently; `begin_deferred_target_selection`
+            // re-prompts for any remaining groups, so the controller may pick the
+            // same or different opponents per effect (Volcanic Offering).
+            if !casting_costs::assign_next_announcing_opponent(state, &mut pending.ability, chosen) {
+                return Err(EngineError::InvalidAction(
+                    "No opponent-choice effect is awaiting an announcing opponent".to_string(),
+                ));
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
         }
