@@ -7208,7 +7208,23 @@ fn resolve_chain_body(
             // `resolve_top` has popped the spell (issue #2860).
             if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
                 sub_with_context.source_id = forwarded_objects[0];
-                if matches!(sub.effect, Effect::Attach { .. }) {
+                if matches!(
+                    ability.effect,
+                    Effect::Conjure {
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                ) && !effect_uses_implicit_tracked_set_targets(&sub.effect)
+                {
+                    // Conjure's propagated `ability.targets` carry the
+                    // duplicate_of referent (Three Tree Battalion's
+                    // battlefield-put creature), not the just-conjured object.
+                    // Trailing ParentTarget anaphora ("the duplicate", "its
+                    // base power…") must bind to the conjured card via the
+                    // ZoneChanged event, mirroring ChangeZone forward_result
+                    // wiring.
+                    sub_with_context.targets = vec![TargetRef::Object(forwarded_objects[0])];
+                } else if matches!(sub.effect, Effect::Attach { .. }) {
                     let attach_target_is_last_created = matches!(
                         &sub.effect,
                         Effect::Attach {
