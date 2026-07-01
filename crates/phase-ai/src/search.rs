@@ -2355,7 +2355,7 @@ fn validated_declare_attackers(
         bands: vec![],
     };
     let mut sim = state.clone();
-    if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
+    if engine::game::engine::apply_as_current_for_simulation(&mut sim, candidate.clone()).is_ok() {
         return candidate;
     }
     engine::ai_support::legal_actions(state)

@@ -179,6 +179,23 @@ pub fn apply(
     apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
 }
 
+/// Explicit-actor simulation apply: [`apply`] for throwaway forward-projection
+/// clones the caller never renders (the AI velocity-policy `project_to`
+/// look-ahead). Identical rules resolution to [`apply`], but in
+/// `DeferredDisplay` mode it skips `finalize_display_state` — the board-global
+/// mana-availability sweep whose frontend-only output no rules or
+/// AI-evaluation path consults. See [`apply_as_current_for_simulation`] for the
+/// actor-derived counterpart used by the search's `apply_candidate`; both keep
+/// the projected/simulated game-logic state rules-correct while removing the
+/// per-step O(battlefield) display sweep (#4798).
+pub fn apply_for_simulation(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary(state, actor, action, PublicFinalizeMode::DeferredDisplay)
+}
+
 pub(super) fn apply_action_boundary(
     state: &mut GameState,
     actor: PlayerId,
@@ -428,16 +445,20 @@ pub fn apply_as_current(
     apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
 }
 
-/// Legality-probe variant of [`apply_as_current`] for throwaway simulation
-/// clones (the AI `SimulationFilter` oracle): the caller only reads `.is_ok()`
-/// and discards the mutated state. The Ok/Err verdict is fully decided inside
-/// `apply_action`; `finalize_display_state` only computes frontend-only hints
-/// (mana availability, devotion, summoning-sickness display) that no rules
-/// legality path consults. Applying in `DeferredDisplay` mode therefore yields
-/// the identical verdict while skipping the per-call `derive_display_state`
-/// board sweep — which on a go-wide mana board (Cryptolith Rite granting `{T}:
-/// Add` to hundreds of tokens) is an O(N^2) static scan paid once per candidate.
-pub(crate) fn apply_as_current_for_legality(
+/// Simulation-apply variant of [`apply_as_current`] for throwaway clones that
+/// are never rendered: either the caller discards the mutated state (the AI
+/// `SimulationFilter` legality oracle reads only `.is_ok()`) or it keeps the
+/// state solely to read *game-logic* fields for evaluation (the AI search
+/// rollout/expansion). `finalize_rules_state` still runs, so the result is
+/// rules-correct; only `finalize_display_state` — the board-global
+/// `derive_display_state` sweep computing frontend-only hints (mana
+/// availability `has_mana_ability`/`available_mana_pips`, devotion,
+/// summoning-sickness display) that no rules, enumeration, or AI-evaluation
+/// path consults — is skipped. On a large board this removes an
+/// O(battlefield) mana sweep from every legality probe AND every AI search
+/// node expansion; that per-node sweep, compounded across the un-timed
+/// `resolveAll` batch loop, was the AI-vs-AI "won't advance" wedge (#4798).
+pub fn apply_as_current_for_simulation(
     state: &mut GameState,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
