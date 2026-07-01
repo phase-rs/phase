@@ -1,6 +1,7 @@
 use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::AttachmentKind;
+use crate::types::card_type::CoreType;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -740,12 +741,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
     CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
     Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-    DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition, LinkedExileScope,
-    ManaContribution, ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-    PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+    DevotionColors, DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition,
+    LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty, ObjectScope,
+    PermissionGrantee, PlayerFilter, PlayerRelation, PreventionScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+    TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::Supertype;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaExpiry};
@@ -9937,6 +9939,50 @@ fn effect_target_creature_gains_keyword_uses_continuous_effect() {
             ..
         } if tf.type_filters.contains(&TypeFilter::Creature)
     ));
+}
+
+/// Issue #4371 + CR 105.4 + CR 702.16: "gains protection from the color of
+/// your choice" must inject a color `Choose` ahead of the grant so the
+/// granting source carries a `ChosenAttribute::Color` for the layer applier
+/// to bake into `Protection(ChosenColor)`. Without the injected choice the
+/// grant reads a `None` chosen color and protects from nothing (the reported
+/// "doesn't resolve" bug). Mirrors the `try_parse_become_choice` structure.
+#[test]
+fn protection_from_color_of_your_choice_injects_color_choice() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
+        "Mother of Runes",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = &parsed.abilities[0];
+    // Outer effect is the injected color choice.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { excluded },
+                ..
+            } if excluded.is_empty()
+        ),
+        "expected injected Choose(Color), got {:?}",
+        def.effect
+    );
+    // The grant rides as the sub-ability and targets the chosen color.
+    let sub = def.sub_ability.as_ref().expect("grant sub_ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*sub.effect
+    else {
+        panic!("expected grant GenericEffect, got {:?}", sub.effect);
+    };
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }
+    )));
 }
 
 /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
@@ -24510,6 +24556,87 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn cant_cast_spells_during_that_players_next_turn() {
+    // CR 514.2 + CR 500.7: Sphinx's Decree / Azor — "Each opponent can't cast
+    // instant or sorcery spells during that player's next turn." The trailing
+    // next-turn duration must be captured (not dropped into an Unimplemented
+    // sub_ability), yielding a next-turn-expiring prohibition rather than an
+    // end-of-current-turn one.
+    let def = parse_effect_chain(
+        "Each opponent can't cast instant or sorcery spells during that player's next turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // The duration drives the runtime expiry (fill_runtime_fields lowers this to
+    // RestrictionExpiry::UntilEndOfNextTurnOf); it must NOT be dropped.
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    // The next-turn clause is consumed, not left as an Unimplemented sub_ability.
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_during_their_next_turn_determiner_variant() {
+    // The "during their next turn" determiner is the sibling surface form of
+    // "during that player's next turn" and resolves to the same duration.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells during their next turn.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+    assert!(def.sub_ability.is_none(), "got {:?}", def.sub_ability);
+}
+
+#[test]
+fn cant_cast_spells_this_turn_keeps_end_of_turn_expiry() {
+    // Regression guard: the plain "this turn" form must NOT be rewritten to a
+    // next-turn duration by the new trailing-duration arm.
+    let def = parse_effect_chain(
+        "Each opponent can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                expiry: RestrictionExpiry::EndOfTurn,
+                ..
+            }
+        }
+    ));
+    assert_ne!(
+        def.duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        })
+    );
+}
+
+#[test]
 fn abeyance_clause_chain_parses_both_restrictions() {
     let def = parse_effect_chain(
             "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities. Draw a card.",
@@ -36472,6 +36599,289 @@ fn split_choice_list_items_is_quote_aware() {
     );
 }
 
+fn assert_semantic_where_x_binding(value: &QuantityExpr, expected: &QuantityExpr) {
+    assert!(
+        !matches!(
+            value,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        ),
+        "where-X binding must not fall back to an arbitrary variable: {value:?}"
+    );
+    assert_eq!(
+        value, expected,
+        "where-X binding must have the expected semantic quantity"
+    );
+}
+
+fn controlled_object_count(type_filter: TypeFilter) -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(type_filter).controller(ControllerRef::You),
+            ),
+        },
+    }
+}
+
+fn find_filter_prop<'a>(
+    filter: &'a TargetFilter,
+    predicate: &impl Fn(&'a FilterProp) -> bool,
+) -> Option<&'a FilterProp> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .find_map(|filter| find_filter_prop(filter, predicate)),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            find_filter_prop(filter, predicate)
+        }
+        _ => None,
+    }
+}
+
+fn find_nested_filter_prop<'a>(
+    prop: &'a FilterProp,
+    predicate: &impl Fn(&'a FilterProp) -> bool,
+) -> Option<&'a FilterProp> {
+    match prop {
+        FilterProp::AnyOf { props } => props.iter().find_map(|prop| {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }),
+        FilterProp::Not { prop } => {
+            if predicate(prop) {
+                Some(prop)
+            } else {
+                find_nested_filter_prop(prop, predicate)
+            }
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => find_filter_prop(target, predicate),
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => find_filter_prop(reference, predicate),
+        _ => None,
+    }
+}
+
+fn assert_pt_where_x_bound(filter: &TargetFilter, stat: PtStat, expected: &QuantityExpr) {
+    let prop = find_filter_prop(filter, &|prop| {
+        matches!(
+            prop,
+            FilterProp::PtComparison {
+                stat: found,
+                ..
+            } if *found == stat
+        )
+    })
+    .unwrap_or_else(|| panic!("expected rewritten {stat:?} PtComparison in {filter:?}"));
+    let FilterProp::PtComparison { value, .. } = prop else {
+        unreachable!("predicate matched PtComparison");
+    };
+    assert_semantic_where_x_binding(value, expected);
+}
+
+fn assert_cmc_where_x_bound(filter: &TargetFilter, expected: &QuantityExpr) {
+    let prop = find_filter_prop(filter, &|prop| matches!(prop, FilterProp::Cmc { .. }))
+        .unwrap_or_else(|| panic!("expected rewritten Cmc in {filter:?}"));
+    let FilterProp::Cmc { value, .. } = prop else {
+        unreachable!("predicate matched Cmc");
+    };
+    assert_semantic_where_x_binding(value, expected);
+}
+
+fn ability_tree_has_rewritten_dig_filter(ability: &AbilityDefinition) -> bool {
+    if let Effect::Dig { filter, .. } = ability.effect.as_ref() {
+        if find_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::Cmc { value, .. }
+                    if !value.contains_x()
+                        && !matches!(
+                            value,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { .. }
+                            }
+                        )
+            )
+        })
+        .is_some()
+        {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_tree_has_rewritten_dig_filter)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_rewritten_dig_filter)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_tree_has_rewritten_dig_filter)
+}
+
+fn ability_tree_has_rewritten_change_zone_tracked_filter(ability: &AbilityDefinition) -> bool {
+    if let Effect::ChangeZone { target, .. } = ability.effect.as_ref() {
+        if matches!(target, TargetFilter::TrackedSetFiltered { .. })
+            && find_filter_prop(target, &|prop| {
+                matches!(
+                    prop,
+                    FilterProp::Cmc { value, .. }
+                        if !value.contains_x()
+                            && !matches!(
+                                value,
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { .. }
+                                }
+                            )
+                )
+            })
+            .is_some()
+        {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_tree_has_rewritten_change_zone_tracked_filter)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_rewritten_change_zone_tracked_filter)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_tree_has_rewritten_change_zone_tracked_filter)
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_destroy_target_go_shintai_hidden_cruelty() {
+    let ability = parse_effect_chain(
+        "destroy target creature with toughness X or less, where X is the number of Shrines you control",
+        AbilityKind::Spell,
+    );
+    let Effect::Destroy { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Destroy, got {:?}", ability.effect);
+    };
+    assert_pt_where_x_bound(
+        target,
+        PtStat::Toughness,
+        &controlled_object_count(TypeFilter::Subtype("Shrine".to_string())),
+    );
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_destroy_target_invasion_of_lorwyn() {
+    let ability = parse_effect_chain(
+        "destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control",
+        AbilityKind::Spell,
+    );
+    let Effect::Destroy { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Destroy, got {:?}", ability.effect);
+    };
+    assert_pt_where_x_bound(
+        target,
+        PtStat::Power,
+        &controlled_object_count(TypeFilter::Land),
+    );
+}
+
+#[test]
+fn where_x_rewrites_cmc_bounce_target_devotion_to_white_blue() {
+    let ability = parse_effect_chain(
+        "return target creature an opponent controls with mana value X or less to its owner's hand, where X is your devotion to white and blue",
+        AbilityKind::Spell,
+    );
+    let Effect::Bounce { target, .. } = ability.effect.as_ref() else {
+        panic!("expected Bounce, got {:?}", ability.effect);
+    };
+    assert_cmc_where_x_bound(
+        target,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::White, ManaColor::Blue]),
+            },
+        },
+    );
+}
+
+#[test]
+fn where_x_rewrites_ptcomparison_bounce_all_scourge_and_spectral_deluge() {
+    for text in [
+        "return each creature your opponents control with toughness X or less to its owner's hand, where X is the number of Islands you control",
+        "Return each creature your opponents control with toughness X or less to its owner's hand, where X is the number of Islands you control.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::BounceAll { target, .. } = ability.effect.as_ref() else {
+            panic!("expected BounceAll for {text:?}, got {:?}", ability.effect);
+        };
+        assert_pt_where_x_bound(
+            target,
+            PtStat::Toughness,
+            &controlled_object_count(TypeFilter::Subtype("Island".to_string())),
+        );
+    }
+}
+
+#[test]
+fn where_x_rewrites_dig_filter_hatchery_spider() {
+    let parsed = parse_oracle_text(
+        "Reach\nUndergrowth — When you cast this spell, reveal the top X cards of your library, where X is the number of creature cards in your graveyard. You may put a green permanent card with mana value X or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.",
+        "Hatchery Spider",
+        &["Reach".to_string()],
+        &["Creature".to_string()],
+        &["Spider".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(ability_tree_has_rewritten_dig_filter),
+        "expected Hatchery Spider Dig filter to bind where-X, got {:?}",
+        parsed.triggers
+    );
+}
+
+#[test]
+fn where_x_rewrites_tracked_set_filtered_change_zone_keldon_flamesage() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+        "Keldon Flamesage",
+        &["Enlist".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Shaman".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(ability_tree_has_rewritten_change_zone_tracked_filter),
+        "expected Keldon Flamesage tracked-set ChangeZone filter to bind where-X, got {:?}",
+        parsed.triggers
+    );
+}
+
 /// CR 111.2 + CR 608.2d: Reef Worm creates a single cascading Fish token that
 /// carries a quoted death-triggered ability; it is NOT a modal token choice.
 /// Before the quote-aware splitter, the inner ", create …" severed the clause
@@ -36489,4 +36899,175 @@ fn reef_worm_nested_token_is_not_modal_choice() {
         );
     };
     assert_eq!(name, "Fish", "outer token is the 3/3 Fish");
+}
+
+#[test]
+fn cyber_conversion_turn_face_down_with_cyberman_body() {
+    // CR 708.2a + CR 205.1a: Cyber Conversion — "Turn target creature face
+    // down. It's a 2/2 Cyberman artifact creature." The head clause lowers to
+    // `Effect::TurnFaceDown` targeting a creature; the trailing body sentence
+    // is consumed as a `FaceDownProfileSpec` continuation that refines the
+    // seeded vanilla 2/2 into the Cyberman artifact profile — NOT left as an
+    // `Unimplemented` sibling.
+    let chain = parse_effect_chain(
+        "Turn target creature face down. It's a 2/2 Cyberman artifact creature.",
+        AbilityKind::Spell,
+    );
+    let Effect::TurnFaceDown { target, profile } = &*chain.effect else {
+        panic!("expected TurnFaceDown, got: {:?}", chain.effect);
+    };
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected a typed creature target, got: {target:?}"
+    );
+    let profile = profile.as_ref().expect("face-down profile must be present");
+    assert_eq!(profile.power, Some(2));
+    assert_eq!(profile.toughness, Some(2));
+    assert_eq!(profile.body, crate::types::ability::FaceDownBody::Creature);
+    assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+    assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
+    assert!(
+        chain.sub_ability.is_none(),
+        "the body sentence must refine the profile, not survive as an \
+         Unimplemented sibling: {:?}",
+        chain.sub_ability
+    );
+}
+
+#[test]
+fn mondassian_colony_ship_turn_face_down_becomes_cyberman_body() {
+    // CR 708.2a + CR 205.1a: Mondassian Colony Ship — "Turn target creature
+    // face down. It becomes a 2/2 Cyberman artifact creature." Mirrors Cyber
+    // Conversion but with the "It becomes a ..." copula instead of "It's a
+    // ...". The body sentence must refine the seeded vanilla 2/2 into the
+    // Cyberman artifact profile, NOT survive as a separate `GenericEffect`
+    // "becomes" static targeting the source ship.
+    let chain = parse_effect_chain(
+        "Turn target creature face down. It becomes a 2/2 Cyberman artifact creature.",
+        AbilityKind::Spell,
+    );
+    let Effect::TurnFaceDown { target, profile } = &*chain.effect else {
+        panic!("expected TurnFaceDown, got: {:?}", chain.effect);
+    };
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected a typed creature target, got: {target:?}"
+    );
+    let profile = profile.as_ref().expect("face-down profile must be present");
+    assert_eq!(profile.power, Some(2));
+    assert_eq!(profile.toughness, Some(2));
+    assert_eq!(profile.body, crate::types::ability::FaceDownBody::Creature);
+    assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+    assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
+    assert!(
+        chain.sub_ability.is_none(),
+        "the 'It becomes a ...' body sentence must refine the profile, not \
+         survive as a separate GenericEffect sibling: {:?}",
+        chain.sub_ability
+    );
+}
+
+#[test]
+fn self_ref_turn_this_creature_face_down_is_a_resolving_effect() {
+    // CR 708.2a: "{cost}: Turn this creature face down" (Mischievous Quanar,
+    // Wall of Deceit) is a genuine resolving activated ability, not a special
+    // action — turning face DOWN has no special-action form (morph/cloak/
+    // disguise only turn face UP). The self-reference must parse to a
+    // `TurnFaceDown { target: SelfRef }`, not be rejected to Unimplemented.
+    let e = parse_effect("Turn this creature face down.");
+    assert!(
+        matches!(
+            e,
+            Effect::TurnFaceDown {
+                target: TargetFilter::SelfRef,
+                profile: Some(_)
+            }
+        ),
+        "expected TurnFaceDown {{ SelfRef }}, got: {e:?}"
+    );
+
+    // Sibling self-reference type ("this enchantment", Obscuring Aether)
+    // proves the class coverage is not creature-specific.
+    let e = parse_effect("Turn this enchantment face down.");
+    assert!(
+        matches!(
+            e,
+            Effect::TurnFaceDown {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected TurnFaceDown {{ SelfRef }} for 'this enchantment', got: {e:?}"
+    );
+}
+
+/// CR 115.1 + CR 118.12a: resolution-side parity with the trigger arm —
+/// "destroy target creature unless target player pays 2 life" surfaces a
+/// declared-target `Typed` payer (no type/property filters, no controller —
+/// "target player" enumerates all players) and a `PayLife { 2 }` cost.
+#[test]
+fn resolution_unless_target_player_pays_life() {
+    let (cleaned, modifier) = extract_resolution_unless_pay_modifier(
+        "Destroy target creature unless target player pays 2 life.",
+        None,
+    );
+    let modifier = modifier.expect("declared-target unless-pay must be extracted");
+    assert_eq!(
+        modifier.payer,
+        TargetFilter::Typed(TypedFilter::default()),
+        "\"target player\" is a controller-less declared-target Typed (all players)"
+    );
+    assert_eq!(
+        modifier.cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 }
+        },
+        "cost must be PayLife 2, got {:?}",
+        modifier.cost
+    );
+    assert_eq!(
+        cleaned.trim_end_matches('.'),
+        "Destroy target creature",
+        "the unless clause must be stripped from the body"
+    );
+}
+
+/// CR 115.1 + CR 118.12a: "target opponent pays {cost}" yields an
+/// opponent-scoped declared-target `Typed` payer.
+#[test]
+fn resolution_unless_target_opponent_pays_life() {
+    let (_, modifier) = extract_resolution_unless_pay_modifier(
+        "Destroy target creature unless target opponent pays 3 life.",
+        None,
+    );
+    let modifier = modifier.expect("declared-target unless-pay must be extracted");
+    assert_eq!(
+        modifier.payer,
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        "\"target opponent\" carries the Opponent controller"
+    );
+}
+
+/// Negative guards: the existing anaphoric/scope payers must be unchanged by
+/// the new declared-target arms. "any player pays" stays `AllPlayers`;
+/// "you pay" stays `Controller`.
+#[test]
+fn resolution_unless_anaphoric_payers_unchanged() {
+    let (_, any) = extract_resolution_unless_pay_modifier(
+        "Destroy target creature unless any player pays 3 life.",
+        None,
+    );
+    assert_eq!(
+        any.expect("any-player unless-pay").payer,
+        TargetFilter::AllPlayers,
+        "\"any player pays\" must stay AllPlayers"
+    );
+
+    let (_, you) =
+        extract_resolution_unless_pay_modifier("Draw a card unless you pay 2 life.", None);
+    assert_eq!(
+        you.expect("you-pay unless-pay").payer,
+        TargetFilter::Controller,
+        "\"you pay\" must stay Controller"
+    );
 }

@@ -614,6 +614,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
         return true;
     }
+    // CR 701.23f + CR 614.1a: "If an opponent/a player would search a library,
+    // that player searches the top N cards of that library instead." (Aven
+    // Mindcensor) leads with "...would search...", which the Priority-8 "would "
+    // replacement gate would otherwise swallow (there is no Search replacement
+    // event). Route to Priority-7 static. Specific conjunction avoids false hits.
+    if scan_contains(lower, "would search a library") && scan_contains(lower, "instead") {
+        return true;
+    }
     // CR 121.1 / CR 613.11: "[subject] draw(s) cards from the bottom of [your|
     // their] library rather than/instead of the top." — River Song's draw-source
     // redirection static (Meet in Reverse). The body verb is "draw", so none of

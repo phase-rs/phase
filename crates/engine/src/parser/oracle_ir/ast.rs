@@ -206,6 +206,8 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
+        enters_under: Option<ControllerRef>,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
         /// When true, the found card enters "attached to" the search source.
@@ -517,6 +519,23 @@ pub(crate) enum ImperativeFamilyAst {
     /// the card(s) the source exiled.
     TurnFaceUp {
         target: TargetFilter,
+    },
+    /// CR 708.2a: "Turn target [permanent] face down" — turns the targeted
+    /// face-up permanent(s) face down via a resolving effect (Cyber Conversion).
+    /// `profile` is seeded with `Some(vanilla_2_2())` at the verb arm so a
+    /// trailing "It's a 2/2 Cyberman artifact creature." `FaceDownProfileSpec`
+    /// continuation can refine the face-down body (CR 205.1a).
+    ///
+    /// CR 115.1d: `multi_target` carries the target-count quantifier when the
+    /// subject is plural ("turn any number of target tapped nontoken creatures
+    /// face down" — Illithid Harvester; "turn N target … face down"). It is
+    /// stamped onto the lowered `ParsedEffectClause` so the cast surfaces the
+    /// correct number of target slots rather than collapsing to one. `None` for
+    /// the single-subject form (Cyber Conversion, Backslide).
+    TurnFaceDown {
+        target: TargetFilter,
+        profile: Option<FaceDownProfile>,
+        multi_target: Option<MultiTargetSpec>,
     },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"

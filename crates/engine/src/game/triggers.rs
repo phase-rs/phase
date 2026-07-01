@@ -4385,8 +4385,11 @@ fn dispatch_pending_trigger_context(
                     &trigger.ability,
                     &trigger.ability.effect,
                 ) {
+                    // CR 601.2c + CR 601.2d: Divide only among the distributing
+                    // effect's own targets; sibling-effect targets became targets
+                    // in the emit above and are not part of the division.
                     let assigned_targets =
-                        super::ability_utils::flatten_targets_in_chain(&trigger.ability);
+                        super::ability_utils::distribution_targets(&trigger.ability);
                     if assigned_targets.len() == 1 {
                         trigger.ability.distribution =
                             Some(vec![(assigned_targets[0].clone(), total)]);
@@ -11174,6 +11177,121 @@ pub mod tests {
 
         assert_eq!(state.objects[&target1].damage_marked, 1);
         assert_eq!(state.objects[&target2].damage_marked, 3);
+    }
+
+    /// CR 601.2c + CR 601.2d + CR 603.3d (runtime seam test): a triggered
+    /// ability whose divided-damage node is CHAINED to a sibling "tap target
+    /// creature" effect announces its division only among the damage node's OWN
+    /// targets — the sibling target is excluded from `DistributeAmong.targets`
+    /// even though it still "becomes a target" (a `BecomesTarget` event fires
+    /// for it). Reverting the `distribution_targets` scoping regresses (a): the
+    /// sibling would leak into the division prompt.
+    #[test]
+    fn trigger_distributed_damage_scopes_distribution_to_own_targets_not_sibling() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let dmg1 = make_creature(&mut state, PlayerId(1), "Damage Target 1", 2, 10);
+        let dmg2 = make_creature(&mut state, PlayerId(1), "Damage Target 2", 2, 10);
+        let tap_target = make_creature(&mut state, PlayerId(1), "Tap Target", 2, 10);
+
+        let source = make_creature(&mut state, PlayerId(0), "Chained Source", 3, 3);
+        {
+            // Top-level divided damage among exactly two target creatures,
+            // chained to a sibling "tap target creature".
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                },
+            );
+            execute.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+            execute.distribute = Some(DistributionUnit::Damage);
+            let execute = execute.sub_ability(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Tap,
+                },
+            ));
+
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events);
+
+        let wf = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("begin trigger target selection")
+            .expect("target selection required");
+        state.waiting_for = wf;
+
+        // Slot order is effect-first then sub_ability: [dmg0, dmg1, tap].
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Object(dmg1),
+                    TargetRef::Object(dmg2),
+                    TargetRef::Object(tap_target),
+                ],
+            },
+        )
+        .expect("target selection should succeed");
+
+        // (a) Division is scoped to the damage node's own targets — the sibling
+        // tap target is NOT offered as a division recipient.
+        match &result.waiting_for {
+            WaitingFor::DistributeAmong {
+                total,
+                targets,
+                unit: DistributionUnit::Damage,
+                ..
+            } => {
+                assert_eq!(*total, 4);
+                assert_eq!(
+                    targets,
+                    &vec![TargetRef::Object(dmg1), TargetRef::Object(dmg2)],
+                    "distribution offered only among the damage node's own targets"
+                );
+                assert!(
+                    !targets.contains(&TargetRef::Object(tap_target)),
+                    "sibling tap target must not leak into the division"
+                );
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+
+        // (b) The sibling target still became a target (CR 601.2c) — a
+        // BecomesTarget event fired for it.
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::BecomesTarget {
+                    target: TargetRef::Object(id),
+                    ..
+                } if *id == tap_target
+            )),
+            "sibling tap target should still emit a becomes-target event"
+        );
     }
 
     #[test]

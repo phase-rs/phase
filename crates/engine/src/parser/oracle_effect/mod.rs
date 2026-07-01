@@ -2747,6 +2747,35 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         return None;
     }
 
+    // CR 514.2 + CR 500.7 + CR 109.5: a TRAILING "during their next turn" /
+    // "during that player's next turn" clause (Sphinx's Decree, Azor) makes the
+    // prohibition expire at the affected player's next turn — the cast-branch
+    // mirror of `try_parse_that_player_cant_attack_prohibition`. Without it the
+    // duration was dropped into an `Unimplemented` sub_ability and the ban
+    // wrongly ended at the CURRENT turn's cleanup. `UntilEndOfNextTurnOf` anchors
+    // on the controller for the opponents scope: each opponent's single
+    // intervening next turn precedes the controller's next turn, so the
+    // controller-anchored window covers exactly those turns (see
+    // `add_restriction::fill_runtime_fields`, and the `EndOfTurn` placeholder
+    // below is overridden there from `ability.duration`).
+    let (duration, remaining) = match nom_on_lower(remaining, remaining_lower, |input| {
+        value(
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            alt((
+                tag(" during their next turn"),
+                tag(" during that player's next turn"),
+            )),
+        )
+        .parse(input)
+    }) {
+        Some((next_turn_duration, rest)) if rest.trim_matches(['.', ' ']).is_empty() => {
+            (Some(next_turn_duration), rest)
+        }
+        _ => (duration, remaining),
+    };
+
     let spell_filter = match spell_filter_text {
         None => None,
         Some(text) => {
@@ -19175,6 +19204,100 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 105.4 + CR 702.11d + CR 702.16: A grant of "protection/hexproof from the
+/// color of your choice" needs a color choice at resolution so the granting
+/// source carries a `ChosenAttribute::Color` for the layer applier to bake into
+/// the granted keyword (see the `chosen_color` pre-read in `game/layers.rs`,
+/// which resolves `Protection(ChosenColor)` / `HexproofFrom(ChosenColor)` from
+/// the source's chosen color). Cards in this class (Mother of Runes, Blessed
+/// Breath, Aven Liberator) print the grant as a single clause with no separate
+/// "choose a color" sentence, so the parser must inject the choice.
+///
+/// This mirrors `try_parse_become_choice`, which already emits
+/// `Choose(Color) -> sub_ability(AddChosenColor)` for "becomes the color of your
+/// choice": the `Choose` resolves first (storing the color on the source via
+/// `effects/choose.rs`), then the grant sub-ability bakes it in.
+///
+/// Wraps a `GenericEffect` whose static modifications grant the chosen-color
+/// keyword into `Choose(Color) -> sub_ability(grant)`. Skips clauses already
+/// nested under a color choice (`parent_is_color_choice`) — e.g. an explicit
+/// "Choose a color. Target creature gains protection from that color" already
+/// supplies the choice, so re-wrapping would double-prompt.
+fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color_choice: bool) {
+    if !parent_is_color_choice && effect_grants_chosen_color_keyword(&def.effect) {
+        // Move the grant under a freshly injected color choice. Any existing
+        // sub_ability chain rides along beneath the grant so downstream effects
+        // still resolve after it.
+        let grant_effect = std::mem::replace(
+            &mut def.effect,
+            Box::new(Effect::Choose {
+                choice_type: ChoiceType::color(),
+                // CR 607.2d + CR 613.1: `persist: true` so the choice resolver
+                // carries `source_id` into `WaitingFor::NamedChoice`; answering
+                // it then routes through `bind_named_choice`, which writes
+                // `ChosenAttribute::Color` onto the granting source and re-runs
+                // layers. The layer applier reads that color off the source
+                // (`game/layers.rs` `chosen_color` pre-read) to bake the grant's
+                // `Protection`/`HexproofFrom(ChosenColor)` into a concrete color.
+                // With `persist: false` no `source_id` is stored, the source
+                // never gets a chosen color, and the grant resolves to a no-op
+                // (issue #4371). Matches `try_parse_become_choice`'s persisted
+                // `AddChosenColor` choice.
+                persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
+            }),
+        );
+        let prior_sub = def.sub_ability.take();
+        let mut grant_ability = AbilityDefinition::new(AbilityKind::Spell, *grant_effect);
+        grant_ability.sub_ability = prior_sub;
+        def.sub_ability = Some(Box::new(grant_ability));
+        // The grant is now a leaf beneath the choice; recurse into it with the
+        // parent flag set so it is not re-wrapped, while any prior downstream
+        // chain it carries is still visited.
+        if let Some(sub) = def.sub_ability.as_mut() {
+            inject_chosen_color_choice_grant(sub, true);
+        }
+        return;
+    }
+
+    let child_under_color_choice = matches!(
+        &*def.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    );
+    if let Some(sub) = def.sub_ability.as_mut() {
+        inject_chosen_color_choice_grant(sub, child_under_color_choice);
+    }
+}
+
+/// True when `effect` is a `GenericEffect` granting `Protection`/`Hexproof` from
+/// the chosen color via a continuous `AddKeyword` modification (CR 702.16 /
+/// CR 702.11d).
+fn effect_grants_chosen_color_keyword(effect: &Effect) -> bool {
+    use crate::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|s| {
+        s.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword { keyword }
+                    if matches!(
+                        keyword,
+                        Keyword::Protection(ProtectionTarget::ChosenColor)
+                            | Keyword::HexproofFrom(HexproofFilter::ChosenColor)
+                    )
+            )
+        })
+    })
+}
+
 fn parse_that_type_mana_count(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |input| {
@@ -23811,6 +23934,20 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
             // controller (Stench of Evil, Fade Away) rather than a player
             // target (Flay).
             value(TargetFilter::Player, tag("they pay ")),
+            // CR 115.1 + CR 118.12a: declared-target payer "target opponent/target
+            // player pays {cost}" (resolution-side parity with the trigger-side
+            // arm). Distinct from the anaphoric "they pay" (-> Player) above: the
+            // payer is the player declared as a target inside the unless clause,
+            // resolved from `ability.targets`. The `Typed` shape passes through the
+            // caller's `payer == Player` remap unmodified.
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("target opponent pays "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                tag("target player pays "),
+            ),
             // CR 118.12a: "unless any player pays ..." — every player is polled
             // in APNAP order; the first to pay prevents the effect (Cleansing,
             // the Rhystic cycle, Soul Strings).

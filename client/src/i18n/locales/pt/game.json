@@ -74,7 +74,6 @@
     "resolveTooltip": "Passe a prioridade para que o item do topo da pilha possa resolver se todos os jogadores também passarem. Atalho: Espaço.",
     "resolveAll": "Resolver Tudo",
     "resolveAllTooltip": "Continue passando a prioridade enquanto a pilha resolve. Uma escolha obrigatória ou parada pode interrompê-la.",
-    "waiting": "Aguardando",
     "priorityTooltip": "Passe a prioridade. Se a pilha estiver vazia, isso avança pela janela de prioridade atual. Atalho: Espaço.",
     "pass": "Passar",
     "passToEndTooltip": "Passe automaticamente até a etapa final, a menos que uma escolha, parada ou o Controle Total interrompa. Atalho: Enter.",
@@ -1073,10 +1072,19 @@
       "subtitleManaValueUpTo_other": "Escolha até {{count}} cartas dentro do limite de valor de mana"
     },
     "searchPartition": {
-      "title": "Escolher Cartas para o Campo de Batalha",
-      "subtitle_one": "Escolha {{count}} carta para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "subtitle_other": "Escolha {{count}} cartas para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "tapped": " viradas"
+      "title": "Escolher Cartas",
+      "subtitle_one": "Escolha {{count}} carta para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "subtitle_other": "Escolha {{count}} cartas para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "tapped": " viradas",
+      "zones": {
+        "Library": "na sua biblioteca",
+        "Hand": "na sua mão",
+        "Battlefield": "no campo de batalha",
+        "Graveyard": "no seu cemitério",
+        "Stack": "na pilha",
+        "Exile": "no exílio",
+        "Command": "na zona de comando"
+      }
     },
     "outsideGame": {
       "title": "Escolher do Sideboard",
@@ -1620,6 +1628,7 @@
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "Copiado!",
     "reportOnGithub": "Reportar no GitHub",
+    "continueWaiting": "Continuar esperando",
     "reload": "Recarregar",
     "reportTitle": "Travamento do motor: {{summary}}",
     "reportConnectionSummary": "Conexão com o motor perdida",
@@ -1909,5 +1918,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

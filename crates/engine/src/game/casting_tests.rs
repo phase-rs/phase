@@ -37675,3 +37675,79 @@ mod plot_from_library {
         );
     }
 }
+
+/// CR 500.7 + CR 514.2 + CR 109.5: Sphinx's Decree / Azor — "Each opponent can't
+/// cast … during that player's next turn." The ban must be dormant on the
+/// creating turn (opponents may still respond that turn) and take force on each
+/// opponent's OWN next turn. Resolving the restriction fans it out per opponent;
+/// the pre-armed marker only bites once that opponent's untap step arms it.
+#[test]
+fn cant_cast_next_turn_arms_on_each_opponents_own_turn() {
+    use crate::types::ability::{
+        Duration, Effect, GameRestriction, PlayerScope, ProhibitedActivity, ResolvedAbility,
+        RestrictionExpiry, RestrictionPlayerScope,
+    };
+    let mut state = setup_game_at_main_phase(); // 2-player, P0 active
+    let source = create_object(
+        &mut state,
+        CardId(700),
+        PlayerId(0),
+        "Sphinx's Decree".to_string(),
+        Zone::Battlefield,
+    );
+    let ability = ResolvedAbility::new(
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::CastSpells { spell_filter: None },
+            },
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    )
+    .duration(Duration::UntilEndOfNextTurnOf {
+        player: PlayerScope::Controller,
+    });
+    let mut events = Vec::new();
+    crate::game::effects::add_restriction::resolve(&mut state, &ability, &mut events).unwrap();
+
+    // Fanned out into one SpecificPlayer(opponent) restriction anchored on the
+    // opponent's own next turn — not a controller-anchored OpponentsOf... marker.
+    assert_eq!(state.restrictions.len(), 1, "got {:?}", state.restrictions);
+    assert!(
+        matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::SpecificPlayer(p),
+                expiry: RestrictionExpiry::UntilEndOfNextTurnOf { player: q },
+                ..
+            } if *p == PlayerId(1) && *q == PlayerId(1)
+        ),
+        "got {:?}",
+        state.restrictions[0]
+    );
+
+    // On the creating turn the ban is dormant (pre-armed): the opponent may still
+    // cast, and the controller is never affected by their own opponents-scope ban.
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
+
+    // Advance to the opponent's next turn and run their untap step, which arms
+    // the marker (UntilEndOfNextTurnOf{P1} -> EndOfTurn).
+    state.active_player = PlayerId(1);
+    state.turn_number += 1;
+    state.phase = Phase::Untap;
+    let mut untap_events = Vec::new();
+    crate::game::turns::execute_untap(&mut state, &mut untap_events);
+
+    // Now the prohibited spell is rejected for the opponent during their own turn.
+    assert!(
+        is_blocked_by_cant_cast_spells(&state, PlayerId(1), None),
+        "opponent must be blocked during their next turn; restrictions={:?}",
+        state.restrictions
+    );
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
+}

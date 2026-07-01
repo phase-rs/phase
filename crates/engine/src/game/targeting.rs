@@ -39,6 +39,21 @@ pub(crate) fn find_legal_targets_for_ability(
     )
 }
 
+pub(crate) fn has_legal_target_for_ability(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> bool {
+    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    has_legal_target_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
 pub(crate) fn find_legal_targets_for_ability_with_controller(
     state: &GameState,
     filter: &TargetFilter,
@@ -343,6 +358,65 @@ fn find_legal_targets_with_context(
     }
 
     targets
+}
+
+fn has_legal_target_with_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> bool {
+    if matches!(
+        filter,
+        TargetFilter::SpecificObject { .. } | TargetFilter::ParentTarget
+    ) {
+        return false;
+    }
+
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().any(|branch| {
+            has_legal_target_with_context(state, branch, source_controller, source_id, target_ctx)
+        });
+    }
+
+    let explicit_zones = extract_explicit_zones(filter);
+    if !explicit_zones.is_empty() {
+        if explicit_zones.contains(&Zone::Battlefield) {
+            for &obj_id in &state.battlefield {
+                if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+                    let Some(obj) = state.objects.get(&obj_id) else {
+                        continue;
+                    };
+                    if can_target(obj, source_controller, source_id, state) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return !find_legal_targets_with_context(
+            state,
+            filter,
+            source_controller,
+            source_id,
+            target_ctx,
+        )
+        .is_empty();
+    }
+
+    for &obj_id in &state.battlefield {
+        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if can_target(obj, source_controller, source_id, state) {
+                return true;
+            }
+        }
+    }
+
+    !find_legal_targets_with_context(state, filter, source_controller, source_id, target_ctx)
+        .is_empty()
 }
 
 /// Recheck targets on resolution using typed filter, returns only still-legal targets.
@@ -1077,6 +1151,20 @@ pub fn resolve_effect_player_ref(
             let index = filter.chosen_player_index().expect("checked by guard");
             ability.chosen_players.get(index as usize).copied()
         }
+        // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside an unless
+        // clause ("unless target opponent/target player pays") resolves to the
+        // player chosen at stack placement — read from `ability.targets`,
+        // identically to the anaphoric `Player` arm above. Uses the shared
+        // `payer_is_declared_target` authority (also gates slot creation in
+        // `ability_utils` and the `resolve_unless_payer` arm) so the declared-
+        // target shape has one definition. Ordered after the `ChosenPlayer` arm,
+        // which it never overlaps (declared-target payers carry no chosen index).
+        _ if crate::game::ability_utils::payer_is_declared_target(filter) => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),
@@ -1118,6 +1206,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
+        GameEvent::TurnedFaceDown { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
         GameEvent::CreatureSuspected { object_id } => Some(*object_id),
         GameEvent::CreatureNoLongerSuspected { object_id } => Some(*object_id),

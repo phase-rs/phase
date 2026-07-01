@@ -538,6 +538,12 @@ function SearchPartitionModal({
   const tappedText = data.primary_enter_tapped
     ? t("cardChoice.searchPartition.tapped")
     : "";
+  const primaryText = t(
+    `cardChoice.searchPartition.zones.${data.primary_destination}`,
+  );
+  const restText = t(
+    `cardChoice.searchPartition.zones.${data.rest_destination}`,
+  );
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -575,6 +581,8 @@ function SearchPartitionModal({
       subtitle={t("cardChoice.searchPartition.subtitle", {
         count: data.primary_count,
         tapped: tappedText,
+        primary: primaryText,
+        rest: restText,
       })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >

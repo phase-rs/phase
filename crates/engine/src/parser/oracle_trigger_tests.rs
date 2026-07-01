@@ -8,14 +8,14 @@ use crate::types::ability::{
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
     Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
     DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
-    FilterProp, ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
 use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
@@ -5148,6 +5148,98 @@ fn satya_delayed_end_step_energy_unless_rides_delayed_sacrifice() {
     );
 }
 
+/// CR 115.1 + CR 118.12a + CR 603.3d: Athreos, God of Passage — "Whenever
+/// another creature you control dies, return it to its owner's hand unless
+/// target opponent pays 3 life." The unless-payer is declared as a target
+/// inside the unless clause, distinct from the anaphoric "they"/"that
+/// opponent" forms.
+#[test]
+fn athreos_god_of_passage_targeted_opponent_unless_pay() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control dies, return it to its owner's hand \
+             unless target opponent pays 3 life.",
+        "Athreos, God of Passage",
+    );
+
+    let unless = def
+        .unless_pay
+        .as_ref()
+        .expect("Athreos trigger must carry the unless-pay modifier");
+    assert_eq!(
+        unless.payer,
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        "payer must be a declared-target opponent Typed, not the anaphoric forms"
+    );
+    assert_eq!(
+        unless.cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 }
+        },
+        "cost must be PayLife 3, got {:?}",
+        unless.cost
+    );
+
+    let exec = def.execute.as_deref().expect("Athreos execute body");
+    assert!(
+        !matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "body effect must be the parsed return-to-hand, got {:?}",
+        exec.effect
+    );
+    assert!(
+        matches!(
+            &*exec.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                ..
+            } | Effect::Bounce {
+                destination: Some(Zone::Hand) | None,
+                ..
+            }
+        ),
+        "body effect must return the creature to its owner's hand, got {:?}",
+        exec.effect
+    );
+}
+
+/// CR 118.12a: Sibling guard for the declared-target arm. The anaphoric
+/// pronoun forms must not collapse to the declared-target `Typed` payer.
+#[test]
+fn unless_pay_anaphoric_payers_distinct_from_declared_target() {
+    let they = parse_trigger_line(
+        "Whenever you attack, target opponent loses 3 life unless they pay 3 life.",
+        "They Pay Test",
+    );
+    let they_unless = they
+        .unless_pay
+        .as_ref()
+        .expect("\"they pay\" must yield an unless-pay modifier");
+    assert_eq!(
+        they_unless.payer,
+        TargetFilter::Player,
+        "\"they pay\" stays anaphoric Player, not the declared-target Typed"
+    );
+
+    let that = parse_trigger_line(
+        "Whenever a player casts a spell, that player draws a card \
+             unless that opponent pays 3 life.",
+        "That Opponent Pay Test",
+    );
+    let that_unless = that
+        .unless_pay
+        .as_ref()
+        .expect("\"that opponent pays\" must yield an unless-pay modifier");
+    assert_eq!(
+        that_unless.payer,
+        TargetFilter::TriggeringPlayer,
+        "\"that opponent pays\" stays anaphoric TriggeringPlayer"
+    );
+    assert!(
+        matches!(that_unless.cost, AbilityCost::PayLife { .. }),
+        "cost must be PayLife, got {:?}",
+        that_unless.cost
+    );
+}
+
 #[test]
 fn non_token_enters_exile_it_stays_triggering_source() {
     // No-regression: a non-token ETB trigger "exile it" has NO token creator
@@ -8512,6 +8604,162 @@ fn trigger_you_tap_land_for_mana_that_player_scope() {
         }
         other => panic!("expected TapAll effect, got {other:?}"),
     }
+}
+
+#[test]
+fn high_tide_delayed_trigger_taps_for_mana_mode_and_filter() {
+    // CR 603.7b + CR 106.12a (issue #4673): High Tide's real Oracle text is an
+    // instant that creates an until-end-of-turn delayed trigger. The inner
+    // trigger condition is keyword-stripped by `try_parse_whenever_this_turn`
+    // before `parse_trigger_condition` runs, so the taps-for-mana recognizer
+    // must accept the missing "whenever " keyword. Reverting the `opt()` on the
+    // leading keyword in `parse_taps_for_mana_actor_line` reproduces
+    // `TriggerMode::Unknown`, which has no matcher and never fires.
+    let parsed = parse_oracle_text(
+        "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}.",
+        "High Tide",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("High Tide must parse a CreateDelayedTrigger");
+
+    // Outer window is the until-end-of-turn cleanup purge (CR 603.7b).
+    assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected WheneverEvent delayed trigger, got {:?}",
+            ability.effect
+        );
+    };
+
+    // Inner trigger must be a real TapsForMana matcher, NOT the Unknown fallback.
+    assert_eq!(trigger.mode, TriggerMode::TapsForMana);
+    assert!(
+        !matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "inner trigger must not be Unknown (Unknown has no matcher and never fires)"
+    );
+
+    // valid_card is the Island subtype filter with no controller constraint
+    // ("a player" = any player).
+    match &trigger.valid_card {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Island".to_string())),
+                "valid_card must filter on Subtype(Island), got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller, None,
+                "\"a player\" imposes no controller constraint on the tapped land"
+            );
+        }
+        other => panic!("expected Typed Island filter, got {other:?}"),
+    }
+
+    // Inner rider adds an ADDITIONAL blue mana.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
+                ..
+            } if colors == &vec![ManaColor::Blue]
+        ),
+        "inner effect must be additional blue mana, got {:?}",
+        effect.effect
+    );
+}
+
+#[test]
+fn high_tide_delayed_trigger_that_player_binds_triggering_player() {
+    // CR 608.2c + CR 106.12a (issue #4673): "that player adds an additional {U}"
+    // must bind the recipient to the player who tapped the land
+    // (TriggeringPlayer), not the caster. Both symptoms share the root cause:
+    // `relative_player_scope_for_condition` runs on the keyword-stripped
+    // condition and must recognize the taps-for-mana event to yield
+    // TriggeringPlayer scope, and the subject-application must honor that scope
+    // rather than defaulting to ParentTargetController. Reverting either fix
+    // reproduces the wrong recipient.
+    let parsed = parse_oracle_text(
+        "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}.",
+        "High Tide",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("High Tide must parse a CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger { effect, .. } = &*ability.effect else {
+        unreachable!("guarded by find() above");
+    };
+    match &*effect.effect {
+        Effect::Mana {
+            target: Some(recipient),
+            ..
+        } => assert_eq!(
+            *recipient,
+            TargetFilter::TriggeringPlayer,
+            "\"that player\" must bind to the triggering (tapping) player, not the caster"
+        ),
+        other => panic!("expected Mana with an explicit recipient, got {other:?}"),
+    }
+}
+
+#[test]
+fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
+    // CR 603.7b + CR 106.12a (issue #4673): Bubbling Muck is the Swamp/{B}
+    // sibling of High Tide — proves the fix is class-general across permanent
+    // type and mana color, not a High Tide special case.
+    let parsed = parse_oracle_text(
+        "Until end of turn, whenever a player taps a Swamp for mana, that player adds an additional {B}.",
+        "Bubbling Muck",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("Bubbling Muck must parse a CreateDelayedTrigger");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected WheneverEvent delayed trigger");
+    };
+    assert_eq!(trigger.mode, TriggerMode::TapsForMana);
+    match &trigger.valid_card {
+        Some(TargetFilter::Typed(tf)) => assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Swamp".to_string()))),
+        other => panic!("expected Typed Swamp filter, got {other:?}"),
+    }
+    assert!(matches!(
+        &*effect.effect,
+        Effect::Mana {
+            produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
+            target: Some(TargetFilter::TriggeringPlayer),
+            ..
+        } if colors == &vec![ManaColor::Black]
+    ));
 }
 
 #[test]
@@ -20480,5 +20728,157 @@ fn trigger_veilstone_amulet_cant_be_targets() {
         matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
         "expected GenericEffect (hexproof grant), got {:?}",
         execute.effect
+    );
+}
+
+#[test]
+fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot() {
+    // CR 603.7b + CR 106.12a + CR 605.1a (issue #4673): End-to-end runtime proof
+    // for High Tide's real Oracle text. The instant creates an until-end-of-turn
+    // multi-fire delayed trigger. Whenever ANY player taps an Island for mana,
+    // THAT player (TriggeringPlayer, not the caster) gets an additional {U}.
+    // The delayed trigger is purged at end-of-turn cleanup (CR 603.7b).
+    use crate::game::scenario::GameScenario;
+    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::turns::execute_cleanup;
+    use crate::types::events::{GameEvent, ManaTapState};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+
+    fn blue(runner: &crate::game::scenario::GameRunner, p: PlayerId) -> usize {
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|ps| ps.id == p)
+            .unwrap()
+            .mana_pool
+            .count_color(ManaType::Blue)
+    }
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let hi = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "High Tide",
+            true,
+            "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}.",
+        )
+        .id();
+    let isl0 = scenario.add_basic_land(P0, ManaColor::Blue);
+    let isl1 = scenario.add_basic_land(P1, ManaColor::Blue);
+    // Fund P0's {U} to cast High Tide through the real pipeline (registers the
+    // delayed trigger authentically).
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(9999), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner.cast(hi).resolve();
+
+    // The instant registered exactly one until-end-of-turn delayed trigger.
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "High Tide must register its delayed trigger on resolution"
+    );
+    // Clear any residual pool mana from the cast so bonus deltas read cleanly.
+    for p in [P0, P1] {
+        runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|ps| ps.id == p)
+            .unwrap()
+            .mana_pool
+            .clear();
+    }
+
+    // (1) P0 taps its own Island for mana. Simulate the base {U} the land
+    // produced (CR 106.12a) and fire the delayed trigger; P0 must gain the
+    // ADDITIONAL {U} on top (net +2 blue in the pool: base + bonus).
+    runner
+        .state_mut()
+        .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
+    check_delayed_triggers(
+        runner.state_mut(),
+        &[GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: isl0,
+            produced: vec![ManaType::Blue],
+            tap_state: ManaTapState::FromTap,
+        }],
+    );
+    assert_eq!(
+        blue(&runner, P0),
+        2,
+        "P0 taps its own Island: base {{U}} + additional {{U}} = 2 blue"
+    );
+    assert_eq!(blue(&runner, P1), 0, "P1 gets nothing when P0 taps");
+
+    // (2) P1 (a DIFFERENT player, not the caster) taps THEIR Island. The bonus
+    // must go to P1's pool — proving the recipient is TriggeringPlayer, not the
+    // caster P0.
+    runner
+        .state_mut()
+        .add_mana_to_pool(P1, ManaUnit::new(ManaType::Blue, isl1, false, vec![]));
+    check_delayed_triggers(
+        runner.state_mut(),
+        &[GameEvent::TappedForMana {
+            player_id: PlayerId(1),
+            source_id: isl1,
+            produced: vec![ManaType::Blue],
+            tap_state: ManaTapState::FromTap,
+        }],
+    );
+    assert_eq!(
+        blue(&runner, P1),
+        2,
+        "P1 taps their Island: bonus routes to P1 (TriggeringPlayer), not caster P0"
+    );
+    assert_eq!(
+        blue(&runner, P0),
+        2,
+        "P0's pool is unchanged when P1 taps — bonus is NOT the caster's"
+    );
+
+    // (3) End-of-turn cleanup purges the multi-fire delayed trigger (CR 603.7b).
+    let mut cleanup_events = Vec::new();
+    execute_cleanup(runner.state_mut(), &mut cleanup_events);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        0,
+        "the until-end-of-turn delayed trigger must be purged at cleanup"
+    );
+
+    // A subsequent Island tap yields NO bonus (the WheneverEvent is gone).
+    for p in [P0, P1] {
+        runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|ps| ps.id == p)
+            .unwrap()
+            .mana_pool
+            .clear();
+    }
+    runner
+        .state_mut()
+        .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
+    check_delayed_triggers(
+        runner.state_mut(),
+        &[GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: isl0,
+            produced: vec![ManaType::Blue],
+            tap_state: ManaTapState::FromTap,
+        }],
+    );
+    assert_eq!(
+        blue(&runner, P0),
+        1,
+        "after cleanup: only the base {{U}}, no bonus — the delayed trigger expired"
     );
 }
