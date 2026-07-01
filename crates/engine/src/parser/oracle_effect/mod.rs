@@ -6583,10 +6583,11 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
 /// and toughness N/N [and gains [keyword(s)]]" → [`Effect::ApplyPerpetual`]
 /// with [`PerpetualModification::Become`] (Second Little Pig).
 ///
-/// Self-subjects only; referenced-object forms ("the duplicate"/"it") are
-/// deferred. The clause tail must be fully consumed so compound riders that
-/// are not modeled (e.g. Heir to Dragonfire's ", gets +3/+3") fall through to
-/// `Unimplemented` rather than being silently dropped.
+/// Self-subjects only; referenced-object forms ("the duplicate"/"its") are
+/// handled by [`try_parse_perpetual_base_pt`]. The clause tail must be fully
+/// consumed so compound riders that are not modeled (e.g. Heir to Dragonfire's
+/// ", gets +3/+3") fall through to `Unimplemented` rather than being silently
+/// dropped.
 fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
     use crate::parser::oracle_util::parse_subtype;
 
@@ -6665,24 +6666,80 @@ fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
     })
 }
 
-/// Digital-only Alchemy: parse the self-subject base-P/T "perpetually" form —
-/// "[~ / it / this creature / …] perpetually become(s)/has base power and
-/// toughness N/N" → [`Effect::ApplyPerpetual`] with
-/// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster).
+/// Digital-only Alchemy: parse the base-P/T "perpetually" form —
+/// self-subject ("[~ / this creature / …] perpetually become(s)/has base power
+/// and toughness N/N"), referenced-object ("the duplicate perpetually has …"),
+/// and prior-clause anaphor ("its base power and toughness perpetually
+/// become …") → [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster, Three
+/// Tree Battalion, Blood Age Muster).
 ///
-/// Increment 1 handles only the self-subject (resolved to the source). The
-/// referenced-object forms ("the duplicate"/"its base power and toughness
-/// perpetually become …", Three Tree Battalion, Blood Age Muster) are left to
-/// `Unimplemented` until the referenced-object target wiring lands. The clause
-/// tail must be fully consumed so riders (e.g. "… and gains flying") fall
-/// through instead of being silently dropped.
+/// The clause tail must be fully consumed so riders (e.g. "… and gains flying")
+/// fall through instead of being silently dropped.
 fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    fn parse_base_pt_values(rest: &str) -> Option<(i32, i32, &str)> {
+        let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+        let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+        tail_done(rest).then_some((power as i32, toughness as i32, rest))
+    }
+
     let lower = tp.lower;
+
+    // Referenced object: "The duplicate perpetually has base power and toughness 1/1."
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the duplicate perpetually ").parse(lower) {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("becomes "),
+            tag::<_, _, OracleError<'_>>("become "),
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
+            .parse(rest)
+            .ok()?;
+        let (power, toughness, _) = parse_base_pt_values(rest)?;
+        return Some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                power,
+                toughness,
+            },
+        });
+    }
+
+    // Prior-clause anaphor: "Its base power and toughness perpetually become 2/2."
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("its base power and toughness perpetually ").parse(lower)
+    {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("becomes "),
+            tag::<_, _, OracleError<'_>>("become "),
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (power, toughness, _) = parse_base_pt_values(rest)?;
+        return Some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                power,
+                toughness,
+            },
+        });
+    }
+
+    // Self-subject: "~ perpetually has base power and toughness 4/1."
     // Only unambiguous self-subjects. The anaphoric "it " is intentionally
     // excluded: after a prior object choice it refers to that object, not the
     // source, so accepting it here would let a referenced-object perpetual clause
-    // parse as supported while mutating the wrong object. Referenced-object forms
-    // ("the duplicate"/"its …") are deferred until real referent binding lands.
+    // parse as supported while mutating the wrong object.
     let after_subject = [
         "~ ",
         "this creature ",
@@ -6713,17 +6770,12 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
         .parse(rest)
         .ok()?;
-    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
-    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
-    if !(rest.is_empty() || rest == ".") {
-        return None;
-    }
+    let (power, toughness, _) = parse_base_pt_values(rest)?;
     Some(Effect::ApplyPerpetual {
         target: TargetFilter::Any,
         modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
-            power: power as i32,
-            toughness: toughness as i32,
+            power,
+            toughness,
         },
     })
 }
@@ -11649,6 +11701,35 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
+        // and <zone>" (Identity Crisis) is a *union* of origin zones, not a
+        // compound of two effects. This is `try_split_targeted_compound`'s
+        // remainder probe: the generic parse below would leave " and <graveyard>"
+        // as the remainder, and the caller would mis-split it into an orphaned
+        // "graveyard" conjunct. Claiming the whole clause here (empty remainder)
+        // keeps it single — the actual `ChangeZoneAll { InAnyZone }` is built by
+        // `parse_exile_ast`, which mirrors this recognizer.
+        if let Some((owner, zones)) = imperative::try_parse_multi_zone_player_exile(rest_lower) {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(
+                    ZoneCounterImperativeAst::Exile {
+                        origin: None,
+                        target: TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::default()
+                                .controller(owner)
+                                .properties(vec![crate::types::ability::FilterProp::InAnyZone {
+                                    zones,
+                                }]),
+                        ),
+                        all: true,
+                        enter_with_counters: vec![],
+                    },
+                )),
+                // The matcher only claims a fully-consumed clause (trailing text
+                // is rejected), so there is no compound remainder to thread on.
+                "",
+            ));
+        }
         let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if scan_contains_phrase(rest_lower, "spell") {

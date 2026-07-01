@@ -25,12 +25,13 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    CastFromZoneDriver, CastingPermission, Comparator, ContinuousModification, ControllerRef,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CastFromZoneDriver, CastingPermission, Comparator, ConjureSource, ContinuousModification,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
+    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -2243,6 +2244,9 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
             } | Effect::ChangeZone {
                 destination: Zone::Battlefield,
                 ..
+            } | Effect::Conjure {
+                destination: Zone::Battlefield,
+                ..
             }
         );
         let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
@@ -2308,6 +2312,18 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
         Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
     ) {
         return true;
+    }
+    if let Effect::Conjure { cards, .. } = &*sub.effect {
+        if cards.iter().any(|card| {
+            matches!(
+                &card.source,
+                ConjureSource::Duplicate {
+                    duplicate_of: TargetFilter::ParentTarget | TargetFilter::SelfRef,
+                }
+            )
+        }) {
+            return true;
+        }
     }
     if let Effect::GenericEffect {
         static_abilities, ..

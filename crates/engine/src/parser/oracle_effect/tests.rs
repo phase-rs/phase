@@ -28604,6 +28604,37 @@ fn perpetual_parser_maps_self_base_pt() {
 }
 
 #[test]
+fn perpetual_parser_maps_referenced_base_pt() {
+    use crate::types::ability::PerpetualModification;
+
+    let e = parse_effect("The duplicate perpetually has base power and toughness 1/1.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 1,
+                toughness: 1,
+            },
+            ..
+        }
+    ));
+
+    let e = parse_effect("Its base power and toughness perpetually become 2/2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 2,
+                toughness: 2,
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
 fn perpetual_parser_maps_modify_pt() {
     use crate::types::ability::PerpetualModification;
     let e = parse_effect("~ perpetually gets +3/+3.");
@@ -30977,6 +31008,68 @@ fn name_hate_owner_axis_shuffle_inherits_parent_target_owner() {
         cursor = sub.sub_ability.as_deref();
     }
     panic!("expected Shuffle sub-ability in owner-axis name-hate chain");
+}
+
+/// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: Identity Crisis — "Exile all cards from target
+/// player's hand and graveyard." is a mass exile across a *union* of the
+/// targeted player's zones. The zone union rides on the target filter via
+/// `InAnyZone` (origin: None), mirroring the multi-zone same-name-exile infra;
+/// previously the generic single-origin `exile all` path captured only "hand"
+/// via `infer_origin_zone` and orphaned "and graveyard" as an unsupported child.
+#[test]
+fn identity_crisis_parses_multi_zone_player_exile() {
+    use crate::types::ability::{ControllerRef, TypedFilter};
+
+    let def = parse_effect_chain(
+        "Exile all cards from target player's hand and graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected ChangeZoneAll, got {:?}", def.effect);
+    };
+    assert_eq!(*origin, None, "multi-zone origin is carried by the filter");
+    assert_eq!(*destination, Zone::Exile);
+    let expected = TargetFilter::Typed(
+        TypedFilter::default()
+            .controller(ControllerRef::TargetPlayer)
+            .properties(vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }]),
+    );
+    assert_eq!(
+        *target, expected,
+        "expected exile filter over the targeted player's hand + graveyard union"
+    );
+}
+
+/// Unit coverage for the multi-zone exile recognizer: it claims a 2+ zone
+/// union with the correct owner axis, and declines a single-zone clause so the
+/// generic single-origin `exile all` path keeps handling those.
+#[test]
+fn multi_zone_player_exile_matcher_recognizes_zone_union() {
+    use crate::types::ability::ControllerRef;
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "cards from target player's hand and graveyard."
+        ),
+        Some((
+            ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        ))
+    );
+    // Single zone → declined; the generic single-origin path owns it.
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "cards from target player's graveyard."
+        ),
+        None
+    );
 }
 
 /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
