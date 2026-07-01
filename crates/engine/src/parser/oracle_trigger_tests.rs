@@ -6,11 +6,11 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
-    Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-    DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
-    FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    Comparator, ContinuousModification, ControllerRef, CountScope, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -2788,6 +2788,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -2805,6 +2806,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )));
     trigger.execute = Some(Box::new(head));
@@ -7226,7 +7228,7 @@ fn trigger_intervening_if_source_was_dealt_damage_this_turn() {
 /// CR 120.10 + CR 603.4: Maarika, Brutal Gladiator's "Whenever ~ deals
 /// damage to a creature, if that creature was dealt excess damage this turn"
 /// must hoist the excess-damage clause as a `TriggerCondition::QuantityComparison`
-/// with `excess_only: true`, not silently drop it (condition: null).
+/// with `channel: Excess`, not silently drop it (condition: null).
 #[test]
 fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
     let def = parse_trigger_line(
@@ -7239,7 +7241,7 @@ fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::DamageDealtThisTurn {
-                        excess_only: true,
+                        channel: DamageChannel::Excess,
                         ..
                     },
                 },
@@ -7253,9 +7255,9 @@ fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
 }
 
 /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's phase trigger with an
-/// opponent-scoped excess-damage intervening-if must set `excess_only: true`
+/// opponent-scoped excess-damage intervening-if must set `channel: Excess`
 /// and produce a non-trivial target filter. `parse_type_phrase` emits
-/// `TargetFilter::Or` for compound types, so we check excess_only and
+/// `TargetFilter::Or` for compound types, so we check the channel and
 /// that the condition is a QuantityComparison with DamageDealtThisTurn.
 #[test]
 fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_turn() {
@@ -7269,7 +7271,7 @@ fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_t
                 qty:
                     QuantityRef::DamageDealtThisTurn {
                         ref target,
-                        excess_only,
+                        channel,
                         ..
                     },
             },
@@ -7282,7 +7284,11 @@ fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_t
             def.condition
         );
     };
-    assert!(excess_only, "excess_only must be true for Rith's trigger");
+    assert_eq!(
+        channel,
+        DamageChannel::Excess,
+        "channel must be Excess for Rith's trigger"
+    );
     assert!(
         !matches!(target.as_ref(), TargetFilter::Any),
         "target filter must be non-Any, got: {target:?}"
@@ -20881,4 +20887,66 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
         1,
         "after cleanup: only the base {{U}}, no bonus — the delayed trigger expired"
     );
+}
+
+/// CR 614.12: Summoner's Grimoire's granted ability — the leading
+/// "if that card is an enchantment card" must materialize an
+/// `enters_modified_if` gate on the absorbed ChangeZone (via `parse_type_phrase`),
+/// not be silently dropped while applying the riders unconditionally.
+#[test]
+fn grimoire_granted_trigger_gates_enters_on_moved_object_type() {
+    let def = parse_trigger_line(
+            "Whenever this creature attacks, you may put a creature card from your hand onto the battlefield. If that card is an enchantment card, it enters tapped and attacking.",
+            "Summoner's Grimoire",
+        );
+    let exec = def.execute.as_ref().expect("expected execute");
+    match &*exec.effect {
+        Effect::ChangeZone {
+            enter_tapped,
+            enters_attacking,
+            enters_modified_if,
+            ..
+        } => {
+            assert!(enter_tapped.is_tapped(), "enter_tapped must be Tapped");
+            assert!(*enters_attacking, "enters_attacking must be set");
+            match enters_modified_if {
+                Some(TargetFilter::Typed(tf)) => assert!(
+                    tf.type_filters.contains(&TypeFilter::Enchantment),
+                    "gate must materialize an Enchantment card-type filter, got {tf:?}"
+                ),
+                other => {
+                    panic!("expected enters_modified_if = Some(Typed(Enchantment)), got {other:?}")
+                }
+            }
+        }
+        other => panic!("expected ChangeZone execute, got {other:?}"),
+    }
+}
+
+/// CR 508.4 — negative: a follow-on "It enters tapped and attacking" with NO
+/// leading moved-object condition (Stangg / Shark Shredder) keeps both flags
+/// AND leaves `enters_modified_if` as `None` (unconditional).
+#[test]
+fn grimoire_unconditional_enters_leaves_gate_none() {
+    let def = parse_trigger_line(
+            "When this creature enters, put a creature card from your hand onto the battlefield. It enters tapped and attacking.",
+            "Unconditional Put",
+        );
+    let exec = def.execute.as_ref().expect("expected execute");
+    match &*exec.effect {
+        Effect::ChangeZone {
+            enter_tapped,
+            enters_attacking,
+            enters_modified_if,
+            ..
+        } => {
+            assert!(enter_tapped.is_tapped());
+            assert!(*enters_attacking);
+            assert!(
+                enters_modified_if.is_none(),
+                "no leading condition -> gate must stay None, got {enters_modified_if:?}"
+            );
+        }
+        other => panic!("expected ChangeZone execute, got {other:?}"),
+    }
 }

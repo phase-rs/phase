@@ -308,6 +308,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::DiscoverChoice { .. },
         )
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            },
+            GameAction::GraveyardPaidCastChoice { .. },
+        )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
         | (
@@ -2138,7 +2145,7 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: Vec::new(),
+            candidates: Vec::new(),
         };
 
         assert!(cheap_reject_candidate(

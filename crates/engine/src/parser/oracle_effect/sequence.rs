@@ -18,10 +18,10 @@ use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    CounteredSpellDestination, DigSource, Duration, Effect, EffectScope, FaceDownBody,
-    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
+    Duration, Effect, EffectScope, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec,
+    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -1549,10 +1549,76 @@ fn starts_player_gains_control_clause(s: &str) -> bool {
     super::subject::starts_with_subject_prefix(subject_phrase)
 }
 
+/// CR 708.7 + CR 708.8: True when `s` is a "turn <object> face up" / "turn
+/// <object> face down" face-toggle clause (Yarus, Roar of the Old Gods: "...,
+/// then turn it face up"). CR 708.7 lets a face-down permanent's controller turn
+/// it face up; CR 708.8 reverts its copiable values as it is turned face up.
+///
+/// Narrowly gated to the COMPLETE toggle shape so it never re-splits unrelated
+/// "turn" phrasings ("turn it sideways", "each turn", "until your next turn"):
+///   - `tag("turn ")` head,
+///   - a recognized anaphoric/target object subject head (`it` / `this` / `that`
+///     / `those` / `them` / `target`) consumed as a complete word — the same
+///     object-subject axis the clause-starter table already recognizes,
+///   - the comma-free remainder of the (possibly multi-word) subject up to the
+///     `face ` marker,
+///   - the `up` / `down` toggle leaf.
+///
+/// Only a full "turn &lt;object&gt; face up|down" may license the split.
+fn starts_turn_face_up_down_clause(s: &str) -> bool {
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("turn ").parse(s) else {
+        return false;
+    };
+    // Object-subject head as a complete word (anaphor / target determiner).
+    let Ok((rest, _)) = terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("this"),
+            tag("that"),
+            tag("those"),
+            tag("them"),
+            tag("target"),
+        )),
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+    .parse(rest) else {
+        return false;
+    };
+    // Peel the comma-free remainder of the subject up to the " face " toggle
+    // marker. take_until stops at the first occurrence, keeping the match local
+    // to a single clause.
+    let Ok((tail, subject_rest)) = terminated(
+        take_until::<_, _, OracleError<'_>>("face "),
+        tag::<_, _, OracleError<'_>>("face "),
+    )
+    .parse(rest) else {
+        return false;
+    };
+    // A clause boundary inside the subject span means the " face " marker belongs
+    // to a different clause — reject (byte scan, not a dispatch string-method).
+    if subject_rest.bytes().any(|b| b == b',') {
+        return false;
+    }
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("up")),
+        value((), tag("down")),
+    ))
+    .parse(tail)
+    .is_ok()
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
         return false;
+    }
+
+    // CR 708.7 + CR 708.8: "turn <object> face up|down" face-toggle clause-starter
+    // (Yarus, Roar of the Old Gods). A complete toggle shape is always its own
+    // clause ("..., then turn it face up"), so it must split off to reach the
+    // TurnFaceUp lowering; the narrow match leaves other "turn" phrasings intact.
+    if starts_turn_face_up_down_clause(s) {
+        return true;
     }
 
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -2601,7 +2667,7 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 /// this way, put it <zone> instead of into that player's graveyard"
 /// continuation clause (Memory Lapse, Remand, Spell Crumple). Operates on
 /// lowercased text; tolerates a trailing period/whitespace. Returns the parsed
-/// [`CounteredSpellDestination`], or `None` for an unsupported destination
+/// [`SpellStackToGraveyardReplacement`], or `None` for an unsupported destination
 /// (Hinder's "your choice of the top or bottom", Transcendent Dragon's "exile
 /// it instead") so those cards are honestly gapped rather than misparsed.
 ///
@@ -2609,7 +2675,7 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - spell anaphor ("that spell" / "that card" / "it").
 ///   - destination ("on top of its owner's library" / "on the bottom of its
 ///     owner's library" / "into its owner's hand").
-fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDestination> {
+fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGraveyardReplacement> {
     let clause = lower.trim().trim_end_matches('.').trim_end();
     let mut parser = (
         tag::<_, _, OracleError<'_>>("if "),
@@ -2617,19 +2683,19 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDe
         tag(" is countered this way, put it "),
         alt((
             value(
-                CounteredSpellDestination::Library {
+                SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 },
                 tag("on top of its owner's library"),
             ),
             value(
-                CounteredSpellDestination::Library {
+                SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 },
                 tag("on the bottom of its owner's library"),
             ),
             value(
-                CounteredSpellDestination::Hand,
+                SpellStackToGraveyardReplacement::Hand,
                 tag("into its owner's hand"),
             ),
         )),
@@ -2766,6 +2832,7 @@ pub(super) fn apply_clause_continuation(
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability
@@ -3255,6 +3322,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
                                 face_down_profile,
+                                enters_modified_if: None,
                             },
                         );
                         if is_any_number {
@@ -3393,6 +3461,7 @@ pub(super) fn apply_clause_continuation(
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 let mut rest_def = AbilityDefinition::new(
@@ -3410,6 +3479,7 @@ pub(super) fn apply_clause_continuation(
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 if (chosen_destination == Zone::Library || rest_destination == Zone::Library)
@@ -3493,7 +3563,7 @@ pub(super) fn apply_clause_continuation(
             );
             append_definition_to_sub_chain(previous, grant_def);
         }
-        ContinuationAst::EntersTappedAttacking => {
+        ContinuationAst::EntersTappedAttacking { moved_filter } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -3518,10 +3588,16 @@ pub(super) fn apply_clause_continuation(
                 Effect::ChangeZone {
                     enters_attacking,
                     enter_tapped,
+                    enters_modified_if,
                     ..
                 } => {
                     *enters_attacking = true;
                     *enter_tapped = crate::types::zones::EtbTapState::Tapped;
+                    // CR 614.12: when the followup carried a leading "if that
+                    // card is a/an <type>", gate the riders on the moved
+                    // object's type at ChangeZone resolution instead of
+                    // applying them unconditionally.
+                    *enters_modified_if = moved_filter;
                 }
                 _ => {}
             }
@@ -3841,7 +3917,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::BecomesPlotted => true,
         ContinuationAst::BecomesForetold => true,
-        ContinuationAst::EntersTappedAttacking => true,
+        ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
@@ -4946,6 +5022,105 @@ fn parse_self_cost_keyword_clarification(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 205.2a + CR 205.3a: Strip the moved-object subject prefix ("that card is
+/// a/an", "it's a/an", "it is a/an") from a recognized card-type / subtype
+/// condition clause, returning the type tail (`"enchantment card"`, a card type
+/// per CR 205.2a; subtype tails per CR 205.3a). Only the affirmative
+/// subjects are listed: a negated clause ("that card is not a/an") has no
+/// matching prefix and falls through to `None`, so the caller declines to
+/// emit a gate it cannot represent (the moved-object filter is affirmative).
+fn strip_moved_object_subject(clause: &str) -> Option<&str> {
+    alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+        tag("it's a "),
+        tag("it's an "),
+        tag("it is a "),
+        tag("it is an "),
+    ))
+    .parse(clause.trim_start())
+    .ok()
+    .map(|(rest, _)| rest)
+}
+
+/// CR 614.12: recognize the optional leading moved-object type condition on a
+/// ChangeZone "enters tapped and attacking" followup (Summoner's Grimoire:
+/// "If that card is an enchantment card, it enters tapped and attacking").
+///
+/// Returns the continuation to emit, or `None` to emit NOTHING:
+/// - no leading "if"  -> `EntersTappedAttacking { moved_filter: None }`
+///   (Stangg / Shark Shredder; byte-identical to the prior unconditional patch).
+/// - recognized moved-object card-type condition -> `{ moved_filter: Some(..) }`.
+/// - leading "if" present but NOT a recognized, materializable affirmative
+///   card-type condition -> `None`. Because `apply_clause_continuation` sets
+///   both riders UNCONDITIONALLY whenever this continuation is emitted, the only
+///   correct behavior for an unrepresentable condition is to emit nothing,
+///   leaving the bare " if " for the honest `Swallow:Condition_If` diagnostic.
+fn parse_change_zone_enters_tapped_attacking(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
+    let trimmed = lower.trim_start();
+    // No leading "if": unconditional riders (unchanged behavior).
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed) else {
+        return Some(ContinuationAst::EntersTappedAttacking { moved_filter: None });
+    };
+    // CR 614.12: the condition clause runs up to the first comma
+    // ("that card is an enchantment card" | ", it enters tapped and attacking").
+    let (_, condition_clause) = take_until::<_, _, OracleError<'_>>(",")
+        .parse(after_if)
+        .ok()?;
+    // Single condition-recognition authority: confirm this is a recognized
+    // moved-object card-type condition before materializing a filter.
+    let recognized = matches!(
+        super::conditions::try_nom_condition_as_ability_condition(condition_clause, ctx),
+        Some(
+            AbilityCondition::RevealedHasCardType { .. }
+                | AbilityCondition::TargetMatchesFilter { .. }
+        )
+    );
+    if !recognized {
+        return None;
+    }
+    // N-D: materialize TargetFilter::Typed via parse_type_phrase on the type
+    // tail — RevealedHasCardType carries no TargetFilter, so reuse the canonical
+    // materializer rather than reconstructing from the recognized condition.
+    let type_tail = strip_moved_object_subject(condition_clause)?;
+    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    if matches!(filter, TargetFilter::Any | TargetFilter::None) || !leftover.trim().is_empty() {
+        return None;
+    }
+    Some(ContinuationAst::EntersTappedAttacking {
+        moved_filter: Some(filter),
+    })
+}
+
+/// CR 614.12: returns true when `sentence` is a moved-object type-conditional
+/// enters-modifier clause — a leading "if that card is a/an <type>" (or
+/// "it's/it is a/an <type>") gating an "enters tapped and attacking" tail
+/// (Summoner's Grimoire). Shared with the `Condition_If` swallow detector so the
+/// represented clause can be located and stripped text-scoped, reusing the same
+/// leading-condition combinators (`strip_moved_object_subject` +
+/// `parse_type_phrase`) that `parse_change_zone_enters_tapped_attacking` uses —
+/// not a verbatim Oracle-string match.
+pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    if !(nom_primitives::scan_contains(lower, "enters tapped and attacking")
+        || nom_primitives::scan_contains(lower, "enter tapped and attacking"))
+    {
+        return false;
+    }
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Some(type_tail) = strip_moved_object_subject(after_if) else {
+        return false;
+    };
+    let (filter, _leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    !matches!(filter, TargetFilter::Any | TargetFilter::None)
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -5640,12 +5815,23 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
-        // after CopyTokenOf, Token, or ChangeZone effects.
-        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
+        // after CopyTokenOf or Token. Tokens/copies always enter
+        // unconditionally — no moved-object type gate applies.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. }
             if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
                 || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
         {
-            Some(ContinuationAst::EntersTappedAttacking)
+            Some(ContinuationAst::EntersTappedAttacking { moved_filter: None })
+        }
+        // CR 508.4 / CR 614.1 / CR 614.12: the same followup after a ChangeZone,
+        // but the riders may be gated on the MOVED object's type by a leading
+        // "if that card is a/an <type>" (Summoner's Grimoire). Condition-aware so
+        // the leading clause is no longer silently dropped (Swallow:Condition_If).
+        Effect::ChangeZone { .. }
+            if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
+                || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
+        {
+            parse_change_zone_enters_tapped_attacking(&lower, ctx)
         }
         // CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token creation.
         Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
@@ -5728,8 +5914,22 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
     ))
     .parse(input)?;
     let (input, _) = tag("all other ").parse(input)?;
-    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    let (input, filter) =
+        alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
     Ok((input, Some(filter)))
+}
+
+/// CR 701.21a: Parse "creatures [they/you/that player] control[s]" — the sacrifice
+/// domain for Slaughter the Strong's "sacrifices all other creatures they control".
+fn parse_creature_domain(input: &str) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("creatures ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((input, TargetFilter::Typed(TypedFilter::creature())))
 }
 
 fn parse_nonland_permanent_domain(
@@ -6278,6 +6478,39 @@ mod tests {
         );
     }
 
+    /// CR 708.7: "..., then turn it face up" is its own clause (Yarus, Roar of
+    /// the Old Gods). The face-toggle clause must split off so it lowers to a
+    /// `TurnFaceUp` sub-ability. Reverting the `starts_turn_face_up_down_clause`
+    /// starter leaves the tail glued to the return clause (one chunk).
+    #[test]
+    fn turn_face_up_toggle_splits_off_after_then() {
+        let chunks = clause_texts("return it to the battlefield, then turn it face up");
+        assert_eq!(
+            chunks,
+            vec!["return it to the battlefield", "turn it face up"],
+            "the face-up toggle must split into its own clause"
+        );
+    }
+
+    /// The "turn <object> face up|down" starter is narrow: it matches ONLY a
+    /// complete toggle, never unrelated "turn" phrasings.
+    #[test]
+    fn turn_face_up_starter_is_narrow() {
+        assert!(starts_turn_face_up_down_clause("turn it face up"));
+        assert!(starts_turn_face_up_down_clause("turn it face down"));
+        assert!(starts_turn_face_up_down_clause(
+            "turn that creature face up"
+        ));
+        assert!(starts_turn_face_up_down_clause(
+            "turn target permanent face down"
+        ));
+        // Negatives — no face toggle / no recognized subject / not clause-initial.
+        assert!(!starts_turn_face_up_down_clause("turn it sideways"));
+        assert!(!starts_turn_face_up_down_clause("each turn"));
+        assert!(!starts_turn_face_up_down_clause("until your next turn"));
+        assert!(!starts_turn_face_up_down_clause("turn face up"));
+    }
+
     #[test]
     fn quoted_token_ability_boundary_splits_before_then_if() {
         let chunks = clause_texts(
@@ -6400,6 +6633,7 @@ mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         let result =
             parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
@@ -6956,6 +7190,7 @@ mod tests {
             chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            total_power_cap: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(

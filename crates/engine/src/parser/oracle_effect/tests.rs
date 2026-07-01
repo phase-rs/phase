@@ -4630,7 +4630,7 @@ fn teferis_response_destroy_rider_absorbed_draw_chains() {
 /// `Effect::Counter.countered_spell_zone` as `Library { Top }`.
 #[test]
 fn memory_lapse_counter_spell_zone_redirect_library_top() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let ability = parse_effect_chain(
             "Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard.",
@@ -4651,7 +4651,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Top
             })
         ),
@@ -4664,7 +4664,7 @@ fn memory_lapse_counter_spell_zone_redirect_library_top() {
 /// Crumple on the bottom of its owner's library." is a separate sentence.)
 #[test]
 fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
-    use crate::types::ability::{CounteredSpellDestination, LibraryPosition};
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it on the bottom of its owner's library instead of into that player's graveyard. Put Spell Crumple on the bottom of its owner's library.",
@@ -4684,7 +4684,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
     assert!(
         matches!(
             countered_spell_zone,
-            Some(CounteredSpellDestination::Library {
+            Some(SpellStackToGraveyardReplacement::Library {
                 position: LibraryPosition::Bottom
             })
         ),
@@ -4696,7 +4696,7 @@ fn spell_crumple_counter_spell_zone_redirect_library_bottom() {
 /// `Hand`, and the subsequent "Draw a card." still chains as a sibling.
 #[test]
 fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
-    use crate::types::ability::CounteredSpellDestination;
+    use crate::types::ability::SpellStackToGraveyardReplacement;
 
     let result = crate::parser::parse_oracle_text(
             "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard.\nDraw a card.",
@@ -4714,7 +4714,10 @@ fn remand_counter_spell_zone_redirect_hand_and_draw_chains() {
         panic!("expected Counter effect, got {:?}", ability.effect);
     };
     assert!(
-        matches!(countered_spell_zone, Some(CounteredSpellDestination::Hand)),
+        matches!(
+            countered_spell_zone,
+            Some(SpellStackToGraveyardReplacement::Hand)
+        ),
         "expected Hand, got {countered_spell_zone:?}"
     );
 
@@ -19532,6 +19535,7 @@ fn cast_variant_paid_sneak_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         })
     );
@@ -19547,6 +19551,7 @@ fn cast_variant_paid_ninjutsu_non_instead() {
     assert_eq!(
         cond,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Ninjutsu,
         })
     );
@@ -19574,7 +19579,8 @@ fn foretold_instead_rewrites_those_tokens_with_x_count() {
             if matches!(
                 &**inner,
                 AbilityCondition::CastVariantPaid {
-                    variant: crate::types::ability::CastVariantPaid::Foretell
+                    variant: crate::types::ability::CastVariantPaid::Foretell,
+                    ..
                 }
             )
     ));
@@ -19616,6 +19622,7 @@ fn conditional_enter_tapped_attacking_patches_token() {
     assert_eq!(
         def.condition,
         Some(AbilityCondition::CastVariantPaid {
+            subject: crate::types::ability::ObjectScope::Source,
             variant: CastVariantPaid::Sneak,
         }),
         "Token should have CastVariantPaid condition"
@@ -33131,25 +33138,67 @@ fn bare_cast_from_among_those_exiled_cards_unchanged() {
 }
 
 /// CR 614.1a + CR 701.5: Verify the structural detector for the
-/// "If that spell would be put into a graveyard, exile it instead" rider
+/// "If that spell would be put into a graveyard, [dest] instead" rider
 /// covers the determiner variants (a / the / its owner's / your /
-/// opponent's). All forms must dispatch identically so the parent-target
-/// rewrite applies uniformly.
+/// opponent's) AND every typed destination (exile / library bottom / library
+/// top / hand). All forms must dispatch so the parent-target rewrite applies
+/// uniformly and the destination axis is parameterized, not exile-only.
 #[test]
-fn exile_after_spell_rider_clause_recognises_determiner_variants() {
-    for clause in [
-        "if that spell would be put into a graveyard, exile it instead",
-        "if that spell would be put into the graveyard, exile it instead",
-        "if that spell would be put into its owner's graveyard, exile it instead",
-        "if that spell would be put into your graveyard, exile it instead",
-        "if that spell would be put into an opponent's graveyard, exile it instead",
-        "if that spell would be put into a graveyard, exile it instead.",
+fn spell_graveyard_replacement_rider_recognises_determiner_and_destination_variants() {
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
+    for (clause, expected) in [
+        (
+            "if that spell would be put into a graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into the graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into its owner's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into your graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into an opponent's graveyard, exile it instead",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, exile it instead.",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on the bottom of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Bottom,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, put it on top of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Top,
+            },
+        ),
+        (
+            "if that spell would be put into a graveyard, return it to its owner's hand instead",
+            SpellStackToGraveyardReplacement::Hand,
+        ),
     ] {
-        assert!(
-            is_exile_after_spell_rider_clause(clause),
+        assert_eq!(
+            parse_spell_graveyard_replacement_rider(clause),
+            Some(expected),
             "should recognise rider clause: {clause:?}"
         );
     }
+    // Negative: a non-rider "instead" clause must not match.
+    assert_eq!(
+        parse_spell_graveyard_replacement_rider("draw a card instead"),
+        None,
+    );
 }
 
 #[test]
@@ -35296,6 +35345,7 @@ fn excess_damage_fight_followup_parses_condition_amount_and_retention() {
         Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            ..
         })
     ));
     assert!(matches!(
@@ -37069,5 +37119,32 @@ fn resolution_unless_anaphoric_payers_unchanged() {
         you.expect("you-pay unless-pay").payer,
         TargetFilter::Controller,
         "\"you pay\" must stay Controller"
+    );
+}
+
+/// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore parses to a `Pump` (+3/+2
+/// on the controlled creature) with a `SequentialSibling` grant sub-ability
+/// gated on `CastVariantPaid { variant: Warp, subject: Target }` — "that
+/// creature" anaphors to the +3/+2 target, so the rider is TARGET-scoped, not
+/// the source-scoped "if its warp cost was paid" form. Reverting the parser
+/// arm drops the condition (the `Condition_If` swallow returns).
+#[test]
+fn full_bore_grant_clause_is_target_scoped_warp_condition() {
+    let def = parse_effect_chain(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was cast for its warp cost, it also gains trample and haste until end of turn.",
+            AbilityKind::Spell,
+        );
+    assert!(
+        matches!(&*def.effect, Effect::Pump { .. }),
+        "parent effect is the +3/+2 pump"
+    );
+    let sub = def.sub_ability.as_ref().expect("grant sub-ability");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::CastVariantPaid {
+            variant: CastVariantPaid::Warp,
+            subject: ObjectScope::Target,
+        }),
+        "the trample+haste grant must be gated on the TARGET's warp-cast marker"
     );
 }

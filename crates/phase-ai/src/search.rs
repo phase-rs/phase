@@ -962,6 +962,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 608.2g + CR 609.4b: paid graveyard cast — decline by default (parity
+        // with Discover/Cascade/Ripple); the candidate generator explores accept.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { .. },
+            ..
+        } => Some(GameAction::GraveyardPaidCastChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
         // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
         // as the search default; the candidate generator still explores decline.
         WaitingFor::RevealUntilKeptChoice { .. } => {
@@ -1396,6 +1404,27 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 .map(|eligible| eligible.first().copied())
                 .collect();
             Some(GameAction::SelectCategoryPermanents { choices })
+        }
+
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): keep the most creatures
+        // whose running power total fits the cap (lowest power first) — a valid,
+        // non-trivial fallback that minimises self-sacrifice.
+        WaitingFor::KeepWithinTotalPowerChoice { eligible, cap, .. } => {
+            let power = |id: &engine::types::identifiers::ObjectId| {
+                state.objects.get(id).and_then(|o| o.power).unwrap_or(0)
+            };
+            let mut by_power = eligible.clone();
+            by_power.sort_by_key(power);
+            let mut kept = Vec::new();
+            let mut total = 0i32;
+            for id in by_power {
+                let p = power(&id);
+                if total + p <= *cap {
+                    total += p;
+                    kept.push(id);
+                }
+            }
+            Some(GameAction::ChooseKeptCreatures { kept })
         }
 
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
