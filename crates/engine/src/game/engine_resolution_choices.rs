@@ -132,6 +132,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
 }
@@ -3930,6 +3931,104 @@ pub(super) fn handle_resolution_choice(
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
+        }
+        // CR 101.4 + CR 707.2 + CR 122.1: One player submitted their ordered
+        // 1..=max selection for `EachPlayerCopyChosen`. Drive this player's
+        // copy+counter step, then continue the APNAP walk.
+        (
+            WaitingFor::EachPlayerCopyChosenSelection {
+                player,
+                eligible,
+                min,
+                max,
+                choose_filter,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                remaining_players,
+                scoped_players,
+                trigger_event,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            // CR 707.2: validate an ordered, distinct, in-eligible selection of
+            // size `min..=max`. Order is load-bearing (index 0 copied, index 1
+            // scales).
+            if targets.len() < min as usize || targets.len() > max as usize {
+                return Err(EngineError::InvalidAction(format!(
+                    "EachPlayerCopyChosen: must choose between {min} and {max} objects, got {}",
+                    targets.len()
+                )));
+            }
+            let mut chosen: Vec<ObjectId> = Vec::with_capacity(targets.len());
+            for t in &targets {
+                if !eligible.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object not eligible".to_string(),
+                    ));
+                }
+                let TargetRef::Object(id) = t else {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selection must be objects".to_string(),
+                    ));
+                };
+                if chosen.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: duplicate object in selection".to_string(),
+                    ));
+                }
+                chosen.push(*id);
+            }
+            let params = effects::each_player_copy_chosen::CopyChosenParams {
+                choose_filter,
+                min,
+                max,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                scoped_players,
+                trigger_event: trigger_event.clone(),
+            };
+            // Priority sentinel — `drive_from_copy` writes `waiting_for` only when
+            // it pauses (replacement choice) or seeds the next player's selection.
+            let events_before = events.len();
+            set_priority(state, player);
+            // CR 608.2: restore the phenomenon trigger event across the drive.
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = trigger_event;
+            let drive_result = effects::each_player_copy_chosen::drive_from_copy(
+                state,
+                player,
+                chosen,
+                remaining_players,
+                &params,
+                events,
+            );
+            state.current_trigger_event = previous_trigger_event;
+            if let Err(e) = drive_result {
+                return Err(EngineError::InvalidAction(format!("{e:?}")));
+            }
+            // CR 603.2 + CR 603.3b: trigger bookkeeping across the paused walk,
+            // mirroring the `CategoryChoice` arm. If the walk settled back to
+            // Priority, drain any triggers deferred by earlier paused rounds;
+            // otherwise (a later player's selection or a replacement choice is
+            // now pending) batch this action's events for a later drain so the
+            // created tokens' ETB observers are not dropped.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            } else {
+                let trigger_events: Vec<GameEvent> = events[events_before..]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (waiting_for, action) => {
             return Err(EngineError::ActionNotAllowed(format!(

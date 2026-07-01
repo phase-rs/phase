@@ -1369,6 +1369,20 @@ export type WaitingFor =
       all_kept: ObjectId[];
       scoped_players: PlayerId[];
     } }
+  | { type: "EachPlayerCopyChosenSelection"; data: {
+      player: PlayerId;
+      eligible: TargetRef[];
+      min: number;
+      max: number;
+      choose_filter: TargetFilter;
+      copy_modifications?: unknown[];
+      scale?: unknown;
+      source_id: ObjectId;
+      source_controller: PlayerId;
+      remaining_players: PlayerId[];
+      scoped_players: PlayerId[];
+      trigger_event?: GameEvent;
+    } }
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
   // into two piles for an `Effect::SeparateIntoPiles`. `player` is the

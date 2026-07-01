@@ -841,6 +841,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
         | EffectKind::ChooseAndSacrificeRest
+        | EffectKind::EachPlayerCopyChosen
         | EffectKind::Exploit
         | EffectKind::GainEnergy
         | EffectKind::GivePlayerCounter

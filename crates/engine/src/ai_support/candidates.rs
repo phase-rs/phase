@@ -1175,6 +1175,51 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — enumerate each
+        // single object (copy first only) plus representative first+second pairs
+        // when a second object may be chosen. Ordered: index 0 is copied, index 1
+        // scales the copy.
+        WaitingFor::EachPlayerCopyChosenSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } => {
+            let mut actions: Vec<CandidateAction> = Vec::new();
+            if *min <= 1 {
+                for e in eligible {
+                    actions.push(candidate(
+                        GameAction::SelectTargets {
+                            targets: vec![e.clone()],
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+            }
+            if *max >= 2 {
+                'outer: for first in eligible {
+                    for second in eligible {
+                        if first == second {
+                            continue;
+                        }
+                        actions.push(candidate(
+                            GameAction::SelectTargets {
+                                targets: vec![first.clone(), second.clone()],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                        // Cap to avoid combinatorial explosion on wide boards.
+                        if actions.len() >= 64 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            actions
+        }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {
             player,

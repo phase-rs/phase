@@ -9,7 +9,7 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    ChosenAttribute, Comparator, ContinuousModification, CopyScale, CostPaidObjectSnapshot,
     CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
     KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
@@ -1150,6 +1150,50 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+}
+
+/// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
+/// step is currently mid-flight, so the drain resumes at the right point
+/// (neither re-reading a stale token nor double-placing counters).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyChosenStage {
+    /// The inner `CopyTokenOf` paused on a replacement choice; on resume, the
+    /// created token(s) are now recorded in `last_created_token_ids` and the
+    /// counter step must be driven.
+    AwaitingCopy,
+    /// The copy completed and the +1/+1 counter placement was initiated and
+    /// paused (2+ counter-modifying replacements needed ordering); on resume,
+    /// the counters have finished — advance to the next player.
+    AwaitingCounters,
+}
+
+/// CR 101.4 + CR 616.1: Resume state for a single player's copy+counter step of
+/// `EachPlayerCopyChosen` that paused on a CR 616.1 replacement choice. `stage`
+/// disambiguates which primitive paused; `chosen[0]` was copied and `chosen[1]`
+/// (if present) scales the copy; `remaining_players` + the effect params
+/// continue the APNAP walk after this player's step completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEachPlayerCopyChosen {
+    pub stage: CopyChosenStage,
+    pub player: PlayerId,
+    /// `[0]` copied, `[1]` (optional) scales the copy.
+    pub chosen: Vec<ObjectId>,
+    pub remaining_players: Vec<PlayerId>,
+    // Effect params for the remainder of the walk.
+    pub choose_filter: TargetFilter,
+    pub min: u32,
+    pub max: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy_modifications: Vec<ContinuousModification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<CopyScale>,
+    pub source_id: ObjectId,
+    pub source_controller: PlayerId,
+    /// APNAP-ordered scoped player set (for a mid-choice save/reload).
+    #[serde(default)]
+    pub scoped_players: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<crate::types::events::GameEvent>,
 }
 
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
@@ -4258,6 +4302,35 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
+    /// CR 101.4 + CR 707.2: One player selects an ordered `min..=max` objects for
+    /// [`Effect::EachPlayerCopyChosen`]. `order` is load-bearing: index 0 is
+    /// copied, index 1 (if present) scales the copy. The effect params + walk
+    /// state are threaded so the continuation can recompute eligibility and drive
+    /// each subsequent player in APNAP order.
+    EachPlayerCopyChosenSelection {
+        player: PlayerId,
+        /// The choosing player's own eligible objects (public battlefield info).
+        eligible: Vec<TargetRef>,
+        min: u32,
+        max: u32,
+        choose_filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_modifications: Vec<ContinuousModification>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<CopyScale>,
+        source_id: ObjectId,
+        source_controller: PlayerId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// CR 101.4: the APNAP-ordered scoped player set. Empty only on a
+        /// mid-resolution save/reload (`#[serde(default)]`).
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+        /// CR 608.2: triggering event of the phenomenon trigger, restored around
+        /// the continuation so resolution-scoped reads resolve correctly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<crate::types::events::GameEvent>,
+    },
     /// CR 707.10c: When a spell is copied, the controller may choose new targets.
     /// Each slot shows the current target and legal alternatives.
     CopyRetarget {
@@ -4593,6 +4666,7 @@ impl WaitingFor {
             WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
@@ -4719,6 +4793,7 @@ impl WaitingFor {
             | WaitingFor::AssistChoosePlayer { player, .. }
             | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::AssignBlockerDamage { player, .. }
@@ -6714,6 +6789,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
 
+    /// CR 101.4 + CR 616.1: Deferred resume state for `EachPlayerCopyChosen` when
+    /// the current player's inner token copy OR its +1/+1 counter placement
+    /// paused on a replacement choice. Drained by
+    /// `each_player_copy_chosen::drain_pending` after the copy/counter drains in
+    /// `engine_replacement.rs`, once state is back at Priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_each_player_copy_chosen: Option<PendingEachPlayerCopyChosen>,
+
     /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
     /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
     /// loop position so `resume_after_keep` can re-enter the flip loop after the
@@ -7869,6 +7952,7 @@ impl GameState {
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
+            pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
@@ -8422,6 +8506,7 @@ impl PartialEq for GameState {
             // is serialized whenever `Some` — see `skip_serializing_if` above —
             // so a mid-prompt save/resume keeps the constraint intact).
             && self.pending_copy_token_resolution == other.pending_copy_token_resolution
+            && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of

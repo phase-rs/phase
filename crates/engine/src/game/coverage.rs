@@ -3139,6 +3139,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize => {}
