@@ -1410,6 +1410,34 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 601.2d: The node whose effect divides damage/counters among its own
+/// targets. Mirrors `extract_distribution_total`, which inspects only the
+/// top-level `ability.effect`; a divided effect only reaches the
+/// `WaitingFor::DistributeAmong` sites when it is the top-level node.
+fn distributing_node(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    matches!(
+        ability.effect,
+        Effect::DealDamage { .. } | Effect::PutCounter { .. }
+    )
+    .then_some(ability)
+}
+
+/// CR 601.2d: The targets a division is distributed among — the distributing
+/// node's OWN targets only, excluding sibling-effect targets elsewhere in the
+/// chain (e.g. a chained "tap two target permanents"). Per-opponent fanout
+/// strips player refs (mirroring `flatten_targets_in_chain`); ordinary
+/// player-targeted divided damage keeps its player targets.
+pub fn distribution_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let Some(node) = distributing_node(ability) else {
+        return Vec::new();
+    };
+    if is_per_opponent_target_fanout(node) {
+        object_targets_only(&node.targets)
+    } else {
+        node.targets.clone()
+    }
+}
+
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
@@ -9061,6 +9089,119 @@ mod tests {
             },
         ));
         ability
+    }
+
+    /// CR 601.2d building-block (AST-shape) test: a division is announced only
+    /// among the distributing effect's OWN targets, never sibling-effect targets
+    /// elsewhere in the chain. `flatten_targets_in_chain` still returns the full
+    /// chain (those siblings still "become targets" per CR 601.2c), proving the
+    /// two helpers diverge.
+    #[test]
+    fn distribution_targets_excludes_sibling_chain_targets() {
+        // Top-level divided damage carries two of its own object targets; a
+        // chained "tap two target permanents" carries two unrelated targets.
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability = ability.sub_ability(ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            vec![
+                TargetRef::Object(ObjectId(3)),
+                TargetRef::Object(ObjectId(4)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let dist = distribution_targets(&ability);
+        assert_eq!(
+            dist,
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2))
+            ],
+            "division scoped to the DealDamage node's own targets"
+        );
+        assert_eq!(
+            flatten_targets_in_chain(&ability).len(),
+            4,
+            "flatten still spans the whole chain (siblings became targets)"
+        );
+
+        // Ordinary player-targeted divided damage (NOT per-opponent fanout):
+        // the player target is part of the division and is kept.
+        let with_player = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(5)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(
+            distribution_targets(&with_player),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(5)),
+            ],
+            "non-fanout divided damage keeps its player target"
+        );
+
+        // Per-opponent fanout divided damage: player refs are structural
+        // partitions, not division recipients, so they are stripped.
+        let mut fanout = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+                damage_source: None,
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(ObjectId(6)),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(ObjectId(7)),
+            ],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        fanout.multi_target = Some(MultiTargetSpec::bounded(
+            1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        assert!(is_per_opponent_target_fanout(&fanout));
+        assert_eq!(
+            distribution_targets(&fanout),
+            vec![
+                TargetRef::Object(ObjectId(6)),
+                TargetRef::Object(ObjectId(7)),
+            ],
+            "per-opponent fanout strips player partition refs from the division"
+        );
     }
 
     #[test]
