@@ -17435,6 +17435,53 @@ fn cant_search_library_opponents_form() {
     );
 }
 
+// --- CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop (Aven Mindcensor class) ---
+
+#[test]
+fn restrict_search_to_top_aven_mindcensor() {
+    // CR 701.23f + CR 614.1a: Aven Mindcensor — "If an opponent would search a
+    // library, that player searches the top four cards of that library instead."
+    let def = parse_static_line(
+        "If an opponent would search a library, that player searches the top four cards of that library instead.",
+    )
+    .expect("Aven Mindcensor Oracle text should parse as a static");
+    assert_eq!(
+        def.mode,
+        StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::Opponents,
+            count: 4,
+        },
+        "must lower to the top-N restriction static, not Unimplemented/replacement"
+    );
+}
+
+#[test]
+fn restrict_search_to_top_count_is_parsed_not_hardcoded() {
+    // Hostile count: a top-six variant proves `count` is extracted from the text,
+    // not pinned to Aven's 4.
+    let def = parse_static_line(
+        "If a player would search a library, that player searches the top six cards of that library instead.",
+    )
+    .expect("top-six variant should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::AllPlayers,
+            count: 6,
+        }
+    );
+}
+
+#[test]
+fn restrict_search_to_top_does_not_claim_plain_search_effect() {
+    // Negative: a normal tutor effect is not this static — the static parser must
+    // decline it so it routes to the effect parser as an ordinary search.
+    assert!(
+        parse_static_line("Search your library for a card, then shuffle.").is_none(),
+        "a plain library-search effect must not parse as RestrictLibrarySearchToTop"
+    );
+}
+
 // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
 
 #[test]

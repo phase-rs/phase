@@ -7887,6 +7887,90 @@ pub(super) fn parse_imperative_family_ast(
             }
         }
 
+        // CR 708.2a: "Turn <permanent> face down" — a resolving effect that turns
+        // the named/targeted face-up permanent(s) face down. This is ALWAYS a
+        // resolving spell/ability effect, never a special action: the morph,
+        // cloak, and disguise special actions only ever turn a permanent face UP
+        // (CR 702.37e / CR 701.58b / CR 702.168d), so "turn ... face down" has no
+        // special-action wording to collide with. The subject may therefore be a
+        // target (Cyber Conversion — "Turn target creature face down"), a
+        // self-reference (Mischievous Quanar / Wall of Deceit — "{cost}: Turn
+        // this creature face down"; Obscuring Aether — "Turn this enchantment
+        // face down"; Skittish Valesk's coin-flip trigger), or a mass non-target
+        // form ("turn all other ... creatures face down"). `parse_target` maps
+        // each form, including "~" / "this <type>" → `SelfRef` (resolved at
+        // runtime via `resolved_battlefield_object_ids`); self-references are NOT
+        // rejected. Mirrors the general face-up extraction: anchored/all-consuming
+        // so the combined two-sentence input ("... face down. It's a 2/2 Cyberman
+        // artifact creature.") fails here and is left for the chain splitter,
+        // which re-attaches the trailing body sentence as a `FaceDownProfileSpec`
+        // continuation (CR 205.1a). The seed `Some(vanilla_2_2())` profile
+        // (CR 708.2a sentence 1) is overwritten by that continuation when present.
+        "turn" | "turns" if nom_primitives::scan_contains(lower, "face down") => {
+            let text_trim = text.trim();
+            let lower_trim = lower.trim();
+            let parsed = (|| {
+                let (rest, _) = alt((
+                    tag::<_, _, OracleError<'_>>("turn "),
+                    tag("turns "),
+                ))
+                .parse(lower_trim)?;
+                all_consuming(terminated(
+                    take_until::<_, _, OracleError<'_>>(" face down"),
+                    preceded(tag(" face down"), opt(tag("."))),
+                ))
+                .parse(rest)
+                .and_then(|(_, mid)| {
+                    // Slice the original-cased middle by the lowercase byte
+                    // offsets; `.get()` guards against non-ASCII boundary shifts.
+                    let start = lower_trim.len() - rest.len();
+                    text_trim.get(start..start + mid.len()).ok_or_else(|| {
+                        nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail))
+                    })
+                })
+            })();
+            match parsed {
+                Ok(mid_orig) if !mid_orig.trim().is_empty() => {
+                    // `parse_target` maps the subject to a `TargetFilter` AND
+                    // reports the unconsumed remainder. CR 115.1d: recover the
+                    // target-count quantifier ("any number of target", "N target")
+                    // separately via the shared subject building block so a plural
+                    // subject (Illithid Harvester) surfaces a `MultiTargetSpec`
+                    // instead of collapsing to one slot; single subjects (Cyber
+                    // Conversion, self-references) yield `None`.
+                    let (target, remainder) = parse_target(mid_orig);
+                    // The count quantifier is derived purely from the subject's
+                    // count phrase, not from enclosing context, so a throwaway
+                    // context (mirroring the `parse_target` wrapper above) keeps
+                    // the caller's `ctx` diagnostics untouched.
+                    let multi_target = super::subject::parse_subject_application(
+                        mid_orig,
+                        &mut ParseContext::default(),
+                    )
+                    .and_then(|app| app.multi_target);
+                    // CR 608.2b: only emit `TurnFaceDown` when `parse_target`
+                    // consumed the ENTIRE subject. A non-empty remainder means an
+                    // unmodeled target restriction ("with a morph ability" —
+                    // Backslide) was silently dropped, which would illegally widen
+                    // the legal-target set (any creature would become a legal
+                    // target). Fall through to Unimplemented rather than ship an
+                    // over-broad / illegal target.
+                    if matches!(target, TargetFilter::None) || !remainder.trim().is_empty() {
+                        None
+                    } else {
+                        Some(ImperativeFamilyAst::TurnFaceDown {
+                            target,
+                            profile: Some(
+                                crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                            ),
+                            multi_target,
+                        })
+                    }
+                }
+                _ => None,
+            }
+        }
+
         // Numeric verbs (CR 121)
         "draw" if nom_primitives::scan_contains(lower, "that many") => {
             // "draw that many cards" / "draw that many cards minus one" →
@@ -9752,6 +9836,23 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 115.1d + CR 708.2a: "turn any number of target … face down" /
+        // "turn N target … face down" (Illithid Harvester). The target-count
+        // quantifier is an ability-level field (`ParsedEffectClause.multi_target`
+        // → `AbilityDefinition.multi_target`), not an `Effect::TurnFaceDown`
+        // field, so intercept here where a `ParsedEffectClause` is in scope and
+        // stamp the spec — mirroring the `Fight` / `PutCounterList` clause-field
+        // arms above. `None` (single subject — Cyber Conversion) leaves the
+        // clause's default unchanged.
+        ImperativeFamilyAst::TurnFaceDown {
+            target,
+            profile,
+            multi_target,
+        } => {
+            let mut clause = parsed_clause(Effect::TurnFaceDown { target, profile });
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 601.2d + CR 615.7: "prevent N damage divided/distributed among [targets]"
         // — intercepted here so `distribute` and `multi_target` propagate to
         // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
@@ -9857,6 +9958,15 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
         // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
+        // CR 708.2a: Turn target permanent(s) face down (Cyber Conversion).
+        // `multi_target` is a clause-level field stamped in
+        // `lower_imperative_family_ast`'s intercept arm; the bare-Effect path
+        // (used by unit tests that inspect only the `Effect`) cannot carry it.
+        ImperativeFamilyAst::TurnFaceDown {
+            target,
+            profile,
+            multi_target: _,
+        } => Effect::TurnFaceDown { target, profile },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
@@ -13958,6 +14068,81 @@ mod tests {
             );
         }
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    }
+
+    /// CR 115.1d + CR 708.2a: "turn any number of target … face down" (Illithid
+    /// Harvester) is a plural-subject turn-face-down. The target-count quantifier
+    /// must survive lowering as `ParsedEffectClause.multi_target` (unlimited,
+    /// min 0) so the cast surfaces every chosen target rather than collapsing to
+    /// one slot — the bare `Effect::TurnFaceDown` cannot carry the cardinality.
+    /// The single-subject form (Cyber Conversion) carries `None`, pinning the
+    /// other end of the axis.
+    #[test]
+    fn turn_face_down_any_number_of_target_carries_multi_target() {
+        let text = "turn any number of target tapped nontoken creatures face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("plural turn-face-down should parse");
+        assert!(
+            matches!(
+                &ast,
+                ImperativeFamilyAst::TurnFaceDown {
+                    multi_target: Some(_),
+                    ..
+                }
+            ),
+            "expected TurnFaceDown with a multi_target, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast);
+        assert!(
+            matches!(clause.effect, Effect::TurnFaceDown { .. }),
+            "expected Effect::TurnFaceDown, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "any number of target → unlimited (min 0) multi-target"
+        );
+
+        // Single-subject form carries no multi-target.
+        let text = "turn target creature face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("single turn-face-down should parse");
+        let clause = lower_imperative_family_ast(ast);
+        assert_eq!(
+            clause.multi_target, None,
+            "single 'target creature' must not carry a multi-target spec"
+        );
+    }
+
+    /// CR 608.2b: "turn target creature with a morph ability face down" (Backslide)
+    /// carries a target restriction ("with a morph ability") the parser cannot
+    /// model. Rather than silently drop it — which would illegally widen the
+    /// legal-target set to any creature — the verb arm must reject the clause
+    /// (returning `None`) so it falls through to `Unimplemented`. The unrestricted
+    /// "turn target creature face down" still parses, pinning the guard's other
+    /// end.
+    #[test]
+    fn turn_face_down_with_unmodeled_restriction_falls_through() {
+        let text = "turn target creature with a morph ability face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            ast.is_none(),
+            "an unmodeled target restriction must not silently widen the target; \
+             expected fall-through to Unimplemented, got {ast:?}"
+        );
+
+        // The unrestricted subject still parses to TurnFaceDown.
+        let text = "turn target creature face down";
+        let lower = text.to_lowercase();
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            matches!(ast, Some(ImperativeFamilyAst::TurnFaceDown { .. })),
+            "unrestricted 'target creature' must still parse to TurnFaceDown, got {ast:?}"
+        );
     }
 
     /// CR 115.6: "it fights up to one target creature …" allows zero targets.

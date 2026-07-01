@@ -3287,6 +3287,14 @@ pub(super) fn apply_clause_continuation(
                     | Effect::Manifest {
                         profile: fdp @ Some(_),
                         ..
+                    }
+                    // CR 708.2a: "Turn target creature face down" seeds a vanilla
+                    // 2/2 profile; overwrite it with the parsed "It's a 2/2
+                    // Cyberman artifact creature." characteristics (Cyber
+                    // Conversion).
+                    | Effect::TurnFaceDown {
+                        profile: fdp @ Some(_),
+                        ..
                     } => {
                         *fdp = Some(profile);
                         break;
@@ -4500,7 +4508,12 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// CR 708.2a + CR 205.1a: Parse the singular "It's a/an <characteristics>
 /// <core-type-noun>." face-down characteristic clause for a permanent put onto
 /// the battlefield face down (Yedora, Grave Gardener: "It's a Forest land.").
-/// Returns `None` when the sentence is not an it's-characteristics clause.
+/// Also accepts the "It becomes a/an ..." copula variant used after a
+/// turn-face-down effect (Mondassian Colony Ship: "Turn target creature face
+/// down. It becomes a 2/2 Cyberman artifact creature."); both copulas describe
+/// the same CR 205.1a characteristic-setting and refine the same face-down
+/// profile via the `FaceDownProfileSpec` continuation. Returns `None` when the
+/// sentence is not an it's/it-becomes-characteristics clause.
 ///
 /// Built entirely from typed combinators (no card-named hardcode), mirroring
 /// `parse_theyre_face_down_profile` for the plural creature form: optional N/M
@@ -4510,12 +4523,17 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
 /// type explicit and no power/toughness (CR 208.1).
 pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
-    // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
+    // CR 205.1a: "It's a / It is a / It becomes a <characteristics> <core-type>."
+    // The "becomes" copula is the turn-face-down variant (Mondassian Colony
+    // Ship); it sets the same characteristics as the "is" copula (Cyber
+    // Conversion).
     let (mut rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it is an "),
         tag("it is a "),
+        tag("it becomes an "),
+        tag("it becomes a "),
     ))
     .parse(lower)
     .ok()?;
@@ -4676,6 +4694,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
+        // CR 708.2a: turning a permanent face down is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceDown { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
@@ -5544,6 +5565,11 @@ pub(super) fn parse_followup_continuation_ast(
         // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
         // artifact creatures." spec refines that seed via the back-walk patcher.
         | Effect::Manifest { profile: Some(_), .. }
+        // CR 708.2a + CR 205.1a: "Turn target creature face down. It's a 2/2
+        // Cyberman artifact creature." (Cyber Conversion) — the seeded vanilla
+        // 2/2 profile on the preceding `TurnFaceDown` is refined by this spec
+        // sentence via the back-walk patcher.
+        | Effect::TurnFaceDown { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -8160,12 +8186,12 @@ mod tests {
         assert_eq!(creature.power, Some(3));
         assert_eq!(creature.toughness, Some(3));
 
-        // CR 205.1a: a creature body with an EXTRA core type before "creature"
-        // ("It's a 2/2 Cyberman artifact creature." — Missy / Cyber Conversion).
+        // CR 708.2a + CR 205.1a: Cyber Conversion's singular creature body with an
+        // extra core type AND a subtype — "It's a 2/2 Cyberman artifact creature."
         // The non-terminal "artifact " modifier must be consumed before the
         // terminal "creature" noun; the subtype "Cyberman" is retained.
         let cyberman =
-            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature").unwrap();
+            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature.").unwrap();
         assert_eq!(cyberman.body, FaceDownBody::Creature);
         assert_eq!(cyberman.power, Some(2));
         assert_eq!(cyberman.toughness, Some(2));
@@ -8184,6 +8210,21 @@ mod tests {
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).
         assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
+
+        // CR 205.1a: the "It becomes a/an ..." copula (Mondassian Colony Ship)
+        // sets the same characteristics as the "It's a ..." copula, so the same
+        // Cyberman creature body parses from the "becomes" lead-in.
+        let becomes_cyberman =
+            parse_its_face_down_profile("it becomes a 2/2 cyberman artifact creature.").unwrap();
+        assert_eq!(becomes_cyberman.body, FaceDownBody::Creature);
+        assert_eq!(becomes_cyberman.power, Some(2));
+        assert_eq!(becomes_cyberman.toughness, Some(2));
+        assert_eq!(becomes_cyberman.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(becomes_cyberman.subtypes, vec!["Cyberman".to_string()]);
+        // Sibling "becomes an" article proves class coverage, not Cyberman-specific.
+        let becomes_artifact = parse_its_face_down_profile("it becomes an artifact.").unwrap();
+        assert_eq!(becomes_artifact.body, FaceDownBody::Noncreature);
+        assert_eq!(becomes_artifact.extra_core_types, vec![CoreType::Artifact]);
 
         // Not an it's-characteristics clause → None.
         assert!(parse_its_face_down_profile("draw a card.").is_none());

@@ -17,6 +17,7 @@ import type {
 import { AdapterError, AdapterErrorCode } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
+import { notifyEngineSlow } from "../game/engineRecovery";
 
 type EngineResponse =
   | { type: "ready" }
@@ -26,12 +27,11 @@ type EngineResponse =
 /**
  * Watchdog timeout for gameplay round-trip calls. Generous on purpose: a
  * legitimately slow call (e.g. a turn-21 four-player board) can take many
- * seconds, and a false-positive timeout on a valid-but-slow call is worse
- * than a longer wait. This does NOT speed anything up — it converts an
- * otherwise-infinite worker hang into a 60s-then-recoverable error so the
- * dispatch mutex is released and the user sees the recovery prompt instead
- * of a silently dead UI. Tunable; only applied to gameplay round-trips, never
- * to bulk/long setup calls (card-DB load, game init, batch resolve, restore).
+ * seconds, and a false-positive timeout on a valid-but-slow call must not
+ * kill the game. This does NOT speed anything up — it surfaces a recoverable
+ * "still waiting" dialog while leaving the worker request alive. Tunable; only
+ * applied to gameplay round-trips, never to bulk/long setup calls (card-DB
+ * load, game init, batch resolve, restore).
  */
 const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
 
@@ -57,6 +57,7 @@ export class EngineWorkerClient {
       resolve: (value: unknown) => void;
       reject: (reason: Error) => void;
       timer?: ReturnType<typeof setTimeout>;
+      slowNotified?: boolean;
     }
   >();
   private readyPromise: Promise<void>;
@@ -119,14 +120,12 @@ export class EngineWorkerClient {
   /**
    * Post a typed message to the worker and resolve when it replies.
    *
-   * `timeoutMs` arms a watchdog: if the worker never replies within the
-   * window, the pending entry is deleted and the promise rejects with
-   * `ENGINE_UNRESPONSIVE`. This is applied ONLY to gameplay round-trips (see
-   * call sites below) — never to bulk/long setup calls (card-DB load, game
-   * init, batch resolve, restore), where a long but legitimate runtime is
-   * expected. A late worker reply after the timeout is a safe no-op: the
-   * pending entry is already gone, so the `if (entry)` guard in `onmessage`
-   * discards it.
+   * `timeoutMs` arms a watchdog: if the worker doesn't reply within the
+   * window, the pending entry stays alive and the UI is notified that the
+   * request is slow. This is applied ONLY to gameplay round-trips (see call
+   * sites below) — never to bulk/long setup calls (card-DB load, game init,
+   * batch resolve, restore), where a long runtime is expected. A late worker
+   * reply still resolves the original promise and clears the dispatch mutex.
    */
   private request<T>(message: Record<string, unknown>, timeoutMs?: number): Promise<T> {
     const id = this.nextId++;
@@ -134,14 +133,10 @@ export class EngineWorkerClient {
       const timer =
         timeoutMs !== undefined
           ? setTimeout(() => {
-              if (this.pending.delete(id)) {
-                reject(
-                  new AdapterError(
-                    AdapterErrorCode.ENGINE_UNRESPONSIVE,
-                    `Engine worker did not respond within ${timeoutMs}ms (${String(message.type)})`,
-                    true,
-                  ),
-                );
+              const entry = this.pending.get(id);
+              if (entry && !entry.slowNotified) {
+                entry.slowNotified = true;
+                notifyEngineSlow(`${String(message.type)}-timeout`);
               }
             }, timeoutMs)
           : undefined;
@@ -201,9 +196,9 @@ export class EngineWorkerClient {
 
   // ── Gameplay round-trips ──────────────────────────────────────────────
   // Each of these is a per-action engine call that the UI awaits before it can
-  // continue (and that holds the dispatch mutex). They carry the watchdog
-  // timeout so a wedged worker rejects with ENGINE_UNRESPONSIVE instead of
-  // hanging forever. Human round-trips use ENGINE_REQUEST_TIMEOUT_MS (60s);
+  // continue (and that holds the dispatch mutex). They carry a watchdog that
+  // surfaces a "still waiting" prompt after ENGINE_REQUEST_TIMEOUT_MS without
+  // cancelling the underlying worker request. Human round-trips use 60s;
   // the AI-search getters (getAiAction / getAiScoredCandidates /
   // selectActionFromScores) use the far longer ENGINE_AI_TIMEOUT_MS because a
   // healthy search can legitimately exceed a minute on pathological boards.

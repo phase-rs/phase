@@ -1929,6 +1929,20 @@ pub(super) fn parse_subject_application(
                 Some(ControllerRef::ParentTargetController)
             ) {
                 TargetFilter::ParentTargetController
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
+            ) {
+                // CR 608.2c + CR 106.12a: An explicit triggering/defending player
+                // scope established by `relative_player_scope_for_condition`
+                // (e.g. the instant/sorcery taps-for-mana delayed trigger split:
+                // "whenever a player taps <type> for mana, that player adds …" —
+                // High Tide, Bubbling Muck) makes "that player" the triggering
+                // player, NOT the parent target's controller. Without this arm the
+                // scope is resolved but silently discarded, defaulting to
+                // `ParentTargetController` below. `ctx_filter` is the matching
+                // event-context ref for the parsed subject phrase.
+                ctx_filter
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {

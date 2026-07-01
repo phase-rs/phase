@@ -2027,6 +2027,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "If an opponent/a player would search a library, that player searches the top N cards ... instead" ---
+    // CR 701.23f + CR 614.1a: Aven Mindcensor class. Replaces a SEARCHER-scoped
+    // library search with a top-N search. `who` scopes which searcher is
+    // restricted; `count` is the visible portion. Runtime enforcement is in
+    // game/effects/search_library.rs::library_search_top_limit.
+    if let Some(def) = parse_restrict_search_to_top(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
     // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
     // where `cause` identifies whose triggered abilities are muzzled and `affected`

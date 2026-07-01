@@ -1,8 +1,7 @@
 use crate::game::printed_cards::apply_back_face_to_object;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
 
 /// CR 406.3: Turn the card(s) referenced by `target` face up via a resolving
 /// effect — distinct from the morph/disguise *special action* in
@@ -28,7 +27,7 @@ pub fn resolve(
         _ => return Ok(()),
     };
 
-    let object_ids = target_object_ids(state, ability, &target);
+    let object_ids = crate::game::effects::resolved_battlefield_object_ids(state, ability, &target);
 
     let mut restored_any = false;
     let mut turned_ids = Vec::new();
@@ -69,37 +68,16 @@ pub fn resolve(
     Ok(())
 }
 
-fn target_object_ids(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    target: &TargetFilter,
-) -> Vec<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, target, state);
-    let explicit = crate::game::effects::effect_object_targets(target, &resolved);
-    if !explicit.is_empty() {
-        return explicit;
-    }
-
-    let zone = target
-        .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    crate::game::targeting::zone_object_ids(state, zone)
-        .into_iter()
-        .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityCondition, ControllerRef, TargetRef};
+    use crate::types::ability::{AbilityCondition, ControllerRef, TargetFilter, TargetRef};
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::game_state::{ExileLink, ExileLinkKind};
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::{EtbTapState, Zone};
 
