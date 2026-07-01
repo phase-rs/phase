@@ -103,9 +103,12 @@ fn bench(phase: Phase, n: usize, spells: usize) {
          choose={choose_dt:>9.3?} [clones={cc_cl} sweeps={cc_sw} swept={cc_swept}]",
         objs = state.objects.len(),
         bf = state.battlefield.len(),
-        ec_cl = ec.state_clone_for_legality,
-        ec_sw = ec.mana_display_sweeps,
-        ec_swept = ec.mana_display_swept_objects,
+        // `ec` accumulates across the `iters`-iteration read-path loop, so
+        // report per-decision averages to match `valid_mean` above. `cc` below
+        // is a single `choose_action` call and is already per-decision.
+        ec_cl = ec.state_clone_for_legality / iters as u64,
+        ec_sw = ec.mana_display_sweeps / iters as u64,
+        ec_swept = ec.mana_display_swept_objects / iters as u64,
         cc_cl = cc.state_clone_for_legality,
         cc_sw = cc.mana_display_sweeps,
         cc_swept = cc.mana_display_swept_objects,

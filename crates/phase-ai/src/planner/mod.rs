@@ -594,8 +594,11 @@ impl<'a> PlannerServices<'a> {
                 .iter()
                 .all(|c| matches!(c.action, engine::types::actions::GameAction::PassPriority));
             if all_pass {
-                if apply_as_current_for_simulation(&mut sim, engine::types::actions::GameAction::PassPriority)
-                    .is_err()
+                if apply_as_current_for_simulation(
+                    &mut sim,
+                    engine::types::actions::GameAction::PassPriority,
+                )
+                .is_err()
                 {
                     break;
                 }
@@ -604,7 +607,9 @@ impl<'a> PlannerServices<'a> {
 
             // Case 2: Only one legal action — apply it (forced move)
             if ctx.candidates.len() == 1 {
-                if apply_as_current_for_simulation(&mut sim, ctx.candidates[0].action.clone()).is_err() {
+                if apply_as_current_for_simulation(&mut sim, ctx.candidates[0].action.clone())
+                    .is_err()
+                {
                     break;
                 }
                 continue;

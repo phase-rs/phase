@@ -465,16 +465,6 @@ pub fn apply_as_current_for_simulation(
     apply_as_current_with_mode(state, action, PublicFinalizeMode::DeferredDisplay)
 }
 
-/// Legality-probe alias of [`apply_as_current_for_simulation`], named for the
-/// `SimulationFilter` oracle call site (which only reads `.is_ok()` and
-/// discards the clone). Both share one implementation.
-pub(crate) fn apply_as_current_for_legality(
-    state: &mut GameState,
-    action: GameAction,
-) -> Result<ActionResult, EngineError> {
-    apply_as_current_for_simulation(state, action)
-}
-
 fn apply_as_current_with_mode(
     state: &mut GameState,
     action: GameAction,
