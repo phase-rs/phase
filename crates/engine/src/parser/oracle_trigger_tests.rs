@@ -12833,6 +12833,11 @@ fn trigger_one_or_more_creature_cards_leave_graveyard() {
     assert_eq!(def.origin, Some(Zone::Graveyard));
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
+    // CR 113.6 / CR 113.6b: Insidious Roots is a battlefield permanent whose
+    // "leave your graveyard" trigger references other cards, not itself, so it
+    // functions only from the battlefield (make_base() default). CR 603.10a's
+    // graveyard/exile look-back applies only to self-referential leaves triggers.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12850,6 +12855,9 @@ fn trigger_one_or_more_cards_leave_graveyard() {
         matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
         "expected card filter for unqualified cards, got {filter:?}"
     );
+    // CR 113.6 / CR 113.6b: Chalk Outline's trigger references other cards leaving
+    // its owner's graveyard, not itself — battlefield-only (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12863,6 +12871,9 @@ fn trigger_one_or_more_cards_leave_graveyard_during_your_turn() {
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    // CR 113.6 / CR 113.6b: Soul Enervation is a battlefield permanent; its
+    // non-self "leave your graveyard" trigger stays battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12877,6 +12888,10 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_or_graveyard() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Graveyard]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: Laelia is a battlefield permanent whose "cards are put
+    // into exile from library/graveyard" trigger has no self-referential subject —
+    // it functions only from the battlefield (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12890,6 +12905,8 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_only() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: battlefield-only for the single-source variant too.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12904,6 +12921,9 @@ fn trigger_one_or_more_artifact_or_creature_cards_leave_graveyard() {
     let filter = def.valid_card.as_ref().expect("valid_card");
     assert!(matches!(filter, TargetFilter::Or { .. }));
     assert_owned_by_you(filter);
+    // CR 113.6 / CR 113.6b: Attuned Hunter's disjunctive "leave your graveyard"
+    // trigger references other cards, not itself — battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 // ── Work Item 2: Discard Batch Triggers ───────────────────────

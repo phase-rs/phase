@@ -2915,10 +2915,13 @@ pub(super) fn parse_hand_reveal_ast(
         value((), alt((tag("reveal "), tag("reveals ")))).parse(input)
     })?;
 
-    // CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
-    // "reveal those cards" — reveals a specific card identified by the parent
-    // effect's affected IDs. Common in "look at top → reveal it" sequences
-    // (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    // CR 701.20a: Back-reference reveal — reveals a specific card identified by
+    // the parent effect's affected IDs. Common in "look at top → reveal it"
+    // sequences (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    //
+    // The pronoun/demonstrative forms ("it" / "that card" / "those cards") are
+    // matched as a clause prefix, as they have been historically: no real card
+    // continues them with a divergent effect, so a prefix match is safe.
     let after_reveal_lower = &lower[lower.len() - after_reveal.len()..];
     if alt((
         tag::<_, _, OracleError<'_>>("it"),
@@ -2926,6 +2929,25 @@ pub(super) fn parse_hand_reveal_ast(
         tag("those cards"),
     ))
     .parse(after_reveal_lower)
+    .is_ok()
+    {
+        return Some(HandRevealImperativeAst::RevealBackRef);
+    }
+
+    // CR 701.20a: the definite-article forms ("the card" / "the cards") are the
+    // same back-reference, but far more collision-prone than the pronoun forms:
+    // "reveal the cards you want to splice onto it" and "reveal the cards in your
+    // library" are distinct effects that merely share the leading tokens. Match
+    // the whole remaining clause with `all_consuming` ("cards" first so the
+    // longer tag wins; the optional trailing period is consumed) so only a bare
+    // "Reveal the card." / "Reveal the cards." clause lowers to the
+    // back-reference, while compound reveal clauses fall through to their own
+    // recognizers.
+    if all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("the cards"), tag("the card"))),
+        opt(tag(".")),
+    ))
+    .parse(after_reveal_lower.trim())
     .is_ok()
     {
         return Some(HandRevealImperativeAst::RevealBackRef);

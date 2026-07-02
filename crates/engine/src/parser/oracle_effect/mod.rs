@@ -21729,6 +21729,8 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
+        let retained_you_may_retarget_optional =
+            !is_optional && starts_with_you_may_choose_new_targets(&text);
         let (unless_same_name_condition, text) = if is_optional {
             if let Some((stripped, unless_cond)) =
                 crate::parser::oracle_effect::conditions::strip_unless_shares_name_with_other_exiled_this_way(
@@ -22472,6 +22474,16 @@ pub(crate) fn parse_effect_chain_ir(
             Effect::ChooseFromZone { zone, .. } => Some(*zone),
             _ => None,
         };
+        // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
+        // `you may choose new targets ...` surface form so the retarget parser
+        // can distinguish true ChangeTargets clauses from copy-retarget riders.
+        // Once that full-surface clause has actually parsed as ChangeTargets,
+        // carry the retained "you may" modal onto the ability.
+        if retained_you_may_retarget_optional
+            && matches!(clause.effect, Effect::ChangeTargets { .. })
+        {
+            clause.optional = true;
+        }
         if let Some(target) = &for_each_reference_target {
             bind_search_library_for_each_antecedent(&mut clause.effect, target, &text_no_qty_lower);
         }
@@ -24681,6 +24693,24 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
 /// - "you may choose new targets for [spell phrase]" → scope: `All` (CR 115.7d)
 ///
 /// An optional trailing "to [target phrase]" sets `forced_to`.
+fn starts_with_you_may_choose_new_targets(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("you may "),
+                alt((
+                    tag("choose new targets for "),
+                    tag("choose new target for "),
+                )),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
@@ -24691,8 +24721,8 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         ),
         value(RetargetScope::Single, tag("change a target of ")),
         value(RetargetScope::All, tag("you may choose new targets for ")),
-        // Peeled form when `strip_optional_effect_prefix` correctly declined to
-        // strip a specialized "you may choose new targets" retarget clause.
+        // Peeled form for call sites that have already recorded the governing
+        // "you may" modal before dispatching the retarget body.
         value(RetargetScope::All, tag("choose new targets for ")),
     ))
     .parse(lower)

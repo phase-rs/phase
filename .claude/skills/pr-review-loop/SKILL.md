@@ -89,4 +89,4 @@ Do not perform GitHub mutations from this skill except ordinary review/comment a
 
 ## Drift Rule
 
-`.agents/skills/pr-review-loop/SKILL.md` is the canonical Codex-facing copy. Keep `.claude/skills/pr-review-loop/SKILL.md` byte-for-byte synchronized.
+`.agents/skills` is a symlink to `.claude/skills`, so `.claude/skills/pr-review-loop/SKILL.md` is the single physical copy for both Claude Code and Codex. Do not create a separate file under `.agents/`; if the symlink is ever replaced with a real directory, restore it rather than maintaining two copies.
