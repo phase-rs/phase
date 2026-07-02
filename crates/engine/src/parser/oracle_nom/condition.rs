@@ -2980,6 +2980,21 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
 /// with `FilterProp::Attacking { defender }` appended — the same property
 /// "for each creature attacking you" uses.
 fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticCondition> {
+    // CR 611.3a: "equipped creature" / "enchanted creature" is a self-referential
+    // subject (the host of THIS Equipment/Aura), not a generic board-wide filter —
+    // `parse_type_phrase` would otherwise happily match it as a creature with
+    // `FilterProp::EquippedBy`/`EnchantedBy`, silently swapping "is the specific
+    // creature this permanent is attached to attacking" for "does any equipped/
+    // enchanted creature exist that's attacking". That phrase is owned by
+    // `parse_attached_subject_combat_state` (the inverted-grant path) — defer to
+    // it by refusing to match here, mirroring how `parse_self_source_subject`
+    // excludes these same two prefixes for the source combat-state predicate.
+    if alt((tag("equipped creature "), tag("enchanted creature ")))
+        .parse(input)
+        .is_ok()
+    {
+        return Err(oracle_err(input));
+    }
     let (rest, _) = opt(parse_article).parse(input)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
