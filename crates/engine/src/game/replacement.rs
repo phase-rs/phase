@@ -4455,13 +4455,12 @@ fn object_replacement_candidate_applies(
     let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
         && obj.zone == Zone::Graveyard
         && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == replacement_player)
-        && obj.keywords.iter().any(|k| {
-            matches!(k, crate::types::keywords::Keyword::Dredge(n)
-                if state
-                    .players
-                    .iter()
-                    .find(|p| p.id == replacement_player)
-                    .is_some_and(|p| p.library.len() as u32 >= *n))
+        && crate::game::keywords::effective_dredge_value(state, obj.id).is_some_and(|dredge| {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == replacement_player)
+                .is_some_and(|p| p.library.len() as u32 >= dredge)
         });
 
     if !in_scanned_zone
