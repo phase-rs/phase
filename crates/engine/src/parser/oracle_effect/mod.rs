@@ -7736,6 +7736,33 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
         }
     }
 
+    // CR 614.10 + CR 614.10a + CR 502.3: "Skip the [step] step of that turn" —
+    // the current-turn-anaphor sibling of the "skip your next [step] step" form
+    // above. Printed on extra-turn spells that take an extra turn, then skip a
+    // step of it (Savor the Moment, Time Bends to My Will: "Take an extra turn
+    // after this one. Skip the untap step of that turn."). "That turn" is the
+    // extra turn just created, which is the controller's next turn, so its
+    // untap step is exactly the next occurrence of that step for the controller
+    // (CR 614.10a: a skip waits for the first occurrence that isn't skipped).
+    // The subject is elided to the resolving controller. Lowers to the same
+    // `SkipNextStep { NextOccurrence }` the "skip your next [step] step" sibling
+    // produces — no new effect or scope is required.
+    if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("skip the ").parse(input)?;
+        let (input, step) = parse_skip_step_name(input)?;
+        let (input, _) = tag(" of that turn").parse(input)?;
+        Ok((input, step))
+    }) {
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+                scope: SkipScope::NextOccurrence,
+            }));
+        }
+    }
+
     if let Some((target, after_verb_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
