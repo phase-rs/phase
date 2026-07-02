@@ -11300,6 +11300,12 @@ fn requires_untapped(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
         AbilityCost::Composite { costs } => costs.iter().any(requires_untapped),
+        // CR 118.12a: block only when every alternative requires an untapped
+        // source ({3},{T} or {R},{T}); a mixed branch set ({3} or discard) must
+        // not trip this gate while a non-{T} branch remains payable.
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty() && costs.iter().all(requires_untapped)
+        }
         _ => false,
     }
 }
@@ -12394,6 +12400,23 @@ fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     }
 }
 
+/// CR 118.12a: Filter disjunctive activation-cost branches through the same
+/// affordability authority used by `can_activate_ability_now` and
+/// `handle_activate_ability`.
+pub(crate) fn payable_one_of_activation_branches(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    costs: &[AbilityCost],
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+) -> Vec<AbilityCost> {
+    costs
+        .iter()
+        .filter(|branch| can_pay_ability_cost_now(state, player, source_id, branch, ability_tag))
+        .cloned()
+        .collect()
+}
+
 /// CR 118.12a: Normalize legacy `EffectCost(ChooseOneOf{PayCost|Discard,...})`
 /// equip costs from card-data export into `AbilityCost::OneOf`.
 fn normalize_activation_cost(cost: AbilityCost) -> AbilityCost {
@@ -12753,7 +12776,7 @@ pub(super) fn find_eligible_sacrifice_targets(
 /// `is_payable` (proven by discriminating tests); a bare Waterbend cost is
 /// answered by `is_payable`'s auto-tap check and skips the `can_pay` dry run
 /// (gated on the bare `AbilityCost::Waterbend` shape).
-fn can_pay_ability_cost_now(
+pub(crate) fn can_pay_ability_cost_now(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -13122,10 +13145,27 @@ pub fn handle_activate_ability(
     // CR 601.2f: Apply self-referential cost reduction before any cost payment.
     apply_cost_reduction(state, &mut ability_def, player, source_id);
 
+    // CR 118.12a: Normalize legacy card-data equip disjunctions before any
+    // affordability or detour checks so EffectCost(ChooseOneOf) exports match
+    // oracle-parsed OneOf at runtime.
+    let activation_cost = ability_def.cost.clone().map(|cost| {
+        if ability_def.ability_tag == Some(AbilityTag::Equip) {
+            normalize_activation_cost(cost)
+        } else {
+            cost
+        }
+    });
+
     // CR 601.2b: If the activation cost requires a choice of object and no
     // legal object exists, the ability can't be activated.
-    if let Some(ref cost) = ability_def.cost {
-        if !cost.is_payable(state, player, source_id) {
+    if let Some(ref cost) = activation_cost {
+        if !can_pay_ability_cost_now(
+            state,
+            player,
+            source_id,
+            cost,
+            ability_def.ability_tag,
+        ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay activation cost".to_string(),
             ));
@@ -13143,7 +13183,7 @@ pub fn handle_activate_ability(
     // CR 302.6 + CR 602.5a: Universal summoning-sickness gate for {T}/{Q} activated
     // abilities on creatures. Mirrors the check in `can_activate_ability_now` so both
     // the AI legality gate and the runtime activation path agree.
-    if let Some(ref cost) = ability_def.cost {
+    if let Some(ref cost) = activation_cost {
         let obj = state.objects.get(&source_id).ok_or_else(|| {
             EngineError::InvalidAction("Object not found during summoning-sickness check".into())
         })?;
@@ -13241,13 +13281,6 @@ pub fn handle_activate_ability(
 
     // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
     // before any cost payment, regardless of whether targets were auto-selected.
-    let activation_cost = ability_def.cost.clone().map(|cost| {
-        if ability_def.ability_tag == Some(AbilityTag::Equip) {
-            normalize_activation_cost(cost)
-        } else {
-            cost
-        }
-    });
     if let Some(ref cost) = activation_cost {
         // CR 606.3: `can_activate_ability_now` gates legal-action generation,
         // but direct `GameAction::ActivateAbility` submissions must be rejected
@@ -13544,13 +13577,25 @@ pub fn handle_activate_ability(
 
         // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
         if let Some(costs) = find_one_of_cost(cost) {
+            let payable = payable_one_of_activation_branches(
+                state,
+                player,
+                source_id,
+                costs,
+                ability_def.ability_tag,
+            );
+            if payable.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay activation cost".to_string(),
+                ));
+            }
             let mut pending_one_of =
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_one_of.activation_cost = Some(cost.clone());
             pending_one_of.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::ActivationCostOneOfChoice {
                 player,
-                costs: costs.clone(),
+                costs: payable,
                 pending_cast: Box::new(pending_one_of),
             });
         }

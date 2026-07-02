@@ -2820,6 +2820,49 @@ fn composite_mana_tap_activation_excludes_source_from_auto_tap() {
     assert!(events.is_empty());
 }
 
+
+#[test]
+fn handle_activate_rejects_tapped_one_of_tap_branches() {
+    use crate::parser::oracle_cost::parse_oracle_cost;
+    use crate::types::mana::{ManaType, ManaUnit};
+
+    let mut state = setup_game_at_main_phase();
+    let cost = parse_oracle_cost("{3}, {T} or {R}, {T}");
+    let source = create_colorless_tap_activated_source(
+        &mut state,
+        PlayerId(0),
+        cost,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Red, source, false, vec![]));
+    state.objects.get_mut(&source).unwrap().tapped = true;
+
+    assert!(!can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+    let mut events = Vec::new();
+    let result = handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events);
+
+    assert!(
+        result.is_err(),
+        "direct ActivateAbility must reject tapped OneOf {{T}} branches"
+    );
+    assert!(events.is_empty());
+}
+
 #[test]
 fn composite_mana_tap_sacrifice_activation_uses_alternate_mana_source() {
     let mut state = setup_game_at_main_phase();

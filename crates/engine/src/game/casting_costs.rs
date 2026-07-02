@@ -1342,7 +1342,13 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     }
 
     let chosen_cost = &costs[index];
-    if !chosen_cost.is_payable(state, player, pending.object_id) {
+    if !super::casting::can_pay_ability_cost_now(
+        state,
+        player,
+        pending.object_id,
+        chosen_cost,
+        pending.ability.context.ability_tag,
+    ) {
         return Err(EngineError::ActionNotAllowed(
             "Chosen cost branch is not payable".to_string(),
         ));

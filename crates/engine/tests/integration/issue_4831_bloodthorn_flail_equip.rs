@@ -50,15 +50,24 @@ fn bloodthorn_flail_equip_offers_disjunctive_cost_and_pays_mana_branch() {
         })
         .expect("equip activation must be legal when {3} is available");
 
-    match result.waiting_for {
+    let mana_branch_index = match result.waiting_for {
         WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => {
-            assert_eq!(costs.len(), 2, "expected Pay {{3}} or discard branches");
+            assert!(
+                !costs.is_empty(),
+                "expected at least one payable Pay {{3}} or discard branch, got {costs:?}"
+            );
+            costs
+                .iter()
+                .position(|c| matches!(c, engine::types::ability::AbilityCost::Mana { .. }))
+                .expect("mana branch must be offered when {3} is available")
         }
         other => panic!("expected ActivationCostOneOfChoice, got {other:?}"),
-    }
+    };
 
     runner
-        .act(GameAction::ChooseActivationCostBranch { index: 0 })
+        .act(GameAction::ChooseActivationCostBranch {
+            index: mana_branch_index,
+        })
         .expect("choosing the mana branch is accepted");
 
     runner.advance_until_stack_empty();
@@ -98,17 +107,18 @@ fn bloodthorn_flail_from_card_db_equip_accepts_disjunctive_cost() {
         })
         .expect("card-db Bloodthorn Flail equip must be activatable");
 
-    assert!(
-        matches!(
-            result.waiting_for,
-            WaitingFor::ActivationCostOneOfChoice { .. }
-        ),
-        "exported card-data cost must normalize to OneOf, got {:?}",
-        result.waiting_for
-    );
+    let mana_branch_index = match result.waiting_for {
+        WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => costs
+            .iter()
+            .position(|c| matches!(c, engine::types::ability::AbilityCost::Mana { .. }))
+            .expect("card-db equip must offer a payable mana branch"),
+        other => panic!("exported card-data cost must normalize to OneOf, got {other:?}"),
+    };
 
     runner
-        .act(GameAction::ChooseActivationCostBranch { index: 0 })
+        .act(GameAction::ChooseActivationCostBranch {
+            index: mana_branch_index,
+        })
         .expect("mana branch selection accepted");
 
     runner.advance_until_stack_empty();
