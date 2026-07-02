@@ -465,10 +465,13 @@ fn intervening_if_source_has_counters_on_it_populates_condition() {
     // The intervening-if clause is stripped, so the effect still parses.
     assert!(ozolith.execute.is_some());
 
-    // Denry Klin, Editor in Chief — the same source-scoped gate on an ETB trigger.
+    // Denry Klin, Editor in Chief — the same source-scoped gate on an ETB
+    // trigger. The card's Oracle text uses the comma-based short self-name
+    // "Denry Klin" (not the full "Denry Klin, Editor in Chief"); passing the
+    // full card name exercises the real short-name → `~` normalization path.
     let denry = parse_trigger_line(
-        "Whenever a nontoken creature you control enters, if Denry Klin, Editor in Chief \
-         has counters on it, proliferate.",
+        "Whenever a nontoken creature you control enters, if Denry Klin has counters on it, \
+         proliferate.",
         "Denry Klin, Editor in Chief",
     );
     assert_eq!(denry.condition, expected);
