@@ -1106,8 +1106,7 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // CR 508.1c + CR 509.1b + CR 611.3a: "~ can't attack if <cond> and can't block
     // if <cond>" (The Fallen Apart) — each restriction carries its own trailing
     // gate; must split before the single-gate `can't block` dispatch arm.
-    // Attached-subject forms ("enchanted creature …") defer to the established
-    // subject parser — SelfRef would scope the Aura/Equipment, not the host.
+    // Attached-subject forms scope `affected` to the enchanted/equipped host.
     if let Some(defs) = try_parse_dual_gated_cant_attack_and_cant_block(&tp, &stripped) {
         return defs;
     }
@@ -1965,20 +1964,24 @@ fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Opti
     tp.original.get(start..start + lower_sub.len())
 }
 
+fn dual_gated_combat_affected(tp: &TextPair<'_>, subject_lower: &str) -> Option<TargetFilter> {
+    if let Some((filter, _)) = attached_subject_filter(tp) {
+        Some(filter)
+    } else if is_self_ref_combat_subject(subject_lower) {
+        Some(TargetFilter::SelfRef)
+    } else {
+        None
+    }
+}
+
 fn try_parse_dual_gated_cant_attack_and_cant_block(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
-    if attached_subject_filter(tp).is_some() {
-        return None;
-    }
     let (remainder, (subject_lower, attack_cond_lower, block_cond_lower)) =
         parse_dual_gated_cant_attack_block(tp.lower).ok()?;
-    if !is_self_ref_combat_subject(subject_lower)
-        || !remainder.trim().is_empty()
-        || attack_cond_lower.is_empty()
-        || block_cond_lower.is_empty()
-    {
+    let affected = dual_gated_combat_affected(tp, subject_lower)?;
+    if !remainder.trim().is_empty() || attack_cond_lower.is_empty() || block_cond_lower.is_empty() {
         return None;
     }
     let attack_cond = lower_subslice_to_original(tp, attack_cond_lower)?;
@@ -1993,11 +1996,11 @@ fn try_parse_dual_gated_cant_attack_and_cant_block(
     };
     Some(vec![
         StaticDefinition::new(StaticMode::CantAttack)
-            .affected(TargetFilter::SelfRef)
+            .affected(affected.clone())
             .condition(attack_condition)
             .description(text.to_string()),
         StaticDefinition::new(StaticMode::CantBlock)
-            .affected(TargetFilter::SelfRef)
+            .affected(affected)
             .condition(block_condition)
             .description(text.to_string()),
     ])
