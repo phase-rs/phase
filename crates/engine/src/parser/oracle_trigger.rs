@@ -3943,6 +3943,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     subject: AttackersDeclaredCountSubject::AttackTarget {
                         controller: ControllerRef::You,
                         attacked: AttackTargetFilter::Player,
+                        filter: None,
                     },
                     comparator: Comparator::EQ,
                     count: 0,
@@ -4607,6 +4608,7 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: minimum,
@@ -5901,6 +5903,12 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("discard"),
     ));
     let play_cast_create_actions = alt((
+        // CR 121.2: Player draw events in disjunctive trigger lists (Trouble in
+        // Pairs: "draws their second card each turn, or casts...").
+        parse_event_phrase("draws "),
+        parse_event_word("draws"),
+        parse_event_phrase("draw "),
+        parse_event_word("draw"),
         // CR 305.1 + CR 601.2: Player-action verbs for Rocco-class
         // "a player plays a land from exile or casts a spell from exile".
         parse_event_phrase("plays "),
@@ -5965,6 +5973,11 @@ fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("play"),
         parse_event_word("casts"),
         parse_event_word("cast"),
+        // CR 121.2: Player draw events in disjunctive trigger lists.
+        parse_event_phrase("draws "),
+        parse_event_word("draws"),
+        parse_event_phrase("draw "),
+        parse_event_word("draw"),
         // CR 702.29c: "cycle" as bare event verb for shared-object propagation.
         parse_event_word("cycle"),
     ))
@@ -5983,6 +5996,9 @@ fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("play "),
         parse_event_phrase("casts "),
         parse_event_phrase("cast "),
+        // CR 121.2: Player draw events in disjunctive trigger lists.
+        parse_event_phrase("draws "),
+        parse_event_phrase("draw "),
         // CR 702.29c: "cycle" as shared-object verb head.
         parse_event_phrase("cycle "),
     ))
@@ -10353,9 +10369,19 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     .ok()?;
     let (after_actor, actor): (&str, ControllerRef) = actor_parse;
 
+    // CR 508.3e: "attacks you with N or more creatures" — player-level attack
+    // trigger where the defending player is the controller (Trouble in Pairs).
+    let (after_target, attacks_you) = if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>(" you")).parse(after_actor)
+    {
+        (rest, true)
+    } else {
+        (after_actor, false)
+    };
+
     // Required " with " separator.
     let (after_with, ()) = value((), tag::<_, _, OracleError<'_>>(" with "))
-        .parse(after_actor)
+        .parse(after_target)
         .ok()?;
 
     // Parse the count word/digit. `parse_number` already maps "one"→1 as well as
@@ -10405,6 +10431,9 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         TriggerMode::YouAttack
     };
     def.mode = mode.clone();
+    if attacks_you {
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+    }
     if n == 1 {
         // CR 508.1 + CR 603.2c: the matcher's "at least one attacker matching
         // valid_card" gate is the whole "one or more" condition.
@@ -10420,9 +10449,17 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     }
     let count_filter = narrows.then_some(filter);
     def.condition = Some(TriggerCondition::AttackersDeclaredCount {
-        subject: AttackersDeclaredCountSubject::Controller {
-            scope: actor,
-            filter: count_filter,
+        subject: if attacks_you {
+            AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: count_filter,
+            }
+        } else {
+            AttackersDeclaredCountSubject::Controller {
+                scope: actor,
+                filter: count_filter,
+            }
         },
         comparator: Comparator::GE,
         count: n,

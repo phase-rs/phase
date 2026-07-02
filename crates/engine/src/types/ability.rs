@@ -5642,10 +5642,14 @@ pub enum AttackersDeclaredCountSubject {
         filter: Option<TargetFilter>,
     },
     /// Count attackers whose announced attack target matches a scoped player,
-    /// planeswalker, battle, or combined attack-target class.
+    /// planeswalker, battle, or combined attack-target class. `filter` is the
+    /// optional condition-level type axis (CR 508.1): when `Some(f)`, only
+    /// attackers matching `f` that attack the scoped target are counted.
     AttackTarget {
         controller: ControllerRef,
         attacked: crate::types::triggers::AttackTargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
 }
 

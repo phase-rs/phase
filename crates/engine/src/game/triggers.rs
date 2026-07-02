@@ -4169,8 +4169,18 @@ pub(crate) fn dispatch_synthetic_trigger(
     trigger: PendingTrigger,
     events_out: &mut Vec<GameEvent>,
 ) -> bool {
-    dispatch_pending_trigger_context(state, PendingTriggerContext::single(trigger), events_out)
-        .paused()
+    let mut pending = vec![PendingTriggerContext::single(trigger)];
+    // CR 603.2d: Synthetic dungeon room triggers (CR 309.4c) must pass through
+    // the same doubling pipeline as event-collected triggers.
+    apply_trigger_doubling(state, &mut pending);
+    let mut iter = pending.into_iter();
+    while let Some(trigger_context) = iter.next() {
+        if dispatch_pending_trigger_context(state, trigger_context, events_out).paused() {
+            state.deferred_triggers.extend(iter);
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drive a single collected trigger through
@@ -4748,6 +4758,11 @@ fn trigger_cause_matches(
             };
             obj.controller == doubler_controller
                 && obj.card_types.core_types.contains(&CoreType::Creature)
+        }
+        TriggerCause::RoomEntered => {
+            // CR 309.4c: Room abilities of dungeons you own trigger an
+            // additional time when a dungeon room is entered.
+            matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
     }
 }
@@ -6298,16 +6313,24 @@ fn attackers_declared_count(
         crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
             controller,
             attacked,
+            filter,
         } => attacks
             .iter()
-            .filter(|(_, target)| {
+            .filter(|(attacker_id, target)| {
                 attack_target_matches_controller_scope(
                     state,
                     *target,
                     trigger_controller,
                     controller,
                     attacked,
-                )
+                ) && filter.as_ref().is_none_or(|f| {
+                    crate::game::trigger_matchers::target_filter_matches_object(
+                        state,
+                        *attacker_id,
+                        f,
+                        source_id.unwrap_or(ObjectId(0)),
+                    )
+                })
             })
             .count(),
     }
@@ -18007,6 +18030,7 @@ pub mod tests {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::Player,
+                filter: None,
             },
             comparator: Comparator::EQ,
             count: 0,
@@ -18060,6 +18084,7 @@ pub mod tests {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::Player,
+                filter: None,
             },
             comparator: Comparator::EQ,
             count: 0,
@@ -18116,6 +18141,7 @@ pub mod tests {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
@@ -18172,6 +18198,7 @@ pub mod tests {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
@@ -18182,6 +18209,93 @@ pub mod tests {
             trigger_controller,
             None,
             Some(&event),
+        ));
+    }
+
+    #[test]
+    fn attacks_you_typed_count_requires_matching_attackers_only() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let dino1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Dino 1".to_string(),
+            Zone::Battlefield,
+        );
+        let dino2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Dino 2".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [dino1, dino2] {
+            state.objects.get_mut(&id).unwrap().card_types.subtypes = vec!["Dinosaur".to_string()];
+        }
+        state.objects.get_mut(&goblin).unwrap().card_types.subtypes = vec!["Goblin".to_string()];
+
+        let dino_filter =
+            TargetFilter::Typed(TypedFilter::default().subtype("Dinosaur".to_string()));
+        let cond = TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: Some(dino_filter.clone()),
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        };
+
+        let mixed_attack = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, goblin],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    goblin,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            trigger_controller,
+            None,
+            Some(&mixed_attack),
+        ));
+
+        let two_dinos_attack = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, dino2],
+            defending_player: trigger_controller,
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+                (
+                    dino2,
+                    crate::game::combat::AttackTarget::Player(trigger_controller),
+                ),
+            ],
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            trigger_controller,
+            None,
+            Some(&two_dinos_attack),
         ));
     }
 

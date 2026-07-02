@@ -1410,7 +1410,12 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
-        // semantic. Longer tag first so the shorter one doesn't shadow it.
+        // semantic. Longer tag first so the shorter one doesn't shadow it. Only the
+        // `~`-normalized subject is accepted context-free; bare "it entered this turn"
+        // is deliberately NOT matched here (for an attached-subject static "it" binds
+        // the enchanted/equipped creature, not the source). The self-referential
+        // bound-pronoun form is handled by `rewrite_self_pronoun_subject` on the
+        // SelfRef static path (see oracle_static/anthem.rs).
         value(
             StaticCondition::SourceEnteredThisTurn,
             alt((
@@ -9031,6 +9036,19 @@ mod tests {
         let (rest, c) = parse_inner_condition("~ entered the battlefield this turn").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    }
+
+    // CR 400.7: bare "it entered this turn" is deliberately NOT matched
+    // context-free. For an attached-subject static (an Aura/Equipment) "it"
+    // binds the enchanted/equipped creature, not the source, so accepting it
+    // here would turn an honest gap into wrong coverage. The self-referential
+    // bound-pronoun form is rewritten to "~ entered ..." on the SelfRef static
+    // path (`rewrite_self_pronoun_subject`, oracle_static/anthem.rs) before it
+    // reaches this grammar.
+    #[test]
+    fn test_bare_it_entered_this_turn_not_matched_context_free() {
+        assert!(parse_inner_condition("it entered this turn").is_err());
+        assert!(parse_inner_condition("it entered the battlefield this turn").is_err());
     }
 
     // CR 708.2: Unable to Scream — attached-to creature face-down gate.
