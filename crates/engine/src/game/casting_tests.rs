@@ -2820,7 +2820,6 @@ fn composite_mana_tap_activation_excludes_source_from_auto_tap() {
     assert!(events.is_empty());
 }
 
-
 #[test]
 fn handle_activate_rejects_tapped_one_of_tap_branches() {
     use crate::parser::oracle_cost::parse_oracle_cost;

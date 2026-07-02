@@ -2122,7 +2122,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn equip_pay_mana_or_discard_parses_as_one_of() {
         use crate::types::ability::{CardSelectionMode, DiscardSelfScope};

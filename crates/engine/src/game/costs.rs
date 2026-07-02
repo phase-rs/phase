@@ -1797,7 +1797,6 @@ mod tests {
         );
     }
 
-
     /// HIGH-1 regression (CR 118.12a + CR 118.3): shard-style
     /// `OneOf([Composite([Mana, Tap]), …])` must route each branch through the
     /// activation dry-run, not `is_payable` alone. The Tap arm is unconditionally

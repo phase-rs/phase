@@ -11303,9 +11303,7 @@ fn requires_untapped(cost: &AbilityCost) -> bool {
         // CR 118.12a: block only when every alternative requires an untapped
         // source ({3},{T} or {R},{T}); a mixed branch set ({3} or discard) must
         // not trip this gate while a non-{T} branch remains payable.
-        AbilityCost::OneOf { costs } => {
-            !costs.is_empty() && costs.iter().all(requires_untapped)
-        }
+        AbilityCost::OneOf { costs } => !costs.is_empty() && costs.iter().all(requires_untapped),
         _ => false,
     }
 }
@@ -12417,6 +12415,24 @@ pub(crate) fn payable_one_of_activation_branches(
         .collect()
 }
 
+/// CR 601.2b early gate: disjunctive `OneOf` costs route through the activation
+/// dry-run so tapped-source `{T}` legs are rejected before branch choice. Other
+/// shapes keep `is_payable` here so targeted `{mana},{T}` abilities can still
+/// reach target selection before the tap-source exclusion dry-run runs.
+fn activation_cost_passes_early_affordability_gate(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+) -> bool {
+    if find_one_of_cost(cost).is_some() {
+        can_pay_ability_cost_now(state, player, source_id, cost, ability_tag)
+    } else {
+        cost.is_payable(state, player, source_id)
+    }
+}
+
 /// CR 118.12a: Normalize legacy `EffectCost(ChooseOneOf{PayCost|Discard,...})`
 /// equip costs from card-data export into `AbilityCost::OneOf`.
 fn normalize_activation_cost(cost: AbilityCost) -> AbilityCost {
@@ -13159,7 +13175,7 @@ pub fn handle_activate_ability(
     // CR 601.2b: If the activation cost requires a choice of object and no
     // legal object exists, the ability can't be activated.
     if let Some(ref cost) = activation_cost {
-        if !can_pay_ability_cost_now(
+        if !activation_cost_passes_early_affordability_gate(
             state,
             player,
             source_id,
