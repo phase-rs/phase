@@ -2385,14 +2385,31 @@ fn another_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondi
             nom::error::ErrorKind::Fail,
         )));
     }
+    let TargetFilter::Typed(mut tf) = filter else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    // CR 613.7: "another <type>" excludes the ability source — reuse
+    // FilterProp::Another rather than approximating with ObjectCount(type) >= 2.
+    if !tf
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::Another))
+    {
+        tf.properties.push(FilterProp::Another);
+    }
     Ok((
         input,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { filter },
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
             },
             comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 2 },
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }

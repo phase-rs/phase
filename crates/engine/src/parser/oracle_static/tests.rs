@@ -566,12 +566,29 @@ fn dual_gated_cant_attack_and_cant_block_requires_both_gates_parsed() {
         matches!(
             attack.condition,
             Some(StaticCondition::QuantityComparison {
-                rhs: QuantityExpr::Fixed { value: 2 },
+                rhs: QuantityExpr::Fixed { value: 1 },
                 ..
             })
         ),
-        "attack gate must be ObjectCount(creature) >= 2, got {:?}",
+        "attack gate must be ObjectCount(another creature) >= 1, got {:?}",
         attack.condition
+    );
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        ..
+    }) = &attack.condition
+    else {
+        unreachable!()
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed creature filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "another creature gate must carry FilterProp::Another, got {:?}",
+        tf.properties
     );
     assert!(
         matches!(
