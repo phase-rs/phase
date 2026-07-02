@@ -5,6 +5,31 @@ This tool keeps durable review memory as an append-only JSONL event log
 (`review-events.jsonl`), the sole canonical store; `review-summary.json` is a
 derived artifact. It is advisory: GitHub mutations stay in the maintainer
 handling skills.
+
+Architecture (one-way data flow, top to bottom):
+
+    GitHub GraphQL (read-only, via `gh`)      Event log (JSONL, append-only)
+        fetch_open_prs / gh_pr_view               all_events -> normalize_event
+        normalize_graphql_pr                      |         |
+              |                                   |    build_analytics_model
+              |                                   |    collect_signal_occurrences
+              |                              latest_events_by_pr_head
+              v                                   v
+        make_packet  <---  ReviewContext (policy + overrides + local history)
+              |             build_contributor_summary (standing/scrutiny)
+              v
+        recommend_from_packet (ordered advisory-action ladder)
+
+Commands: `scan` (triage every open PR), `inspect`/`recommend` (one PR),
+`record` (validated event append), `import` (legacy TSV/markdown), `compact`
+(summary artifact), `analytics` (contributor tables), `check-skill-sync`.
+
+Invariants:
+- All GitHub access is read-only and goes through run_json (retried).
+- The event log is the only mutable store; append_event is its only writer.
+- Every tunable threshold lives in the constants block below, not inline.
+- Recommendations are advisory; precedence is the elif ladder in
+  recommend_from_packet, ordered so safety (hard_stop) always wins.
 """
 from __future__ import annotations
 
@@ -114,6 +139,43 @@ ANALYTICS_DEFAULT_MIN_PRS = 3
 # "skip" changes the advisory action; watch/probation force elevated scrutiny;
 # trusted marks light-touch eligibility. Anything else in the file is ignored.
 ALLOWED_STANDINGS = {"skip", "probation", "watch", "trusted"}
+# Score bands. SCORE_WATCH_FLOOR is shared by the score_label display bands and
+# the scrutiny ladder (score below it at medium/high confidence elevates).
+SCORE_EXCELLENT = 90
+SCORE_STRONG = 75
+SCORE_WATCH_FLOOR = 55
+# Derived-trusted gate: enough terminal history, high success, and a clean
+# recurrence window (see build_contributor_summary).
+TRUSTED_MIN_TERMINAL_PRS = 5
+TRUSTED_MIN_SUCCESS_RATE = 0.85
+# Same signal on this many distinct PRs inside RECURRENCE_WINDOW_DAYS.
+RECURRENCE_ELEVATED_PRS = 2
+RECURRENCE_ATTENTION_PRS = 3
+# Non-terminal states that still advance a head's "latest known posture".
+PROGRESS_STATES = {"held", "held_ci", "deferred", "review", "pending"}
+# GitHub read retry policy (see run_json).
+RUN_JSON_ATTEMPTS = 3
+RUN_JSON_BACKOFF_SECONDS = (2, 5)
+# Sticky-comment marker posted by .github/workflows/coverage-parse-diff-comment.yml
+# as the first (HTML-comment) line of the parse-detail diff body.
+PARSE_DIFF_MARKER = "<!-- coverage-parse-diff -->"
+# Sweep-priority order for scan output buckets (lower sorts first).
+CANDIDATE_ACTION_ORDER = {
+    "dequeue_stale_for_handler": 0,
+    "update_branch_for_handler": 1,
+    "approve_ready_for_handler": 2,
+    "review": 3,
+    "hold_ci": 4,
+    "request_changes": 5,
+    "blocked": 6,
+    "defer": 7,
+    "queued": 8,
+    "merged_prune": 9,
+    "skip": 10,
+}
+
+
+# ─── Config, overrides, and small helpers ────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -236,36 +298,7 @@ def event_id(event: dict[str, Any]) -> str:
     return hashlib.sha256(json_dumps(clean).encode("utf-8")).hexdigest()
 
 
-def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(event)
-    if normalized.get("head_sha") is None and normalized.get("head") is not None:
-        normalized["head_sha"] = normalized["head"]
-    action = normalized.get("action")
-    if normalized.get("event_type") is None and action is not None:
-        normalized["event_type"] = action
-    summary = str(normalized.get("summary") or normalized.get("note") or "")
-    if normalized.get("event_type") in {None, "observation"} and (
-        summary.startswith("CHANGES_REQUESTED:")
-        or summary.startswith("Requested changes:")
-    ):
-        normalized["event_type"] = "changes_requested"
-    if normalized.get("outcome") is None and action in {
-        "changes_requested",
-        "blocked",
-        "approved_enqueued",
-        "deferred",
-        "held",
-    }:
-        normalized["outcome"] = action
-    normalized.setdefault("timestamp", now_iso())
-    normalized.setdefault("event_type", "observation")
-    normalized.setdefault("schema_version", 1)
-    normalized["event_id"] = normalized.get("event_id") or event_id(normalized)
-    return normalized
-
-
-RUN_JSON_ATTEMPTS = 3
-RUN_JSON_BACKOFF_SECONDS = (2, 5)
+# ─── GitHub subprocess helpers (read-only) ───────────────────────────────────
 
 
 def run_json(command: list[str]) -> Any:
@@ -306,20 +339,39 @@ def run_json(command: list[str]) -> Any:
     raise last_error
 
 
-def run_text(command: list[str]) -> str:
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return result.stdout
-
-
 def gh_user() -> str:
     return str(run_json(["gh", "api", "user"])["login"])
+
+
+# ─── Event log (the sole mutable store) ──────────────────────────────────────
+
+
+def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(event)
+    if normalized.get("head_sha") is None and normalized.get("head") is not None:
+        normalized["head_sha"] = normalized["head"]
+    action = normalized.get("action")
+    if normalized.get("event_type") is None and action is not None:
+        normalized["event_type"] = action
+    summary = str(normalized.get("summary") or normalized.get("note") or "")
+    if normalized.get("event_type") in {None, "observation"} and (
+        summary.startswith("CHANGES_REQUESTED:")
+        or summary.startswith("Requested changes:")
+    ):
+        normalized["event_type"] = "changes_requested"
+    if normalized.get("outcome") is None and action in {
+        "changes_requested",
+        "blocked",
+        "approved_enqueued",
+        "deferred",
+        "held",
+    }:
+        normalized["outcome"] = action
+    normalized.setdefault("timestamp", now_iso())
+    normalized.setdefault("event_type", "observation")
+    normalized.setdefault("schema_version", 1)
+    normalized["event_id"] = normalized.get("event_id") or event_id(normalized)
+    return normalized
 
 
 def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
@@ -352,10 +404,16 @@ def all_events(state_dir: Path) -> list[dict[str, Any]]:
         return []
     events = []
     with log_path.open("r", encoding="utf-8") as file:
-        for line in file:
-            if not line.strip():
-                continue
-            events.append(normalize_event(json.loads(line)))
+        # Shared lock pairs with append_event's exclusive lock: a reader can't
+        # observe a partially flushed line from a concurrent agent's append.
+        fcntl.flock(file, fcntl.LOCK_SH)
+        try:
+            for line in file:
+                if not line.strip():
+                    continue
+                events.append(normalize_event(json.loads(line)))
+        finally:
+            fcntl.flock(file, fcntl.LOCK_UN)
     # Preserve the previous SELECT ... ORDER BY timestamp, event_id semantics that
     # downstream aggregation relies on.
     return sorted(events, key=event_sort_key)
@@ -398,6 +456,9 @@ def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> l
         if timestamp is not None and timestamp.timestamp() >= cutoff:
             filtered.append(event)
     return filtered
+
+
+# ─── Canonical outcome mapping (read-side, legacy-tolerant) ──────────────────
 
 
 def canonical_from_text(value: str | None) -> tuple[str, str] | None:
@@ -521,6 +582,9 @@ def unknown_event_values(events: list[dict[str, Any]]) -> dict[str, dict[str, in
     return {name: values for name, values in unknowns.items() if values}
 
 
+# ─── Analytics aggregation (events → PR rows → contributor rows) ─────────────
+
+
 def head_analytics(pr: int, head_sha: str, events: list[dict[str, Any]]) -> dict[str, Any]:
     sorted_events = sorted(events, key=event_sort_key)
     ever_states: dict[str, int] = {}
@@ -530,13 +594,7 @@ def head_analytics(pr: int, head_sha: str, events: list[dict[str, Any]]) -> dict
         ever_states[outcome.state] = ever_states.get(outcome.state, 0) + 1
         if outcome.state in TERMINAL_STATES:
             terminal = outcome
-        elif terminal.state not in TERMINAL_STATES and outcome.state in {
-            "held",
-            "held_ci",
-            "deferred",
-            "review",
-            "pending",
-        }:
+        elif terminal.state not in TERMINAL_STATES and outcome.state in PROGRESS_STATES:
             terminal = outcome
     return {
         "pr": pr,
@@ -621,11 +679,11 @@ def confidence_for(total_prs: int, terminal_prs: int, unclassified_ratio: float,
 def score_label(score: int, confidence: str) -> str:
     if confidence == "low":
         return "Insufficient Data"
-    if score >= 90:
+    if score >= SCORE_EXCELLENT:
         return "Excellent Signal"
-    if score >= 75:
+    if score >= SCORE_STRONG:
         return "Strong Signal"
-    if score >= 55:
+    if score >= SCORE_WATCH_FLOOR:
         return "Watch"
     return "Elevated Scrutiny"
 
@@ -747,7 +805,7 @@ def contributor_rows_from_prs(
             )
         )
     for login, signals in contributor_quality.items():
-        if author and login.lower() != author.lower():
+        if author and fold_login(login) != fold_login(author):
             continue
         if login not in contributor_prs:
             contributors.append(
@@ -803,7 +861,7 @@ def build_analytics_model(
             if login:
                 folded = fold_login(str(login))
                 display_names.setdefault(folded, str(login))
-                signals = event.get("quality", {}).get("signals", [])
+                signals = (event.get("quality") or {}).get("signals") or []
                 quality = contributor_quality.setdefault(folded, {})
                 for signal in signals:
                     add_counter(quality, str(signal))
@@ -887,6 +945,9 @@ def finalize_contributor_model(
         row["login"] = display_names.get(row["login"], row["login"])
 
 
+# ─── Contributor intelligence (recurrence, standing, scrutiny) ───────────────
+
+
 def collect_signal_occurrences(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -963,8 +1024,8 @@ def build_contributor_summary(
     override = contributor_standing_override(author_login, private_overrides)
     derived_trusted = bool(
         row
-        and row["terminal_prs"] >= 5
-        and (row["observed_success_rate"] or 0) >= 0.85
+        and row["terminal_prs"] >= TRUSTED_MIN_TERMINAL_PRS
+        and (row["observed_success_rate"] or 0) >= TRUSTED_MIN_SUCCESS_RATE
         and not recurrence
     )
     if override:
@@ -976,16 +1037,16 @@ def build_contributor_summary(
     score = row["local_signal_score"] if row else None
     confidence = row["confidence"] if row else None
     scrutiny_reasons = []
-    if score is not None and score < 55 and confidence in {"medium", "high"}:
+    if score is not None and score < SCORE_WATCH_FLOOR and confidence in {"medium", "high"}:
         scrutiny_reasons.append(f"low_score_{score}_{confidence}_confidence")
     for entry in recurrence:
-        if entry["distinct_prs_window"] >= 2:
+        if entry["distinct_prs_window"] >= RECURRENCE_ELEVATED_PRS:
             scrutiny_reasons.append(
                 f"recurrence_{entry['signal']}_{entry['distinct_prs_window']}_prs_in_window"
             )
     if standing in {"watch", "probation"}:
         scrutiny_reasons.append(f"standing_{standing}")
-    if any(entry["distinct_prs_window"] >= 3 for entry in recurrence):
+    if any(entry["distinct_prs_window"] >= RECURRENCE_ATTENTION_PRS for entry in recurrence):
         scrutiny = "maintainer_attention"
     elif scrutiny_reasons:
         scrutiny = "elevated"
@@ -1010,6 +1071,9 @@ def build_contributor_summary(
     }
 
 
+# ─── ASCII rendering for analytics ───────────────────────────────────────────
+
+
 def score_bar(score: int, width: int = 12) -> str:
     filled = round((score / 100) * width)
     return "#" * filled + "." * (width - filled)
@@ -1023,27 +1087,19 @@ def sorted_contributors(
     def confidence_rank(item: dict[str, Any]) -> int:
         return {"high": 0, "medium": 1, "low": 2}.get(item["confidence"], 3)
 
-    if sort_key == "activity":
-        key = lambda item: (confidence_rank(item), -item["prs"], item["login"].lower())
-    elif sort_key == "acceptance":
-        key = lambda item: (
-            confidence_rank(item),
-            -(item["observed_success_rate"] or 0),
-            item["login"].lower(),
-        )
-    elif sort_key == "observed-heads":
-        key = lambda item: (
-            confidence_rank(item),
-            -item["observed_heads_avg"],
-            item["login"].lower(),
-        )
-    else:
-        key = lambda item: (
-            confidence_rank(item),
-            -item["local_signal_score"],
-            item["login"].lower(),
-        )
-    rows = sorted(contributors, key=key)
+    # Sort metric per --sort choice; every ordering tiebreaks on confidence first
+    # and folded login last so rows are stable across runs.
+    metrics = {
+        "activity": lambda item: -item["prs"],
+        "acceptance": lambda item: -(item["observed_success_rate"] or 0),
+        "observed-heads": lambda item: -item["observed_heads_avg"],
+        "score": lambda item: -item["local_signal_score"],
+    }
+    metric = metrics.get(sort_key, metrics["score"])
+    rows = sorted(
+        contributors,
+        key=lambda item: (confidence_rank(item), metric(item), fold_login(item["login"])),
+    )
     return rows[:limit] if limit is not None else rows
 
 
@@ -1095,7 +1151,7 @@ def render_count_bar(label: str, value: int, max_value: int) -> str:
 def render_contributor_detail(model: dict[str, Any], login: str) -> str:
     matches = [
         contributor for contributor in model["contributors"]
-        if contributor["login"].lower() == login.lower()
+        if fold_login(contributor["login"]) == fold_login(login)
     ]
     if not matches:
         return f"No analytics found for {login}."
@@ -1149,6 +1205,9 @@ def render_analytics_ascii(model: dict[str, Any], args: argparse.Namespace) -> s
     return render_analytics_table(model, sort_key=args.sort, limit=args.limit)
 
 
+# ─── GitHub live refresh (analytics --refresh-github) ────────────────────────
+
+
 def gh_pr_refresh_chunk(repo: str, numbers: list[int]) -> dict[str, dict[str, Any] | None]:
     """Fetch live terminal state for up to 50 PRs in one aliased GraphQL query.
 
@@ -1165,7 +1224,9 @@ def gh_pr_refresh_chunk(repo: str, numbers: list[int]) -> dict[str, dict[str, An
     result = run_json(
         ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"query={query}"]
     )
-    repository = result.get("data", {}).get("repository", {}) or {}
+    # GraphQL can answer HTTP 200 with `"data": null` plus an errors array, so
+    # every level of the response is guarded with `or {}`, not a .get default.
+    repository = (result.get("data") or {}).get("repository") or {}
     return {str(number): repository.get(f"q{index}") for index, number in enumerate(numbers)}
 
 
@@ -1210,6 +1271,9 @@ def apply_github_refresh(model: dict[str, Any], repo: str) -> None:
     model["mode"] = "github_refreshed"
     model["title"] = "GitHub Refreshed Review Analytics"
     model["github_refreshed_prs"] = refreshed
+
+
+# ─── Path classification, CI summary, and packet assembly ────────────────────
 
 
 def matches_any(path: str, patterns: list[str]) -> bool:
@@ -1337,6 +1401,9 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
     }
 
 
+# ─── Advisory recommendation (ordered precedence ladder) ─────────────────────
+
+
 def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     pr = packet["pr"]
     head = pr.get("headRefOid")
@@ -1450,11 +1517,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Sticky-comment marker posted by .github/workflows/coverage-parse-diff-comment.yml
-# as the first (HTML-comment) line of the parse-detail diff body.
-PARSE_DIFF_MARKER = "<!-- coverage-parse-diff -->"
-
-
 def parse_diff_comment_state(comments: list[dict[str, Any]]) -> dict[str, Any]:
     """Classify the parse-diff sticky comment from FULL comment bodies.
 
@@ -1543,6 +1605,9 @@ def policy_trace(classification: dict[str, Any], standing: str | None = None) ->
     if classification.get("surface") == "mixed":
         trace.append("matched:mixed")
     return trace
+
+
+# ─── GraphQL queries and PR-node normalization ───────────────────────────────
 
 
 def pr_node_fields(*, comments_last: int, include_full_reviews: bool) -> str:
@@ -1699,7 +1764,7 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
         if cursor:
             variables += ["-f", f"after={cursor}"]
         result = run_json(["gh", "api", "graphql", "-f", f"query={SCAN_PR_QUERY}", *variables])
-        connection = result.get("data", {}).get("repository", {}).get("pullRequests", {})
+        connection = ((result.get("data") or {}).get("repository") or {}).get("pullRequests") or {}
         nodes.extend(graphql_nodes(connection))
         page_info = connection.get("pageInfo", {})
         if not page_info.get("hasNextPage"):
@@ -1725,23 +1790,68 @@ def gh_pr_view(repo: str, pr_number: int) -> dict[str, Any]:
             f"query={SINGLE_PR_QUERY}",
         ]
     )
-    node = result.get("data", {}).get("repository", {}).get("pullRequest")
+    node = ((result.get("data") or {}).get("repository") or {}).get("pullRequest")
     return normalize_graphql_pr(node or {})
 
 
-CANDIDATE_ACTION_ORDER = {
-    "dequeue_stale_for_handler": 0,
-    "update_branch_for_handler": 1,
-    "approve_ready_for_handler": 2,
-    "review": 3,
-    "hold_ci": 4,
-    "request_changes": 5,
-    "blocked": 6,
-    "defer": 7,
-    "queued": 8,
-    "merged_prune": 9,
-    "skip": 10,
-}
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReviewContext:
+    """Everything a packet needs besides the PR node itself, loaded once per command.
+
+    One event-log read feeds the head-freshness index, contributor analytics, and
+    signal recurrence for every packet a command builds — scan amortizes it across
+    the whole sweep; inspect/recommend build it for their single PR.
+    """
+
+    policy: Policy
+    private_overrides: dict[str, Any]
+    acting_login: str
+    local_events: dict[tuple[int, str], dict[str, Any]]
+    analytics_model: dict[str, Any]
+    signal_occurrences: dict[str, list[dict[str, Any]]]
+
+
+def load_review_context(args: argparse.Namespace) -> ReviewContext:
+    events = all_events(args.state_dir)
+    return ReviewContext(
+        policy=load_policy(args.config),
+        private_overrides=load_private_overrides(args.state_dir),
+        acting_login=args.acting_login or gh_user(),
+        local_events=latest_events_by_pr_head(events),
+        analytics_model=build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=ANALYTICS_DEFAULT_MIN_PRS,
+            include_open=True,
+        ),
+        signal_occurrences=collect_signal_occurrences(events),
+    )
+
+
+def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Assemble the full packet for one normalized PR view."""
+    pr_number = int(pr.get("number") or 0)
+    local_event = context.local_events.get((pr_number, pr.get("headRefOid") or ""))
+    contributor_summary = build_contributor_summary(
+        (pr.get("author") or {}).get("login"),
+        pr_number,
+        context.analytics_model,
+        context.signal_occurrences,
+        context.private_overrides,
+    )
+    return make_packet(
+        pr,
+        context.policy,
+        context.acting_login,
+        mode,
+        context.private_overrides,
+        local_event,
+        contributor_summary,
+    )
 
 
 def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
@@ -1757,18 +1867,37 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (order, pr_number)
 
 
+def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
+    """Project a full packet down to the token-minimal triage row scan prints."""
+    contributor = packet.get("contributor") or {}
+    return {
+        "pr": pr.get("number"),
+        "title": pr.get("title"),
+        "created_at": pr.get("createdAt"),
+        "updated_at": pr.get("updatedAt"),
+        "head_sha": pr.get("headRefOid"),
+        "author_login": packet["pr"].get("author_login"),
+        "self_authored": packet["pr"].get("self_authored"),
+        "surface": packet["classification"]["surface"],
+        "gate": packet["classification"]["gate"],
+        "hard_stop_paths": packet["classification"]["hard_stop_paths"],
+        "ci": packet["ci"]["state"],
+        "parse_diff": packet["parse_diff"],
+        "review_decision": pr.get("reviewDecision"),
+        "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
+        "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
+        "auto_merge_request": packet["pr"].get("autoMergeRequest"),
+        "advisory_action": packet["recommendation"]["advisory_action"],
+        "reason": packet["recommendation"]["reason"],
+        "policy_trace": packet["policy_trace"],
+        "standing": contributor.get("standing"),
+        "scrutiny": contributor.get("scrutiny"),
+        "first_contribution": contributor.get("first_contribution"),
+    }
+
+
 def command_scan(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
-    # One event-log read feeds head-freshness lookup, contributor analytics, and
-    # signal recurrence for every packet in the sweep.
-    events = all_events(args.state_dir)
-    local_events = latest_events_by_pr_head(events)
-    analytics_model = build_analytics_model(
-        events, days=None, author=None, min_prs=ANALYTICS_DEFAULT_MIN_PRS, include_open=True
-    )
-    signal_occurrences = collect_signal_occurrences(events)
+    context = load_review_context(args)
     # One paginated GraphQL query returns every field a full packet needs (files,
     # comments, reviews, queue state, CI), so there is no light/full escalation:
     # each packet is built once, mode "full".
@@ -1776,46 +1905,8 @@ def command_scan(args: argparse.Namespace) -> int:
     candidates = []
     for node in nodes:
         pr = normalize_graphql_pr(node)
-        pr_number = int(pr["number"])
-        local_event = local_events.get((pr_number, pr.get("headRefOid") or ""))
-        contributor_summary = build_contributor_summary(
-            pr.get("author", {}).get("login"),
-            pr_number,
-            analytics_model,
-            signal_occurrences,
-            private_overrides,
-        )
-        packet = make_packet(
-            pr, policy, acting_login, "full", private_overrides, local_event, contributor_summary
-        )
-        candidates.append(
-            {
-                "pr": pr.get("number"),
-                "title": pr.get("title"),
-                "created_at": pr.get("createdAt"),
-                "updated_at": pr.get("updatedAt"),
-                "head_sha": pr.get("headRefOid"),
-                "author_login": packet["pr"].get("author_login"),
-                "self_authored": packet["pr"].get("self_authored"),
-                "surface": packet["classification"]["surface"],
-                "gate": packet["classification"]["gate"],
-                "hard_stop_paths": packet["classification"]["hard_stop_paths"],
-                "ci": packet["ci"]["state"],
-                "parse_diff": packet["parse_diff"],
-                "review_decision": pr.get("reviewDecision"),
-                "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
-                "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
-                "auto_merge_request": packet["pr"].get("autoMergeRequest"),
-                "advisory_action": packet["recommendation"]["advisory_action"],
-                "reason": packet["recommendation"]["reason"],
-                "policy_trace": packet["policy_trace"],
-                "standing": (packet.get("contributor") or {}).get("standing"),
-                "scrutiny": (packet.get("contributor") or {}).get("scrutiny"),
-                "first_contribution": (packet.get("contributor") or {}).get(
-                    "first_contribution"
-                ),
-            }
-        )
+        packet = packet_for_pr(context, pr, "full")
+        candidates.append(scan_candidate(pr, packet))
 
     candidates.sort(key=candidate_sort_key)
     candidates_by_action: dict[str, list[dict[str, Any]]] = {}
@@ -1823,7 +1914,7 @@ def command_scan(args: argparse.Namespace) -> int:
         candidates_by_action.setdefault(candidate["advisory_action"], []).append(candidate)
     action_counts = {action: len(items) for action, items in candidates_by_action.items()}
     output = {
-        "acting_login": acting_login,
+        "acting_login": context.acting_login,
         "completeness": "triage",
         "action_counts": action_counts,
         "candidates_by_action": candidates_by_action,
@@ -1852,26 +1943,9 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
 
 
 def command_inspect(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
+    context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    events = all_events(args.state_dir)
-    local_event = latest_events_by_pr_head(events).get(
-        (args.pr, pr.get("headRefOid") or "")
-    )
-    contributor_summary = build_contributor_summary(
-        pr.get("author", {}).get("login"),
-        args.pr,
-        build_analytics_model(
-            events, days=None, author=None, min_prs=ANALYTICS_DEFAULT_MIN_PRS, include_open=True
-        ),
-        collect_signal_occurrences(events),
-        private_overrides,
-    )
-    packet = make_packet(
-        pr, policy, acting_login, args.mode, private_overrides, local_event, contributor_summary
-    )
+    packet = packet_for_pr(context, pr, args.mode)
     if args.emit_event:
         packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
     print(json_dumps(packet))
@@ -1879,26 +1953,9 @@ def command_inspect(args: argparse.Namespace) -> int:
 
 
 def command_recommend(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
+    context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    events = all_events(args.state_dir)
-    local_event = latest_events_by_pr_head(events).get(
-        (args.pr, pr.get("headRefOid") or "")
-    )
-    contributor_summary = build_contributor_summary(
-        pr.get("author", {}).get("login"),
-        args.pr,
-        build_analytics_model(
-            events, days=None, author=None, min_prs=ANALYTICS_DEFAULT_MIN_PRS, include_open=True
-        ),
-        collect_signal_occurrences(events),
-        private_overrides,
-    )
-    packet = make_packet(
-        pr, policy, acting_login, "full", private_overrides, local_event, contributor_summary
-    )
+    packet = packet_for_pr(context, pr, "full")
     recommendation = packet["recommendation"]
     if packet["completeness"] != "complete" and recommendation["advisory_action"].endswith("_for_handler"):
         recommendation = {
@@ -2090,7 +2147,7 @@ def command_compact(args: argparse.Namespace) -> int:
             )
             entry["events"] += 1
             entry["latest_timestamp"] = event.get("timestamp")
-            for signal in list(event.get("quality", {}).get("signals", [])) + list(
+            for signal in list((event.get("quality") or {}).get("signals") or []) + list(
                 event.get("signals") or []
             ):
                 entry["signals"][signal] = entry["signals"].get(signal, 0) + 1
@@ -2128,6 +2185,9 @@ def command_analytics(args: argparse.Namespace) -> int:
     else:
         print(render_analytics_ascii(model, args))
     return 0
+
+
+# ─── CLI wiring ──────────────────────────────────────────────────────────────
 
 
 def existing_path(value: str) -> Path:

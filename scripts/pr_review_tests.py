@@ -944,6 +944,33 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(row["login"], "Contrib")
         self.assertEqual(row["prs"], 2)
 
+    def test_analytics_tolerates_explicit_null_quality(self) -> None:
+        # A logged event can carry "quality": null (JSON round-trip or --force
+        # record); signal aggregation must treat it like an absent block.
+        events = [
+            {
+                "event_type": "quality_entry",
+                "timestamp": self._days_ago(2),
+                "event_id": "q1",
+                "author": "contrib",
+                "quality": None,
+            },
+            {
+                "event_type": "review",
+                "timestamp": self._days_ago(1),
+                "event_id": "r1",
+                "pr": 1,
+                "author": "contrib",
+                "head_sha": "h1",
+                "quality": None,
+            },
+        ]
+        model = pr_review.build_analytics_model(
+            events, days=None, author=None, min_prs=1, include_open=True
+        )
+        self.assertEqual(len(model["contributors"]), 1)
+        self.assertEqual(model["contributors"][0]["quality_signals"], {})
+
     def test_make_packet_without_summary_has_null_contributor(self) -> None:
         policy = pr_review.Policy({})
         pr = {
