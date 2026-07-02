@@ -386,7 +386,7 @@ mod tests {
         let mut ability = make_fight_ability(bear, wall);
         let mut mana = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount,
                     },
@@ -422,7 +422,7 @@ mod tests {
         let mut ability = make_fight_ability(bear, wall);
         let mut mana = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount,
                     },

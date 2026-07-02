@@ -19,7 +19,7 @@ pub(crate) fn brushland_colored_ability() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Mana {
-            produced: ManaProduction::AnyOneColor {
+            produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Fixed { value: 1 },
                 color_options: vec![ManaColor::Green, ManaColor::White],
                 contribution: ManaContribution::Base,

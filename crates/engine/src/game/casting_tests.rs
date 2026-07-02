@@ -2059,7 +2059,7 @@ fn add_brushland_like_land(
     let colored = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Mana {
-            produced: ManaProduction::AnyOneColor {
+            produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Fixed { value: 1 },
                 color_options: vec![ManaColor::Green, ManaColor::White],
                 contribution: ManaContribution::Base,
@@ -2681,7 +2681,7 @@ fn create_starting_town(state: &mut GameState, player: PlayerId, card_id: CardId
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: crate::types::ability::ManaProduction::AnyOneColor {
+                produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::White, ManaColor::Blue],
                     contribution: crate::types::ability::ManaContribution::Base,
@@ -15425,7 +15425,7 @@ fn auto_tap_uses_colorless_row_for_generic_preserving_dual() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![ManaColor::Black, ManaColor::Green],
                         contribution: ManaContribution::Base,
@@ -21290,7 +21290,7 @@ fn creature_castable_via_dynamic_mana_dork() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Ref {
                             qty: QuantityRef::ObjectCount {
                                 filter: TargetFilter::Typed(crate::types::ability::TypedFilter {

@@ -19323,6 +19323,7 @@ fn mana_production_with_count(
             contribution,
             ..
         } => Some(ManaProduction::AnyOneColor {
+            includes_colorless: false,
             count,
             color_options: color_options.clone(),
             contribution: *contribution,

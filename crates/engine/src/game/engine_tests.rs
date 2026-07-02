@@ -3432,7 +3432,7 @@ fn attach_fertile_ground(state: &mut GameState, land_id: ObjectId, owner: Player
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                         color_options: crate::types::mana::ManaColor::ALL.to_vec(),
                         contribution: ManaContribution::Additional,
@@ -5953,7 +5953,7 @@ fn springleaf_drum_prompts_for_creature_then_adds_mana() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             crate::types::mana::ManaColor::White,
@@ -6132,7 +6132,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_priority_resume() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             crate::types::mana::ManaColor::White,
@@ -6312,7 +6312,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             crate::types::mana::ManaColor::White,
@@ -6425,7 +6425,7 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             crate::types::mana::ManaColor::White,

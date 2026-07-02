@@ -205,6 +205,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref());
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
+                includes_colorless: false,
                 count,
                 color_options,
                 contribution,
@@ -450,12 +451,14 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 // Bazaar).
                 mana_target = target;
                 ManaProduction::AnyOneColor {
+                    includes_colorless: false,
                     count: QuantityExpr::Ref { qty: dynamic_qty },
                     color_options: all_mana_colors(),
                     contribution,
                 }
             } else {
                 ManaProduction::AnyOneColor {
+                    includes_colorless: false,
                     count,
                     color_options: all_mana_colors(),
                     contribution,
@@ -575,6 +578,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 if colors.len() == 1 {
                     return Some(Effect::Mana {
                         produced: ManaProduction::AnyOneColor {
+                            includes_colorless: false,
                             count,
                             color_options: colors,
                             contribution,
@@ -738,10 +742,13 @@ pub(super) fn parse_mana_production_clause(
     text: &str,
     contribution: ManaContribution,
 ) -> Option<(ManaProduction, Option<TargetFilter>)> {
-    if let Some(color_options) = parse_mana_color_set(text) {
-        if color_options.len() > 1 {
+    if let Some((color_options, includes_colorless)) = parse_mana_color_set_with_colorless(text) {
+        // CR 106.1b: a genuine choice needs >= 2 options (colors + optional {C});
+        // a lone color or a bare "{C}" is a Fixed production, handled below.
+        if color_options.len() + usize::from(includes_colorless) > 1 {
             return Some((
                 ManaProduction::AnyOneColor {
+                    includes_colorless,
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options,
                     contribution,
@@ -776,6 +783,7 @@ pub(super) fn parse_mana_production_clause(
             let target = for_each_clause_target_filter(for_each_rest);
             return Some((
                 ManaProduction::AnyOneColor {
+                    includes_colorless: false,
                     count: QuantityExpr::Ref { qty },
                     color_options: colors,
                     contribution,
@@ -1115,6 +1123,86 @@ pub(super) fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
     }
 }
 
+/// Like [`parse_mana_color_set`], but also accepts colorless `{C}` as one of the
+/// choices, returning whether `{C}` was among them. `ManaColor` (CR 106.1b)
+/// cannot represent colorless, so the colorless option is surfaced separately
+/// for `ManaProduction::AnyOneColor { includes_colorless }`. Processing Plant's
+/// "Add {W}, {U}, {B}, or {C}" is the canonical case.
+pub(super) fn parse_mana_color_set_with_colorless(text: &str) -> Option<(Vec<ManaColor>, bool)> {
+    let mut rest = text.trim().trim_end_matches(['.', '"']).trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut colors = Vec::new();
+    let mut colorless = false;
+    loop {
+        // CR 106.1b: each element is a colored symbol or colorless `{C}`.
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("{C}").parse(rest) {
+            colorless = true;
+            rest = after;
+        } else {
+            let (parsed, after_symbol) = parse_mana_color_symbol(rest)?;
+            for color in parsed {
+                if !colors.contains(&color) {
+                    colors.push(color);
+                }
+            }
+            rest = after_symbol;
+        }
+
+        let next = rest.trim_start();
+        if next.is_empty() {
+            break;
+        }
+
+        let next_lower = next.to_lowercase();
+        if let Some((_, after_sep)) = nom_on_lower(next, &next_lower, |i| {
+            alt((
+                value((), tag("and/or ")),
+                value((), tag("or ")),
+                value((), tag("and ")),
+            ))
+            .parse(i)
+        }) {
+            rest = after_sep.trim_start();
+            continue;
+        }
+        if let Some((_, after_comma)) =
+            nom_on_lower(next, &next_lower, |i| value((), tag(",")).parse(i))
+        {
+            let stripped = after_comma.trim_start();
+            let stripped_lower = stripped.to_lowercase();
+            if let Some((_, after_conj)) = nom_on_lower(stripped, &stripped_lower, |i| {
+                alt((
+                    value((), tag("and/or ")),
+                    value((), tag("or ")),
+                    value((), tag("and ")),
+                ))
+                .parse(i)
+            }) {
+                rest = after_conj.trim_start();
+                continue;
+            }
+            rest = stripped;
+            continue;
+        }
+        if let Some((_, after_slash)) =
+            nom_on_lower(next, &next_lower, |i| value((), tag("/")).parse(i))
+        {
+            rest = after_slash.trim_start();
+            continue;
+        }
+        return None;
+    }
+
+    if colors.is_empty() && !colorless {
+        None
+    } else {
+        Some((colors, colorless))
+    }
+}
+
 /// Parse a single mana color symbol like `{W}`, `{U/B}`, returning the color(s)
 /// and the remaining text after the closing brace.
 ///
@@ -1227,6 +1315,7 @@ fn scan_mana_production_type(
             ),
             value(
                 ManaProduction::AnyOneColor {
+                    includes_colorless: false,
                     count: count.clone(),
                     color_options: all_mana_colors(),
                     contribution,
@@ -2572,6 +2661,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     let color_options: Vec<ManaColor> = colors;
     Some(Effect::Mana {
         produced: ManaProduction::AnyOneColor {
+            includes_colorless: false,
             count,
             color_options,
             contribution,

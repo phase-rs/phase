@@ -1343,6 +1343,13 @@ pub enum ManaProduction {
         count: QuantityExpr,
         #[serde(default = "default_all_mana_colors")]
         color_options: Vec<ManaColor>,
+        /// CR 106.1b + CR 106.4: Whether colorless {C} is also a choice in this
+        /// set (Processing Plant: "Add {W}, {U}, {B}, or {C}"). `ManaColor` is
+        /// WUBRG-only, so this augments `color_options` rather than widening it
+        /// to `Vec<ManaType>` across every construction site; the resolver
+        /// appends `ManaType::Colorless` to the offered mana options when set.
+        #[serde(default, skip_serializing_if = "is_false")]
+        includes_colorless: bool,
         /// CR 605.1a: Whether this is base or additional (e.g. Fertile Ground) mana.
         #[serde(
             default = "default_mana_contribution",
@@ -1601,6 +1608,7 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         color_options,
                         contribution,
                     } => ManaProduction::AnyOneColor {
+                        includes_colorless: false,
                         count,
                         color_options,
                         contribution,

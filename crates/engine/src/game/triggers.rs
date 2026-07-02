@@ -1577,6 +1577,7 @@ fn collect_pending_triggers(
                     if attacker_ids.contains(&obj_id) {
                         let fb_effect = Effect::Mana {
                             produced: crate::types::ability::ManaProduction::AnyOneColor {
+                                includes_colorless: false,
                                 count: amount,
                                 color_options: vec![crate::types::mana::ManaColor::Red],
                                 contribution: crate::types::ability::ManaContribution::Base,
@@ -16068,7 +16069,7 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::Mana {
-                            produced: ManaProduction::AnyOneColor {
+                            produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                                 count: QuantityExpr::Fixed { value: 1 },
                                 color_options: vec![
                                     ManaColor::White,
@@ -16175,7 +16176,7 @@ pub mod tests {
             let execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             ManaColor::White,

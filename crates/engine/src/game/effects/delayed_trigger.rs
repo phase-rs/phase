@@ -691,7 +691,7 @@ mod tests {
 
     fn mana_any_one_color_effect(count: QuantityExpr) -> Effect {
         Effect::Mana {
-            produced: ManaProduction::AnyOneColor {
+            produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                 count,
                 color_options: crate::types::mana::ManaColor::ALL.to_vec(),
                 contribution: Default::default(),

@@ -1994,7 +1994,7 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::AnyOneColor {
+                        produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                             count: QuantityExpr::Fixed { value: 1 },
                             color_options: vec![
                                 ManaColor::White,
@@ -2428,7 +2428,7 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::AnyOneColor {
+                        produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                             count: QuantityExpr::Fixed { value: 1 },
                             color_options: vec![ManaColor::Red],
                             contribution: ManaContribution::Base,

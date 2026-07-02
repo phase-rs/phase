@@ -1030,10 +1030,20 @@ fn profile_kind_from_production(
                     .collect(),
             ))
         }
-        ManaProduction::AnyOneColor { color_options, .. } => {
+        ManaProduction::AnyOneColor {
+            color_options,
+            includes_colorless,
+            ..
+        } => {
+            let mut options: Vec<ManaType> = color_options.iter().map(mana_color_to_type).collect();
+            // CR 106.1b: colorless {C} rides the `includes_colorless` flag since
+            // it is not a `ManaColor`; add it to the offered mana options.
+            if *includes_colorless {
+                options.push(ManaType::Colorless);
+            }
             Some(ActivatableManaProfileKind::AnyOneColor {
                 count: resolved_production_count(produced, state, resolved),
-                options: color_options.iter().map(mana_color_to_type).collect(),
+                options,
             })
         }
         ManaProduction::AnyCombination { color_options, .. } => {
@@ -2497,7 +2507,7 @@ mod tests {
         );
 
         // CR 106.4: AnyOneColor producer (City of Brass).
-        let city_of_brass = pips_for_production(ManaProduction::AnyOneColor {
+        let city_of_brass = pips_for_production(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: ManaColor::ALL.to_vec(),
             contribution: ManaContribution::Base,
@@ -2844,7 +2854,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![
                         ManaColor::White,
@@ -2900,7 +2910,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![ManaColor::White, ManaColor::Blue],
                         contribution: ManaContribution::Base,
@@ -2995,7 +3005,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 AbilityEffect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![ManaColor::Black, ManaColor::Red],
                         contribution: ManaContribution::Base,
@@ -3048,7 +3058,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Red],
                     contribution: ManaContribution::Base,
@@ -3115,7 +3125,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Red],
                     contribution: ManaContribution::Base,
@@ -3807,7 +3817,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Database,
                     Effect::Mana {
-                        produced: ManaProduction::AnyOneColor {
+                        produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                             count: QuantityExpr::Fixed { value: 1 },
                             color_options: ManaColor::ALL.to_vec(),
                             contribution: ManaContribution::Additional,

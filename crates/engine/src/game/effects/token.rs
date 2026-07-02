@@ -1740,6 +1740,7 @@ fn treasure_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Mana {
             produced: ManaProduction::AnyOneColor {
+                includes_colorless: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 color_options: vec![
                     ManaColor::White,
@@ -1770,6 +1771,7 @@ fn gold_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Mana {
             produced: ManaProduction::AnyOneColor {
+                includes_colorless: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 color_options: vec![
                     ManaColor::White,

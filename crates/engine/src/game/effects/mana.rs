@@ -915,7 +915,7 @@ mod tests {
         state.objects.get_mut(&source).unwrap().power = Some(4);
         let mut ability = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Power {
                             scope: crate::types::ability::ObjectScope::Source,
@@ -965,7 +965,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 0 },
                     color_options: vec![ManaColor::Red],
                     contribution: ManaContribution::Base,
@@ -1018,7 +1018,7 @@ mod tests {
 
         resolve(
             &mut state,
-            &make_mana_ability(ManaProduction::AnyOneColor {
+            &make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
                 },
@@ -1180,7 +1180,7 @@ mod tests {
 
         resolve(
             &mut state,
-            &make_mana_ability(ManaProduction::AnyOneColor {
+            &make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Fixed { value: 2 },
                 color_options: vec![ManaColor::Blue, ManaColor::Red],
                 contribution: ManaContribution::Base,
@@ -1723,7 +1723,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Green],
                     contribution: ManaContribution::Base,
@@ -1770,7 +1770,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Green],
                     contribution: ManaContribution::Base,
@@ -1832,7 +1832,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Green],
                     contribution: ManaContribution::Base,

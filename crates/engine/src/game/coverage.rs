@@ -10957,7 +10957,7 @@ mod tests {
         let mut mana = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::White, ManaColor::Blue],
                     contribution: crate::types::ability::ManaContribution::Base,

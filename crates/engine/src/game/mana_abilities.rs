@@ -579,10 +579,18 @@ pub(crate) fn mana_choice_prompt(
         return None;
     };
     match produced {
-        ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
-            Some(ManaChoicePrompt::SingleColor {
-                options: color_options.iter().map(mana_color_to_type).collect(),
-            })
+        ManaProduction::AnyOneColor {
+            color_options,
+            includes_colorless,
+            ..
+        } if color_options.len() + usize::from(*includes_colorless) > 1 => {
+            let mut options: Vec<ManaType> = color_options.iter().map(mana_color_to_type).collect();
+            // CR 106.1b: colorless {C} is a first-class choice alongside colors
+            // (Processing Plant: "Add {W}, {U}, {B}, or {C}").
+            if *includes_colorless {
+                options.push(ManaType::Colorless);
+            }
+            Some(ManaChoicePrompt::SingleColor { options })
         }
         ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
             let ability = ability?;
@@ -3313,7 +3321,7 @@ mod tests {
         let replacement = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: ManaColor::ALL.to_vec(),
                     contribution: ManaContribution::Base,
@@ -3535,7 +3543,7 @@ mod tests {
     fn mana_with_roll_die_sub_remains_mana_ability() {
         // CR 605.1: mana abilities remain mana abilities regardless of other
         // generated effects (Vexing Puzzlebox rolls a d20 inline).
-        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: ManaColor::ALL.to_vec(),
             contribution: ManaContribution::Base,
@@ -3562,7 +3570,7 @@ mod tests {
             "Vexing Puzzlebox".to_string(),
             Zone::Battlefield,
         );
-        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: ManaColor::ALL.to_vec(),
             contribution: ManaContribution::Base,
@@ -3901,7 +3909,7 @@ mod tests {
         let mut def = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     contribution: ManaContribution::Base,
                     color_options: vec![ManaColor::White, ManaColor::Blue],
@@ -4914,7 +4922,7 @@ mod tests {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: colors,
                     contribution: ManaContribution::Base,
@@ -4960,7 +4968,7 @@ mod tests {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: ManaColor::ALL.to_vec(),
                     contribution: ManaContribution::Base,
@@ -5570,7 +5578,7 @@ mod tests {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::White, ManaColor::Blue],
                     contribution: ManaContribution::Base,
@@ -5647,7 +5655,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 3 },
                     color_options: vec![
                         ManaColor::White,
@@ -6199,7 +6207,7 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def = make_mana_ability(ManaProduction::AnyOneColor {
+        let def = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: vec![ManaColor::White, ManaColor::Blue, ManaColor::Black],
             contribution: ManaContribution::Base,
@@ -6578,7 +6586,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
         obj.entered_battlefield_turn = Some(1);
-        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+        let ability = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: vec![ManaColor::Red, ManaColor::Green],
             contribution: ManaContribution::Base,
@@ -6626,7 +6634,7 @@ mod tests {
         obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
-        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+        let ability = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: vec![ManaColor::Red, ManaColor::Green],
             contribution: ManaContribution::Base,
@@ -6749,7 +6757,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
         obj.entered_battlefield_turn = Some(1);
-        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+        let ability = make_mana_ability(ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: vec![ManaColor::Red, ManaColor::Green],
             contribution: ManaContribution::Base,
@@ -7999,7 +8007,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![
                         ManaColor::White,
@@ -8218,7 +8226,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(
@@ -8540,7 +8548,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Offset {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::ObjectManaValue {
@@ -8577,7 +8585,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![
                         ManaColor::White,
@@ -9478,7 +9486,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
+                produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                     count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![
                         ManaColor::White,

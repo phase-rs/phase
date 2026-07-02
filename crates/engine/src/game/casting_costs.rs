@@ -10042,7 +10042,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![ManaColor::White, ManaColor::Blue],
                         contribution: crate::types::ability::ManaContribution::Base,
@@ -11371,7 +11371,7 @@ mod tests {
                 crate::types::ability::AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::AnyOneColor {
+                        produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                             count: QuantityExpr::Fixed { value: 1 },
                             color_options: vec![
                                 ManaColor::White,
@@ -11510,7 +11510,7 @@ mod tests {
                 crate::types::ability::AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::AnyOneColor {
+                        produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                             count: QuantityExpr::Fixed { value: 1 },
                             color_options: vec![
                                 ManaColor::White,
@@ -12100,7 +12100,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![ManaColor::Red, ManaColor::Green],
                         contribution: crate::types::ability::ManaContribution::Base,
@@ -13522,7 +13522,7 @@ mod tests {
             let ability = AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
+                    produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                         count: QuantityExpr::Fixed { value: 1 },
                         color_options: vec![
                             ManaColor::White,

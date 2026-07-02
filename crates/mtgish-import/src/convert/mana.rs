@@ -188,7 +188,7 @@ pub fn convert_produce(p: &ManaProduce) -> ConvResult<ManaProduction> {
         // fixed colored sequences → ChoiceAmongCombinations.
         ManaProduce::Or(parts) => choice_from_options(parts)?,
         // CR 106.7: "any color" is the WUBRG choice axis.
-        ManaProduce::AnyManaColor => ManaProduction::AnyOneColor {
+        ManaProduce::AnyManaColor => ManaProduction::AnyOneColor { includes_colorless: false, 
             count: QuantityExpr::Fixed { value: 1 },
             color_options: ManaColor::ALL.to_vec(),
             contribution: ManaContribution::Base,
@@ -266,7 +266,7 @@ pub fn convert_repeated_produce(
     count: QuantityExpr,
 ) -> ConvResult<ManaProduction> {
     if let Some(color) = single_color(p) {
-        return Ok(ManaProduction::AnyOneColor {
+        return Ok(ManaProduction::AnyOneColor { includes_colorless: false, 
             count,
             color_options: vec![color],
             contribution: ManaContribution::Base,
@@ -274,7 +274,7 @@ pub fn convert_repeated_produce(
     }
     Ok(match p {
         ManaProduce::ManaProduceC => ManaProduction::Colorless { count },
-        ManaProduce::AnyManaColor => ManaProduction::AnyOneColor {
+        ManaProduce::AnyManaColor => ManaProduction::AnyOneColor { includes_colorless: false, 
             count,
             color_options: ManaColor::ALL.to_vec(),
             contribution: ManaContribution::Base,
@@ -324,7 +324,7 @@ fn any_one_color_from_options(parts: &[ManaProduce]) -> ConvResult<ManaProductio
             }
         }
     }
-    Ok(ManaProduction::AnyOneColor {
+    Ok(ManaProduction::AnyOneColor { includes_colorless: false, 
         count: QuantityExpr::Fixed { value: 1 },
         color_options,
         contribution: ManaContribution::Base,
@@ -394,7 +394,7 @@ mod tests {
 
         assert_eq!(
             produced,
-            ManaProduction::AnyOneColor {
+            ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Fixed { value: 1 },
                 color_options: vec![ManaColor::Blue, ManaColor::Red],
                 contribution: ManaContribution::Base,

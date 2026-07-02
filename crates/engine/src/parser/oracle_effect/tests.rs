@@ -6591,7 +6591,7 @@ fn effect_add_that_much_colored_mana_uses_event_context_amount() {
     assert!(matches!(
         e,
         Effect::Mana {
-            produced: ManaProduction::AnyOneColor {
+            produced: ManaProduction::AnyOneColor { includes_colorless: _, 
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
                 },

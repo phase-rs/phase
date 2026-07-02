@@ -57,7 +57,7 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
     // of AnyOneColor mana where N == counters removed by the parent.
     let mut sub = ResolvedAbility::new(
         Effect::Mana {
-            produced: ManaProduction::AnyOneColor {
+            produced: ManaProduction::AnyOneColor { includes_colorless: false, 
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount,
                 },
