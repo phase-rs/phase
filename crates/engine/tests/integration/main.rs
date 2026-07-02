@@ -391,6 +391,7 @@ mod issue_4269_nested_shambler_death_tokens;
 mod issue_4271_birthing_ritual_cmc_filter;
 mod issue_4272_birthing_ritual_etb_triggers;
 mod issue_4357_molecule_man;
+mod issue_4358_hama_pashar_dungeon;
 mod issue_4379_convoke_cancel_untap;
 mod issue_4384_airbend_stack_spell;
 mod issue_4388_mana_on_opponents_turn;

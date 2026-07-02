@@ -4169,8 +4169,18 @@ pub(crate) fn dispatch_synthetic_trigger(
     trigger: PendingTrigger,
     events_out: &mut Vec<GameEvent>,
 ) -> bool {
-    dispatch_pending_trigger_context(state, PendingTriggerContext::single(trigger), events_out)
-        .paused()
+    let mut pending = vec![PendingTriggerContext::single(trigger)];
+    // CR 603.2d: Synthetic dungeon room triggers (CR 309.4c) must pass through
+    // the same doubling pipeline as event-collected triggers.
+    apply_trigger_doubling(state, &mut pending);
+    let mut iter = pending.into_iter();
+    while let Some(trigger_context) = iter.next() {
+        if dispatch_pending_trigger_context(state, trigger_context, events_out).paused() {
+            state.deferred_triggers.extend(iter);
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drive a single collected trigger through
@@ -4748,6 +4758,11 @@ fn trigger_cause_matches(
             };
             obj.controller == doubler_controller
                 && obj.card_types.core_types.contains(&CoreType::Creature)
+        }
+        TriggerCause::RoomEntered => {
+            // CR 309.4c: Room abilities of dungeons you own trigger an
+            // additional time when a dungeon room is entered.
+            matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
     }
 }

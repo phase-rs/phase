@@ -112,7 +112,9 @@ ALLOWED_OUTCOMES = {
     "queued",
     "pruned",
 }
-QUALITY_SIGNAL_WEIGHTS = {
+# Defect signals subtract from the contributor score and are the ONLY signals
+# that feed windowed recurrence / scrutiny elevation.
+DEFECT_SIGNAL_WEIGHTS = {
     "wrong-seam": 14,
     "false-green": 12,
     "runtime-test-gap": 10,
@@ -127,6 +129,30 @@ QUALITY_SIGNAL_WEIGHTS = {
     "no-repro": 6,
     "value-bar": 6,
     "careful-watch": 4,
+}
+# Praise signals add to the contributor score (credit, capped below). They never
+# affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
+# risk gauge, it does not launder defects.
+PRAISE_SIGNAL_WEIGHTS = {
+    "right-seam": 6,
+    "scope-discipline": 5,
+    "discriminating-runtime-test": 5,
+    "parameterized-not-proliferated": 6,
+    "evidence-backed-pushback": 4,
+}
+# Total praise credit a contributor's score can earn; keeps volume of praise
+# from masking real defect penalties.
+PRAISE_CREDIT_CAP = 15
+# Write-time vocabulary: `record` accepts exactly these signal tokens.
+QUALITY_SIGNAL_VOCAB = frozenset(DEFECT_SIGNAL_WEIGHTS) | frozenset(PRAISE_SIGNAL_WEIGHTS)
+# Read-side normalization for tokens already in the append-only log from before
+# write-time validation existed. Aliases map to canonical vocabulary; anything
+# still non-canonical after aliasing is dropped from derived metrics (and
+# surfaced in the analytics model's unknown_signals audit field).
+SIGNAL_ALIASES = {
+    "runtime-test-present": "discriminating-runtime-test",
+    "discriminating-parser-test": "discriminating-runtime-test",
+    "gemini-case-finding-refuted": "evidence-backed-pushback",
 }
 # Recurrence ("same defect, multiple PRs after feedback") and the derived-trusted
 # gate both read signal occurrences within this window, so an improving contributor
@@ -220,6 +246,11 @@ class Policy:
     def default_tier(self) -> str:
         return str(self.raw.get("defaults", {}).get("tier", "T2"))
 
+    @property
+    def frontend_deferred_label(self) -> str | None:
+        value = self.raw.get("labels", {}).get("frontend_deferred")
+        return str(value) if value else None
+
 
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -252,6 +283,18 @@ def load_private_overrides(state_dir: Path) -> dict[str, Any]:
 def fold_login(login: str) -> str:
     """Case-fold a GitHub login for grouping/lookup; GitHub logins are case-insensitive."""
     return login.lower()
+
+
+def canonical_signal(token: str) -> str | None:
+    """Normalize a logged signal token to canonical vocabulary.
+
+    Single read-side authority: applies legacy aliases, then returns the token
+    only if it is canonical (defect or praise). Returns None for anything else —
+    the log is append-only, so pre-validation strays are neutralized here rather
+    than rewritten.
+    """
+    resolved = SIGNAL_ALIASES.get(token, token)
+    return resolved if resolved in QUALITY_SIGNAL_VOCAB else None
 
 
 def frontend_review_allowed(author_login: str | None, overrides: dict[str, Any]) -> bool:
@@ -698,12 +741,31 @@ def contributor_score(
     success_component = 0 if success_rate is None else round((success_rate - 0.5) * 30)
     block_penalty = 0 if block_rate is None else round(block_rate * 30)
     observed_head_penalty = max(0, round((avg_observed_heads - repo_median_heads) * 6))
+    # quality_signals arrives canonical (see canonical_signal), so direct
+    # per-vocabulary lookups are safe; defects penalize, praise credits (capped).
     signal_penalty = sum(
-        QUALITY_SIGNAL_WEIGHTS.get(signal, 5) * count
+        DEFECT_SIGNAL_WEIGHTS[signal] * count
         for signal, count in quality_signals.items()
+        if signal in DEFECT_SIGNAL_WEIGHTS
+    )
+    praise_credit = min(
+        PRAISE_CREDIT_CAP,
+        sum(
+            PRAISE_SIGNAL_WEIGHTS[signal] * count
+            for signal, count in quality_signals.items()
+            if signal in PRAISE_SIGNAL_WEIGHTS
+        ),
     )
     clean_bonus = 5 if success_rate is not None and success_rate >= 0.85 and signal_penalty == 0 else 0
-    score = 65 + success_component - block_penalty - observed_head_penalty - signal_penalty + clean_bonus
+    score = (
+        65
+        + success_component
+        - block_penalty
+        - observed_head_penalty
+        - signal_penalty
+        + praise_credit
+        + clean_bonus
+    )
     score = min(100, max(0, score))
     return {
         "score": score,
@@ -713,6 +775,7 @@ def contributor_score(
             "block_penalty": block_penalty,
             "observed_head_penalty": observed_head_penalty,
             "quality_signal_penalty": signal_penalty,
+            "praise_credit": praise_credit,
             "clean_bonus": clean_bonus,
         },
     }
@@ -753,10 +816,21 @@ def contributor_analytics(
     confidence = confidence_for(len(prs), len(terminal), unclassified_ratio, refreshed)
     if len(prs) < min_prs:
         confidence = "low"
+    # top_signals is the "what to dig into" list for scrutiny consumers, so it
+    # carries defects only; praise is reported separately.
     top_signals = sorted(
-        quality_signals.items(),
+        (
+            (signal, count)
+            for signal, count in quality_signals.items()
+            if signal in DEFECT_SIGNAL_WEIGHTS
+        ),
         key=lambda item: (-item[1], item[0]),
     )[:5]
+    praise_signals = {
+        signal: count
+        for signal, count in sorted(quality_signals.items())
+        if signal in PRAISE_SIGNAL_WEIGHTS
+    }
     return {
         "login": login,
         "prs": len(prs),
@@ -770,6 +844,7 @@ def contributor_analytics(
         "deferred": len(deferred),
         "quality_signals": quality_signals,
         "top_signals": [{"signal": signal, "count": count} for signal, count in top_signals],
+        "praise_signals": praise_signals,
         "local_signal_score": score_data["score"],
         "score_components": score_data["components"],
         "confidence": confidence,
@@ -851,9 +926,21 @@ def build_analytics_model(
     filtered_events = filtered_events_by_days(all_sorted_events, days)
     pr_accumulators: dict[int, PrAccumulator] = {}
     contributor_quality: dict[str, dict[str, int]] = {}
+    unknown_signals: dict[str, int] = {}
     # GitHub logins are case-insensitive, so all grouping keys are folded; the
     # first-seen original casing is kept for display and restored on the final rows.
     display_names: dict[str, str] = {}
+
+    def add_signals(folded_login: str, raw_signals: list[Any]) -> None:
+        # Canonicalize every logged token; non-canonical strays are excluded from
+        # derived metrics but counted in unknown_signals so they stay auditable.
+        for raw in raw_signals:
+            canonical = canonical_signal(str(raw))
+            if canonical is None:
+                add_counter(unknown_signals, str(raw))
+            else:
+                add_counter(contributor_quality.setdefault(folded_login, {}), canonical)
+
     for event in filtered_events:
         event_type = event.get("event_type")
         login = contributor_login_for_event(event)
@@ -861,10 +948,7 @@ def build_analytics_model(
             if login:
                 folded = fold_login(str(login))
                 display_names.setdefault(folded, str(login))
-                signals = (event.get("quality") or {}).get("signals") or []
-                quality = contributor_quality.setdefault(folded, {})
-                for signal in signals:
-                    add_counter(quality, str(signal))
+                add_signals(folded, (event.get("quality") or {}).get("signals") or [])
             continue
         pr = event.get("pr")
         if pr is None:
@@ -880,8 +964,7 @@ def build_analytics_model(
         # Signals recorded on PR-attributed outcome events join the same lifetime
         # aggregate the legacy quality_entry import feeds (per-occurrence recurrence
         # is collected separately by collect_signal_occurrences).
-        for signal in event.get("signals") or []:
-            add_counter(contributor_quality.setdefault(contributor, {}), str(signal))
+        add_signals(contributor, event.get("signals") or [])
         accumulator = pr_accumulators.setdefault(
             pr_number,
             PrAccumulator(pr_number, contributor, [], {}),
@@ -912,6 +995,7 @@ def build_analytics_model(
         "display_names": display_names,
         "prs": prs,
         "quality_by_contributor": contributor_signals,
+        "unknown_signals": unknown_signals,
         "unclassified_counts": unknown_event_values(filtered_events),
         "audit_counts": audit_event_values(filtered_events),
         "warnings": [],
@@ -951,11 +1035,13 @@ def finalize_contributor_model(
 def collect_signal_occurrences(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Collect dated, PR-attributed quality-signal occurrences per folded login.
+    """Collect dated, PR-attributed DEFECT-signal occurrences per folded login.
 
     Only top-level `signals` on PR-attributed events qualify: legacy quality_entry
     imports carry neither a PR nor a real observation date (their timestamp is the
-    import time), so they can never feed windowed recurrence.
+    import time), so they can never feed windowed recurrence. Praise signals are
+    excluded by design — recurrence exists to elevate scrutiny and gate derived
+    trust, and repeated praise must do neither.
     """
     occurrences: dict[str, list[dict[str, Any]]] = {}
     for event in events:
@@ -968,8 +1054,11 @@ def collect_signal_occurrences(
             continue
         entries = occurrences.setdefault(fold_login(str(login)), [])
         for signal in signals:
+            canonical = canonical_signal(str(signal))
+            if canonical not in DEFECT_SIGNAL_WEIGHTS:
+                continue
             entries.append(
-                {"signal": str(signal), "pr": int(pr), "timestamp": event.get("timestamp")}
+                {"signal": canonical, "pr": int(pr), "timestamp": event.get("timestamp")}
             )
     return occurrences
 
@@ -1059,6 +1148,7 @@ def build_contributor_summary(
         "score": score,
         "confidence": confidence,
         "top_signals": row["top_signals"] if row else [],
+        "praise_signals": row["praise_signals"] if row else {},
         "recurrence": recurrence,
         "standing": standing,
         "standing_source": standing_source,
@@ -1185,6 +1275,13 @@ def render_contributor_detail(model: dict[str, Any], login: str) -> str:
     if row["top_signals"]:
         for signal in row["top_signals"]:
             lines.append(f"  {signal['signal']}: {signal['count']}")
+    else:
+        lines.append("  -")
+    lines.append("")
+    lines.append("Praise")
+    if row["praise_signals"]:
+        for signal, count in row["praise_signals"].items():
+            lines.append(f"  {signal}: {count}")
     else:
         lines.append("  -")
     lines.append("")
@@ -1504,7 +1601,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     ):
         reason = "review_parse_baseline_pending"
 
-    return {
+    recommendation = {
         "pr": pr.get("number"),
         "head_sha": head,
         "advisory_action": action,
@@ -1515,6 +1612,11 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         # block (standing/scrutiny/recurrence) must ride along for skill consumers.
         "contributor": packet.get("contributor"),
     }
+    if action == "defer" and reason == "frontend_policy":
+        label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
+        if label:
+            recommendation["label_to_apply"] = label
+    return recommendation
 
 
 def parse_diff_comment_state(comments: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1580,6 +1682,11 @@ def make_packet(
         "parse_diff": parse_diff,
         "latest_maintainer_review_commit": latest_review_commit(pr, acting_login),
         "domain": {"rules_domain": policy.rules_domain},
+        "policy": {
+            "labels": {
+                "frontend_deferred": policy.frontend_deferred_label,
+            }
+        },
         "author_policy": author_policy,
         "contributor": contributor_summary,
         "policy_trace": policy_trace(
@@ -1938,7 +2045,7 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
         "timestamp": now_iso(),
         "outcome": "<FILL or omit>",
         "summary": "<FILL>",
-        "signals": f"<FILL or omit: [] or subset of {sorted(QUALITY_SIGNAL_WEIGHTS)}>",
+        "signals": f"<FILL or omit: [] or subset of {sorted(QUALITY_SIGNAL_VOCAB)}>",
     }
 
 
@@ -1995,7 +2102,7 @@ def event_validation_error(event: dict[str, Any]) -> str | None:
             isinstance(signal, str) for signal in signals
         ):
             return "signals must be a list of strings"
-        unknown = sorted(set(signals) - set(QUALITY_SIGNAL_WEIGHTS))
+        unknown = sorted(set(signals) - QUALITY_SIGNAL_VOCAB)
         if unknown:
             return f"signals {unknown} are not in the allowed vocabulary"
     return None
@@ -2017,7 +2124,7 @@ def command_record(args: argparse.Namespace) -> int:
                     "error": error,
                     "allowed_event_types": sorted(ALLOWED_EVENT_TYPES),
                     "allowed_outcomes": sorted(ALLOWED_OUTCOMES),
-                    "allowed_signals": sorted(QUALITY_SIGNAL_WEIGHTS),
+                    "allowed_signals": sorted(QUALITY_SIGNAL_VOCAB),
                 }
             )
         )
@@ -2077,7 +2184,7 @@ def quality_entry(path: Path, line_number: int, login: str, lines: list[str]) ->
     body = "\n".join(lines).strip()
     # The recognized tokens are the signal vocabulary itself — one authority with
     # record-time validation and the event_skeleton hint.
-    signals = [token for token in sorted(QUALITY_SIGNAL_WEIGHTS) if token in body]
+    signals = [token for token in sorted(QUALITY_SIGNAL_VOCAB) if token in body]
     return {
         "event_type": "quality_entry",
         "timestamp": now_iso(),
@@ -2150,7 +2257,10 @@ def command_compact(args: argparse.Namespace) -> int:
             for signal in list((event.get("quality") or {}).get("signals") or []) + list(
                 event.get("signals") or []
             ):
-                entry["signals"][signal] = entry["signals"].get(signal, 0) + 1
+                canonical = canonical_signal(str(signal))
+                if canonical is None:
+                    continue
+                entry["signals"][canonical] = entry["signals"].get(canonical, 0) + 1
     summary = {
         "generated_at": now_iso(),
         "prs": sorted(prs.values(), key=lambda item: item["pr"]),
