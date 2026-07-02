@@ -10,7 +10,11 @@ use engine::types::zones::Zone;
 
 const FOR_THE_ANCESTORS: &str = "Choose a creature type. Look at the top six cards of your library. You may reveal any number of cards of the chosen type from among them and put the revealed cards into your hand. Put the rest on the bottom of your library in a random order.\nFlashback {3}{G}";
 
-fn stage_creature(runner: &mut engine::game::scenario::GameRunner, id: engine::types::identifiers::ObjectId, subtype: &str) {
+fn stage_creature(
+    runner: &mut engine::game::scenario::GameRunner,
+    id: engine::types::identifiers::ObjectId,
+    subtype: &str,
+) {
     let obj = runner.state_mut().objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Creature);
     obj.card_types.subtypes = vec![subtype.to_string()];
@@ -38,9 +42,7 @@ fn for_the_ancestors_exposes_matching_cards_in_dig_choice() {
     stage_creature(&mut runner, elf_one, "Elf");
     stage_creature(&mut runner, elf_two, "Elf");
     stage_creature(&mut runner, non_elf, "Human");
-    runner
-        .state_mut()
-        .players[P0.0 as usize]
+    runner.state_mut().players[P0.0 as usize]
         .mana_pool
         .add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Green,
@@ -64,10 +66,26 @@ fn for_the_ancestors_exposes_matching_cards_in_dig_choice() {
                 ..
             } => {
                 assert!(
-                    !selectable_cards.is_empty(),
-                    "matching Elf cards must be selectable"
+                    selectable_cards.contains(&elf_one),
+                    "Elf One must be selectable; selectable = {selectable_cards:?}"
                 );
-                assert!(keep_count > 0, "keep_count must reflect selectable Elves");
+                assert!(
+                    selectable_cards.contains(&elf_two),
+                    "Elf Two must be selectable; selectable = {selectable_cards:?}"
+                );
+                assert!(
+                    !selectable_cards.contains(&non_elf),
+                    "Non-Elf (Human) must NOT be selectable; selectable = {selectable_cards:?}"
+                );
+                assert_eq!(
+                    selectable_cards.len(),
+                    2,
+                    "exactly the two Elf cards must be selectable; selectable = {selectable_cards:?}"
+                );
+                assert_eq!(
+                    keep_count, 2,
+                    "keep_count must reflect both selectable Elves"
+                );
                 return;
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
@@ -103,9 +121,7 @@ fn for_the_ancestors_puts_revealed_elves_in_hand() {
     stage_creature(&mut runner, elf_one, "Elf");
     stage_creature(&mut runner, elf_two, "Elf");
     stage_creature(&mut runner, non_elf, "Human");
-    runner
-        .state_mut()
-        .players[P0.0 as usize]
+    runner.state_mut().players[P0.0 as usize]
         .mana_pool
         .add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Green,
@@ -123,21 +139,23 @@ fn for_the_ancestors_puts_revealed_elves_in_hand() {
 
     for _ in 0..24 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::DigChoice { cards, .. } => {
-                let kept: Vec<_> = cards
-                    .iter()
-                    .filter(|id| {
-                        runner.state().objects[id]
-                            .card_types
-                            .subtypes
-                            .iter()
-                            .any(|s| s == "Elf")
-                    })
-                    .copied()
-                    .collect();
+            WaitingFor::DigChoice {
+                selectable_cards, ..
+            } => {
+                assert_eq!(
+                    selectable_cards.len(),
+                    2,
+                    "exactly the two Elf cards must be selectable; selectable = {selectable_cards:?}"
+                );
+                assert!(
+                    !selectable_cards.contains(&non_elf),
+                    "Human must be excluded from selectable_cards; selectable = {selectable_cards:?}"
+                );
                 runner
-                    .act(GameAction::SelectCards { cards: kept })
-                    .expect("keep all Elves");
+                    .act(GameAction::SelectCards {
+                        cards: selectable_cards.clone(),
+                    })
+                    .expect("keep all selectable Elves");
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             _ => {
