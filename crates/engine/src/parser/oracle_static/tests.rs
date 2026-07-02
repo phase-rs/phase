@@ -313,6 +313,64 @@ fn rock_jockey_cant_play_land_gated_on_source_cast_this_turn() {
         "no clause should be swallowed; warnings = {:?}",
         parsed.parse_warnings
     );
+
+    // The real card references itself by name; card-name normalization ("Rock
+    // Jockey" → "~") must still route through the shared trailing-gate splitter
+    // and produce the same gated static.
+    let named = crate::parser::oracle::parse_oracle_text(
+        "You can't play lands if Rock Jockey was cast this turn.",
+        "Rock Jockey",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        named.statics.iter().any(
+            |d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && matches!(&d.condition, Some(StaticCondition::And { conditions })
+                if conditions.contains(&StaticCondition::WasCast { zone: None })
+                    && conditions.contains(&StaticCondition::SourceEnteredThisTurn))
+        ),
+        "card-name-normalized dispatch must produce the gated CantPlayLand, got {:?}",
+        named.statics
+    );
+}
+
+/// CR 611.3a: `split_trailing_gate_condition` anchors on the LAST ` if ` and
+/// skips an `as if` rider. Asserted on the splitter building block directly —
+/// the production `can't play lands` arm does not model a middle `as if` rider,
+/// so driving it through dispatch would silently erase the rider and prove
+/// nothing about the splitter's `as if` handling.
+#[test]
+fn split_trailing_gate_condition_skips_as_if_rider() {
+    use super::shared::split_trailing_gate_condition;
+
+    // The real trailing gate is the LAST ` if `, not the ` if ` inside `as if`.
+    assert_eq!(
+        split_trailing_gate_condition(
+            "you can't play lands as if it had flash if you control a swamp"
+        ),
+        Some("you control a swamp")
+    );
+    // A plain trailing `if` (no rider) is unchanged.
+    assert_eq!(
+        split_trailing_gate_condition("you can't play lands if this creature was cast this turn"),
+        Some("this creature was cast this turn")
+    );
+    // `as long as` still takes precedence over a later bare `if`.
+    assert_eq!(
+        split_trailing_gate_condition(
+            "you can't play lands as long as ten or more lands are on the battlefield"
+        ),
+        Some("ten or more lands are on the battlefield")
+    );
+    // A line whose only ` if ` sits inside `as if` has no real trailing gate.
+    assert_eq!(
+        split_trailing_gate_condition("cast this as if it had flash"),
+        None
+    );
+    // No trailing gate at all.
+    assert_eq!(split_trailing_gate_condition("you can't play lands"), None);
 }
 
 /// CR 508.1 + CR 611.3a: A trailing "if a[n] <type> is on the battlefield" gate

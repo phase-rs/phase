@@ -181,6 +181,64 @@ pub(crate) fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair
         })
 }
 
+/// CR 611.3a: Split a trailing `" as long as <condition>"` rider off a static
+/// line, returning the condition text when present (combinator form, no
+/// string-method dispatch). Shared trailing-gate building block alongside
+/// [`split_trailing_gate_condition`].
+pub(crate) fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
+    opt(preceded(
+        (
+            take_until::<_, _, OracleError<'_>>(" as long as "),
+            tag(" as long as "),
+        ),
+        rest,
+    ))
+    .parse(lower)
+    .ok()
+    .and_then(|(_, condition)| condition)
+}
+
+/// CR 611.3a: A static restriction may carry a trailing gate introduced by
+/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
+/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
+/// this turn." Returns the condition text for `parse_static_condition`.
+///
+/// The `as long as` form is tried first so a card carrying both keywords anchors
+/// on the continuous form. For the bare `if` fallback the condition is taken
+/// after the LAST trailing `" if "` that is not the tail of an `"as if"`
+/// permission rider — e.g. "… cast as if it had flash if you control a Swamp"
+/// gates on "you control a Swamp", not "it had flash …". Anchoring on the first
+/// `" if "` (as the original inline helper did) would otherwise attach the wrong
+/// condition or drop the real trailing gate.
+///
+/// As with [`split_trailing_as_long_as`], an unrecognized condition downstream
+/// leaves the line unsupported rather than enforcing the restriction
+/// unconditionally.
+pub(crate) fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
+    if let Some(condition) = split_trailing_as_long_as(lower) {
+        return Some(condition);
+    }
+
+    // Walk every `" if "` boundary via `take_until`/`tag`, keeping the last one
+    // whose preceding word is not "as" (so an "as if" rider is skipped). The
+    // scan advances one boundary per iteration and stays combinator-based.
+    let mut remaining = lower;
+    let mut consumed = 0usize;
+    let mut gate_start: Option<usize> = None;
+    while let Ok((after, before)) =
+        terminated(take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")).parse(remaining)
+    {
+        let after_if = consumed + before.len() + " if ".len();
+        if before.rsplit(' ').next() != Some("as") {
+            gate_start = Some(after_if);
+        }
+        consumed = after_if;
+        remaining = after;
+    }
+
+    gate_start.map(|start| lower[start..].trim())
+}
+
 /// Recognizes the first token/phrase of an effect clause that follows the
 /// condition-vs-effect comma in an inverted `"As long as <cond>, <effect>"` line.
 ///
