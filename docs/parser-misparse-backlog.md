@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 35
-- **Distinct cards implicated:** 4836
-- **Total card appearances across root causes:** 4870 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 34
+- **Distinct cards implicated:** 4832
+- **Total card appearances across root causes:** 4866 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -46,7 +46,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 32 | Other / uncategorized misparse | 7 | manual triage |
 | 33 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
 | 34 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
-| 35 | Cost-reduction static spell_filter / condition dropped | 4 | oracle_static.rs ModifyCost — capture spell_filter and gating condition |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5289,20 +5288,5 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lost in Thought
 - Read the Runes
 - Trapped in the Tower
-
-</details>
-
-### 35. Cost-reduction static spell_filter / condition dropped  (4 cards)
-
-**Signature.** ModifyCost emitted with spell_filter and/or condition null; the reduction applies to all spells or unconditionally, dropping the type/subtype/state gate.
-
-**Fix hint.** oracle_static.rs ModifyCost — capture spell_filter and gating condition
-
-<details><summary>Cards</summary>
-
-- Drag to the Underworld
-- Dragonfire Blade
-- Progenitor's Icon
-- Visions of Ruin
 
 </details>
