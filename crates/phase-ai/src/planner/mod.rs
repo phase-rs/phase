@@ -9,11 +9,12 @@ use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
 use engine::types::counter::{has_positive_counters, positive_counter_entries};
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
+use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
 use crate::card_hints::should_play_now_with_facts;
 use crate::cast_facts::cast_facts_for_action;
-use crate::config::{AiConfig, OpponentModel, PlannerMode};
+use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
@@ -214,6 +215,91 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
     hasher.finish()
 }
 
+/// Fold one object's keywords into the position hash. Discriminant-first
+/// (`KeywordKind: Copy + Hash`) so unit keywords allocate nothing; parameterized
+/// payloads are serde-folded because AI tactical scoring reads them in a
+/// value-relevant way (Ward cost -> `tactical_gate` `GateDecision::Reject`,
+/// tactical_gate.rs; Protection/Enchant/Ward -> `policies/**`), which flows into
+/// beam ranking + rollout priors -> the TT'd search value. A bare discriminant
+/// would alias e.g. Ward(2) with Ward(100).
+fn fold_object_keywords(keywords: &[Keyword], hasher: &mut DefaultHasher) {
+    for kw in keywords {
+        kw.kind().hash(hasher);
+        // Serde-fold the payload only for keywords not provably parameterless.
+        // `promote_keyword_kind` is the engine's canonical parameterless-kind
+        // registry; a keyword that equals its own promotion carries no payload,
+        // so the discriminant above already captures it. Anything else (incl. a
+        // future new keyword) serde-folds -> sound by default.
+        match Keyword::promote_keyword_kind(kw.kind()) {
+            Some(unit) if &unit == kw => {} // parameterless -> discriminant suffices
+            _ => hash_json_value(
+                &serde_json::to_value(kw).expect("keyword serializes"),
+                hasher,
+            ),
+        }
+    }
+}
+
+/// Position hash for the transposition table. Field dependency is a strict
+/// **superset** of `quick_state_hash`, adding the axes a *bound-returning* TT
+/// cannot tolerate aliasing on that the search's own caches don't already
+/// protect (a wrong TT hit skips a whole subtree, unlike a wrong eval-cache hit
+/// which only perturbs one leaf). See the TT design notes for the per-axis
+/// disposition and the two-cache (uncapped candidate_cache / capped eval_cache)
+/// argument that makes the omitted axes safe.
+pub fn search_position_hash(state: &GameState) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    // Base: reuse the existing digest, then extend its field dependency.
+    quick_state_hash(state).hash(&mut hasher);
+
+    // Exile contents (cast-from-exile candidate gen reads these; quick_state_hash
+    // hashes only exile.len()). Mirror the graveyard treatment.
+    for &id in &state.exile {
+        id.hash(&mut hasher);
+    }
+
+    // Full library ordering per player (top-of-library cast / draw-horizon lines).
+    for player in &state.players {
+        for &id in &player.library {
+            id.hash(&mut hasher);
+        }
+    }
+
+    // commander_damage: read by eval commander-threat in 3+ player games; the
+    // eval_cache 256-cap means this eval-leaf read is not reliably memoized.
+    // Serialize but not Hash -> serde-fold. Empty in non-commander games -> skipped.
+    if !state.commander_damage.is_empty() {
+        hash_json_value(
+            &serde_json::to_value(&state.commander_damage).expect("commander_damage serializes"),
+            &mut hasher,
+        );
+    }
+
+    // Stack entry targets/modes: NOT covered by either cache (post-apply
+    // divergence — e.g. "Shock target A" vs "Shock target B" share source_id +
+    // controller). Empty stack (common) -> skipped.
+    for entry in &state.stack {
+        hash_json_value(
+            &serde_json::to_value(entry).expect("stack entry serializes"),
+            &mut hasher,
+        );
+    }
+
+    // Per-battlefield-object: summoning sickness (available_mana eval leaf) and
+    // keywords (unit discriminant -> combat eval; parameterized payload -> tactical
+    // gate/policies). Both are value-relevant under the capped eval_cache / beam.
+    for &obj_id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            obj.summoning_sick.hash(&mut hasher);
+            if !obj.keywords.is_empty() {
+                fold_object_keywords(&obj.keywords, &mut hasher);
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
 /// Cache key for `AiDecisionContext` — combines `quick_state_hash` (board
 /// state) with the full `WaitingFor` payload that drives `candidate_actions`.
 ///
@@ -231,6 +317,39 @@ pub fn candidate_cache_key(state: &GameState) -> u64 {
     hash_waiting_for(&state.waiting_for, &mut hasher);
     hasher.finish()
 }
+
+/// TT key: stronger position hash + full `WaitingFor` payload, so a maximizing
+/// node and a minimizing node at the same board never share an entry.
+pub fn transposition_key(state: &GameState) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    search_position_hash(state).hash(&mut hasher);
+    hash_waiting_for(&state.waiting_for, &mut hasher);
+    hasher.finish()
+}
+
+/// Alpha-beta bound classification of a stored search value (typed — never a
+/// pair of bools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtBound {
+    /// Exact minimax value (window was not cut).
+    Exact,
+    /// Fail-high: true value is >= `value` (node returned >= beta).
+    LowerBound,
+    /// Fail-low: true value is <= `value` (node never exceeded alpha).
+    UpperBound,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TtEntry {
+    pub depth: u32,
+    pub value: f64,
+    pub bound: TtBound,
+}
+
+/// Defensive ceiling on the transposition table. A single decision searches
+/// <= `max_nodes` (<=96) interior nodes per rung across a few ID rungs, so this
+/// never binds in practice; it mirrors the `eval_cache` 256-entry guard idiom.
+const TT_CAPACITY: usize = 4096;
 
 fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
     let value = serde_json::to_value(waiting_for).expect("WaitingFor serializes");
@@ -329,6 +448,14 @@ pub struct PlannerServices<'a> {
     pub context: crate::context::AiContext,
     pub utility_reducer: Box<dyn UtilityReducer + 'a>,
     eval_cache: HashMap<u64, f64>,
+    /// Interior-node search-value memo with alpha-beta bound + depth semantics
+    /// (distinct from `eval_cache`, a value-only *leaf* memo). Scope is the
+    /// `PlannerServices` lifetime — one decision — so no cross-turn staleness.
+    transposition_table: HashMap<u64, TtEntry>,
+    /// Count of TT cutoffs served this decision. Not an engine perf counter
+    /// (perf_counters.rs is out of scope); a local witness that a re-search was
+    /// actually skipped, used by the TT-hit regression test.
+    pub tt_hits: u32,
     /// Search-scoped candidate cache keyed by `candidate_cache_key(state)`
     /// (board state + full `waiting_for` payload — see the function's doc
     /// for why `quick_state_hash` alone is not sufficient).
@@ -381,6 +508,8 @@ impl<'a> PlannerServices<'a> {
             context,
             utility_reducer,
             eval_cache: HashMap::new(),
+            transposition_table: HashMap::new(),
+            tt_hits: 0,
             candidate_cache: HashMap::new(),
             deadline,
         }
@@ -516,6 +645,60 @@ impl<'a> PlannerServices<'a> {
             self.eval_cache.insert(hash, value);
         }
         value
+    }
+
+    /// Probe the TT. Returns `Some(value)` only when a stored entry proves an
+    /// alpha-beta cutoff for the current window at sufficient depth — otherwise
+    /// `None` (caller searches normally). Exhaustive match over `TtBound`.
+    fn tt_probe(&mut self, key: u64, depth: u32, alpha: f64, beta: f64) -> Option<f64> {
+        let entry = *self.transposition_table.get(&key)?;
+        if entry.depth < depth {
+            return None; // shallower than we need — not trustworthy for this rung
+        }
+        let hit = match entry.bound {
+            TtBound::Exact => Some(entry.value),
+            TtBound::LowerBound if entry.value >= beta => Some(entry.value),
+            TtBound::UpperBound if entry.value <= alpha => Some(entry.value),
+            _ => None,
+        };
+        if hit.is_some() {
+            self.tt_hits += 1;
+        }
+        hit
+    }
+
+    /// Store a search result. `alpha_orig`/`beta_orig` (the ORIGINAL window
+    /// captured before the alpha-beta loop mutated `alpha`/`beta`) classify the
+    /// bound. Classifying against the *original* window on both sides is required
+    /// because `search_value` is true minimax (not negamax): at a minimizing node
+    /// `beta` is lowered during search, so a fully-searched exact value would
+    /// satisfy `value >= (mutated) beta` and be mislabeled `LowerBound`, silently
+    /// losing TT hits at min nodes. Depth-preferred replacement: keep a strictly
+    /// deeper existing entry; otherwise insert (respecting the capacity ceiling
+    /// for new keys).
+    fn tt_store(&mut self, key: u64, depth: u32, value: f64, alpha_orig: f64, beta_orig: f64) {
+        let bound = if value <= alpha_orig {
+            TtBound::UpperBound // fail-low
+        } else if value >= beta_orig {
+            TtBound::LowerBound // fail-high
+        } else {
+            TtBound::Exact
+        };
+        match self.transposition_table.get(&key) {
+            Some(existing) if existing.depth > depth => {} // keep the deeper entry
+            _ if self.transposition_table.len() >= TT_CAPACITY
+                && !self.transposition_table.contains_key(&key) => {} // cap guard
+            _ => {
+                self.transposition_table.insert(
+                    key,
+                    TtEntry {
+                        depth,
+                        value,
+                        bound,
+                    },
+                );
+            }
+        }
     }
 
     /// Evaluate state with both tactical and strategic dimensions.
@@ -863,6 +1046,16 @@ impl BeamContinuationPlanner {
             return services.evaluate_state_quiesced(state);
         }
 
+        let key = transposition_key(state);
+        if let Some(v) = services.tt_probe(key, depth, alpha, beta) {
+            return v; // re-search skipped
+        }
+        // Capture the ORIGINAL window before the alpha-beta loop mutates it, so
+        // `tt_store` classifies the bound against the window this node opened with
+        // on BOTH sides (min-node `beta` lowering must not mislabel an Exact value).
+        let alpha_orig = alpha;
+        let beta_orig = beta;
+
         let ctx = services.build_decision_context(state);
         // Skip upfront validation in beam search — invalid candidates are handled
         // by apply_candidate returning None in the loop below. This avoids cloning
@@ -917,11 +1110,19 @@ impl BeamContinuationPlanner {
             }
         }
 
-        if best.is_infinite() {
+        let result = if best.is_infinite() {
             services.evaluate_state_quiesced(state)
         } else {
             best
+        };
+        // Budget-truncation guard: only memoize a fully-explored node.
+        // `budget.exhausted()` includes `deadline.expired()`, so a node that broke
+        // early on the mid-loop deadline bail is NOT stored — only genuinely
+        // completed nodes enter the TT.
+        if !budget.exhausted() {
+            services.tt_store(key, depth, result, alpha_orig, beta_orig);
         }
+        result
     }
 }
 
@@ -944,19 +1145,6 @@ impl ContinuationPlanner for BeamContinuationPlanner {
                 budget,
             )
         }
-    }
-}
-
-pub fn build_continuation_planner(config: &AiConfig) -> Box<dyn ContinuationPlanner> {
-    match config.search.planner_mode {
-        PlannerMode::BeamOnly => Box::new(BeamContinuationPlanner {
-            depth: 0,
-            rollout_depth: 0,
-        }),
-        PlannerMode::BeamPlusRollout => Box::new(BeamContinuationPlanner {
-            depth: config.search.max_depth.saturating_sub(1),
-            rollout_depth: config.search.rollout_depth,
-        }),
     }
 }
 
@@ -996,11 +1184,17 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::perf_counters;
     use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+        ResolvedAbility, TargetRef,
+    };
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{CommanderDamageEntry, StackEntry, StackEntryKind, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::keywords::WardCost;
+    use engine::types::mana::ManaColor;
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
     use std::collections::HashMap;
@@ -1602,6 +1796,459 @@ mod tests {
             perf_counters::snapshot().state_clone_for_legality,
             0,
             "rollout_estimate must not clone-and-apply per candidate for legality"
+        );
+    }
+
+    // ===== Transposition-table / iterative-deepening tests (pipeline 5) =====
+
+    fn add_bf_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = false;
+        id
+    }
+
+    /// A land whose only ability is `{T}: Add {G}` — a mana ability (no target,
+    /// no loyalty), so it resolves without the stack and the player retains
+    /// priority. Tapping two of these commutes: the resulting board is identical
+    /// regardless of order, giving a genuine transposition.
+    fn add_mana_land(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = false;
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Tap);
+        let abilities = std::sync::Arc::make_mut(&mut obj.abilities);
+        abilities.push(ability);
+        id
+    }
+
+    fn hard_services<'a>(
+        config: &'a AiConfig,
+        policies: &'a PolicyRegistry,
+    ) -> PlannerServices<'a> {
+        PlannerServices::new_default(PlayerId(0), config, policies)
+    }
+
+    // Row 1: a unit-keyword-only difference that `quick_state_hash` aliases must
+    // be distinguished by `search_position_hash`'s discriminant fold.
+    #[test]
+    fn search_position_hash_distinguishes_granted_keyword() {
+        let mut a = make_state();
+        let id = add_bf_creature(&mut a, PlayerId(0));
+        let mut b = a.clone();
+        b.objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        // Reach-guard: the base hash aliases these two (keywords are not hashed
+        // by quick_state_hash), so the `_ne!` below is non-vacuous.
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        // Revert-failing: dropping the keyword fold collapses these to equal.
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 1e: a parameterized keyword payload (Ward cost) — the hybrid serde
+    // branch. A discriminant-only fold would alias Ward(2) with Ward(100).
+    #[test]
+    fn search_position_hash_distinguishes_ward_cost() {
+        let mut a = make_state();
+        let id = add_bf_creature(&mut a, PlayerId(0));
+        a.objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Ward(WardCost::PayLife(2)));
+        let mut b = a.clone();
+        b.objects.get_mut(&id).unwrap().keywords[0] = Keyword::Ward(WardCost::PayLife(100));
+
+        // Reach-guard 1: base hash aliases (keyword payloads not hashed there).
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        // Reach-guard 2: discriminants are equal, so a discriminant-only fold
+        // WOULD collide — proving the `_ne!` exercises the serde payload branch.
+        assert_eq!(
+            a.objects.get(&id).unwrap().keywords[0].kind(),
+            b.objects.get(&id).unwrap().keywords[0].kind()
+        );
+        // Revert-failing for the hybrid: replacing the fold body with a pure
+        // `kw.kind().hash()` collapses Ward(2)/Ward(100) to equal.
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 1b: stack entry targets/modes (post-apply divergence) — quick_state_hash
+    // hashes only source_id + controller of each stack entry.
+    #[test]
+    fn search_position_hash_distinguishes_stack_targets() {
+        let src = ObjectId(500);
+        let ctrl = PlayerId(0);
+        let mut a = make_state();
+        a.stack.push_back(StackEntry {
+            id: src,
+            source_id: src,
+            controller: ctrl,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: src,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], src, ctrl),
+            },
+        });
+        let mut b = a.clone();
+        if let StackEntryKind::ActivatedAbility { ability, .. } = &mut b.stack[0].kind {
+            ability.targets = vec![TargetRef::Object(ObjectId(999))];
+        }
+
+        // Reach-guard: only source_id + controller are hashed by quick_state_hash.
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 1c: commander_damage amounts.
+    #[test]
+    fn search_position_hash_distinguishes_commander_damage() {
+        let mut a = make_state();
+        a.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: ObjectId(7),
+            damage: 3,
+        });
+        let mut b = a.clone();
+        b.commander_damage[0].damage = 9;
+
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 1d: exile contents (equal length, different ObjectIds).
+    #[test]
+    fn search_position_hash_distinguishes_exile_contents() {
+        let mut a = make_state();
+        a.exile.push_back(ObjectId(11));
+        a.exile.push_back(ObjectId(12));
+        let mut b = make_state();
+        b.exile.push_back(ObjectId(21));
+        b.exile.push_back(ObjectId(22));
+
+        // Reach-guard: quick_state_hash hashes exile.len() only -> equal length aliases.
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 2: library ordering (top-of-library cast / draw-horizon lines).
+    #[test]
+    fn search_position_hash_distinguishes_library_order() {
+        let mut a = make_state();
+        {
+            let lib = &mut a.players[0].library;
+            lib.clear();
+            lib.push_back(ObjectId(1));
+            lib.push_back(ObjectId(2));
+            lib.push_back(ObjectId(3));
+        }
+        let mut b = a.clone();
+        {
+            let lib = &mut b.players[0].library;
+            lib.clear();
+            lib.push_back(ObjectId(2));
+            lib.push_back(ObjectId(1));
+            lib.push_back(ObjectId(3));
+        }
+
+        // Reach-guard: quick_state_hash hashes library.len() only.
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 2b: per-object summoning sickness.
+    #[test]
+    fn search_position_hash_distinguishes_summoning_sick() {
+        let mut a = make_state();
+        let id = add_bf_creature(&mut a, PlayerId(0));
+        a.objects.get_mut(&id).unwrap().summoning_sick = false;
+        let mut b = a.clone();
+        b.objects.get_mut(&id).unwrap().summoning_sick = true;
+
+        assert_eq!(quick_state_hash(&a), quick_state_hash(&b));
+        assert_ne!(search_position_hash(&a), search_position_hash(&b));
+    }
+
+    // Row 8b: the keyword fold path is exercised on a keyword-DENSE board (both
+    // the discriminant fast path and the serde payload branch) and stays cheap.
+    #[test]
+    fn search_position_hash_keyword_dense_stays_fast() {
+        let mut state = make_state();
+        for i in 0..400 {
+            let owner = if i % 2 == 0 { PlayerId(0) } else { PlayerId(1) };
+            let id = add_bf_creature(&mut state, owner);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords.push(Keyword::Flying); // discriminant fast path
+            if i % 50 == 0 {
+                obj.keywords.push(Keyword::Ward(WardCost::PayLife(2))); // serde branch
+            }
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = search_position_hash(&state);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "keyword-dense position hash too slow ({elapsed:?}) — the fold regressed"
+        );
+    }
+
+    // Row 4: probe soundness under bounds + depth — exhaustive over all three
+    // `TtBound` arms and the depth-insufficient arm.
+    #[test]
+    fn tt_probe_respects_depth_and_bound() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+
+        // Too shallow: entry depth 1, caller needs depth 2 -> None.
+        services.transposition_table.insert(
+            1,
+            TtEntry {
+                depth: 1,
+                value: 5.0,
+                bound: TtBound::Exact,
+            },
+        );
+        assert_eq!(
+            services.tt_probe(1, 2, f64::NEG_INFINITY, f64::INFINITY),
+            None
+        );
+        // Exact always hits at sufficient depth, regardless of window.
+        assert_eq!(services.tt_probe(1, 1, 0.0, 10.0), Some(5.0));
+
+        // LowerBound (fail-high) hits iff value >= beta.
+        services.transposition_table.insert(
+            2,
+            TtEntry {
+                depth: 2,
+                value: 8.0,
+                bound: TtBound::LowerBound,
+            },
+        );
+        assert_eq!(services.tt_probe(2, 2, 0.0, 8.0), Some(8.0));
+        assert_eq!(services.tt_probe(2, 2, 0.0, 9.0), None);
+
+        // UpperBound (fail-low) hits iff value <= alpha.
+        services.transposition_table.insert(
+            3,
+            TtEntry {
+                depth: 2,
+                value: 2.0,
+                bound: TtBound::UpperBound,
+            },
+        );
+        assert_eq!(services.tt_probe(3, 2, 2.0, 10.0), Some(2.0));
+        assert_eq!(services.tt_probe(3, 2, 1.0, 10.0), None);
+    }
+
+    // Row 4b: store-time bound classification is correct for all three arms.
+    #[test]
+    fn tt_store_classifies_bound() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+
+        // Window (alpha_orig = 0.0, beta_orig = 10.0).
+        services.tt_store(10, 2, -5.0, 0.0, 10.0); // value <= alpha_orig -> fail-low
+        services.tt_store(20, 2, 15.0, 0.0, 10.0); // value >= beta_orig  -> fail-high
+        services.tt_store(30, 2, 5.0, 0.0, 10.0); // in-window          -> Exact
+
+        assert_eq!(
+            services.transposition_table.get(&10).unwrap().bound,
+            TtBound::UpperBound
+        );
+        assert_eq!(
+            services.transposition_table.get(&20).unwrap().bound,
+            TtBound::LowerBound
+        );
+        assert_eq!(
+            services.transposition_table.get(&30).unwrap().bound,
+            TtBound::Exact
+        );
+    }
+
+    // Row 4b (min-node beta_orig sub-case): a fully-searched MINIMIZING root must
+    // store `Exact`, not `LowerBound`. At a min node `beta` is lowered to `best`
+    // during search; if `search_value` passed the MUTATED beta to `tt_store`, the
+    // exact value would satisfy `value >= beta` and be mislabeled `LowerBound`.
+    // The root's incoming beta_orig is +inf, so the correct classification is
+    // Exact — this assertion flips to LowerBound if the beta_orig fix is reverted.
+    #[test]
+    fn search_value_min_node_stores_exact_against_beta_orig() {
+        let mut state = make_state();
+        // Opponent (PlayerId 1) has priority -> the root is a MINIMIZING node for
+        // ai_player 0. A tappable mana land gives the node real branching.
+        add_mana_land(&mut state, PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let mut budget = SearchBudget::new(100_000);
+        let planner = BeamContinuationPlanner {
+            depth: 2,
+            rollout_depth: 1,
+        };
+
+        let value = planner.search_value(
+            &state,
+            2,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &mut services,
+            &mut budget,
+        );
+        assert!(value.is_finite());
+
+        let key = transposition_key(&state);
+        let entry = services
+            .transposition_table
+            .get(&key)
+            .expect("the fully-searched min root must be stored in the TT");
+        assert_eq!(
+            entry.bound,
+            TtBound::Exact,
+            "min-node exact value must classify Exact against beta_orig(+inf), \
+             not LowerBound against the mutated beta"
+        );
+    }
+
+    // Row 3: the TT probe is wired into `search_value` and a sufficient-depth hit
+    // skips the whole expansion (the memoization win). The probe runs at
+    // `search_value` entry — BEFORE `build_decision_context` and candidate
+    // expansion — so a pre-seeded entry for the node's own position makes the real
+    // search short-circuit to the stored value. (This is the robust way to drive
+    // the probe: genuine same-decision transpositions do not occur through the
+    // production candidate pipeline — the only commuting priority actions are mana
+    // abilities, which the AI candidate generator withholds at priority, and every
+    // other action leaves an order-dependent stack that `search_position_hash`
+    // folds. Row 4b drives the *store* side through a real search.)
+    #[test]
+    fn transposition_hit_skips_research() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let mut budget = SearchBudget::new(100_000);
+
+        // Seed the node's own position at ample depth with an Exact bound.
+        let key = transposition_key(&state);
+        let stored = 42.0;
+        services.transposition_table.insert(
+            key,
+            TtEntry {
+                depth: 5,
+                value: stored,
+                bound: TtBound::Exact,
+            },
+        );
+
+        let planner = BeamContinuationPlanner {
+            depth: 2,
+            rollout_depth: 1,
+        };
+        let value = planner.search_value(
+            &state,
+            2,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &mut services,
+            &mut budget,
+        );
+
+        // Revert-failing: without the probe the search expands and returns a
+        // computed eval (not `stored`), and `tt_hits` never increments.
+        assert_eq!(
+            value, stored,
+            "a sufficient-depth Exact hit must short-circuit expansion to the stored value"
+        );
+        assert!(
+            services.tt_hits > 0,
+            "the wired probe must count the cutoff"
+        );
+        // Only one node was entered (the probe cut it off before recursing).
+        assert!(
+            budget.nodes_evaluated <= 1,
+            "the hit must skip the subtree, not search it"
+        );
+    }
+
+    // Row 3 negative sibling: with no matching entry, a real search stores but never
+    // probes a hit, so `tt_hits` stays 0 — proving the counter tracks real cutoffs,
+    // not spurious increments.
+    #[test]
+    fn search_without_matching_entry_yields_zero_tt_hits() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let mut budget = SearchBudget::new(100_000);
+        let planner = BeamContinuationPlanner {
+            depth: 1,
+            rollout_depth: 1,
+        };
+        let _ = planner.search_value(
+            &state,
+            1,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &mut services,
+            &mut budget,
+        );
+        assert_eq!(
+            services.tt_hits, 0,
+            "no seeded/matching entry -> the probe never serves a cutoff"
+        );
+    }
+
+    // Row 6 (planner part): measurement mode holds a `none()` deadline that never
+    // expires, so the ID ceiling is pinned by config alone.
+    #[test]
+    fn measurement_mode_deadline_is_none() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+        let policies = PolicyRegistry::default();
+        let services = hard_services(&config, &policies);
+        assert!(
+            !services.deadline.expired(),
+            "measurement deadline is none() -> expired() is always false"
         );
     }
 }

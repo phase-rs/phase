@@ -11,6 +11,12 @@ use crate::strategy_profile::StrategyProfile;
 /// cost of search quality on slow hardware. The same deadline gates expensive
 /// tactical projections so optional lookahead cannot dominate a move.
 ///
+/// Search runs iterative deepening (rung `0 -> max_depth-1`): this budget now
+/// bounds the *rungs* — the deepest fully-completed rung's scores are returned
+/// on expiry (rather than a single fixed-depth pass collapsing to a
+/// tactical-only score). Measurement mode pins the iteration ceiling and never
+/// consults the wall clock, preserving byte-determinism.
+///
 /// Measurement test and duel-suite runs call [`AiConfig::into_measurement`]
 /// to disable this wall-clock cap and remain bounded solely by node/depth
 /// budgets.

@@ -20,13 +20,14 @@ use engine::types::zones::Zone;
 
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
-use crate::config::{AiConfig, ThreatAwareness};
+use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
 use crate::mana_colors::demand_aware_single_color;
 use crate::plan::PlanSnapshot;
 use crate::planner::{
-    apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
+    apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
+    RankedCandidate, SearchBudget,
 };
 use crate::policies::context::PolicyContext;
 use crate::policies::copy_value::score_legend_rule_keep;
@@ -1620,21 +1621,7 @@ pub fn score_candidates_with_session(
 
     // Score actions via search or heuristics
     if config.search.enabled {
-        // Measurement mode ignores the wall-clock time budget so search is
-        // bounded solely by max_nodes — integration tests and ai-duel regression
-        // runs rely on this to eliminate wall-clock flake.
-        let mut budget = match (
-            config.execution_mode.is_measurement(),
-            config.search.time_budget_ms,
-        ) {
-            (false, Some(ms)) => SearchBudget::with_time_limit(
-                config.search.max_nodes,
-                web_time::Duration::from_millis(ms as u64),
-            ),
-            _ => SearchBudget::new(config.search.max_nodes),
-        };
         let branching = config.search.max_branching as usize;
-        let mut planner = build_continuation_planner(config);
 
         // Target selection decisions are dominated by the tactical policy
         // (anti-self-harm) but benefit from limited search lookahead.
@@ -1691,33 +1678,72 @@ pub fn score_candidates_with_session(
         });
         ranked.truncate(branching);
 
-        // Walk top-level candidates, but bail out of the full rollout phase
-        // once the deadline fires — remaining candidates keep their tactical
-        // score as the ranking signal instead of a full-search continuation.
-        // This caps wall-clock on the outer map the same way the deadline caps
-        // the inner rollout recursion.
-        let mut out: Vec<(GameAction, f64)> = Vec::with_capacity(ranked.len());
-        let mut deadline_hit = false;
-        for r in ranked {
-            let score = if deadline_hit || services.deadline.expired() {
-                deadline_hit = true;
-                // Skip the continuation search; keep the tactical signal.
-                r.score * tactical_weight
-            } else if let Some(sim) = apply_candidate(state, &r.candidate) {
-                let continuation_score =
-                    planner.evaluate_after_action(&sim, &mut services, &mut budget);
-                continuation_score + (r.score * tactical_weight)
-            } else {
-                // Action failed simulation — heavily penalize so the AI prefers
-                // any valid alternative (e.g., CancelCast over a failing PassPriority
-                // during ManaPayment when the cost is unaffordable).
-                // Preserve tactical score as tiebreaker among equally-failing actions
-                // (e.g., target selection where simulation lacks full engine context).
-                r.score - 1000.0
+        // Iterative deepening: rung 0 (quiesced eval per candidate) -> ceiling.
+        // Return the deepest *fully completed* rung. The deepest rung reproduces
+        // origin/main's fixed-depth pass; the TT (per-decision, on `services`)
+        // accelerates the re-search of transposing subtrees across rungs.
+        let ceiling: u32 = match config.search.planner_mode {
+            PlannerMode::BeamOnly => 0,
+            PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
+        };
+
+        // No-regression floor == origin/main's deadline collapse: tactical-only for
+        // every candidate. Overwritten by each completed rung; returned as-is only
+        // if not even rung 0 is entered (deadline pre-expired), which reproduces
+        // origin/main's zero-apply collapse exactly.
+        let mut best_scored: Vec<(GameAction, f64)> = ranked
+            .iter()
+            .map(|r| (r.candidate.action.clone(), r.score * tactical_weight))
+            .collect();
+
+        for iter_depth in 0..=ceiling {
+            // Guard EVERY rung (incl. rung 0) at entry. Interactive: a pre-expired
+            // deadline returns the tactical-only floor with zero applies (==
+            // origin/main). Measurement: services.deadline is none() => never
+            // expires => full fixed ceiling => deterministic.
+            if services.deadline.expired() {
+                break;
+            }
+            // Fresh node budget per rung sharing the one services.deadline (none()
+            // in measurement, so this single constructor is correct for both modes).
+            // The deepest rung thus gets the full max_nodes just like origin/main's
+            // single pass.
+            let mut budget =
+                SearchBudget::with_deadline(config.search.max_nodes, services.deadline);
+            let mut planner = BeamContinuationPlanner {
+                depth: iter_depth,
+                rollout_depth: config.search.rollout_depth,
             };
-            out.push((r.candidate.action, score));
+
+            let mut rung_scored = Vec::with_capacity(ranked.len());
+            let mut completed = true;
+            for r in &ranked {
+                // Rungs >= 1 may bail mid-rung (interior search is expensive) and
+                // discard the partial. Rung 0 is cheap (branching quiesced evals)
+                // and runs atomically once entered, so it is never left partial.
+                if iter_depth > 0 && services.deadline.expired() {
+                    completed = false;
+                    break;
+                }
+                let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
+                    let cont = planner.evaluate_after_action(&sim, &mut services, &mut budget);
+                    cont + (r.score * tactical_weight)
+                } else {
+                    // Action failed simulation — same penalty as origin/main so the
+                    // AI prefers any valid alternative.
+                    r.score - 1000.0
+                };
+                rung_scored.push((r.candidate.action.clone(), score));
+            }
+
+            if completed {
+                best_scored = rung_scored; // deepest completed rung so far
+            } else {
+                break;
+            }
         }
-        let _ = deadline_hit;
+
+        let mut out = best_scored;
         if config.execution_mode.is_measurement() {
             out.sort_by_cached_key(|(action, _)| action_order_key(action));
         }
@@ -4567,5 +4593,178 @@ mod tests {
             }
             other => panic!("expected AssignCombatDamage, got {other:?}"),
         }
+    }
+
+    // ===== Iterative-deepening tests (pipeline 5) =====
+
+    /// A main-phase priority board with real branching: a castable creature in
+    /// hand (+ pool mana) plus an opponent threat, so depth-2 search evaluates a
+    /// different position than a depth-0 quiesced snapshot. Reaches the
+    /// `config.search.enabled` ID loop (verified by the CastSpell reach-guards).
+    fn searchable_state() -> GameState {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+        // Opponent threat on the battlefield so search sees a value gradient.
+        let _opp = add_creature(&mut state, PlayerId(1), 3, 3);
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+        state
+    }
+
+    fn has_cast(scored: &[(GameAction, f64)]) -> bool {
+        scored
+            .iter()
+            .any(|(a, _)| matches!(a, GameAction::CastSpell { .. }))
+    }
+
+    fn sorted_by_action(mut scored: Vec<(GameAction, f64)>) -> Vec<(GameAction, f64)> {
+        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
+        scored
+    }
+
+    // Row 7: the ID ceiling derivation respects planner_mode and the WASM depth
+    // cap. `create_config` caps `max_depth` at 2 on WASM, so a BeamPlusRollout
+    // config still deepens (ceiling 1) rather than collapsing to a single pass.
+    #[test]
+    fn id_ceiling_matches_planner_mode_and_platform() {
+        // Mirror of the production ceiling derivation in `score_candidates_with_session`.
+        let ceiling = |config: &AiConfig| -> u32 {
+            match config.search.planner_mode {
+                PlannerMode::BeamOnly => 0,
+                PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
+            }
+        };
+        let native = create_config(AiDifficulty::Hard, Platform::Native);
+        let wasm = create_config(AiDifficulty::Hard, Platform::Wasm);
+
+        assert_eq!(native.search.max_depth, 3, "native Hard depth precondition");
+        assert_eq!(wasm.search.max_depth, 2, "WASM caps depth at 2");
+        assert_eq!(ceiling(&native), 2, "native Hard -> ID ceiling 2");
+        assert_eq!(
+            ceiling(&wasm),
+            1,
+            "WASM Hard -> ID ceiling 1 (still deepens)"
+        );
+    }
+
+    // Row 6: measurement-mode scoring is within-process deterministic (the ID loop
+    // never consults the wall clock in measurement — deadline is none()).
+    #[test]
+    fn measurement_score_candidates_deterministic_in_process() {
+        let state = searchable_state();
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        let session = AiSession::arc_from_game(&state);
+
+        let first = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let second = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+
+        assert!(
+            has_cast(&first),
+            "reach-guard: board reaches the search-enabled ID loop"
+        );
+        assert_eq!(
+            first, second,
+            "measurement scoring must be byte-identical across same-process runs"
+        );
+    }
+
+    // Row 5b: ID's deepest rung deepens beyond the rung-0 quiesced baseline (no
+    // depth regression / floor leak). Measurement mode runs the full ceiling; a
+    // BeamOnly clone pins the planner to rung 0 only. If the ID loop ever returned
+    // rung 0 (or the tactical floor) instead of the deepest completed rung, the
+    // two outputs would coincide.
+    #[test]
+    fn iterative_deepening_deepens_beyond_rung_zero() {
+        let state = searchable_state();
+        let session = AiSession::arc_from_game(&state);
+
+        let full = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        assert_eq!(
+            full.search.max_depth.saturating_sub(1),
+            2,
+            "reach-guard: full ceiling must be >= 1 or the test is vacuous"
+        );
+        let mut shallow = full.clone();
+        shallow.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0 -> rung 0 only
+
+        let deep_scores = score_candidates_with_session(&state, PlayerId(0), &full, &session);
+        let rung0_scores = score_candidates_with_session(&state, PlayerId(0), &shallow, &session);
+
+        assert!(
+            has_cast(&deep_scores),
+            "reach-guard: search-enabled branch reached"
+        );
+        // Revert-failing: a broken ID accumulation returning rung 0 / the floor
+        // makes the deepest rung indistinguishable from the rung-0 baseline.
+        assert_ne!(
+            deep_scores, rung0_scores,
+            "the deepest ID rung must deepen beyond the rung-0 quiesced baseline"
+        );
+    }
+
+    // Row 5a: a pre-expired interactive deadline collapses to the tactical-only
+    // floor with ZERO applies (rung-guard option (a)). The distinguishing witness:
+    // under option (a) the pre-expired output carries NO quiesced continuation
+    // term, so it differs from the measurement rung-0 output (which DOES run rung 0
+    // = `quiesced(sim) + floor`). Under option (b) — running rung 0 even when
+    // pre-expired — the two would coincide, so this `assert_ne!` is revert-failing
+    // for the rung-0 entry guard.
+    #[test]
+    fn pre_expired_deadline_collapses_to_zero_apply_floor() {
+        let state = searchable_state();
+        let session = AiSession::arc_from_game(&state);
+
+        // Interactive (non-measurement) with a pre-expired deadline (0 ms budget).
+        let mut interactive = create_config(AiDifficulty::Hard, Platform::Native);
+        interactive.search.time_budget_ms = Some(0);
+        let floor = sorted_by_action(score_candidates_with_session(
+            &state,
+            PlayerId(0),
+            &interactive,
+            &session,
+        ));
+
+        // Measurement + BeamOnly => deadline none(), ceiling 0 => rung 0 runs fully:
+        // per-candidate `quiesced(sim) + r.score*tactical_weight`. This is exactly
+        // what option (b) would produce for the pre-expired interactive run.
+        let mut rung0_cfg = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        rung0_cfg.search.planner_mode = PlannerMode::BeamOnly;
+        let rung0 = sorted_by_action(score_candidates_with_session(
+            &state,
+            PlayerId(0),
+            &rung0_cfg,
+            &session,
+        ));
+
+        assert!(
+            has_cast(&floor),
+            "reach-guard: pre-expired run still reaches the ID loop"
+        );
+        assert_eq!(
+            floor.len(),
+            rung0.len(),
+            "same gated candidate set feeds both runs"
+        );
+        // Option (a): zero applies past the deadline -> pure tactical floor,
+        // distinct from rung-0's quiesced-augmented scores.
+        assert_ne!(
+            floor, rung0,
+            "pre-expired deadline must do ZERO continuation applies (option a), \
+             so its floor differs from the rung-0 quiesced baseline"
+        );
     }
 }
