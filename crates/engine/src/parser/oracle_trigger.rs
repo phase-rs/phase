@@ -3943,6 +3943,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     subject: AttackersDeclaredCountSubject::AttackTarget {
                         controller: ControllerRef::You,
                         attacked: AttackTargetFilter::Player,
+                        filter: None,
                     },
                     comparator: Comparator::EQ,
                     count: 0,
@@ -4607,6 +4608,7 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: minimum,
@@ -10451,6 +10453,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
             AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::Player,
+                filter: count_filter,
             }
         } else {
             AttackersDeclaredCountSubject::Controller {

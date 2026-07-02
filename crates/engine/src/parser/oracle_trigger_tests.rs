@@ -19167,6 +19167,7 @@ fn trigger_another_player_attacks_with_two_or_more_creatures_intervening_if() {
                         subject: AttackersDeclaredCountSubject::AttackTarget {
                             controller: ControllerRef::You,
                             attacked: AttackTargetFilter::Player,
+                            filter: None,
                         },
                         comparator: Comparator::EQ,
                         count: 0,
@@ -19261,6 +19262,7 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
@@ -21093,6 +21095,7 @@ fn trouble_in_pairs_disjunctive_trigger_splits_into_three_triggers() {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::Player,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
@@ -21136,9 +21139,51 @@ fn trouble_in_pairs_opponent_attacks_you_with_two_or_more_creatures() {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::Player,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
         })
     ));
+}
+
+#[test]
+fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks you with two or more Dinosaurs, you draw a card.",
+        "Trouble in Pairs",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    match &def.valid_card {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+            "expected Dinosaur subtype in valid_card, got {:?}",
+            tf.type_filters,
+        ),
+        other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
+    }
+    match &def.condition {
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject:
+                AttackersDeclaredCountSubject::AttackTarget {
+                    controller: ControllerRef::You,
+                    attacked: AttackTargetFilter::Player,
+                    filter: Some(TargetFilter::Typed(tf)),
+                },
+            comparator: Comparator::GE,
+            count: 2,
+        }) => assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+            "expected Dinosaur subtype in attack-target count filter, got {:?}",
+            tf.type_filters,
+        ),
+        other => panic!(
+            "expected AttackersDeclaredCount {{ AttackTarget {{ You, Player, Some(Dinosaur) }}, GE, 2 }}, got {other:?}"
+        ),
+    }
 }
