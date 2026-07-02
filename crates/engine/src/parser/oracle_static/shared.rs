@@ -1943,48 +1943,46 @@ fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
 
 /// CR 508.1c + CR 509.1b: Split a compound "~ can't attack if <A> and can't block
 /// if <B>" static into two gated restrictions (The Fallen Apart).
-fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str)> {
-    let (input, _) = take_until("can't attack if ").parse(input)?;
+fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str, &str)> {
+    let (input, subject) = take_until("can't attack if ").parse(input)?;
     let (input, _) = tag("can't attack if ").parse(input)?;
     let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
     let (input, _) = tag(" and can't block if ").parse(input)?;
-    let (input, block_cond) = rest.parse(input)?;
-    Ok((input, (attack_cond, block_cond)))
+    let (input, block_cond) = terminated(rest, opt(tag("."))).parse(input)?;
+    Ok((input, (subject, attack_cond, block_cond)))
 }
 
-/// True when a dual-gated combat line's leading subject is the static source
-/// (~ / this creature / …), not an attached-subject or scoped form.
-fn dual_gated_combat_restriction_is_self_subject(tp: &TextPair<'_>) -> bool {
-    if attached_subject_filter(tp).is_some() {
-        return false;
-    }
-    let Some(subject_end) = tp.lower.find("can't attack if ") else {
-        return false;
-    };
-    let subject = tp.lower[..subject_end].trim();
+fn is_self_ref_combat_subject(subject: &str) -> bool {
+    let subject = subject.trim();
     subject == "~"
         || subject == "it"
         || SELF_REF_TYPE_PHRASES.contains(&subject)
         || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject)
 }
 
+fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Option<&'a str> {
+    let start = lower_sub.as_ptr() as usize - tp.lower.as_ptr() as usize;
+    tp.original.get(start..start + lower_sub.len())
+}
+
 fn try_parse_dual_gated_cant_attack_and_cant_block(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
-    if !dual_gated_combat_restriction_is_self_subject(tp) {
+    if attached_subject_filter(tp).is_some() {
         return None;
     }
-    let (remainder, (attack_cond_lower, block_cond_lower)) =
+    let (remainder, (subject_lower, attack_cond_lower, block_cond_lower)) =
         parse_dual_gated_cant_attack_block(tp.lower).ok()?;
-    if !remainder.trim().trim_end_matches('.').is_empty()
+    if !is_self_ref_combat_subject(subject_lower)
+        || !remainder.trim().is_empty()
         || attack_cond_lower.is_empty()
-        || block_cond_lower.trim().is_empty()
+        || block_cond_lower.is_empty()
     {
         return None;
     }
-    let attack_cond = tp_slice_from_lower_substr(tp, attack_cond_lower)?;
-    let block_cond = tp_slice_from_lower_substr(tp, block_cond_lower.trim_end_matches('.'))?;
+    let attack_cond = lower_subslice_to_original(tp, attack_cond_lower)?;
+    let block_cond = lower_subslice_to_original(tp, block_cond_lower)?;
     let (Some(attack_condition), Some(block_condition)) = (
         parse_static_condition(attack_cond.trim()),
         parse_static_condition(block_cond.trim()),
@@ -2003,11 +2001,6 @@ fn try_parse_dual_gated_cant_attack_and_cant_block(
             .condition(block_condition)
             .description(text.to_string()),
     ])
-}
-
-fn tp_slice_from_lower_substr<'a>(tp: &'a TextPair<'a>, lower_substr: &str) -> Option<&'a str> {
-    let offset = tp.lower.find(lower_substr)?;
-    tp.original.get(offset..offset + lower_substr.len())
 }
 
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
