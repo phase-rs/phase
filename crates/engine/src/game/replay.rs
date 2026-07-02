@@ -75,6 +75,22 @@ pub fn reconstruct_initial_state(
     // game reconstructs with the same runtime gate the original game had.
     state.set_match_config(header.match_config);
 
+    // Mirror `initialize_game`: local WASM games always run with
+    // `debug_mode = true`, and sandbox games (`allow_debug_actions`) pre-seed
+    // `debug_permitted` for every seat before the first action. Without this,
+    // a replay that contains `GrantDebugPermission` or `RevokeDebugPermission`
+    // actions (which are NOT `GameAction::Debug(_)` and therefore DO get
+    // recorded) applies them against an empty `debug_permitted` set instead of
+    // the pre-seeded one, producing a different permission state — and any
+    // subsequent `Debug(_)` actions replayed through `apply` fail outright
+    // because `debug_mode` would be `false`.
+    state.debug_mode = true;
+    if state.format_config.allow_debug_actions {
+        for i in 0..header.player_count {
+            state.debug_permitted.insert(PlayerId(i));
+        }
+    }
+
     match (&header.deck_data, db) {
         (Some(deck_data), Some(db)) => {
             let payload = resolve_deck_list(db, deck_data);
@@ -305,6 +321,86 @@ mod tests {
         let load_err = ReplayPlayer::load(log, None)
             .expect_err("load must surface the same MissingCardDatabase failure");
         assert!(matches!(load_err, ReplayError::MissingCardDatabase));
+    }
+
+    #[test]
+    fn sandbox_game_reconstruct_pre_seeds_debug_permitted_matching_initialize_game() {
+        // `initialize_game` seeds `debug_permitted` for every seat when
+        // `allow_debug_actions` is true. Without the parallel seeding in
+        // `reconstruct_initial_state`, a replay that contains
+        // `GrantDebugPermission` or `RevokeDebugPermission` actions (which
+        // are recorded, unlike `Debug(_)` ones) applies them against an
+        // empty set, producing a different permission state and desyncing
+        // the reconstruction from the original game.
+        let sandbox_config = FormatConfig::standard().with_sandbox();
+        let header = ReplayHeader {
+            format_config: sandbox_config,
+            match_config: MatchConfig::default(),
+            player_count: 2,
+            first_player: Some(0),
+            seed: 7,
+            deck_data: None,
+        };
+
+        let state = reconstruct_initial_state(&header, None)
+            .expect("deck_data is None, so reconstruction cannot fail");
+
+        // Both seats must be in debug_permitted, mirroring initialize_game.
+        assert!(
+            state.debug_mode,
+            "sandbox reconstruct must have debug_mode = true, matching initialize_game"
+        );
+        assert!(
+            state.debug_permitted.contains(&PlayerId(0)),
+            "seat 0 must be in debug_permitted after sandbox reconstruction"
+        );
+        assert!(
+            state.debug_permitted.contains(&PlayerId(1)),
+            "seat 1 must be in debug_permitted after sandbox reconstruction"
+        );
+
+        // A non-sandbox game must leave debug_permitted empty.
+        let non_sandbox_header = two_player_header(7);
+        let non_sandbox = reconstruct_initial_state(&non_sandbox_header, None)
+            .expect("non-sandbox deck_data is None");
+        assert!(
+            non_sandbox.debug_permitted.is_empty(),
+            "non-sandbox reconstruct must leave debug_permitted empty"
+        );
+
+        // Replaying a RevokeDebugPermission action against the correctly
+        // pre-seeded state must produce the same permission set as the live
+        // game — if the set were empty (the pre-fix bug), remove would be a
+        // no-op and the reconstructed state would diverge.
+        let mut live = reconstruct_initial_state(&header, None).unwrap();
+        let mut log = ReplayLog::new(header.clone());
+
+        apply(
+            &mut live,
+            PlayerId(0),
+            GameAction::RevokeDebugPermission { player_id: PlayerId(1) },
+        )
+        .expect("host revoking P1 permission must be accepted in a sandbox game");
+        log.push_action(
+            PlayerId(0),
+            GameAction::RevokeDebugPermission { player_id: PlayerId(1) },
+        );
+        assert!(
+            live.debug_permitted.contains(&PlayerId(0)),
+            "host must still be in debug_permitted after revoking P1"
+        );
+        assert!(
+            !live.debug_permitted.contains(&PlayerId(1)),
+            "P1 must be removed from debug_permitted after revoke"
+        );
+
+        // Reconstruct to the same point via replay.
+        let mut player = ReplayPlayer::load(log, None).unwrap();
+        let replayed = player.seek(1).unwrap();
+        assert_eq!(
+            replayed.debug_permitted, live.debug_permitted,
+            "replayed debug_permitted must match live game after RevokeDebugPermission"
+        );
     }
 
     #[test]
