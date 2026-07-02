@@ -502,6 +502,58 @@ fn shauku_cant_attack_gated_on_another_creature_exists() {
     );
 }
 
+/// CR 508.1c + CR 509.1b: The Fallen Apart — compound "~ can't attack if <A> and
+/// can't block if <B>" must split into separate gated CantAttack and CantBlock
+/// statics instead of mis-dispatching to a lone CantBlock.
+#[test]
+fn fallen_apart_dual_gated_cant_attack_and_cant_block_split() {
+    let defs = parse_static_line_multi(
+        "~ can't attack if it has no legs and can't block if it has no arms.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected CantAttack + CantBlock statics, got {:?}",
+        defs
+    );
+    let attack = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected CantAttack static");
+    let block = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBlock)
+        .expect("expected CantBlock static");
+    assert!(
+        attack.condition.is_none(),
+        "leg gate not yet modeled; restriction must still split, got {:?}",
+        attack.condition
+    );
+    assert!(
+        block.condition.is_none(),
+        "arm gate not yet modeled; restriction must still split, got {:?}",
+        block.condition
+    );
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "~ can't attack if it has no legs and can't block if it has no arms.",
+        "The Fallen Apart",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed
+            .statics
+            .iter()
+            .filter(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))
+            .count(),
+        2,
+        "full dispatch must split into CantAttack + CantBlock, got {:?}",
+        parsed.statics
+    );
+}
+
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
 /// number of Islands you control can't block this creature." must lower to a
 /// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a

@@ -1103,6 +1103,13 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c + CR 509.1b + CR 611.3a: "~ can't attack if <cond> and can't block
+    // if <cond>" (The Fallen Apart) — each restriction carries its own trailing
+    // gate; must split before the single-gate `can't block` dispatch arm.
+    if let Some(defs) = try_parse_dual_gated_cant_attack_and_cant_block(&tp, &stripped) {
+        return defs;
+    }
+
     // Check compound must-attack/block first — may return multiple.
     if let Some(defs) = try_parse_scoped_must_attack_block(&lower, &stripped) {
         return defs;
@@ -1922,6 +1929,60 @@ fn split_trailing_if_condition(lower: &str) -> Option<&str> {
     Some(tail.trim_start())
 }
 
+fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
+    let (_, _, tail_lower) = nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+        tp.lower,
+        |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        |if_offset| !is_as_if_gate_marker(tp.lower, if_offset),
+    )?;
+    let start = tp.lower.len().checked_sub(tail_lower.len())?;
+    Some(tp.original.get(start..)?.trim_start())
+}
+
+/// CR 508.1c + CR 509.1b: Split a compound "~ can't attack if <A> and can't block
+/// if <B>" static into two gated restrictions (The Fallen Apart).
+fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (input, _) = tag("can't attack if ").parse(input)?;
+    let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
+    let (input, _) = tag(" and can't block if ").parse(input)?;
+    let (input, block_cond) = rest.parse(input)?;
+    Ok((input, (attack_cond, block_cond)))
+}
+
+fn try_parse_dual_gated_cant_attack_and_cant_block(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (remainder, (attack_cond_lower, block_cond_lower)) =
+        parse_dual_gated_cant_attack_block(tp.lower).ok()?;
+    if !remainder.trim().trim_end_matches('.').is_empty()
+        || attack_cond_lower.is_empty()
+        || block_cond_lower.trim().is_empty()
+    {
+        return None;
+    }
+    let attack_cond = tp_slice_from_lower_substr(tp, attack_cond_lower)?;
+    let block_cond = tp_slice_from_lower_substr(tp, block_cond_lower.trim_end_matches('.'))?;
+    let mut attack = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(TargetFilter::SelfRef)
+        .description(text.to_string());
+    if let Some(condition) = parse_static_condition(attack_cond.trim()) {
+        attack.condition = Some(condition);
+    }
+    let mut block = StaticDefinition::new(StaticMode::CantBlock)
+        .affected(TargetFilter::SelfRef)
+        .description(text.to_string());
+    if let Some(condition) = parse_static_condition(block_cond.trim()) {
+        block.condition = Some(condition);
+    }
+    Some(vec![attack, block])
+}
+
+fn tp_slice_from_lower_substr<'a>(tp: &'a TextPair<'a>, lower_substr: &str) -> Option<&'a str> {
+    let offset = tp.lower.find(lower_substr)?;
+    tp.original.get(offset..offset + lower_substr.len())
+}
+
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
 /// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
 /// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
@@ -1942,7 +2003,7 @@ pub(crate) fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
 /// `parse_static_condition` → `parse_inner_condition` (the single authority
 /// for game-state conditions).
 pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
-    let condition_text = split_trailing_if_condition(tp.lower)?;
+    let condition_text = split_trailing_if_condition_tp(tp)?;
     parse_static_condition(condition_text.trim_end_matches('.'))
 }
 
@@ -2279,6 +2340,36 @@ fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondit
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
+/// CR 611.3a: "there's / there is another <type> on the battlefield" (Shauku).
+fn parse_another_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    another_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().trim_end_matches('.').is_empty().then_some(cond))
+}
+
+fn another_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("there's another "), tag("there is another "))).parse(input)?;
+    let (input, type_text) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
         },
     ))
 }
