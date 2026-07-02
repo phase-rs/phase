@@ -23,17 +23,17 @@ use crate::context::AiContext;
 use crate::features::mill::{MillFeature, COMMITMENT_FLOOR};
 use crate::features::DeckFeatures;
 use crate::policies::context::PolicyContext;
-use crate::policies::mill_payoff::MillPayoffPolicy;
+use crate::policies::payoff::{PayoffPolicy, MILL_PAYOFF};
 use crate::policies::registry::{
-    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy,
+    DecisionKind, PolicyId, PolicyReason, PolicyRegistry, PolicyVerdict, TacticalPolicy,
 };
 use crate::session::AiSession;
 
 const AI: PlayerId = PlayerId(0);
 const OPPONENT: PlayerId = PlayerId(1);
 
-fn policy() -> MillPayoffPolicy {
-    MillPayoffPolicy
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&MILL_PAYOFF)
 }
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
@@ -182,6 +182,9 @@ fn identity_is_mill_payoff() {
     assert_eq!(policy().id(), PolicyId::MillPayoff);
     assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
     assert!(!policy().decision_kinds().contains(&DecisionKind::PlayLand));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&MILL_PAYOFF))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::MillPayoff));
 }
 
 // ─── activation gate ────────────────────────────────────────────────────────
@@ -339,7 +342,7 @@ fn verdict_urgent_library_is_x3() {
 /// before the suite runs. Surfaced as a `#[test]` for discoverability.
 #[test]
 fn urgency_constants_are_ordered() {
-    use crate::policies::mill_payoff::{
+    use crate::policies::payoff::{
         LIBRARY_THRESHOLD_ELEVATED, LIBRARY_THRESHOLD_URGENT, URGENCY_SCALE_HIGH,
         URGENCY_SCALE_MID, URGENCY_SCALE_NORMAL,
     };
