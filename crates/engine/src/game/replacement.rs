@@ -9263,12 +9263,17 @@ mod tests {
             Zone::Graveyard,
             vec![dredge_draw_replacement_def()],
         );
-        state
-            .objects
-            .get_mut(&ObjectId(10))
-            .unwrap()
-            .keywords
-            .push(crate::types::keywords::Keyword::Dredge(2));
+        {
+            // Printed keywords live in BOTH fields on a production object
+            // (printed_cards.rs stamps `base_keywords` from the card face and
+            // `keywords` mirrors it off-battlefield). The graveyard gate reads
+            // the off-zone keyword authority, which starts from `base_keywords`.
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.keywords
+                .push(crate::types::keywords::Keyword::Dredge(2));
+            obj.base_keywords
+                .push(crate::types::keywords::Keyword::Dredge(2));
+        }
         let lib = &mut state.players[0].library;
         lib.clear();
         for i in 0..library_size {
