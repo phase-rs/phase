@@ -238,7 +238,7 @@ If `## Anchored on` is absent, do not penalize — the policy is new and most ex
 - A self-declared `Tier: Frontier` PR whose author sits at `elevated` or `maintainer_attention` scrutiny gets Standard-tier scrutiny regardless of the declared tier — declared tier never outranks observed track record.
 - When `recurrence` lists the same signal class you just found in review, say so in the review comment ("Nth PR with `<signal>` in the last 60 days") — repeat-after-feedback is the primary pattern the maintainer wants surfaced.
 - `first_contribution` → apply the full evidence bar and point the author at the `docs/AI-CONTRIBUTOR.md` gates in the first review comment.
-- When your review finds a quality-signal defect, attach `signals` (closed vocabulary) to the recorded outcome event — this review's defects only, never re-recorded history — so recurrence stays derivable.
+- Attach `signals` (closed vocabulary, defect AND praise tokens) to the recorded outcome event — this review's observations only, never re-recorded history. Praise (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback`) earns a capped score credit and never affects recurrence or scrutiny. Never invent tokens — out-of-vocabulary signals are rejected at record time; missing concepts are vocabulary additions in `pr_review.py`, not `--force` recordings.
 
 ## Checkout
 

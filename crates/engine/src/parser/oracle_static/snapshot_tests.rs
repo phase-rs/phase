@@ -772,6 +772,18 @@ fn panharmonicon_doubler_has_no_source_filter() {
     );
 }
 
+#[test]
+fn hama_pashar_room_ability_doubler_static() {
+    let def = parse_static_line("Room abilities of dungeons you own trigger an additional time.")
+        .expect("expected DoubleTriggers static for Hama Pashar");
+    assert!(matches!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::RoomEntered
+        }
+    ));
+}
+
 /// CR 603.2d: Echoes of Eternity — a second real disjunctive doubler beyond
 /// Harmonic Prodigy. "a colorless spell you control or another colorless
 /// permanent you control" must produce a controller-scoped two-branch `Or`, with
