@@ -2915,13 +2915,32 @@ fn controlled_battlefield_subtype_filter(subtype: String) -> TargetFilter {
     )
 }
 
-/// Canonical combinator: "you control N or more [type]" → QuantityComparison.
+/// Parse the leading controller-scope phrase of a "control N or more" count
+/// condition, returning the `ControllerRef` the count is scoped to:
+/// "you control " → `You`, "your opponents control " → `Opponent`.
+///
+/// CR 109.3: object control is a per-player property; this is the single axis
+/// that distinguishes the self-scoped ("you control three or more creatures")
+/// and opponent-scoped ("your opponents control three or more creatures",
+/// Lashwhip Predator) forms of the same `ObjectCount >= N` threshold.
+fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag("you control ")),
+        value(ControllerRef::Opponent, tag("your opponents control ")),
+    ))
+    .parse(input)
+}
+
+/// Canonical combinator: "you control / your opponents control N or more [type]"
+/// → QuantityComparison.
 ///
 /// Single authority for this pattern — called from `oracle_static.rs` and
-/// `oracle_trigger.rs` to avoid three-way duplication.
+/// `oracle_trigger.rs` to avoid three-way duplication. The controller scope is
+/// parameterized on the `you control` / `your opponents control` axis
+/// (`parse_control_scope_prefix`) so both forms share one parse path.
 /// Returns the remainder after the type phrase (may be non-empty for trailing text).
 pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, ctrl) = parse_control_scope_prefix(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
@@ -2931,7 +2950,7 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
             nom::error::ErrorKind::Fail,
         )));
     }
-    let filter = inject_controller_you(filter);
+    let filter = inject_controller(filter, ctrl);
     // Map remainder back to original input slice — parse_type_phrase consumed
     // from a potentially trimmed copy, so use pointer arithmetic to get the
     // correct byte offset (remainder.len() would be wrong if trailing chars
@@ -8070,6 +8089,52 @@ mod tests {
             matches!(c, StaticCondition::Not { .. }),
             "expected Not(IsPresent), got {c:?}"
         );
+    }
+
+    /// CR 109.3 + CR 603.4: The shared `you control / your opponents control N
+    /// or more [type]` count authority is parameterized on the controller-scope
+    /// axis. Both surface forms flow through `parse_inner_condition` and produce
+    /// the same `ObjectCount >= N` shape, differing only in the injected
+    /// `ControllerRef`. Self form ("you control three or more creatures") pins
+    /// `You`; opponent form (Lashwhip Predator: "your opponents control three or
+    /// more creatures") pins `Opponent`.
+    #[test]
+    fn parse_inner_condition_control_count_ge_controller_scope_axis() {
+        for (text, expected_ctrl) in [
+            ("you control three or more creatures", ControllerRef::You),
+            (
+                "your opponents control three or more creatures",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (rest, cond) = parse_inner_condition(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "gate must count creatures for {text:?}, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(expected_ctrl),
+                "controller axis mis-scoped for {text:?}"
+            );
+        }
     }
 
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white

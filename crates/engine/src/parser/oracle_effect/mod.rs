@@ -12133,20 +12133,26 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
-    // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
-    // When the sub-text starts with "target" and parsed as Unimplemented or
-    // the structural TargetOnly wrapper, prepend the verb from the primary
-    // effect and re-parse. Handles "exile target creature and target artifact"
-    // where "target artifact" lacks a verb.
-    // Only this branch accepts TargetOnly: bare "target ..." is the only
-    // verbless head that lowers structurally to TargetOnly; the other
-    // carry-forward prefixes below ("up to", "all/each", "~", possessives)
-    // fall back as Unimplemented when the verb is omitted.
+    // CR 608.2c: Verb carry-forward for bare "target X" / "another target X"
+    // clauses in compound actions. When the sub-text starts with "target" or
+    // "another target" and parsed as Unimplemented or the structural TargetOnly
+    // wrapper, prepend the verb from the primary effect and re-parse. Handles
+    // "exile target creature and target artifact" and "Return ~ and another
+    // target creature to their owners' hands" (Coastal Wizard, Lady Sun), where
+    // the trailing conjunct lacks a verb. "another target creature" is a
+    // standard target (CR 115.1 + FilterProp::Another; ~249 cards already use it).
+    // Only this branch accepts TargetOnly: a bare "target ..." / "another
+    // target ..." is the only verbless head that lowers structurally to
+    // TargetOnly; the other carry-forward prefixes below ("up to", "all/each",
+    // "~", possessives) fall back as Unimplemented when the verb is omitted.
     if (matches!(sub_clause.effect, Effect::Unimplemented { .. })
         || matches!(sub_clause.effect, Effect::TargetOnly { .. }))
-        && tag::<_, _, OracleError<'_>>("target ")
-            .parse(sub_lower.as_str())
-            .is_ok()
+        && alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("another target "),
+        ))
+        .parse(sub_lower.as_str())
+        .is_ok()
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");

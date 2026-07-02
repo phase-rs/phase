@@ -682,6 +682,67 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
     None
 }
 
+/// CR 602.5: Parses the activation-prohibition tail of compound static text.
+fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag(", and "),
+            opt(alt((tag("its "), tag("their ")))),
+            alt((
+                tag("activated abilities can't be activated"),
+                tag("activated abilities can\u{2019}t be activated"),
+            )),
+            opt((tag(" unless they're "), tag("mana abilities"))),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+fn rule_static_predicate_to_activation_compound_mode(
+    predicate: RuleStaticPredicate,
+) -> Option<StaticMode> {
+    match predicate {
+        RuleStaticPredicate::CantAttack => Some(StaticMode::CantAttack),
+        RuleStaticPredicate::CantBlock => Some(StaticMode::CantBlock),
+        RuleStaticPredicate::CantAttackOrBlock => Some(StaticMode::CantAttackOrBlock),
+        RuleStaticPredicate::CantCrew => Some(StaticMode::CantCrew),
+        RuleStaticPredicate::CantUntap
+        | RuleStaticPredicate::CantBeActivated
+        | RuleStaticPredicate::CantBeSacrificed
+        | RuleStaticPredicate::MustAttack
+        | RuleStaticPredicate::MustBlock
+        | RuleStaticPredicate::MustBeBlocked
+        | RuleStaticPredicate::Goaded
+        | RuleStaticPredicate::BlockOnlyCreaturesWithFlying
+        | RuleStaticPredicate::Shroud
+        | RuleStaticPredicate::Hexproof
+        | RuleStaticPredicate::MayLookAtTopOfLibrary
+        | RuleStaticPredicate::LoseAllAbilities
+        | RuleStaticPredicate::NoMaximumHandSize
+        | RuleStaticPredicate::MayPlayAdditionalLand => None,
+    }
+}
+
+fn parse_activation_compound_restriction_modes(predicate_lower: &str) -> Option<Vec<StaticMode>> {
+    let (rest, restriction_text) = terminated(take_until(", and "), parse_activation_compound_tail)
+        .parse(predicate_lower)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let restriction_text = restriction_text.trim();
+    if let Ok((_, (predicate, None))) =
+        all_consuming(parse_combat_rule_static_predicate_with_defended_nom).parse(restriction_text)
+    {
+        return rule_static_predicate_to_activation_compound_mode(predicate).map(|mode| vec![mode]);
+    }
+
+    parse_restriction_modes(restriction_text)
+}
+
 /// Like `parse_static_line`, but returns all `StaticDefinition`s produced by a line.
 ///
 /// Most lines produce zero or one static. Compound forms like
@@ -1106,13 +1167,20 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
-    // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
+    let tp = TextPair::new(&stripped, &lower);
+    let attached_activation_compound_modes =
+        attached_subject_filter(&tp).and_then(|(_, predicate)| {
+            let predicate_lower = predicate.to_lowercase();
+            parse_activation_compound_restriction_modes(&predicate_lower)
+        });
+
+    // CR 508.1c / CR 509.1b / CR 702.122c + CR 602.5: compound attack,
+    // block, crew, and activation prohibitions produce parallel static definitions.
     if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
-        && (nom_primitives::scan_contains(&lower, "can't attack")
+        && (attached_activation_compound_modes.is_some()
+            || nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))
     {
-        let tp = TextPair::new(&stripped, &lower);
         // Faith's Fetters / Arrest-class Aura lines lead with "enchanted
         // permanent/creature …"; the combat lock and activation prohibition apply
         // to the host, not the Aura source.
@@ -1121,18 +1189,24 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
             .unwrap_or(TargetFilter::SelfRef);
         let source_filter = affected.clone();
         let mut defs = Vec::new();
-        let combat_mode = if nom_primitives::scan_contains(&lower, "can't attack or block") {
-            StaticMode::CantAttackOrBlock
-        } else if nom_primitives::scan_contains(&lower, "can't attack") {
-            StaticMode::CantAttack
-        } else {
-            StaticMode::CantBlock
-        };
-        defs.push(
-            StaticDefinition::new(combat_mode)
-                .affected(affected.clone())
-                .description(stripped.to_string()),
-        );
+        let combat_modes = attached_activation_compound_modes.unwrap_or_else(|| {
+            vec![
+                if nom_primitives::scan_contains(&lower, "can't attack or block") {
+                    StaticMode::CantAttackOrBlock
+                } else if nom_primitives::scan_contains(&lower, "can't attack") {
+                    StaticMode::CantAttack
+                } else {
+                    StaticMode::CantBlock
+                },
+            ]
+        });
+        for combat_mode in combat_modes {
+            defs.push(
+                StaticDefinition::new(combat_mode)
+                    .affected(affected.clone())
+                    .description(stripped.to_string()),
+            );
+        }
         defs.push(
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
