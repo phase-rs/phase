@@ -12,14 +12,14 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
-- **Model (load-bearing):** §0.1 routes you to either the full pipeline (Frontier tier) or the same pipeline with mandatory pre-PR gates (Standard tier). Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
+- **Model (load-bearing):** §0.1 assigns your capability tier; the §0.1.2 pre-PR gates apply to every tier, and the tier line sets PR processing priority. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
 - **Thinking (advisory):** High or higher. On Claude Code this is available for Opus; on Codex CLI pass `--reasoning high` or higher. Report on a `Thinking:` line in the PR body.
 - **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
 
 ---
 
-## 0.1. Capability tier and Standard-tier gates
+## 0.1. Capability tier and pre-PR gates
 
 Skill references in this section use the `$skill` / `/skill` convention defined in §0.25 — the forward reference is intentional so tier routing precedes notation.
 
@@ -27,14 +27,14 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 | Tier     | Models | Procedure |
 |----------|--------|-----------|
-| Frontier | `claude-opus-4-7`+, `gpt-5-5`+, `codex-5-5`+ | Full pipeline per §4 onward. Trusted to self-comply with `CLAUDE.md`. |
-| Standard | `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5-3` through `gpt-5-4`, `codex-5-3` through `codex-5-4` | Full pipeline allowed, but both gates in §0.1.2 must pass before opening the PR. |
+| Frontier | `claude-opus-4-7`+, `gpt-5-5`+, `codex-5-5`+ | Full pipeline per §4 onward. |
+| Standard | `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5-3` through `gpt-5-4`, `codex-5-3` through `codex-5-4` | Full pipeline. |
 
-If you cannot determine your model, assume Standard. Below Standard (no tools, no autonomy), abort per §0.
+If you cannot determine your model, assume Standard. Below Standard (no tools, no autonomy), abort per §0. The tier affects PR processing priority (§0.1.4), not which gates apply — **both §0.1.2 gates are universal**.
 
-### 0.1.2. Standard-tier pre-PR gates
+### 0.1.2. Pre-PR gates (all tiers)
 
-Both gates run on your diff before you push and open a PR. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
+Both gates run on your diff before you push and open a PR, regardless of tier — review data shows combinator violations and unanchored patterns come from every model class. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
 
 **Gate A — Combinator-purity script.** Run from the repo root:
 
@@ -165,7 +165,7 @@ Skip this section entirely on the Non-developer track — CI runs everything `--
 **If the human did not name a card**, fetch the latest coverage data directly from the published R2 endpoint (no local `cargo coverage` needed):
 
 ```
-WebFetch: https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
+WebFetch: https://data.phase-rs.dev/staging/coverage-data.json
 ```
 
 From the JSON, select a card where:
@@ -213,7 +213,7 @@ Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAM
 
 `$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate that next.
 
-**Standard tier:** the §0.1.2 gates apply to whatever diff `$engine-implementer` produces. Run both Gate A and Gate B before §5; if either fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed without exceeding tier.
+**All tiers:** the §0.1.2 gates apply to whatever diff `$engine-implementer` produces. Run both Gate A and Gate B before §5; if either fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
 
 ---
 
@@ -227,7 +227,7 @@ Apply **all three** checks:
 
 1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
 2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure.
-3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — `.rfind`/`.split` are not caught by `check-parser-combinators.sh`, so grep the diff for them by hand); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
+3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — `.rfind`/`.split` are not caught by `check-parser-combinators.sh`, so grep the diff for them by hand); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. Negative assertions (`!detector(...)`, "does not parse to X") are vacuous unless the same test carries a positive reach-guard proving the input got past upstream short-circuits (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`) — flag any bare negative as a defect; If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
 **If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
 
@@ -263,6 +263,15 @@ cargo semantic-audit                          # confirm the named card surfaces 
 ---
 
 ## 7. Open the pull request
+
+**Scope gate — run before committing.** The branch must contain ONLY this card's change:
+
+```bash
+git status --short                       # nothing unrelated in the working tree
+git diff --stat upstream/main...HEAD     # every listed file belongs to THIS card's change
+```
+
+If unrelated files appear (another card's test, a stray `mod` line, editor/tool artifacts, regenerated data beyond your card's delta), remove them from the branch before committing — bundled unrelated changes are one of the most common review rejections and will force a rebase/split.
 
 Claude Code: invoke the `commit-push-pr` skill. Codex / other: run the equivalent shell sequence:
 
@@ -355,8 +364,8 @@ Paste one of these into your LLM. That is the entire interaction.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Developer track end-to-end to implement the card {CARD_NAME, or
 say "pick one" and let the LLM choose}. Use high thinking. Do not stop for
-my input. Apply the §0.1 tier routing — if you are Standard tier, BOTH §0.1.2
-gates must pass before opening the PR. Open a PR when done.
+my input. Apply the §0.1 tier routing — BOTH §0.1.2
+gates must pass before opening the PR (all tiers). Open a PR when done.
 ```
 
 ### B.2 — Non-developer track, URL-only
@@ -366,7 +375,7 @@ Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.m
 and follow the Non-developer track end-to-end to implement the card {CARD_NAME,
 or say "pick one"}. Skip local verification — GitHub Actions will run CI on the
 PR. Use high thinking. Do not stop for my input. Apply the §0.1 tier routing
-— if you are Standard tier, BOTH §0.1.2 gates must pass before opening the PR.
+— BOTH §0.1.2 gates must pass before opening the PR (all tiers).
 Open a PR when done.
 ```
 
@@ -389,7 +398,7 @@ Steps:
    git fetch upstream main; git checkout main &&
    git merge --ff-only upstream/main && git push origin main
 2. If I named a card, use it. Otherwise WebFetch
-   https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
+   https://data.phase-rs.dev/staging/coverage-data.json
    and pick a card with supported==false and small gap_count.
 3. git checkout -b card/<slug> upstream/main  (cut the branch from CURRENT
    upstream/main, not stale fork main; if the branch already exists locally or
@@ -413,16 +422,15 @@ Steps:
    automatically based on the branch name and body content.
 8. Print the PR URL and exit.
 
-Tier gates: identify your model. If you are Standard tier (claude-sonnet-4-6,
-claude-haiku-4-5, gpt-5-3 through gpt-5-4, codex-5-3 through codex-5-4), BEFORE
-pushing the PR you MUST: (a) run ./scripts/check-parser-combinators.sh and
-paste the full output under a `## Gate A` heading in the PR body, (b) include
-a `## Anchored on` section with at least 2 file:line citations to existing
-analogous implementations in the same module(s) you edited, (c) include a
-`Tier: Standard` line. If either gate fails, do NOT open the PR — stop and
-report the failed gate output to the user with a recommendation to re-run on
-a Frontier-tier model. Frontier tier (claude-opus-4-7+, gpt-5-5+, codex-5-5+)
-includes a `Tier: Frontier` line and the same `## Anchored on` section.
+Tier gates (ALL tiers): BEFORE pushing the PR you MUST: (a) run
+./scripts/check-parser-combinators.sh and paste the full output under a
+`## Gate A` heading in the PR body, (b) include a `## Anchored on` section
+with at least 2 file:line citations to existing analogous implementations in
+the same module(s) you edited, (c) include a `Tier:` line — `Tier: Frontier`
+for claude-opus-4-7+/gpt-5-5+/codex-5-5+, `Tier: Standard` otherwise (the
+tier affects processing priority only; the gates apply to everyone). If
+either gate fails, do NOT open the PR — stop and report the failed gate
+output to the user with a recommendation to re-run on a Frontier-tier model.
 
 Card: {CARD_NAME or "pick one"}
 ```

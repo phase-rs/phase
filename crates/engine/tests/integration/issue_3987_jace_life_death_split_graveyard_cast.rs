@@ -6,7 +6,7 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{CastingPermission, Duration};
+use engine::types::ability::{CastingPermission, Duration, SpellStackToGraveyardReplacement};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -45,8 +45,9 @@ fn graveyard_split_card_cast_offers_face_choice_for_affordable_half() {
                 granted_to: Some(P0),
                 resolution_cleanup: None,
                 duration: Some(Duration::UntilEndOfTurn),
-                exile_instead_of_graveyard_on_resolve: true,
+                graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
                 enters_with_counter: None,
+                mana_spend_permission: None,
             });
     }
 
@@ -97,8 +98,9 @@ fn exiled_split_card_free_cast_permission_stays_free_after_face_choice() {
                 granted_to: Some(P0),
                 resolution_cleanup: None,
                 duration: None,
-                exile_instead_of_graveyard_on_resolve: false,
+                graveyard_replacement: None,
                 enters_with_counter: None,
+                mana_spend_permission: None,
             });
     }
 

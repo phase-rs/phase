@@ -223,7 +223,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // unbounded `TargetFilter` value space, so it gets coverage support via
     // `coverage::is_data_carrying_static` instead (mirrors SkipStep / RevealHand).
     registry.insert(
-        StaticMode::SpendManaAsAnyColor { spell_filter: None },
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        },
         handle_rule_mod,
     );
     // CR 107.4f: PayLifeAsColoredMana — "For each {C} in a cost, you may pay
@@ -905,23 +908,68 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
 
 /// CR 609.4b: Check if a player has an unfiltered ("any spell/cost")
 /// "spend mana as any color/type" static active. Scans battlefield and command
-/// zone for `StaticMode::SpendManaAsAnyColor { spell_filter: None }` whose
+/// zone for `StaticMode::SpendManaAsAnyColor { spell_filter: None,
+/// activation_source_filter: None }` whose
 /// affected filter matches the given player.
 ///
-/// This is the board-wide path (Chromatic Orrery, Joiner Adept) — used for cost
-/// payments that have no spell object in context (effects, activations) and as
-/// the base case of the spell-scoped check. Spell-filtered statics (Vizier of
-/// the Menagerie) are NOT consulted here; see
-/// [`player_can_spend_as_any_color_for_spell_object`].
+/// This is the board-wide path (Chromatic Orrery) — used for cost
+/// payments that have no spell object in context (effects, activations without
+/// an activation-source filter) and as the base case of the spell-scoped and
+/// activation-source-scoped checks. Spell-filtered statics (Vizier of the
+/// Menagerie) and activation-source-filtered statics (Agatha's Soul Cauldron /
+/// Joiner Adept) are NOT consulted here; see
+/// [`player_can_spend_as_any_color_for_spell_object`] and
+/// [`player_can_spend_as_any_color_for_activation_source`].
 pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
-        StaticMode::SpendManaAsAnyColor { spell_filter: None },
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        },
         &StaticCheckContext {
             player_id: Some(player_id),
             ..Default::default()
         },
     )
+}
+
+/// CR 609.4b: Check if `player_id` may spend mana of any type/color to pay the
+/// mana cost of an activated ability whose source is `source_id`. True when
+/// either an unfiltered board-wide static is active (the
+/// [`player_can_spend_as_any_color`] base case) OR an activation-source-filtered
+/// `StaticMode::SpendManaAsAnyColor { activation_source_filter: Some(filter) }`
+/// controlled by `player_id` is active and `source_id` matches that filter
+/// (Agatha's Soul Cauldron / Joiner Adept: "you may spend mana as though it were
+/// mana of any color to activate abilities of creatures you control").
+///
+/// The filtered concession is re-derived against the activating permanent at
+/// spend time (CR 609.4b) and never applies to spell casts or effect payments.
+pub fn player_can_spend_as_any_color_for_activation_source(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if player_can_spend_as_any_color(state, player_id) {
+        return true;
+    }
+    for (obj, def) in game_active_statics(state) {
+        let StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: Some(ref filter),
+        } = def.mode
+        else {
+            continue;
+        };
+        if obj.controller != player_id {
+            continue;
+        }
+        let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
+        if matches_target_filter(state, source_id, filter, &ctx) {
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 609.4b: Check if `player_id` may spend mana of any type/color to cast the
@@ -952,6 +1000,7 @@ pub fn player_can_spend_as_any_color_for_spell_object(
     for (obj, def) in game_active_statics(state) {
         let StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(ref filter),
+            activation_source_filter: None,
         } = def.mode
         else {
             continue;
@@ -2736,6 +2785,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![crate::types::ability::TargetRef::Object(token)],
             ObjectId(99),

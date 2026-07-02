@@ -32,6 +32,27 @@ pub fn resolve(
         }
     };
 
+    // CR 603.7 + CR 608.2c: Resolve the most-recent tracked set once, up front,
+    // so the tracked-set CONDITION rewrite runs BEFORE the single-target
+    // contextual bind below. Genuine "those cards" tracked-set forms (Ugin the
+    // Ineffable, Lagrella, Mechtitan Core — WhenLeavesPlayFiltered /
+    // WhenEntersBattlefield) rewrite `ParentTarget` → `TrackedSet` first; the
+    // contextual bind then sees `TrackedSet` and passes it through untouched.
+    // Single-target "that creature" cards (Scarblade's Malice class) register no
+    // tracked set, so `latest_tracked_set_id` is `None`, the tracked-set rewrite
+    // is skipped, and the contextual bind rewrites `ParentTarget` → the concrete
+    // chosen object. This ordering is mandatory: running the contextual bind
+    // first would pre-empt the tracked-set rewrite and break the "those cards"
+    // cards.
+    let tracked_set_id = if uses_tracked_set {
+        crate::game::targeting::latest_tracked_set_id(state)
+    } else {
+        None
+    };
+    if let Some(real_id) = tracked_set_id {
+        bind_tracked_set_to_condition(&mut condition, real_id);
+    }
+
     bind_contextual_filter_to_condition(&mut condition, &ability.targets);
 
     // CR 505.1 + CR 603.7a: "your next <phase>" binds the trigger to the
@@ -55,14 +76,15 @@ pub fn resolve(
         ability.controller,
     );
 
-    // CR 603.7: Bind the most recent tracked set to the effect's target filter,
-    // resolving sentinel TrackedSetId(0) or TargetFilter::Any, and upgrading
-    // ChangeZone → ChangeZoneAll for delayed triggers (which have empty explicit targets).
-    if uses_tracked_set {
-        if let Some(real_id) = crate::game::targeting::latest_tracked_set_id(state) {
-            bind_tracked_set_to_condition(&mut condition, real_id);
-            bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
-        }
+    // CR 603.7: Bind the most recent tracked set to the built ability chain's
+    // effect target filter, resolving sentinel TrackedSetId(0) or
+    // TargetFilter::Any, and upgrading ChangeZone → ChangeZoneAll for delayed
+    // triggers (which have empty explicit targets). Reuses `tracked_set_id`
+    // resolved above; the condition rewrite ran there so it precedes the
+    // single-target contextual bind. This operates on the built `delayed_ability`
+    // (not the condition), so it must stay after the ability chain is built.
+    if let Some(real_id) = tracked_set_id {
+        bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
     // CR 603.7c: A delayed trigger whose inner effect targets the trigger's
@@ -231,7 +253,18 @@ fn bind_contextual_filter_to_condition(
     parent_targets: &[TargetRef],
 ) {
     match condition {
-        DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+        // CR 603.7c + CR 608.2k: A delayed triggered ability that refers to
+        // "that creature/permanent" binds the single chosen object into the
+        // condition filter. Runs AFTER the tracked-set condition rewrite, so
+        // genuine "those cards" tracked-set forms (already `TrackedSet`) pass
+        // through untouched; only an unbound `ParentTarget` (single-target
+        // class, no tracked set) binds to the concrete object. Covers the whole
+        // zone-change condition family so "that creature dies / leaves play /
+        // enters" back-references all resolve identically.
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
             bind_parent_target_filter(filter, parent_targets);
         }
         DelayedTriggerCondition::WheneverEvent { trigger } => {
@@ -767,6 +800,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -826,6 +860,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -884,6 +919,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -947,6 +983,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         let ability = ResolvedAbility::new(
@@ -1003,6 +1040,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -1161,6 +1199,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         let ability = ResolvedAbility::new(
@@ -1222,6 +1261,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -1304,6 +1344,141 @@ mod tests {
                 },
             },
             "tracked-set delayed trigger conditions must match only the captured objects"
+        );
+    }
+
+    /// CR 603.7c + CR 608.2k (issue #762): a single-target "when that creature
+    /// dies" delayed trigger — no tracked set registered — must bind its
+    /// `WhenDies { ParentTarget }` condition filter to the parent's chosen
+    /// object. This is the unit-level proof of the Scarblade's Malice fix: with
+    /// `uses_tracked_set: true` but no tracked set present, the tracked-set
+    /// rewrite is skipped and the contextual bind rewrites
+    /// `ParentTarget` → `SpecificObject { victim }`.
+    #[test]
+    fn when_dies_parent_target_binds_to_specific_victim_without_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let victim = ObjectId(10);
+
+        // Mirror the real card: uses_tracked_set is true, but NO tracked set is
+        // registered, so latest_tracked_set_id is None.
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::SpecificObject { id: victim },
+            },
+            "single-target WhenDies must bind ParentTarget to the chosen victim, \
+             not leave it unbound (0 tokens on Scarblade's Malice)"
+        );
+    }
+
+    /// CR 603.7 + CR 608.2c: reorder non-regression — a genuine "those cards"
+    /// tracked-set `WhenLeavesPlayFiltered { ParentTarget }` (Ugin the Ineffable
+    /// / Lagrella class) must rewrite to `TrackedSet` FIRST, then pass through
+    /// the single-target contextual bind untouched. If the reorder were wrong,
+    /// the contextual bind would pre-empt it and bind to `SpecificObject`,
+    /// breaking those cards.
+    #[test]
+    fn tracked_set_leaves_play_condition_survives_contextual_bind() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        // Non-empty parent targets — if the contextual bind ran first it would
+        // rewrite ParentTarget to SpecificObject(99) and clobber the tracked set.
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![TargetRef::Object(ObjectId(99))],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1)
+                },
+            },
+            "tracked-set condition rewrite must run BEFORE the single-target \
+             contextual bind, so ParentTarget → TrackedSet passes through untouched"
+        );
+    }
+
+    /// CR 603.7c: a `WhenLeavesPlayFiltered { SelfRef }` (animate-dead class)
+    /// must resolve with its filter UNCHANGED — `SelfRef` is neither
+    /// `ParentTarget` nor a tracked set, so it flows through
+    /// `concrete_parent_target_filter`'s `other => other` arm untouched.
+    #[test]
+    fn self_ref_leaves_play_condition_passes_through_unchanged() {
+        let mut state = GameState::new_two_player(42);
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::SelfRef,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(ObjectId(7))],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            "SelfRef condition filters must pass through the contextual bind unchanged"
         );
     }
 
@@ -1971,6 +2146,7 @@ mod tests {
                 enter_with_counters: vec![(revival_type.clone(), counter_qty)],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
 

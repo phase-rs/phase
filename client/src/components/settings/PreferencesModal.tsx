@@ -33,6 +33,7 @@ import type {
   CardSizePreference,
   CommandZoneDisplay,
   LogDefaultState,
+  ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
@@ -67,6 +68,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
+const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
@@ -153,6 +155,8 @@ export function PreferencesModal({
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
+  const collapseLands = usePreferencesStore((s) => s.collapseLands);
+  const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
@@ -161,6 +165,8 @@ export function PreferencesModal({
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
+  const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
+  const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
@@ -359,6 +365,24 @@ export function PreferencesModal({
                       value={commandZoneDisplay}
                       onChange={setCommandZoneDisplay}
                       renderLabel={(opt) => t(`gameplay.commandZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseLands")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseLands}
+                      onChange={setCollapseLands}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseSupport")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseSupport}
+                      onChange={setCollapseSupport}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
                     />
                   </SettingGroup>
 

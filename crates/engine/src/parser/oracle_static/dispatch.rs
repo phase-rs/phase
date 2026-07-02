@@ -466,10 +466,91 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
     .and_then(|(_, condition)| condition)
 }
 
+/// CR 509.1b: "Creatures with power <comparison> <quantity> can't
+/// block this creature." — a can't-be-blocked-by restriction whose blocker
+/// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
+/// "Creatures with power less than the number of Islands you control can't block
+/// this creature."). Sibling of `parse_source_power_block_restriction` (which
+/// fixes the threshold to `~'s power` and targets `creatures you control`); this
+/// arm accepts any `parse_target` power-comparison filter — including a dynamic
+/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// subject-first "creatures with power … can't block this creature" wording
+/// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
+/// is the inverse of the intended restriction.
+fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinition> {
+    // allow-noncombinator: split on the fixed clause anchor, not parsing dispatch.
+    let (filter_text, after) = text.split_once(" can't block ")?;
+    // CR 509.1b: the restriction is on blocking the SOURCE ("this creature"/"~").
+    let after = after.trim().trim_end_matches('.').trim().to_lowercase();
+    if after != "this creature" && after != "~" {
+        return None;
+    }
+    // Reuse the shared filter grammar so the power comparison + dynamic threshold
+    // ("less than the number of Islands you control") lower through one authority.
+    let (filter, remainder) = parse_target(filter_text.trim());
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !target_filter_has_power_comparison(&filter)
+    {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
+fn target_filter_has_power_comparison(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_has_power_comparison),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_power_comparison)
+        }
+        TargetFilter::Not { filter } => target_filter_has_power_comparison(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            ..
+        } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_power_comparison),
+        _ => false,
+    }
+}
+
+/// CR 611.3a: A static restriction may carry a trailing gate introduced by
+/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
+/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
+/// this turn." Returns the condition text for `parse_static_condition`. The
+/// `as long as` form is tried first so a card carrying both keywords anchors on
+/// the continuous form; a bare `if` gate is the fallback. As with
+/// `split_trailing_as_long_as`, an unrecognized condition downstream leaves the
+/// line unsupported rather than enforcing the restriction unconditionally.
+fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
+    split_trailing_as_long_as(lower).or_else(|| {
+        opt(preceded(
+            (take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")),
+            rest,
+        ))
+        .parse(lower)
+        .ok()
+        .and_then(|(_, condition)| condition)
+    })
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
 ) -> Option<StaticDefinition> {
+    let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
@@ -780,12 +861,21 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 609.4b: "You may spend mana as though it were mana of any color to
+    // activate abilities of <subject>." (Agatha's Soul Cauldron / Joiner Adept).
+    if let Some(def) = try_parse_spend_any_color_to_activate_abilities(&text, &tp) {
+        return Some(def);
+    }
+
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
         return Some(
-            StaticDefinition::new(StaticMode::SpendManaAsAnyColor { spell_filter: None })
-                .affected(TargetFilter::Player)
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+            })
+            .affected(TargetFilter::Player)
+            .description(text.to_string()),
         );
     }
 
@@ -1894,6 +1984,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_power_threshold_block_restriction(&text) {
+        return Some(def);
+    }
+
     // CR 506.5 + CR 508.1c: "~ can only attack alone" — CombatAlone(Attack, MustBeSole).
     // The creature may attack only if it is the sole attacker (Master of Cruelties).
     // Must precede the generic "can't attack" arm to avoid mis-dispatch.
@@ -2317,7 +2411,7 @@ pub(crate) fn parse_static_line_inner(
     // e.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
     // Excludes lines handled by PerTurnCastLimit ("can't cast more than"),
     // CantCastDuring ("can't cast spells during"), and CantCastFrom ("can't cast spells from").
-    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text) {
+    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text, &raw_lower) {
         return Some(def);
     }
 
@@ -2734,12 +2828,13 @@ pub(crate) fn parse_static_line_inner(
         let def = StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
             .affected(affected)
             .description(text.to_string());
-        // CR 611.3a: a trailing "as long as <condition>" gates the restriction
-        // (Limited Resources: "... as long as ten or more lands are on the
-        // battlefield"). If the rider is present but its condition is NOT
-        // recognized, leave the whole line unsupported (return None) rather than
-        // marking it a CantPlayLand enforced unconditionally.
-        return match split_trailing_as_long_as(tp.lower) {
+        // CR 611.3a: a trailing "as long as <condition>" (Limited Resources:
+        // "... as long as ten or more lands are on the battlefield") or "if
+        // <condition>" (Rock Jockey: "... if this creature was cast this turn")
+        // gates the restriction. If the rider is present but its condition is
+        // NOT recognized, leave the whole line unsupported (return None) rather
+        // than marking it a CantPlayLand enforced unconditionally.
+        return match split_trailing_gate_condition(tp.lower) {
             Some(condition_text) => Some(def.condition(parse_static_condition(condition_text)?)),
             None => Some(def),
         };
