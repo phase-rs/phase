@@ -182,11 +182,12 @@ pub fn resolve(
     // Publish the conjured objects as the engine-local most-recently-created set
     // so chained sub-abilities that reference them via `TargetFilter::LastCreated`
     // bind correctly (e.g. Three Tree Battalion / Blood Age Muster's "the
-    // duplicate / its base power and toughness perpetually …"). A conjure that
-    // produced nothing leaves any prior `LastCreated` untouched.
-    if !conjured_ids.is_empty() {
-        state.last_created_token_ids = conjured_ids;
-    }
+    // duplicate / its base power and toughness perpetually …"). Always overwrite,
+    // even when the conjure produced nothing (an unresolved duplicate reference or
+    // a zero count): the no-created path must CLEAR the ledger so a following
+    // `LastCreated` sub-ability cannot edit a stale object left by a prior
+    // token/conjure resolution.
+    state.last_created_token_ids = conjured_ids;
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Conjure,
@@ -331,6 +332,47 @@ mod tests {
         let src = state.objects.get(&source).unwrap();
         assert_eq!(src.base_power, Some(3));
         assert_eq!(src.base_toughness, Some(3));
+    }
+
+    /// A conjure that creates nothing (a zero count here; likewise an unresolved
+    /// duplicate reference) must CLEAR `last_created_token_ids` rather than leave a
+    /// stale entry, so a following `LastCreated` sub-ability cannot edit an
+    /// unrelated object from a prior token/conjure resolution.
+    #[test]
+    fn empty_conjure_clears_stale_last_created() {
+        let mut state = GameState::new_two_player(7);
+
+        // A stale entry left by some prior token/conjure resolution.
+        let stale = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Old Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.last_created_token_ids = vec![stale];
+
+        // Resolve a conjure that produces nothing (zero count).
+        let conjure = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "Grizzly Bears".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 0 },
+                }],
+                destination: Zone::Battlefield,
+                tapped: false,
+            },
+            vec![],
+            stale,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &conjure, &mut events).unwrap();
+
+        // The ledger is cleared — no stale target survives for a later LastCreated.
+        assert!(state.last_created_token_ids.is_empty());
     }
 
     /// CR 707.2: "conjure a duplicate of <reference>" copies the referenced
