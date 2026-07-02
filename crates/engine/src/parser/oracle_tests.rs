@@ -11924,6 +11924,16 @@ fn strive_line_consumed_not_reparsed() {
         !has_strive_ability,
         "strive line should be consumed, not produce an ability"
     );
+    assert!(
+        r.statics.is_empty(),
+        "strive line should be consumed, not produce a static: {:#?}",
+        r.statics
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "strive cost should satisfy swallow detection without fake statics: {:?}",
+        r.parse_warnings
+    );
 }
 
 /// CR 207.2c (Strive) + CR 115.1d ("any number of") + CR 707.2 (CopyTokenOf) +

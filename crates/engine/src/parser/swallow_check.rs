@@ -1540,10 +1540,10 @@ fn detect_dynamic_qty(
         // `Effect::ProliferateTarget`. The counter-kind iteration is intrinsic to
         // the proliferate operation, not a swallowed `QuantityExpr` count.
         "\"type\":\"ProliferateTarget\"",
-        // CR 702.122: Strive — "this spell costs {N} more for each target
+        // CR 207.2c + CR 601.2f: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
-        "\"strive_cost\":{",
+        "\"striveCost\":{",
         // CR 702.139 / CR 702.41: Affinity / Improvise / Convoke style
         // built-in cost mods — captured as `keywords` entries with cost
         // payload, not as in-AST quantity expressions.

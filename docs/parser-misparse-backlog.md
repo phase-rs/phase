@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 37
-- **Distinct cards implicated:** 4887
-- **Total card appearances across root causes:** 4921 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 36
+- **Distinct cards implicated:** 4876
+- **Total card appearances across root causes:** 4910 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -43,12 +43,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 29 | Trigger/activation timing or ordinal restriction dropped | 20 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
 | 31 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
-| 32 | Strive surcharge double-emitted as spurious ModifyCost static | 11 | oracle_static.rs — suppress Strive lines from static cost-modifier dispatch |
-| 33 | 'another'/'other' self-exclusion FilterProp dropped | 10 | oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed |
-| 34 | Other / uncategorized misparse | 7 | manual triage |
-| 35 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
-| 36 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
-| 37 | Cost-reduction static spell_filter / condition dropped | 4 | oracle_static.rs ModifyCost — capture spell_filter and gating condition |
+| 32 | 'another'/'other' self-exclusion FilterProp dropped | 10 | oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed |
+| 33 | Other / uncategorized misparse | 7 | manual triage |
+| 34 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
+| 35 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
+| 36 | Cost-reduction static spell_filter / condition dropped | 4 | oracle_static.rs ModifyCost — capture spell_filter and gating condition |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5271,29 +5270,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 32. Strive surcharge double-emitted as spurious ModifyCost static  (11 cards)
-
-**Signature.** Strive line captured in strive_cost but also classified by the static cost-modifier parser, producing a duplicate ModifyCost{empty ObjectCount}.
-
-**Fix hint.** oracle_static.rs — suppress Strive lines from static cost-modifier dispatch
-
-<details><summary>Cards</summary>
-
-- Aerial Formation
-- Consign to Dust
-- Eternal Dominion
-- Fertilid
-- Harness by Force
-- Kiora's Dismissal
-- Launch the Fleet
-- Phalanx Formation
-- Setessan Tactics
-- Silence the Believers
-- Twinflame
-
-</details>
-
-### 33. 'another'/'other' self-exclusion FilterProp dropped  (10 cards)
+### 32. 'another'/'other' self-exclusion FilterProp dropped  (10 cards)
 
 **Signature.** Target/sacrifice filter omits FilterProp::Another; the 'another'/'other' qualifier excluding the source object is not propagated.
 
@@ -5314,7 +5291,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 34. Other / uncategorized misparse  (7 cards)
+### 33. Other / uncategorized misparse  (7 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5332,7 +5309,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 35. Duplicate / spurious effect or modification emitted  (7 cards)
+### 34. Duplicate / spurious effect or modification emitted  (7 cards)
 
 **Signature.** A single Oracle instruction is lowered to two effects (double ChangeZone after search, duplicate modification) or a phantom node with no Oracle basis is injected.
 
@@ -5350,7 +5327,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 36. 'Unless'-payment / escape-cost clause dropped  (6 cards)
+### 35. 'Unless'-payment / escape-cost clause dropped  (6 cards)
 
 **Signature.** An 'unless its controller pays/sacrifices/discards' alternative is modeled unconditionally; the unless_pay cost or sacrifice-alternative branch is absent.
 
@@ -5367,7 +5344,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 37. Cost-reduction static spell_filter / condition dropped  (4 cards)
+### 36. Cost-reduction static spell_filter / condition dropped  (4 cards)
 
 **Signature.** ModifyCost emitted with spell_filter and/or condition null; the reduction applies to all spells or unconditionally, dropping the type/subtype/state gate.
 

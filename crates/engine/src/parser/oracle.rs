@@ -1995,6 +1995,33 @@ fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
     }
 }
 
+fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
+    let stripped = strip_reminder_text(line.trim());
+    let (ability_word, effect_text) = strip_ability_word_with_name(&stripped)?;
+    if ability_word != "strive" {
+        return None;
+    }
+
+    let effect_lower = effect_text.to_lowercase();
+    let ((), rest_original) = nom_on_lower(&effect_text, &effect_lower, |i| {
+        value((), tag("this spell costs ")).parse(i)
+    })?;
+    let (cost, rest_original) = parse_mana_symbols(rest_original)?;
+    let rest_lower = rest_original.to_lowercase();
+    nom_on_lower(rest_original, &rest_lower, |i| {
+        value(
+            (),
+            all_consuming((
+                tag(" more to cast for each target beyond the first"),
+                opt(tag(".")),
+                multispace0,
+            )),
+        )
+        .parse(i)
+    })?;
+    Some(cost)
+}
+
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
 /// parse/lower split (Phase 49, Plan 03).
 ///
@@ -2190,21 +2217,9 @@ pub(crate) fn parse_oracle_ir(
     // Strive lines have the form: "Strive — This spell costs {X} more to cast for each
     // target beyond the first." — extract the per-target surcharge cost.
     for raw in &lines {
-        let stripped = strip_reminder_text(raw.trim());
-        if let Some(effect_text) = strip_ability_word(&stripped) {
-            let effect_lower = effect_text.to_lowercase();
-            if let Some(((), rest_original)) = nom_on_lower(&effect_text, &effect_lower, |i| {
-                value((), tag("this spell costs ")).parse(i)
-            }) {
-                if let Some((mana_part, _)) =
-                    rest_original.split_once(" more to cast for each target beyond the first")
-                {
-                    if let Some((cost, _)) = parse_mana_symbols(mana_part) {
-                        result.strive_cost = Some(cost);
-                        break;
-                    }
-                }
-            }
+        if let Some(cost) = parse_strive_cost_line(raw) {
+            result.strive_cost = Some(cost);
+            break;
         }
     }
 
@@ -3175,6 +3190,10 @@ pub(crate) fn parse_oracle_ir(
             std::borrow::Cow::Borrowed(lower.as_str())
         };
         if is_static_pattern(&static_classify_view) {
+            if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
+                i += 1;
+                continue;
+            }
             // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
             // trailing "doesn't untap during…" from a reflexive "When you do"
             // clause) and a copy-replacement ("enter as a copy of") must route
@@ -3439,16 +3458,9 @@ pub(crate) fn parse_oracle_ir(
         // Priority 8c-strive: Skip strive lines (cost already extracted in pre-parse above).
         // Must run before Priority 9 (spell imperative catch-all) which would otherwise
         // consume the entire "Strive — This spell costs..." line as an unimplemented ability.
-        if result.strive_cost.is_some() {
-            if let Some(effect_text) = strip_ability_word(&line) {
-                let effect_lower = effect_text.to_lowercase();
-                if lower_starts_with(&effect_lower, "this spell costs ")
-                    && effect_lower.contains("more to cast for each target beyond the first")
-                {
-                    i += 1;
-                    continue;
-                }
-            }
+        if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
+            i += 1;
+            continue;
         }
 
         // CR 601.3: "Cast this spell only [condition]" — applies to any card type, not just instants/sorceries.
