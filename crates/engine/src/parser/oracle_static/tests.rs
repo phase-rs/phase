@@ -7087,6 +7087,62 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
 }
 
+// CR 400.7: Crew Captain — "This creature has indestructible as long as it
+// entered this turn." For a SelfRef static the bound pronoun "it" co-refers with
+// the source, so `rewrite_self_pronoun_subject` on the SelfRef path normalizes
+// "it entered this turn" to the canonical "~ entered ..." templating before the
+// condition is typed. Previously this dropped to Unrecognized because the "it"
+// form was never rewritten. Generalizes to Drownyard Behemoth (hexproof),
+// Thrasta, and Zurgo and Ojutai.
+#[test]
+fn static_indestructible_as_long_as_it_entered_this_turn() {
+    let def =
+        parse_static_line("This creature has indestructible as long as it entered this turn.")
+            .unwrap();
+    // The SelfRef path is what enables the "it" rewrite — assert it explicitly.
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+
+    // Same "it entered this turn" gate on the hexproof shape shared by
+    // Drownyard Behemoth, Thrasta, Tempest's Roar, and Zurgo and Ojutai.
+    let hexproof = parse_static_line("~ has hexproof as long as it entered this turn.").unwrap();
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::SourceEnteredThisTurn)
+    );
+}
+
+// CR 400.7 (attached-subject NEGATIVE regression — maintainer-requested): for an
+// Aura/Equipment static the "it" in "as long as it entered this turn" binds the
+// ENCHANTED/EQUIPPED creature, NOT the Aura/Equipment source. So the SelfRef
+// rewrite MUST NOT fire here: the affected subject is the enchanted creature
+// (not SelfRef), the else branch of parse_continuous_gets_has skips the rewrite,
+// and the pronoun stays an honest gap — Unrecognized { text: "it entered this
+// turn" } — rather than being mis-bound to SourceEnteredThisTurn. This proves
+// moving the bare-"it" handling out of the context-free grammar did not corrupt
+// the attached-subject case.
+#[test]
+fn static_enchanted_creature_it_entered_this_turn_stays_unrecognized() {
+    let def = parse_static_line("Enchanted creature has hexproof as long as it entered this turn.")
+        .expect("should parse the attached-subject grant");
+    // Attached subject — the enchanted creature, decidedly NOT SelfRef.
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ))
+    );
+    // "it" binds the enchanted creature, so it is an honest gap, not the source.
+    assert_ne!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Unrecognized {
+            text: "it entered this turn".to_string(),
+        })
+    );
+}
+
 #[test]
 fn static_cards_in_graveyards_lose_all_abilities() {
     let def = parse_static_line("Cards in graveyards lose all abilities.").unwrap();
@@ -22242,4 +22298,82 @@ fn granted_ability_inner_unless_stays_inside_quoted_ability() {
         grant.condition, None,
         "the granted ability's inner `unless` must NOT become a static-grant condition"
     );
+}
+
+/// CR 613.1 + CR 613.4c: Eidolon of Countless Battles (#4777). The Bestow aura
+/// buffs both itself and its enchanted host ("this creature and enchanted
+/// creature each get ..."), and each buff scales by two independent counts
+/// ("+1/+1 for each creature you control and +1/+1 for each Aura you control").
+/// A raw parse dropped the distributive-"each" subject and collapsed the dynamic
+/// pump to a fixed +1/+1; all three pieces must now survive.
+#[test]
+fn static_self_and_enchanted_each_repeated_dynamic_pump() {
+    let def = parse_static_line(
+        "This creature and enchanted creature each get +1/+1 for each creature you control and +1/+1 for each Aura you control.",
+    )
+    .unwrap();
+
+    // Both the source and its enchanted host receive the buff.
+    match def.affected {
+        Some(TargetFilter::Or { ref filters }) => {
+            assert!(filters.iter().any(|f| f == &TargetFilter::SelfRef));
+            assert!(filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::EnchantedBy)
+            )));
+        }
+        other => panic!("expected an Or subject (source + enchanted host), got {other:?}"),
+    }
+
+    // Both dynamic terms survive as dynamic P/T — not collapsed to a fixed +1/+1.
+    let object_count = |value: &QuantityExpr| match value {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => Some(filter.clone()),
+        _ => None,
+    };
+    let power_counts: Vec<TargetFilter> = def
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => object_count(value),
+            _ => None,
+        })
+        .collect();
+    let toughness_count = def
+        .modifications
+        .iter()
+        .filter(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. }))
+        .count();
+    assert_eq!(
+        power_counts.len(),
+        2,
+        "both pump terms must scale power dynamically"
+    );
+    assert_eq!(
+        toughness_count, 2,
+        "both pump terms must scale toughness dynamically"
+    );
+
+    let counts_creatures = power_counts.iter().any(|f| {
+        matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::You)
+        )
+    });
+    let counts_auras = power_counts.iter().any(|f| {
+        matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Subtype("Aura".to_string())]
+                    && tf.controller == Some(ControllerRef::You)
+        )
+    });
+    assert!(
+        counts_creatures,
+        "one term must count creatures you control"
+    );
+    assert!(counts_auras, "the other term must count Auras you control");
 }

@@ -580,6 +580,16 @@ pub(crate) fn contextual_continuous_subject_filter(
     subject_original: &str,
     condition: Option<&StaticCondition>,
 ) -> Option<TargetFilter> {
+    // CR 613.1: a distributive "each" trailing a multi-subject list ("this
+    // creature and enchanted creature each get +1/+1 …", Eidolon of Countless
+    // Battles) shares one predicate across every named subject. Strip the marker
+    // from both views so the compound subject parses; the `Or` union below
+    // already applies the predicate to each branch. Stripping each view with the
+    // same combinator keeps them aligned without slicing one by the other's byte
+    // length (safe when case-folding changes width).
+    let subject_lower = strip_trailing_distributive_each(subject_lower);
+    let subject_original = strip_trailing_distributive_each(subject_original);
+
     if subject_lower == "that creature" {
         return condition
             .and_then(exactly_one_creature_you_control_filter)
@@ -741,6 +751,18 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
             return format!("~ is {}", rest.trim());
         }
     }
+    // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
+    // this turn" / "it entered the battlefield this turn" (Crew Captain's
+    // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
+    // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
+    // canonical "~ entered …" templating the context-free grammar resolves to
+    // SourceEnteredThisTurn. Exact match on the tail; only reached on the
+    // SelfRef path, so the attached-subject "it" stays an honest gap.
+    if let Some(rest) = nom_tag_lower(&lower, &lower, "it entered ") {
+        if matches!(rest.trim(), "this turn" | "the battlefield this turn") {
+            return format!("~ entered {}", rest.trim());
+        }
+    }
     condition.to_string()
 }
 
@@ -775,6 +797,19 @@ pub(crate) fn parse_continuous_gets_has(
             def.condition = Some(condition);
             return Some(def);
         }
+    }
+
+    // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and
+    // +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
+    // by its own count. Try this before the single-"for each" path so the second
+    // term isn't silently dropped and the pump collapsed to a fixed value.
+    if let Some(modifications) = parse_repeated_for_each_pt_modifications(text) {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(description.to_string()),
+        );
     }
 
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
@@ -871,6 +906,96 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     let mut modifications = Vec::new();
     push_dynamic_pt_modifications(&mut modifications, power, toughness, quantity);
     (!modifications.is_empty()).then_some(modifications)
+}
+
+/// CR 613.4c: A compound of repeated dynamic pump terms — "gets +N/+M for each X
+/// and +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
+/// by its own count. Splits on the " and " that introduces another "+n/+m for
+/// each" pump term (so a single term's embedded "for each A and B" count-list
+/// stays with the single-term path) and accumulates every term's dynamic
+/// modifications. Returns `None` unless at least two whole pump terms parse, so
+/// the single-term path keeps ownership of every non-repeated case.
+fn parse_repeated_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    let lower = text.to_lowercase();
+    let mut terms: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (index, segment) in split_on_and(&lower).into_iter().enumerate() {
+        if index > 0 && segment_starts_pump_term(segment) {
+            terms.push(std::mem::take(&mut current));
+            current.push_str(segment);
+        } else {
+            if !current.is_empty() {
+                current.push_str(" and ");
+            }
+            current.push_str(segment);
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    if terms.len() < 2 {
+        return None;
+    }
+
+    let mut modifications = Vec::new();
+    for term in &terms {
+        // `parse_dynamic_for_each_pt_modifications` expects the "gets"/"get" verb;
+        // only the first term carries it once the predicate is split.
+        let owned;
+        let term = if segment_has_gets_verb(term) {
+            term.as_str()
+        } else {
+            owned = format!("gets {term}");
+            owned.as_str()
+        };
+        modifications.extend(parse_dynamic_for_each_pt_modifications(term)?);
+    }
+    (!modifications.is_empty()).then_some(modifications)
+}
+
+/// Split `s` into its " and "-delimited segments via a forward `take_until`
+/// scan (the combinator form of `str::split(" and ")`).
+fn split_on_and(s: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut remaining = s;
+    while let Ok((rest, before)) =
+        terminated(take_until::<_, _, OracleError<'_>>(" and "), tag(" and ")).parse(remaining)
+    {
+        segments.push(before);
+        remaining = rest;
+    }
+    segments.push(remaining);
+    segments
+}
+
+/// True iff `segment` (already lowercased) opens with a "gets"/"get" verb.
+fn segment_has_gets_verb(segment: &str) -> bool {
+    alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
+        .parse(segment)
+        .is_ok()
+}
+
+/// True iff `segment` (already lowercased) begins a "+N/+M for each …" pump term:
+/// an optional "gets"/"get" verb, a P/T modifier, then " for each ". Used to tell
+/// a repeated-pump term boundary apart from an " and " inside a count clause.
+fn segment_starts_pump_term(segment: &str) -> bool {
+    preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))),
+        preceded(nom_primitives::parse_pt_modifier, tag(" for each ")),
+    )
+    .parse(segment.trim_start())
+    .is_ok()
+}
+
+/// Strip a trailing distributive " each" ("this creature and enchanted creature
+/// each") so a multi-subject list parses. Only strips when " each" is the final
+/// token, and returns `s` unchanged otherwise, so applying it to both the lower
+/// and original views of a subject keeps them aligned without length slicing.
+fn strip_trailing_distributive_each(s: &str) -> &str {
+    match terminated(take_until::<_, _, OracleError<'_>>(" each"), tag(" each")).parse(s) {
+        Ok(("", before)) => before,
+        _ => s,
+    }
 }
 
 pub(crate) fn parse_dynamic_pt_in_text(
