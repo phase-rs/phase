@@ -13991,6 +13991,13 @@ pub fn handle_cancel_cast(
     if let Some(obj) = state.objects.get_mut(&pending.object_id) {
         obj.convoked_creatures.clear();
     }
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|cast| cast.object_id == pending.object_id)
+    {
+        state.pending_cast = None;
+    }
 
     if pending.activation_ability_index.is_none() {
         // CR 601.2i: Remove the placeholder stack entry pushed at announcement.

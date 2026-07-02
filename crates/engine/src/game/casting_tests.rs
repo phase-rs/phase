@@ -17563,6 +17563,32 @@ fn modal_kicker_declined_caps_modes_before_mode_choice() {
 }
 
 #[test]
+fn cancel_cast_during_optional_cost_choice_clears_pending_cast() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+    add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+    let mut events = Vec::new();
+    state.waiting_for =
+        handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalCostChoice { .. }
+    ));
+    if let WaitingFor::OptionalCostChoice { pending_cast, .. } = &state.waiting_for {
+        state.pending_cast = Some(pending_cast.clone());
+    }
+
+    apply_as_current(&mut state, GameAction::CancelCast).expect("cancel cast is legal");
+    assert!(
+        state.pending_cast.is_none(),
+        "cancel must drop transient pending_cast mirrored during optional-cost prompts"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
 fn modal_kicker_paid_allows_extra_modes_and_reaches_stack_context() {
     let mut state = setup_game_at_main_phase();
     let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
