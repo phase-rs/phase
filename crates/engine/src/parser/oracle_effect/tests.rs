@@ -30514,6 +30514,90 @@ fn skip_next_untap_step_parses_as_step_skip() {
     );
 }
 
+/// CR 614.10 + CR 614.10a + CR 502.3: "Skip the untap step of that turn" (the
+/// second sentence of Savor the Moment / Time Bends to My Will, following an
+/// extra-turn effect) is the current-turn-anaphor sibling of "skip your next
+/// untap step". "That turn" is the extra turn just created — the controller's
+/// next turn — so the clause lowers to the same `SkipNextStep` with
+/// `NextOccurrence` scope, `Controller` target, and a `Untap` step. Fail-before:
+/// without the recognizer this clause falls through to `Effect::Unimplemented`.
+#[test]
+fn skip_the_untap_step_of_that_turn_parses_as_step_skip() {
+    let def = parse_effect_chain("Skip the untap step of that turn.", AbilityKind::Spell);
+    let Effect::SkipNextStep {
+        target,
+        step,
+        count,
+        scope,
+    } = &*def.effect
+    else {
+        panic!("expected SkipNextStep, got {:?}", def.effect);
+    };
+    assert_eq!(scope, &SkipScope::NextOccurrence);
+    assert_eq!(target, &TargetFilter::Controller);
+    assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
+    assert_eq!(
+        count,
+        &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+    );
+}
+
+/// CR 614.10a: Full-card regression for Savor the Moment. The extra-turn spell
+/// must parse to an `ExtraTurn` primary effect with a chained `SkipNextStep`
+/// sub-ability for "Skip the untap step of that turn." — and NO `Unimplemented`
+/// clause anywhere in the chain. Fail-before: the skip clause is `Unimplemented`
+/// and the card is unsupported in coverage.
+#[test]
+fn savor_the_moment_full_card_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Take an extra turn after this one. Skip the untap step of that turn.",
+        "Savor the Moment",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    fn walk<'a>(ad: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ad.effect);
+        if let Some(sub) = ad.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(alt) = ad.else_ability.as_deref() {
+            walk(alt, out);
+        }
+    }
+
+    let mut effects = Vec::new();
+    for a in &parsed.abilities {
+        walk(a, &mut effects);
+    }
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Savor the Moment must have no Unimplemented clause; effects = {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ExtraTurn { .. })),
+        "expected an ExtraTurn effect; effects = {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step: StepSkipTarget::Step(Phase::Untap),
+                scope: SkipScope::NextOccurrence,
+                ..
+            }
+        )),
+        "expected a controller untap-step SkipNextStep; effects = {effects:?}"
+    );
+}
+
 #[test]
 fn target_player_skips_next_draw_step_parses_as_step_skip() {
     let def = parse_effect_chain(
