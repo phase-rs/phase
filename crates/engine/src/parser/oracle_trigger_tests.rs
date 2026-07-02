@@ -380,6 +380,68 @@ fn static_condition_to_trigger_condition_source_in_battlefield() {
 }
 
 #[test]
+fn intervening_if_source_attacked_this_turn_populates_condition() {
+    // CR 508.1 + CR 603.4: a source-scoped "if ~ attacked this turn"
+    // intervening-if must gate the trigger on the ability's own source creature
+    // having declared as an attacker this turn — not resolve unconditionally.
+    // Composed from the existing, already-evaluated `FilterProp::AttackedThisTurn`
+    // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is added.
+    // Distinct from the player-scoped `YouAttackedThisTurn`.
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+        ),
+    });
+
+    // Riders of the Mark — phase trigger. Without the gate it would bounce
+    // itself to hand every end step even when it never attacked.
+    let riders = parse_trigger_line(
+        "At the beginning of your end step, if Riders of the Mark attacked this turn, \
+         return it to its owner's hand.",
+        "Riders of the Mark",
+    );
+    assert_eq!(riders.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(riders.execute.is_some());
+
+    // Taigam, Ojutai Master — the same source-scoped gate on a spell-cast
+    // trigger (would otherwise grant rebound unconditionally).
+    let taigam = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell from your hand, if Taigam, \
+         Ojutai Master attacked this turn, that spell gains rebound.",
+        "Taigam, Ojutai Master",
+    );
+    assert_eq!(taigam.condition, expected);
+    assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
+    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
+    // attacked-only intervening-if. Gates on the source creature having attacked
+    // OR blocked this turn, composed from the existing, already-evaluated
+    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
+    // `TriggerCondition` variant.
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+        ),
+    });
+
+    // Inferno Hellion — without the gate it would shuffle itself into its
+    // owner's library every end step, even on a turn it neither attacked nor
+    // blocked.
+    let hellion = parse_trigger_line(
+        "At the beginning of each end step, if Inferno Hellion attacked or blocked this turn, \
+         its owner shuffles it into their library.",
+        "Inferno Hellion",
+    );
+    assert_eq!(hellion.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(hellion.execute.is_some());
+}
+
+#[test]
 fn trigger_etb_self() {
     let def = parse_trigger_line(
         "When this creature enters, it deals 1 damage to each opponent.",
@@ -12869,6 +12931,11 @@ fn trigger_one_or_more_creature_cards_leave_graveyard() {
     assert_eq!(def.origin, Some(Zone::Graveyard));
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
+    // CR 113.6 / CR 113.6b: Insidious Roots is a battlefield permanent whose
+    // "leave your graveyard" trigger references other cards, not itself, so it
+    // functions only from the battlefield (make_base() default). CR 603.10a's
+    // graveyard/exile look-back applies only to self-referential leaves triggers.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12886,6 +12953,9 @@ fn trigger_one_or_more_cards_leave_graveyard() {
         matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
         "expected card filter for unqualified cards, got {filter:?}"
     );
+    // CR 113.6 / CR 113.6b: Chalk Outline's trigger references other cards leaving
+    // its owner's graveyard, not itself — battlefield-only (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12899,6 +12969,9 @@ fn trigger_one_or_more_cards_leave_graveyard_during_your_turn() {
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    // CR 113.6 / CR 113.6b: Soul Enervation is a battlefield permanent; its
+    // non-self "leave your graveyard" trigger stays battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12913,6 +12986,10 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_or_graveyard() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Graveyard]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: Laelia is a battlefield permanent whose "cards are put
+    // into exile from library/graveyard" trigger has no self-referential subject —
+    // it functions only from the battlefield (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12926,6 +13003,8 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_only() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: battlefield-only for the single-source variant too.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12940,6 +13019,9 @@ fn trigger_one_or_more_artifact_or_creature_cards_leave_graveyard() {
     let filter = def.valid_card.as_ref().expect("valid_card");
     assert!(matches!(filter, TargetFilter::Or { .. }));
     assert_owned_by_you(filter);
+    // CR 113.6 / CR 113.6b: Attuned Hunter's disjunctive "leave your graveyard"
+    // trigger references other cards, not itself — battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 // ── Work Item 2: Discard Batch Triggers ───────────────────────

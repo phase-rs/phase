@@ -1250,6 +1250,21 @@ pub(super) fn parse_all_sacrifice<'a>(
     Some((count, target, rem))
 }
 
+fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
+            typed.properties.push(FilterProp::Another);
+        }
+        TargetFilter::Typed(_) => {}
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for leg in filters {
+                add_another_to_sacrifice_filter(leg);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -1283,10 +1298,10 @@ pub(super) fn parse_targeted_action_ast(
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::GoadAll { target });
     }
-    // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
+    // CR 701.21a: "sacrifice [count] <filter> [of their choice]" —
     // delegates to `parse_count_expr` so "a"/"an"/"X"/"half the permanents
     // they control" all flow through one authority. "Of their choice" is
-    // the default per CR 701.16b (the sacrificing player chooses); strip
+    // redundant because only a permanent's controller can sacrifice it; strip
     // it as a confirmation suffix rather than bleeding into the filter.
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), tag("sacrifice ")).parse(input)
@@ -1321,7 +1336,7 @@ pub(super) fn parse_targeted_action_ast(
             ));
         let (target_text, _) = super::strip_optional_target_prefix(after_count.trim_start());
         // Strip the "of their choice" / "of your choice" confirmation suffix —
-        // CR 701.16b makes player choice the default, so the phrase is a no-op
+        // CR 701.21a makes the controller the sacrificing player, so the phrase is a no-op
         // that must be consumed so it doesn't bleed into the filter. Two
         // shapes exist: (1) the filter precedes the phrase ("permanents
         // they control of their choice" — split at the leading space), and
@@ -1365,7 +1380,7 @@ pub(super) fn parse_targeted_action_ast(
             assert_no_compound_remainder(_rem, text);
             target
         };
-        // CR 701.16a: When the count expression already carries a typed filter
+        // CR 701.21a: When the count expression already carries a typed filter
         // ("half the permanents they control" → ObjectCount{Typed[Permanent,
         // controller:You]}) and the target text didn't yield a filter, lift the
         // count's filter into `target` so eligibility matches the same set the
@@ -1387,20 +1402,9 @@ pub(super) fn parse_targeted_action_ast(
         // carries no `FilterProp::Another` and would let the source sacrifice
         // itself (Morkrut Necropod, #4513).
         //
-        // Apply the exclusion to EVERY leg of an `Or` disjunction. "Another"
-        // means "not this source permanent"; it is required on any leg the
-        // source's type could match and is harmless (vacuous) on legs it cannot
-        // (a land is never the source creature). Marking only the first leg, or
-        // only same-type legs, leaves a self-sacrifice hole for a source that
-        // matches a non-first leg — e.g. Mukotai Soulripper, an artifact
-        // creature, in "sacrifice another creature or artifact".
-        //
-        // Single-type "sacrifice another <type>" exclusion is deliberately NOT
-        // applied here: it reduces a single-eligible mandatory sacrifice (e.g.
-        // Disciple of Bolas) to one option, routing it through the
-        // auto-sacrifice fast-path, which mis-resolves a follow-on "that
-        // creature's power" reference — a separate, pre-existing engine bug for
-        // its own fix.
+        // Apply the exclusion to every typed leg. "Another" means "not this
+        // source permanent"; it is required on any leg the source's type could
+        // match and is harmless (vacuous) on legs it cannot.
         //
         // No CR annotation here: this is parser-grammar scoping of the word
         // "another"; the exclusion itself is CR-annotated at the filter layer
@@ -1409,15 +1413,7 @@ pub(super) fn parse_targeted_action_ast(
             count_word,
             super::super::oracle_util::CountWord::SourceExclusion
         ) {
-            if let TargetFilter::Or { filters } = &mut target {
-                for leg in filters.iter_mut() {
-                    if let TargetFilter::Typed(typed) = leg {
-                        if !typed.properties.contains(&FilterProp::Another) {
-                            typed.properties.push(FilterProp::Another);
-                        }
-                    }
-                }
-            }
+            add_another_to_sacrifice_filter(&mut target);
         }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
@@ -12370,6 +12366,32 @@ mod tests {
                     Some(ControllerRef::You),
                     "Promise of Aclazotz: controller must default to You, got {tf:?}"
                 ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_another_single_type_excludes_source() {
+        let text = "sacrifice another creature";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "single-type sacrifice must preserve source exclusion, got {tf:?}"
+                    );
+                }
                 other => panic!("expected Typed target, got {other:?}"),
             },
             other => panic!("expected Effect::Sacrifice, got {other:?}"),

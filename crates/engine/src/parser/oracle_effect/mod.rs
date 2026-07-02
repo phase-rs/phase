@@ -7802,6 +7802,33 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
         }
     }
 
+    // CR 614.10 + CR 614.10a + CR 502.3: "Skip the [step] step of that turn" —
+    // the current-turn-anaphor sibling of the "skip your next [step] step" form
+    // above. Printed on extra-turn spells that take an extra turn, then skip a
+    // step of it (Savor the Moment, Time Bends to My Will: "Take an extra turn
+    // after this one. Skip the untap step of that turn."). "That turn" is the
+    // extra turn just created, which is the controller's next turn, so its
+    // untap step is exactly the next occurrence of that step for the controller
+    // (CR 614.10a: a skip waits for the first occurrence that isn't skipped).
+    // The subject is elided to the resolving controller. Lowers to the same
+    // `SkipNextStep { NextOccurrence }` the "skip your next [step] step" sibling
+    // produces — no new effect or scope is required.
+    if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("skip the ").parse(input)?;
+        let (input, step) = parse_skip_step_name(input)?;
+        let (input, _) = tag(" of that turn").parse(input)?;
+        Ok((input, step))
+    }) {
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+                scope: SkipScope::NextOccurrence,
+            }));
+        }
+    }
+
     if let Some((target, after_verb_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
@@ -21795,6 +21822,8 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
+        let retained_you_may_retarget_optional =
+            !is_optional && starts_with_you_may_choose_new_targets(&text);
         let (unless_same_name_condition, text) = if is_optional {
             if let Some((stripped, unless_cond)) =
                 crate::parser::oracle_effect::conditions::strip_unless_shares_name_with_other_exiled_this_way(
@@ -22538,6 +22567,16 @@ pub(crate) fn parse_effect_chain_ir(
             Effect::ChooseFromZone { zone, .. } => Some(*zone),
             _ => None,
         };
+        // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
+        // `you may choose new targets ...` surface form so the retarget parser
+        // can distinguish true ChangeTargets clauses from copy-retarget riders.
+        // Once that full-surface clause has actually parsed as ChangeTargets,
+        // carry the retained "you may" modal onto the ability.
+        if retained_you_may_retarget_optional
+            && matches!(clause.effect, Effect::ChangeTargets { .. })
+        {
+            clause.optional = true;
+        }
         if let Some(target) = &for_each_reference_target {
             bind_search_library_for_each_antecedent(&mut clause.effect, target, &text_no_qty_lower);
         }
@@ -24747,6 +24786,24 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
 /// - "you may choose new targets for [spell phrase]" → scope: `All` (CR 115.7d)
 ///
 /// An optional trailing "to [target phrase]" sets `forced_to`.
+fn starts_with_you_may_choose_new_targets(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("you may "),
+                alt((
+                    tag("choose new targets for "),
+                    tag("choose new target for "),
+                )),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
@@ -24757,8 +24814,8 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         ),
         value(RetargetScope::Single, tag("change a target of ")),
         value(RetargetScope::All, tag("you may choose new targets for ")),
-        // Peeled form when `strip_optional_effect_prefix` correctly declined to
-        // strip a specialized "you may choose new targets" retarget clause.
+        // Peeled form for call sites that have already recorded the governing
+        // "you may" modal before dispatching the retarget body.
         value(RetargetScope::All, tag("choose new targets for ")),
     ))
     .parse(lower)

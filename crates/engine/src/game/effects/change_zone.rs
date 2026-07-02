@@ -250,13 +250,26 @@ pub fn resolve(
                     .get(&parent)
                     .is_some_and(|obj| obj.zone == Zone::Hand)
                 {
-                    exile_tracked_set_library_only = true;
-                    effective_target_filter = crate::game::targeting::resolve_tracked_set_sentinel(
+                    let tracked_filter = crate::game::targeting::resolve_tracked_set_sentinel(
                         state,
                         TargetFilter::TrackedSet {
                             id: crate::types::identifiers::TrackedSetId(0),
                         },
                     );
+                    // Dig tails (Expressive Iteration) keep looked-at cards in a
+                    // tracked set with library members — "exile one of them" must
+                    // not re-exile the card already put in hand. RevealHand ->
+                    // "exile that card" also binds ParentTarget in hand but has
+                    // no library members in the tracked set and must exile the
+                    // chosen hand card directly.
+                    let has_library_member = tracked_set_member_zones(state, &tracked_filter)
+                        .is_some_and(|zones| zones.contains(&Zone::Library));
+                    if has_library_member {
+                        exile_tracked_set_library_only = true;
+                        effective_target_filter = tracked_filter;
+                    } else if origin.is_none() {
+                        origin = Some(Zone::Hand);
+                    }
                 }
             }
         }

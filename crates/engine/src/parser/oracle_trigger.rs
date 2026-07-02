@@ -18,7 +18,9 @@ use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
-use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
+use super::oracle_nom::filter::{
+    parse_color_property, parse_enters_origin_zone, parse_with_property,
+};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -1214,6 +1216,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
+    }
+    if let Some(ability) = execute.as_deref_mut() {
+        rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+            &def,
+            ability,
+            &modifiers.effect_lower,
+        );
     }
 
     def.execute = execute;
@@ -3858,6 +3867,41 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 508.1 + CR 603.4: source-scoped "if ~ attacked this turn" —
+            // the trigger resolves only if the ability's own source creature
+            // declared as an attacker this turn (Riders of the Mark, Taigam,
+            // Ojutai Master). Composed from the existing, already-evaluated
+            // `FilterProp::AttackedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn`) via `SourceMatchesFilter`,
+            // so no new `TriggerCondition` variant is needed. Distinct from the
+            // player-scoped `YouAttackedThisTurn` ("if you attacked this turn").
+            (
+                "if ~ attacked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+                    ),
+                },
+            ),
+            // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
+            // blocked this turn" — the sibling of the attacked-only arm above,
+            // gating on the source creature having attacked OR blocked this turn
+            // (Inferno Hellion). Reuses the existing, already-evaluated
+            // `FilterProp::AttackedOrBlockedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
+            // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is
+            // needed. The turn-scoped "this turn" form only; the "this combat"
+            // form (Clockwork cycle, Kjeldoran Home Guard) needs combat-scoped
+            // tracking the engine does not yet keep and is intentionally excluded.
+            (
+                "if ~ attacked or blocked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+                    ),
+                },
+            ),
             // CR 603.4: past-turn life loss.
             (
                 "if an opponent lost life during their last turn",
@@ -10519,10 +10563,17 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.origin = Some(Zone::Graveyard);
-        def.valid_card = Some(with_owner_scope(filter, ControllerRef::You));
+        let scoped = with_owner_scope(filter, ControllerRef::You);
         def.batched = true;
-        // LTB-from-graveyard triggers need to fire from graveyard zone context
-        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        // CR 113.6 / CR 113.6b: a permanent's triggered ability functions only on the
+        // battlefield unless it states otherwise, so this batched "leave your graveyard"
+        // trigger keeps make_base()'s battlefield-only default. CR 113.6k + CR 603.10a:
+        // when the source card is itself the object leaving its own graveyard, the trigger
+        // condition cannot trigger from the battlefield and needs graveyard/exile zones.
+        if filter_references_self(&scoped) {
+            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        }
+        def.valid_card = Some(scoped);
         if during_your_turn {
             def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         }
@@ -10591,10 +10642,12 @@ fn try_parse_one_or_more_put_into_exile_from(
         def.origin_zones = zones;
         def.destination = Some(Zone::Exile);
         def.batched = true;
-        // Source can fire from any public zone context since cards move from
-        // library/graveyard — trigger source (e.g. Laelia) is on the battlefield,
-        // but keeping these zones mirrors the leave-graveyard precedent.
-        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        // CR 113.6 / CR 113.6b: this batched "cards are put into exile from
+        // library/graveyard" ability is a permanent's triggered ability whose source
+        // (e.g. Laelia the Blade Reforged, Rakshasa Vizier) is on the battlefield, and
+        // it doesn't state that it functions from any other zone — so it keeps
+        // make_base()'s battlefield-only default. There is no self-referential subject
+        // here (valid_card is None), so no graveyard/exile look-back zones are needed.
         return Some((TriggerMode::ChangesZoneAll, def));
     }
 
@@ -12522,12 +12575,45 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
 /// Returns `None` if `parse_type_phrase` reports `TargetFilter::Any` or leaves
 /// residual text — both indicate the phrase was not a pure type qualifier.
 fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
+    // CR 105.2b: bare color-quality qualifiers ("multicolored", "monocolored",
+    // "colorless") are color-count properties, not type phrases.
+    if let Ok((remainder, prop)) = parse_color_property(qualifier) {
+        if remainder.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![prop]),
+            ));
+        }
+    }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)
     } else {
         None
     }
+}
+
+/// CR 102.1 + CR 603.2c: On "whenever a player casts..." triggers, "each other
+/// player" excludes the caster (the triggering player), not the source's
+/// controller. The effect-chain stripper maps bare "each other player" to
+/// `Opponent` (controller-relative); rewrite here once the trigger subject is
+/// known to be any player.
+fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+    trigger_def: &TriggerDefinition,
+    ability: &mut AbilityDefinition,
+    effect_lower: &str,
+) {
+    if trigger_def.mode != TriggerMode::SpellCast || trigger_def.valid_target.is_some() {
+        return;
+    }
+    if !scan_contains(effect_lower, "each other player") {
+        return;
+    }
+    if ability.player_scope != Some(PlayerFilter::Opponent) {
+        return;
+    }
+    ability.player_scope = Some(PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::TriggeringPlayer),
+    });
 }
 
 /// Parse a post-spell modifier phrase (text between "spell" and the timing tail).

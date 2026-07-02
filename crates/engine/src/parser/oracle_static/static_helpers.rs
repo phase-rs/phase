@@ -702,7 +702,13 @@ pub(crate) fn try_parse_cost_modification(
             let cond_text = lower[cond_pos + marker.len()..]
                 .trim()
                 .trim_end_matches('.');
-            if let Some(sc) = parse_cost_modifier_condition(cond_text) {
+            // CR 601.2f + CR 611.3a: try the cost-specific predicates first, then
+            // fall back to the shared static-condition grammar so board-state
+            // gates ("if there are ten or more nonland permanents on the
+            // battlefield", Hour of Revelation) attach instead of being swallowed.
+            if let Some(sc) = parse_cost_modifier_condition(cond_text)
+                .or_else(|| parse_static_condition(cond_text))
+            {
                 definition.condition = Some(sc);
             } else if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
                 if rest.trim().is_empty() || rest.trim() == "." {

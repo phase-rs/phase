@@ -185,16 +185,28 @@ describe("BattlefieldZoneOverflow", () => {
     expect(container.querySelector('[data-grouped-ids~="9"]')).toBe(summary);
   });
 
-  it("collapses from actual object count, not visible group count", () => {
+  it("collapses by distinct stack count, not body count", () => {
+    // 7 Forests + 2 duals reads as 2 visible stacks — far under the threshold —
+    // so a big-but-uniform land row must NOT collapse into the summary tile even
+    // though its body count (9) is high. The crowding metric tracks distinct
+    // stacks (what the player actually sees), not raw object count.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
     const groups: GroupedPermanentType[] = [
-      { name: "Forest", ids: [1, 2], count: 2, representative: {} as GroupedPermanentType["representative"] },
-      { name: "Vernal Fen", ids: [3], count: 1, representative: {} as GroupedPermanentType["representative"] },
-      { name: "Swamp", ids: [4], count: 1, representative: {} as GroupedPermanentType["representative"] },
-      { name: "Exotic Orchard", ids: [5], count: 1, representative: {} as GroupedPermanentType["representative"] },
+      { name: "Forest", ids: [1, 2, 3, 4, 5, 6, 7], count: 7, representative: {} as GroupedPermanentType["representative"] },
+      { name: "Vernal Fen", ids: [8, 9], count: 2, representative: {} as GroupedPermanentType["representative"] },
     ];
 
     renderOverflow({ groups });
+
+    expect(screen.queryByRole("button", { name: /open lands drawer/i })).toBeNull();
+  });
+
+  it("collapses once distinct stacks exceed the threshold", () => {
+    // Nine distinct single-card stacks clear the desktop threshold (8), so the
+    // row collapses into the summary tile — the aggregate-space signal the
+    // stack-count metric is meant to catch.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+    renderOverflow({ groups: makeGroups(9) });
 
     expect(screen.getByRole("button", { name: /open lands drawer/i })).toBeInTheDocument();
   });

@@ -1582,6 +1582,14 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         );
     }
 
+    // CR 305.1 + CR 601.2a + CR 114.4: Unlimited combined permission —
+    // "You may play lands and cast permanent spells from your graveyard."
+    // (Wrenn and Realmbreaker emblem). Composed through the shared branch
+    // filter parser so trailing rules text is not silently dropped.
+    if let Some(def) = try_parse_unlimited_combined_graveyard_permission(text, lower) {
+        return Some(def);
+    }
+
     // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive once-per-turn permission —
     // "Once during each of your turns, you may play a <land-filter> or cast a
     // <spell-filter> from your graveyard." (The Eighth Doctor, Serra Paragon).
@@ -1810,6 +1818,46 @@ fn try_parse_disjunctive_graveyard_cast_permission(
             play_mode: CardPlayMode::Play,
             // Stack-exit redirect is wrong for the granted leave-battlefield
             // rider (see doc comment); leave it unset.
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 305.1 + CR 601.2a + CR 114.4: Parse unlimited combined graveyard
+/// permission — "You may play <land-filter> and cast <spell-filter> from your
+/// graveyard." — using the shared branch-filter grammar and rejecting any
+/// trailing rules-bearing suffix.
+fn try_parse_unlimited_combined_graveyard_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "you may play ")?;
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " and cast ")
+        .ok()
+        .map(|(_, pair)| pair)?;
+    let (spell_branch, after_graveyard) =
+        nom_primitives::split_once_on(spell_branch, " from your graveyard")
+            .ok()
+            .map(|(_, pair)| pair)?;
+    if !after_graveyard.trim().trim_start_matches('.').is_empty() {
+        return None;
+    }
+    let land_filter = parse_graveyard_branch_filter(land_branch.trim())?;
+    let spell_filter = parse_graveyard_branch_filter(spell_branch.trim())?;
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
             graveyard_destination_replacement: None,
             extra_cost: None,
         })
