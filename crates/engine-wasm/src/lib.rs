@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -66,8 +67,10 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
     js_sys::JSON::parse(&json).unwrap_or_else(|e| panic!("JSON.parse failed: {e:?}"))
 }
 
-use phase_ai::choose_action;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
+use phase_ai::{
+    choose_action_with_session, score_candidates_with_session, AiSession, SessionCache,
+};
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
     /// In WASM, panics don't unwind (no RAII cleanup), so a RefCell::borrow_mut() that
@@ -80,6 +83,13 @@ thread_local! {
     /// refused in this mode because rewinding a single client's view would
     /// desync from the authoritative game on the wire. See `restore_game_state`.
     static MULTIPLAYER_MODE: Cell<bool> = const { Cell::new(false) };
+    /// Per-thread cache of the last-built `AiSession`, keyed by deck-composition
+    /// fingerprint. The WASM bridge cannot hold the session on the stack across
+    /// JS round-trips (unlike native `run_ai_actions`), so it caches here and
+    /// reuses whenever `deck_pools` are unchanged. Invalidated on game
+    /// init/clear/resume; deliberately NOT invalidated on `restore_game_state`
+    /// so per-decision pool workers reuse the session.
+    static AI_SESSION_CACHE: Cell<SessionCache> = const { Cell::new(SessionCache::new_empty()) };
 }
 
 /// Toggle the multiplayer enforcement flag. Called by multiplayer adapters
@@ -128,6 +138,27 @@ fn with_state<R>(f: impl FnOnce(&GameState) -> R) -> Result<R, JsValue> {
         cell.set(Some(state));
         Ok(result)
     })
+}
+
+/// Fetch (or lazily build) the per-thread `AiSession` for `state`, reusing the
+/// cached session whenever the deck-composition fingerprint is unchanged.
+fn ai_session_for(state: &GameState) -> Arc<AiSession> {
+    AI_SESSION_CACHE.with(|cell| {
+        let mut cache = cell.take();
+        let session = cache.get_or_build(state);
+        cell.set(cache);
+        session
+    })
+}
+
+/// Drop the cached session so the next `ai_session_for` rebuilds from scratch.
+/// Called whenever the game identity changes (init/clear/resume).
+fn clear_ai_session_cache() {
+    AI_SESSION_CACHE.with(|cell| {
+        let mut cache = cell.take();
+        cache.clear();
+        cell.set(cache);
+    });
 }
 
 thread_local! {
@@ -198,6 +229,7 @@ pub fn take_last_panic_message() -> Option<String> {
 #[wasm_bindgen]
 pub fn clear_game_state() {
     GAME_STATE.with(|cell| cell.set(None));
+    clear_ai_session_cache();
 }
 
 /// Verify WASM integration works.
@@ -774,6 +806,7 @@ pub fn initialize_game(
     };
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
+    clear_ai_session_cache();
 
     to_js(&result)
 }
@@ -1224,6 +1257,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    clear_ai_session_cache();
     Ok(())
 }
 
@@ -1241,8 +1275,9 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
 
         let ai_player = PlayerId(player_id);
         let mut rng = rand::rng();
+        let session = ai_session_for(state);
 
-        match choose_action(state, ai_player, &config, &mut rng) {
+        match choose_action_with_session(state, ai_player, &config, &mut rng, &session) {
             Some(action) => Ok(to_js(&action)),
             None => Ok(JsValue::NULL),
         }
@@ -1252,8 +1287,8 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
 /// Score all candidate actions and return `[GameAction, score]` tuples.
 /// Used by AI workers for root parallelism — each worker scores independently,
 /// then results are merged on the main thread.
-/// `rng_seed` seeds the game state's RNG so each worker's MCTS explores
-/// different paths through the search tree, producing diverse score vectors.
+/// `rng_seed` seeds the game state's RNG so each worker's beam search explores
+/// different orderings, producing diverse score vectors.
 #[wasm_bindgen]
 pub fn get_ai_scored_candidates(
     difficulty: &str,
@@ -1264,12 +1299,13 @@ pub fn get_ai_scored_candidates(
 
     with_state_mut(|state| {
         // Re-seed the state RNG so each parallel worker explores different
-        // MCTS rollout paths and beam-search tie-breaking orders.
+        // beam-search rollout paths and tie-breaking orders.
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
         let ai_player = PlayerId(player_id);
-        let scored = phase_ai::score_candidates(state, ai_player, &config);
+        let session = ai_session_for(state);
+        let scored = score_candidates_with_session(state, ai_player, &config, &session);
         Ok(to_js(&scored))
     })?
 }
@@ -1333,6 +1369,7 @@ fn resolve_all_inner(
     max_resolutions: u32,
     rng: &mut impl Rng,
 ) -> BatchResolveResult {
+    let session = ai_session_for(state);
     resolve_all_fast_forward(state, requester, max_resolutions, |state, actor| {
         if let Some(seat) = ai_seats
             .iter()
@@ -1341,7 +1378,7 @@ fn resolve_all_inner(
             let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
             let config =
                 create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-            match choose_action(state, actor, &config, rng) {
+            match choose_action_with_session(state, actor, &config, rng, &session) {
                 Some(action) => ResolveAllCallbackDecision::Action(action),
                 None => ResolveAllCallbackDecision::Stop,
             }
