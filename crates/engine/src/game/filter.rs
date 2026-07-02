@@ -192,6 +192,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality reads the object's own printed characteristic, not
+        // the board population.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -406,6 +409,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality is candidate-local (the object's own printed
+        // characteristic), so a board entry cannot perturb it.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -2890,6 +2896,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // Approach of the Second Sun's "you've cast another spell named
         // {LITERAL} this game" relies on this against the game-scope history.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
+        // SpellCastRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        FilterProp::Modal => false,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -3888,6 +3897,10 @@ fn matches_filter_prop(
         // CR 115.7: Stack entry has exactly one target — permissive at filter level,
         // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
+        // CR 700.2: The object is modal iff its printed modality is present. Read
+        // from the static printed characteristic populated at object creation,
+        // available at SpellCast-trigger match time (Riku, of Many Paths).
+        FilterProp::Modal => obj.modal.is_some(),
         // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
         // per-object level, validated by trigger matchers and retarget effects against the
         // stack entry's actual targets.
@@ -4323,6 +4336,9 @@ fn zone_change_record_matches_property(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        | FilterProp::Modal
         | FilterProp::Suspected
         | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +

@@ -8,7 +8,9 @@
 //! `AiSession` is `Arc`-wrapped on `AiContext` so cloning the context stays
 //! cheap (a refcount bump).
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 use engine::game::DeckEntry;
@@ -224,6 +226,62 @@ impl AiSession {
     }
 }
 
+/// Digest of exactly the inputs `AiSession::from_game` reads: each pool's
+/// player id, bracket tier, and (name, count) of every main-deck and
+/// commander entry. Sideboard/planar/scheme/signature and all board/hand
+/// state are deliberately excluded — equal fingerprint ⇒ byte-identical
+/// session analysis, so a session keyed on this value is safe to reuse.
+/// Stable across serde round-trips (hashes content, not Arc identity).
+pub fn deck_pools_fingerprint(state: &GameState) -> u64 {
+    let mut h = DefaultHasher::new();
+    for pool in &state.deck_pools {
+        pool.player.0.hash(&mut h);
+        pool.bracket_tier.hash(&mut h);
+        pool.current_main.len().hash(&mut h);
+        for entry in pool.current_main.iter() {
+            entry.card.name.hash(&mut h);
+            entry.count.hash(&mut h);
+        }
+        pool.current_commander.len().hash(&mut h);
+        for entry in pool.current_commander.iter() {
+            entry.card.name.hash(&mut h);
+            entry.count.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Per-thread cache of the last-built session, keyed by deck-composition
+/// fingerprint. Mirrors the projection cache's self-invalidation: a changed
+/// fingerprint rebuilds; an unchanged one reuses. Used by the WASM bridge,
+/// which (unlike native `run_ai_actions`) cannot hold the session on the stack.
+#[derive(Debug, Default)]
+pub struct SessionCache {
+    entry: Option<(u64, Arc<AiSession>)>,
+}
+
+impl SessionCache {
+    pub const fn new_empty() -> Self {
+        Self { entry: None }
+    }
+
+    pub fn get_or_build(&mut self, state: &GameState) -> Arc<AiSession> {
+        let fp = deck_pools_fingerprint(state);
+        if let Some((cached_fp, session)) = &self.entry {
+            if *cached_fp == fp {
+                return Arc::clone(session);
+            }
+        }
+        let session = AiSession::arc_from_game(state);
+        self.entry = Some((fp, Arc::clone(&session)));
+        session
+    }
+
+    pub fn clear(&mut self) {
+        self.entry = None;
+    }
+}
+
 fn analysis_deck(main: &[DeckEntry], commander: &[DeckEntry]) -> Vec<DeckEntry> {
     let mut deck = Vec::with_capacity(main.len() + commander.len());
     deck.extend_from_slice(main);
@@ -262,11 +320,15 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::game_state::{GameState, PlayerDeckPool};
+    use engine::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
+    use engine::types::identifiers::ObjectId;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
+    use std::sync::Arc;
 
-    use super::AiSession;
+    use crate::projection::ProjectionHorizon;
+
+    use super::{deck_pools_fingerprint, AiSession, SessionCache};
 
     fn make_pool_with_tier(
         player: PlayerId,
@@ -404,6 +466,73 @@ mod tests {
         assert_eq!(elf.lord_count, 4);
     }
 
+    /// Test C — cache-hit primitive: two identical `get_or_project` calls
+    /// return the same cached `Arc` (pointer equality) and populate exactly one
+    /// cache entry. The already-at-horizon fixture makes `project_to`
+    /// short-circuit to `Confidence::Exact` deterministically. A third call
+    /// differing only in `ai_player` is a distinct key, so it neither collides
+    /// with the cached entry nor reuses its `Arc` — proving key sensitivity.
+    #[test]
+    fn get_or_project_caches_and_reuses_arc_on_identical_key() {
+        let mut s = GameState::new_two_player(42);
+        s.turn_number = 2;
+        s.active_player = PlayerId(1);
+        // reached_horizon only checks non-emptiness of this HashSet.
+        s.creatures_attacked_this_turn.insert(ObjectId(1));
+        s.stack.clear();
+        s.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let session = AiSession::empty();
+        let a = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        let b = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second identical get_or_project must return the cached Arc, not recompute"
+        );
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            1,
+            "identical keys must collapse to a single cache entry"
+        );
+
+        // Key sensitivity: same short-circuiting state but a different
+        // `ai_player` is a distinct ProjectionKey (reached_horizon is
+        // ai_player-independent, so this still resolves to Exact deterministically).
+        let c = session
+            .get_or_project(
+                &s,
+                PlayerId(1),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "a different ai_player is a different key and must not reuse the cached Arc"
+        );
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            2,
+            "a distinct key must add a second cache entry"
+        );
+    }
+
     #[test]
     fn bracket_tier_propagates_through_load_deck_into_state() {
         use engine::game::bracket_estimate::CommanderBracketTier;
@@ -443,6 +572,135 @@ mod tests {
             p1_pool.bracket_tier,
             CommanderBracketTier::Optimized,
             "bracket_tier must round-trip through load_deck_into_state for player 1"
+        );
+    }
+
+    /// Cache hit: an unchanged `deck_pools` must reuse the same `Arc<AiSession>`.
+    #[test]
+    fn session_cache_reuses_when_deck_pools_unchanged() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state
+            .deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Core));
+
+        // Reach-guard: pool presence means `from_game` populates features, so
+        // the cached session is non-trivial — otherwise `ptr_eq` could pass
+        // vacuously on two identical empty sessions.
+        assert!(
+            AiSession::from_game(&state)
+                .archetype(PlayerId(0))
+                .is_some(),
+            "pool present ⇒ session must populate player features"
+        );
+
+        let mut cache = SessionCache::new_empty();
+        let first = cache.get_or_build(&state);
+        let second = cache.get_or_build(&state);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "unchanged deck_pools must reuse the same Arc<AiSession>"
+        );
+    }
+
+    /// Deck-composition change: replacing `current_main` must change the
+    /// fingerprint and force a rebuild (distinct Arc).
+    #[test]
+    fn session_cache_rebuilds_when_deck_composition_changes() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state
+            .deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Core));
+
+        let mut cache = SessionCache::new_empty();
+        let before_fp = deck_pools_fingerprint(&state);
+        let first = cache.get_or_build(&state);
+
+        state.deck_pools[0].current_main = Arc::new(vec![deck_entry(
+            face("Fresh Card", vec![CoreType::Creature], vec!["Elf"]),
+            3,
+        )]);
+        let after_fp = deck_pools_fingerprint(&state);
+        let second = cache.get_or_build(&state);
+
+        assert_ne!(
+            before_fp, after_fp,
+            "changing current_main must change the fingerprint"
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "changed deck composition must rebuild the session"
+        );
+    }
+
+    /// Serde stability: the fingerprint hashes deck content, not Arc identity,
+    /// so it must survive a `GameState` serde round-trip.
+    #[test]
+    fn fingerprint_is_stable_across_serde_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            current_main: Arc::new(vec![deck_entry(
+                face("Serde Card", vec![CoreType::Creature], vec!["Elf"]),
+                2,
+            )]),
+            current_commander: Arc::new(vec![elf_lord_commander()]),
+            bracket_tier: CommanderBracketTier::Core,
+            ..Default::default()
+        });
+
+        let before = deck_pools_fingerprint(&state);
+        let json = serde_json::to_string(&state).expect("GameState serializes");
+        let restored: GameState = serde_json::from_str(&json).expect("GameState deserializes");
+        let after = deck_pools_fingerprint(&restored);
+
+        assert_eq!(
+            before, after,
+            "fingerprint must survive a serde round-trip (content hash, not Arc identity)"
+        );
+    }
+
+    /// Bracket-tier axis: two otherwise-identical pools differing only in
+    /// `bracket_tier` must produce different fingerprints, because tier is a
+    /// `from_game` input.
+    #[test]
+    fn fingerprint_distinguishes_bracket_tier() {
+        let mut core = GameState::new_two_player(42);
+        core.deck_pools.clear();
+        core.deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Core));
+
+        let mut cedh = GameState::new_two_player(42);
+        cedh.deck_pools.clear();
+        cedh.deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Cedh));
+
+        assert_ne!(
+            deck_pools_fingerprint(&core),
+            deck_pools_fingerprint(&cedh),
+            "bracket_tier is a session input, so it must be part of the fingerprint"
+        );
+    }
+
+    /// Hostile: empty `deck_pools` must fingerprint without panic, be
+    /// deterministic across calls, and still reuse the cached session.
+    #[test]
+    fn empty_deck_pools_fingerprint_is_safe_and_deterministic() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+
+        let a = deck_pools_fingerprint(&state);
+        let b = deck_pools_fingerprint(&state);
+        assert_eq!(a, b, "empty deck_pools must fingerprint deterministically");
+
+        let mut cache = SessionCache::new_empty();
+        let first = cache.get_or_build(&state);
+        let second = cache.get_or_build(&state);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "empty deck_pools must still reuse the cached session"
         );
     }
 }

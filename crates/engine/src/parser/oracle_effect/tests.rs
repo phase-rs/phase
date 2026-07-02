@@ -26819,6 +26819,27 @@ fn effect_switch_pt_self() {
     );
 }
 
+/// CR 613.4d: pronoun surface form ("switch its power and toughness") —
+/// `parse_target` does not treat a bare "its" as a target, so this form is
+/// handled by a dedicated branch that resolves the "its" anaphor via
+/// `resolve_it_pronoun`. In a bare effect context (no trigger subject) that
+/// resolves to `SelfRef` (Valakut Fireboar's self-attack trigger); a typed
+/// trigger subject resolves it to `TriggeringSource` (Mangled Soulrager's
+/// granted boon).
+#[test]
+fn effect_switch_pt_pronoun_its() {
+    let e = parse_effect("switch its power and toughness until end of turn");
+    assert!(
+        matches!(
+            e,
+            Effect::SwitchPT {
+                target: TargetFilter::SelfRef
+            }
+        ),
+        "expected SwitchPT with SelfRef for the pronoun form, got: {e:?}"
+    );
+}
+
 /// CR 613.4d: prepositional surface form ("switch the power and toughness
 /// of target creature") — single-target sibling of the possessive form.
 #[test]

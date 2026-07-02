@@ -550,6 +550,7 @@ pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
 ) -> Option<StaticDefinition> {
+    let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
@@ -2410,7 +2411,7 @@ pub(crate) fn parse_static_line_inner(
     // e.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
     // Excludes lines handled by PerTurnCastLimit ("can't cast more than"),
     // CantCastDuring ("can't cast spells during"), and CantCastFrom ("can't cast spells from").
-    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text) {
+    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text, &raw_lower) {
         return Some(def);
     }
 
@@ -2913,7 +2914,18 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // CR 603.2d: Trigger doubling — "triggers an additional time".
+    // CR 309.4c: Hama Pashar — "Room abilities of dungeons you own trigger
+    // an additional time." Parsed with composed nom tags (not scan_contains).
+    if parse_room_ability_doubling_phrase(tp.lower) {
+        return Some(
+            StaticDefinition::new(StaticMode::DoubleTriggers {
+                cause: TriggerCause::RoomEntered,
+            })
+            .description(text.to_string()),
+        );
+    }
+
+    // CR 603.2d: Trigger doubling — "triggers/trigger an additional time".
     //
     // Cause classification by phrasing:
     // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
@@ -2927,7 +2939,9 @@ pub(crate) fn parse_static_line_inner(
     //   additional time" — Roaming Throne, Strionic Resonator copies) use the
     //   unrestricted `Any` cause; the doubler's `affected` filter narrows
     //   which source's triggers qualify.
-    if nom_primitives::scan_contains(tp.lower, "triggers an additional time") {
+    if nom_primitives::scan_contains(tp.lower, "triggers an additional time")
+        || nom_primitives::scan_contains(tp.lower, "trigger an additional time")
+    {
         let cause = if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
@@ -2978,6 +2992,19 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."
+fn parse_room_ability_doubling_phrase(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("room abilities of "),
+        tag("dungeons you own "),
+        alt((tag("trigger "), tag("triggers "))),
+        tag("an additional time"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 /// CR 614.1c + CR 122.1: Parse a continuous "enters with an additional counter"

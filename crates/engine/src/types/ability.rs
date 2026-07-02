@@ -3150,6 +3150,11 @@ pub enum FilterProp {
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
+    /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
+    /// text offers two or more options in a bulleted list). Evaluated against the
+    /// stack object's static printed modality (`obj.modal.is_some()`), a printed
+    /// characteristic present from object creation.
+    Modal,
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
@@ -5637,10 +5642,14 @@ pub enum AttackersDeclaredCountSubject {
         filter: Option<TargetFilter>,
     },
     /// Count attackers whose announced attack target matches a scoped player,
-    /// planeswalker, battle, or combined attack-target class.
+    /// planeswalker, battle, or combined attack-target class. `filter` is the
+    /// optional condition-level type axis (CR 508.1): when `Some(f)`, only
+    /// attackers matching `f` that attack the scoped target are counted.
     AttackTarget {
         controller: ControllerRef,
         attacked: crate::types::triggers::AttackTargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
 }
 
