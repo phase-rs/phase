@@ -490,6 +490,9 @@ fn redundancy_delta(
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
+        // triggered ability — it has no target and no static redundancy signal.
+        | Effect::ChaosEnsues
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ForEachCategoryExile { .. }
@@ -594,6 +597,11 @@ fn redundancy_delta(
         // instead"). Its value depends on whether a draw later occurs — no
         // static redundancy signal, same as the damage replacement above.
         | Effect::CreateDrawReplacement { .. }
+        // CR 614.1a + CR 614.5: CreatePlaneswalkReplacement installs a continuous,
+        // duration-bound planar-die planeswalk "shield" (Fixed Point in Time). Its
+        // value depends on whether a planeswalk later occurs within the window — no
+        // static redundancy signal, same as the draw replacement above.
+        | Effect::CreatePlaneswalkReplacement { .. }
         // CR 614.12 + CR 303.4: ReturnAsAura installs an Aura conversion +
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.

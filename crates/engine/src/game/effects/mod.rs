@@ -48,6 +48,7 @@ pub mod cast_copy_of_card;
 pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
+pub mod chaos_ensues;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
@@ -69,6 +70,7 @@ pub mod counters;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
+pub mod create_planeswalk_replacement;
 pub mod create_token_copy_from_pool;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -3125,6 +3127,9 @@ pub fn resolve_effect(
         Effect::CreateDrawReplacement { .. } => {
             create_draw_replacement::resolve(state, ability, events)
         }
+        Effect::CreatePlaneswalkReplacement { .. } => {
+            create_planeswalk_replacement::resolve(state, ability, events)
+        }
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
@@ -3235,6 +3240,7 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
+        Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }

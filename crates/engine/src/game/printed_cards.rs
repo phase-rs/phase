@@ -874,6 +874,12 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         Effect::CreateDrawReplacement { replacement_effect } => {
             walk_effect(replacement_effect, out)
         }
+        // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
+        // Point in Time: chaos ensues). Walk it so any conjure name it carries is
+        // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            walk_effect(replacement_effect, out)
+        }
         // Heist exiles a card from an opponent's library at random; it does not
         // name a conjure card, so there is no static face to preload.
         Effect::Heist { .. } | Effect::HeistExile => {}
@@ -1121,6 +1127,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }

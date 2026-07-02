@@ -1355,7 +1355,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
     })
 }
 
-fn parse_optional_period_and_end(input: &str) -> Option<()> {
+pub(crate) fn parse_optional_period_and_end(input: &str) -> Option<()> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
         .ok()?;
@@ -5947,6 +5947,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
+    // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
+    // replacement chain — BEFORE the leading-"if" strip further down would peel
+    // the condition clause and hand only "chaos ensues instead" to the imperative
+    // dispatch (which cannot recover the replacement semantics).
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_planar_die_planeswalk_replacement(&lower)
+    {
         return parsed_clause(effect);
     }
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]

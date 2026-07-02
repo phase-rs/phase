@@ -14,8 +14,8 @@ use super::planechase::{
 use super::triggers::process_triggers;
 use crate::database::synthesis::synthesize_planechase;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, Duration, Effect, PlayerScope, QuantityExpr, ResolvedAbility,
+    RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -896,4 +896,276 @@ fn set_planar_controller_noop_outside_planechase() {
         "set_planar_controller must not designate a controller outside Planechase"
     );
     assert!(events.is_empty(), "no events outside a Planechase game");
+}
+
+// ---------------------------------------------------------------------------
+// 18. Fixed Point in Time: planar-die planeswalk → chaos ensues instead
+//     (CR 614.6 / CR 701.31 / CR 901.9c)
+// ---------------------------------------------------------------------------
+
+/// Install the Fixed Point in Time floating shield (`until your next turn, if a
+/// player would planeswalk as a result of rolling the planar die, chaos ensues
+/// instead`) via the real resolver, hosted on `source`, controlled by
+/// `controller`.
+fn install_fixed_point(state: &mut GameState, source: ObjectId, controller: PlayerId) {
+    let mut ability = ResolvedAbility::new(
+        Effect::CreatePlaneswalkReplacement {
+            replacement_effect: Box::new(Effect::ChaosEnsues),
+        },
+        vec![],
+        source,
+        controller,
+    );
+    ability.duration = Some(Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    });
+    let mut events = Vec::new();
+    crate::game::effects::create_planeswalk_replacement::resolve(state, &ability, &mut events)
+        .expect("planeswalk-replacement install resolves");
+}
+
+fn count_chaos_ensued(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::ChaosEnsued { .. }))
+        .count()
+}
+
+/// A (replacement fires exactly once): with the shield installed, resolving the
+/// planar-die planeswalking ability replaces the planeswalk with chaos ensues —
+/// the plane does NOT rotate, chaos ensues exactly once, and the continuation
+/// slot is drained. DISCRIMINATING: reverting the resolver's `Prevented`-arm
+/// drain leaves the continuation set and no chaos fires; reverting the applier
+/// to fire directly (or to `Modified`) rotates the plane and/or double-fires.
+#[test]
+fn fixed_point_replaces_planar_die_planeswalk_with_chaos() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    // Active plane carries a chaos trigger so we can observe chaos ensuing.
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![chaos_trigger()], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (active_id, _deck) = setup_planechase(
+        &mut state,
+        p0,
+        ("Chaos Plane", &plane_a),
+        &[("Plane B", &plane_b)],
+    );
+
+    // Fixed Point in Time itself is a phenomenon in the command zone; its source
+    // id is enough for the shield anchor.
+    let fixed_point = create_planar_object(&mut state, "Fixed Point in Time", &plane_b, p0);
+    install_fixed_point(&mut state, fixed_point, p0);
+    assert_eq!(state.pending_damage_replacements.len(), 1);
+
+    let stack_before = state.stack.len();
+    // Resolve the planar-die planeswalking ability (source = sentinel).
+    let sentinel = planar_ability_sentinel_id(p0);
+    let ability = ResolvedAbility::new(Effect::Planeswalk, vec![], sentinel, p0);
+    let mut events = Vec::new();
+    crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("planeswalking ability resolves");
+
+    // CR 614.6: the planeswalk never happens — the active plane is unchanged.
+    assert_eq!(
+        active_plane(&state),
+        Some(active_id),
+        "CR 614.6: the planeswalk is fully replaced — no rotation"
+    );
+    // CR 311.7: chaos ensues exactly once.
+    assert_eq!(
+        count_chaos_ensued(&events),
+        1,
+        "chaos must ensue exactly once as the substitute"
+    );
+    // The continuation slot is drained (no leftover post-replacement effect).
+    assert!(
+        state.post_replacement_continuation.is_none(),
+        "the post-replacement continuation must be drained exactly once"
+    );
+
+    // The chaos trigger reaches the stack when the ChaosEnsued event is scanned.
+    process_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        stack_before + 1,
+        "the active plane's chaos trigger must reach the stack"
+    );
+}
+
+/// B (SBA / turn-based planeswalk NOT replaced): a direct `planechase::planeswalk`
+/// (CR 312.7 walk-away) bypasses the replacement pipeline entirely — the plane
+/// rotates and no chaos ensues, even with the shield installed.
+#[test]
+fn fixed_point_does_not_replace_direct_planeswalk() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![chaos_trigger()], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (_active_id, deck) = setup_planechase(
+        &mut state,
+        p0,
+        ("Chaos Plane", &plane_a),
+        &[("Plane B", &plane_b)],
+    );
+    let next_id = deck[0];
+    let fixed_point = create_planar_object(&mut state, "Fixed Point in Time", &plane_b, p0);
+    install_fixed_point(&mut state, fixed_point, p0);
+
+    let mut events = Vec::new();
+    planeswalk(&mut state, p0, &mut events);
+    assert_eq!(
+        active_plane(&state),
+        Some(next_id),
+        "CR 701.31c: a direct (SBA / walk-away) planeswalk is never replaced"
+    );
+    assert_eq!(
+        count_chaos_ensued(&events),
+        0,
+        "no chaos ensues for a non-planar-die planeswalk"
+    );
+}
+
+/// C (card-instruction planeswalk NOT replaced): resolving `Effect::Planeswalk`
+/// with a real (non-sentinel) source is a CR 701.31c ability-instructed
+/// planeswalk, not the planar-die one — it rotates and never triggers chaos.
+#[test]
+fn fixed_point_does_not_replace_card_instruction_planeswalk() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![chaos_trigger()], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (_active_id, deck) = setup_planechase(
+        &mut state,
+        p0,
+        ("Chaos Plane", &plane_a),
+        &[("Plane B", &plane_b)],
+    );
+    let next_id = deck[0];
+    let card_source = create_planar_object(&mut state, "Some Card", &plane_b, p0);
+    install_fixed_point(&mut state, card_source, p0);
+
+    assert!(
+        !super::planechase::is_planar_ability_source(card_source),
+        "a real object id is not a planar-ability sentinel"
+    );
+    let ability = ResolvedAbility::new(Effect::Planeswalk, vec![], card_source, p0);
+    let mut events = Vec::new();
+    crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("card-instruction planeswalk resolves");
+    assert_eq!(
+        active_plane(&state),
+        Some(next_id),
+        "CR 701.31c: an ability-instructed planeswalk is never replaced"
+    );
+    assert_eq!(
+        count_chaos_ensued(&events),
+        0,
+        "no chaos for a card planeswalk"
+    );
+}
+
+/// D (expiry): the shield carries `UntilPlayerNextTurn { controller }`, so the
+/// shared untap-step prune drops it at the controller's next turn.
+#[test]
+fn fixed_point_shield_expires_at_controller_next_turn() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let plane = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (_active_id, _) = setup_planechase(&mut state, p0, ("Plane", &plane), &[]);
+    let fixed_point = create_planar_object(&mut state, "Fixed Point in Time", &plane, p0);
+    install_fixed_point(&mut state, fixed_point, p0);
+    assert_eq!(
+        state.pending_damage_replacements[0].expiry,
+        Some(RestrictionExpiry::UntilPlayerNextTurn { player: p0 }),
+    );
+
+    // CR 514.2 / CR 500.7: the controller's untap step prunes "until your next
+    // turn" pending replacements.
+    let mut events = Vec::new();
+    crate::game::turns::execute_untap_with_choices(&mut state, &mut events, &Default::default());
+    assert!(
+        state.pending_damage_replacements.is_empty(),
+        "CR 514.2: the shield is dropped at the controller's next untap step"
+    );
+}
+
+/// E (`Effect::ChaosEnsues` leaf): the standalone chaos-ensues effect resolver
+/// emits `ChaosEnsued` for the active plane and its chaos trigger fires — the
+/// shared leaf usable by any resolving ability, not just the replacement.
+#[test]
+fn chaos_ensues_effect_leaf_fires_plane_chaos_trigger() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let plane = synthesized_planar_face(CoreType::Plane, vec![chaos_trigger()], vec![]);
+    let (plane_id, _) = setup_planechase(&mut state, p0, ("Chaos Plane", &plane), &[]);
+
+    let stack_before = state.stack.len();
+    let ability = ResolvedAbility::new(Effect::ChaosEnsues, vec![], plane_id, p0);
+    let mut events = Vec::new();
+    crate::game::effects::chaos_ensues::resolve(&mut state, &ability, &mut events)
+        .expect("ChaosEnsues effect resolves");
+    assert_eq!(count_chaos_ensued(&events), 1, "ChaosEnsued emitted once");
+    process_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        stack_before + 1,
+        "the active plane's chaos trigger must reach the stack"
+    );
+}
+
+/// F (continuous, not one-shot): two planar-die planeswalks within the window
+/// each fire chaos and the shield is NOT consumed after the first (CR 614.5
+/// only blocks re-application within a single event, not across events).
+#[test]
+fn fixed_point_shield_is_continuous_not_one_shot() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let plane = synthesized_planar_face(CoreType::Plane, vec![chaos_trigger()], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (active_id, _) = setup_planechase(
+        &mut state,
+        p0,
+        ("Chaos Plane", &plane),
+        &[("Plane B", &plane_b)],
+    );
+    let fixed_point = create_planar_object(&mut state, "Fixed Point in Time", &plane_b, p0);
+    install_fixed_point(&mut state, fixed_point, p0);
+
+    let sentinel = planar_ability_sentinel_id(p0);
+    let ability = ResolvedAbility::new(Effect::Planeswalk, vec![], sentinel, p0);
+
+    // First planar-die planeswalk.
+    let mut events1 = Vec::new();
+    crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events1, 0).unwrap();
+    assert_eq!(
+        count_chaos_ensued(&events1),
+        1,
+        "first planeswalk → chaos once"
+    );
+    assert!(
+        !state.pending_damage_replacements.is_empty()
+            && !state.pending_damage_replacements[0].is_consumed,
+        "CR 614.5: the shield is not consumed after firing once"
+    );
+
+    // Second planar-die planeswalk within the same window.
+    let mut events2 = Vec::new();
+    crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events2, 0).unwrap();
+    assert_eq!(
+        count_chaos_ensued(&events2),
+        1,
+        "second planeswalk → chaos again (continuous)"
+    );
+    // The plane never rotated across both replaced planeswalks.
+    assert_eq!(
+        active_plane(&state),
+        Some(active_id),
+        "CR 614.6: neither planeswalk happened — no rotation"
+    );
 }
