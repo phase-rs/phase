@@ -13349,7 +13349,7 @@ fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
     assert!(filter
         .properties
         .iter()
-        .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
+        .any(|prop| matches!(prop, FilterProp::AttackedThisTurn { .. })));
     assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         r.statics[0].active_zones,

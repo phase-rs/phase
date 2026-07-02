@@ -1745,7 +1745,15 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         } => costs
             .iter()
             .enumerate()
-            .filter(|(_, cost)| cost.is_payable(state, *player, pending_cast.object_id))
+            .filter(|(_, cost)| {
+                casting::can_pay_ability_cost_now(
+                    state,
+                    *player,
+                    pending_cast.object_id,
+                    cost,
+                    pending_cast.ability.context.ability_tag,
+                )
+            })
             .map(|(i, _)| {
                 candidate(
                     GameAction::ChooseActivationCostBranch { index: i },

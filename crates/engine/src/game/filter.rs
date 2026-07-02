@@ -208,7 +208,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -425,7 +425,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -2946,7 +2946,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // CR 122.6: A spell on the stack hasn't received counters as a
@@ -3861,8 +3861,21 @@ fn matches_filter_prop(
                     && to.is_none_or(|zone| record.to_zone == zone)
             })
         }
-        // CR 508.1a: Creature was declared as an attacker this turn.
-        FilterProp::AttackedThisTurn => state.creatures_attacked_this_turn.contains(&object_id),
+        // CR 508.1a: Creature was declared as an attacker this turn (board-wide,
+        // any defender). CR 508.6 + CR 508.1b: when `defender` is `Some`, scope to
+        // creatures that attacked the referenced player, reading the per-defender
+        // `creature_attacked_defenders_this_turn` ledger. Mirrors the
+        // `Attacking { defender }` arm above (live-combat analog).
+        FilterProp::AttackedThisTurn { defender } => match defender {
+            None => state.creatures_attacked_this_turn.contains(&object_id),
+            Some(_) => state
+                .creature_attacked_defenders_this_turn
+                .get(&object_id)
+                .is_some_and(|defs| {
+                    defs.iter()
+                        .any(|&d| attacking_defender_matches(state, source, d, defender.as_ref()))
+                }),
+        },
         // CR 509.1a: Creature was declared as a blocker this turn.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&object_id),
         // CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
@@ -4306,7 +4319,12 @@ fn zone_change_record_matches_property(
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        | FilterProp::AttackedThisTurn
+        // CR 400.7: a permanent that changes zones becomes a new object with no
+        // memory of its previous existence, so the zone-change snapshot captures
+        // no attack history. Intentionally fail-closed for both `None` (board-wide)
+        // and `Some` (defender-scoped), matching the `Attacking { defender }`
+        // look-back behavior.
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
@@ -7307,7 +7325,8 @@ mod tests {
         state.creatures_attacked_this_turn.insert(attacker);
 
         let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
@@ -7323,9 +7342,74 @@ mod tests {
         assert!(state.combat.is_none());
 
         let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
+    }
+
+    /// CR 508.6 + CR 508.1b: Jabari's Influence target legality — "creature that
+    /// attacked you this turn" scopes to the caster (P0) as defending player. In
+    /// a 3-player game, a creature that attacked ONLY another player (P2) must NOT
+    /// be a legal target even though it appears in the board-wide
+    /// `creatures_attacked_this_turn` set. Revert-failing on the `Some(defender)`
+    /// eval leg: without the per-defender ledger check, `matcher_b` would fall
+    /// through to the board-wide `contains` and (wrongly) match.
+    #[test]
+    fn attacked_you_this_turn_scopes_to_caster_defender() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+
+        // Source (Jabari's Influence spell/permanent) controlled by the caster P0.
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        // A attacked the caster (P0); B attacked only P2.
+        let attacked_you = add_creature(&mut state, PlayerId(1), "AttackedYou");
+        let attacked_other = add_creature(&mut state, PlayerId(1), "AttackedOther");
+
+        // Board-wide set: both declared as attackers this turn.
+        state.creatures_attacked_this_turn.insert(attacked_you);
+        state.creatures_attacked_this_turn.insert(attacked_other);
+        // Per-defender ledger: A -> {P0}, B -> {P2}.
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacked_you)
+            .or_default()
+            .insert(PlayerId(0));
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacked_other)
+            .or_default()
+            .insert(PlayerId(2));
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+        ]));
+
+        // Source controlled by P0, so `You` resolves to P0.
+        assert!(
+            matches_target_filter_controlled(&state, attacked_you, &filter, source, PlayerId(0)),
+            "creature that attacked the caster must be a legal target"
+        );
+        assert!(
+            !matches_target_filter_controlled(&state, attacked_other, &filter, source, PlayerId(0)),
+            "creature that attacked only another player must NOT be a legal target"
+        );
+
+        // Board-wide (None) still matches both — confirms the parameterization
+        // only narrows the Some leg and the None regression path is intact.
+        let board_wide = TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+        );
+        assert!(matches_target_filter_controlled(
+            &state,
+            attacked_other,
+            &board_wide,
+            source,
+            PlayerId(0)
+        ));
     }
 
     #[test]
@@ -7372,7 +7456,7 @@ mod tests {
 
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }]));
 
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
@@ -7416,7 +7500,7 @@ mod tests {
 
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             },
             FilterProp::Not {
                 prop: Box::new(FilterProp::EnteredThisTurn),

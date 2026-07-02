@@ -5762,7 +5762,7 @@ fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition
     let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
     alt((
         value(
-            make_source_history_absence(FilterProp::AttackedThisTurn),
+            make_source_history_absence(FilterProp::AttackedThisTurn { defender: None }),
             tag("attack this turn"),
         ),
         value(
@@ -5790,33 +5790,54 @@ fn make_source_history_absence(prop: FilterProp) -> StaticCondition {
     }
 }
 
-/// Parse "no [type] are on the battlefield" → ObjectCount EQ 0.
+/// Parse the global battlefield-absence condition in both surface forms →
+/// `ObjectCount(<filter>) == 0`:
+///   - subject-first "no [type] are on the battlefield"
+///     (Call to the Grave, Pestilence, Pyrohemia, Last Laugh: "if no
+///     creatures are on the battlefield, sacrifice ~"), and
+///   - existential there-form "there are no [type] on the battlefield"
+///     (Sarcomancy: "if there are no Zombies on the battlefield"; Mana
+///     Vortex: "there are no lands"; Spirit Mirror: "there are no Reflection
+///     tokens"; Drop of Honey / Porphyry Nodes / Task Mage Assembly: "when
+///     there are no creatures on the battlefield").
 ///
-/// CR 603.8: State-trigger conditions for global absence checks.
-/// Handles "no creatures are on the battlefield", "no nonland permanents are on the battlefield".
+/// CR 603.4 (intervening-`if`) + CR 110.1 / CR 403.1: "there are no X on the
+/// battlefield" == count(X on the battlefield) == 0 — the same predicate the
+/// subject-first form already lowered to, so both forms share one
+/// `QuantityComparison(ObjectCount == 0)` output and no controller restriction
+/// ("no creatures" / "no Zombies" / "no lands" counts *any* player's matching
+/// permanents). The `<type>` reuses `parse_type_phrase`, so a subtype
+/// ("Zombies"), a card type ("lands"), or a token phrase ("Reflection tokens")
+/// scopes the emptiness check exactly, and the trailing anchor is a bounded
+/// `tag` so the recognizer never runs into the effect clause.
 fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("no ").parse(input)?;
-    if let Some(are_pos) = rest.find(" are on the battlefield") {
-        let type_text = &rest[..are_pos];
-        let (filter, _) = parse_type_phrase(type_text);
-        if !matches!(filter, TargetFilter::Any) {
-            let consumed = "no ".len() + are_pos + " are on the battlefield".len();
-            return Ok((
-                &input[consumed..],
-                StaticCondition::QuantityComparison {
-                    lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter },
-                    },
-                    comparator: Comparator::EQ,
-                    rhs: QuantityExpr::Fixed { value: 0 },
-                },
-            ));
-        }
+    // Prefix axis selects the surface form and, with it, the trailing anchor:
+    // the there-form places "on the battlefield" directly after the noun
+    // phrase, while the subject-first form places the copula "are" first.
+    let (rest, anchor) = alt((
+        value(" on the battlefield", tag("there are no ")),
+        value(" are on the battlefield", tag("no ")),
+    ))
+    .parse(input)?;
+    let (rest, type_text) = take_until(anchor).parse(rest)?;
+    let (rest, _) = tag(anchor).parse(rest)?;
+    let (filter, _) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
 }
 
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
@@ -12175,7 +12196,7 @@ mod tests {
     fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
         let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
         assert_eq!(rest, "");
-        assert_source_history_absence(c, FilterProp::AttackedThisTurn);
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn { defender: None });
     }
 
     #[test]
@@ -12234,6 +12255,117 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
         }
+    }
+
+    /// CR 603.4 (intervening-`if`) + CR 110.1: existential there-form
+    /// "there are no [type] on the battlefield" lowers to the SAME
+    /// `ObjectCount == 0` predicate as the subject-first form above. Drop of
+    /// Honey / Porphyry Nodes / Task Mage Assembly: "when there are no
+    /// creatures on the battlefield, sacrifice ~". Previously the intervening-
+    /// `if` was dropped (trigger `condition: null`).
+    #[test]
+    fn test_there_are_no_creatures_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no creatures on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected creature filter, got {:?}",
+                        tf.type_filters
+                    );
+                    // No controller restriction — any player's creatures count.
+                    assert_eq!(tf.controller, None);
+                }
+                other => panic!("expected typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount == 0, got {other:?}"),
+        }
+    }
+
+    /// SEMANTIC CORRECTNESS: the there-form scopes to exactly the stated
+    /// objects. "there are no Zombies on the battlefield" (Sarcomancy) counts
+    /// only the Zombie subtype, NOT all creatures.
+    #[test]
+    fn test_there_are_no_zombies_on_battlefield_subtype_scoped() {
+        let (rest, c) = parse_inner_condition("there are no Zombies on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } = c
+        else {
+            panic!("expected ObjectCount == 0 over a typed filter, got {c:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Zombie")),
+            "expected Zombie subtype filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters.contains(&TypeFilter::Creature),
+            "must not silently widen Zombies to all creatures: {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// there-form with a card type: "there are no lands on the battlefield"
+    /// (Mana Vortex) keeps the land restriction.
+    #[test]
+    fn test_there_are_no_lands_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no lands on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                },
+            ..
+        } = c
+        else {
+            panic!("expected ObjectCount over a typed land filter, got {c:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Land),
+            "expected land filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// GUARD (no over-match): the recognizer requires the bounded battlefield
+    /// anchor, so a "there are no <type>" phrase without "on the battlefield"
+    /// (or a bare "no <type>" without "are on the battlefield") is left for
+    /// other combinators and never runs into the following clause.
+    #[test]
+    fn test_no_on_battlefield_requires_anchor() {
+        assert!(
+            parse_no_on_battlefield("there are no cards in your hand").is_err(),
+            "there-form must require the 'on the battlefield' anchor"
+        );
+        assert!(
+            parse_no_on_battlefield("no opponent controls a creature").is_err(),
+            "'no opponent controls ...' is not a battlefield-emptiness gate"
+        );
     }
 
     // -- "a nonland permanent left the battlefield this turn" --

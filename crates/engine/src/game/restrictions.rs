@@ -571,6 +571,9 @@ fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap | AbilityCost::Untap => true,
         AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap_or_untap),
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty() && costs.iter().all(cost_contains_tap_or_untap)
+        }
         _ => false,
     }
 }

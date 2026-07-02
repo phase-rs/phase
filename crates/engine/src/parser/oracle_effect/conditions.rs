@@ -1384,7 +1384,8 @@ fn parse_target_attacked_this_turn_condition(
         maybe_negate(
             AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
                 ),
                 use_lki: false,
             },
@@ -6121,7 +6122,9 @@ mod tests {
                     "filter must be a creature TypedFilter, got {tf:?}"
                 );
                 assert!(
-                    tf.properties.contains(&FilterProp::AttackedThisTurn),
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::AttackedThisTurn { .. })),
                     "filter must carry AttackedThisTurn, got {tf:?}"
                 );
             }

@@ -640,7 +640,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -1560,7 +1560,7 @@ mod tests {
             }
         ));
         assert!(!filterprop_reads_only_candidate_fp(
-            &FilterProp::AttackedThisTurn
+            &FilterProp::AttackedThisTurn { defender: None }
         ));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::WasKicked));
         assert!(!filterprop_reads_only_candidate_fp(
@@ -1570,10 +1570,13 @@ mod tests {
             prop: Box::new(FilterProp::Tapped)
         }));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::Not {
-            prop: Box::new(FilterProp::AttackedThisTurn)
+            prop: Box::new(FilterProp::AttackedThisTurn { defender: None })
         }));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::AnyOf {
-            props: vec![FilterProp::Tapped, FilterProp::AttackedThisTurn]
+            props: vec![
+                FilterProp::Tapped,
+                FilterProp::AttackedThisTurn { defender: None }
+            ]
         }));
         // Counters with a dynamic count ⇒ POISON; with a Fixed count ⇒ SAFE.
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::Counters {
@@ -1618,7 +1621,8 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]));
         assert!(target_filter_all_props_safe(&safe));
         let poison = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
         assert!(!target_filter_all_props_safe(&poison));
 

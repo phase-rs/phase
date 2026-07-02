@@ -2821,6 +2821,138 @@ fn composite_mana_tap_activation_excludes_source_from_auto_tap() {
 }
 
 #[test]
+fn handle_activate_rejects_tapped_one_of_tap_branches() {
+    use crate::parser::oracle_cost::parse_oracle_cost;
+    use crate::types::mana::{ManaType, ManaUnit};
+
+    let mut state = setup_game_at_main_phase();
+    let cost = parse_oracle_cost("{3}, {T} or {R}, {T}");
+    let source = create_colorless_tap_activated_source(
+        &mut state,
+        PlayerId(0),
+        cost,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Red, source, false, vec![]));
+    state.objects.get_mut(&source).unwrap().tapped = true;
+
+    assert!(!can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+    let mut events = Vec::new();
+    let result = handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events);
+
+    assert!(
+        result.is_err(),
+        "direct ActivateAbility must reject tapped OneOf {{T}} branches"
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
+fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available() {
+    use crate::ai_support::legal_actions;
+    use crate::types::ability::{AbilityTag, CardSelectionMode, PlayerFilter};
+
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(98),
+        PlayerId(0),
+        "Grizzly Bears".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+    }
+    let equip_cost = AbilityCost::EffectCost {
+        effect: Box::new(Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PayCost {
+                        cost: AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                generic: 3,
+                                shards: vec![],
+                            },
+                        },
+                        scale: None,
+                        payer: TargetFilter::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                        selection: CardSelectionMode::Chosen,
+                        unless_filter: None,
+                        filter: None,
+                    },
+                ),
+            ],
+        }),
+    };
+    let source = create_colorless_tap_activated_source(
+        &mut state,
+        PlayerId(0),
+        equip_cost,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    );
+    {
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        Arc::make_mut(&mut obj.abilities)[1].ability_tag = Some(AbilityTag::Equip);
+    }
+    let _hand_card = create_object(
+        &mut state,
+        CardId(99),
+        PlayerId(0),
+        "Hand Card".to_string(),
+        Zone::Hand,
+    );
+
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), source, 1),
+        "legacy EffectCost equip disjunction must be legal when discard is affordable"
+    );
+    assert!(
+        legal_actions(&state).iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 1,
+            } if *source_id == source
+        )),
+        "legal actions must offer legacy EffectCost equip when discard is affordable"
+    );
+}
+
+#[test]
 fn composite_mana_tap_sacrifice_activation_uses_alternate_mana_source() {
     let mut state = setup_game_at_main_phase();
     let source_cost = AbilityCost::Composite {
@@ -4221,6 +4353,272 @@ fn exsanguinate_three_player_controller_gains_sum_across_opponents() {
     // SUM-across-opponents: 3 + 3 = 6, NOT 3 (max/single opponent).
     // CR 608.2c: the GainLife sub-ability reads the accumulated life lost.
     outcome.assert_life_delta(PlayerId(0), 6);
+}
+
+/// Build a 3-player, post-combat-main board holding Jabari's Influence in P0's
+/// hand plus two opponent-controlled nonartifact, nonblack creatures A and B.
+/// A always attacked the caster P0; B attacked only P2 UNLESS
+/// `b_also_attacked_you` is set (the discriminator case, where B also attacked
+/// P0 so BOTH become legal targets). Returns `(state, spell, a, b)`.
+///
+/// The spell carries the REAL parsed effect AST (GainControl target with
+/// `AttackedThisTurn { Some(You) }` + the chained `PutCounter(-1/-0,
+/// ParentTarget)` sub-ability) — the exact structure the card-data pipeline
+/// produces for this line — so resolution exercises production code, not a
+/// hand-built ability.
+fn build_jabari_influence_board(
+    b_also_attacked_you: bool,
+) -> (GameState, ObjectId, ObjectId, ObjectId) {
+    use crate::types::ability::AbilityKind;
+    use crate::types::format::FormatConfig;
+    use crate::types::zones::Zone;
+
+    // Jabari has "Cast this spell only after combat.", so position P0 at its
+    // POST-COMBAT main phase (CR 508 combat has passed).
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+    state.turn_number = 2;
+    state.phase = Phase::PostCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    // Two opponent-controlled creatures. Give them an explicit nonblack color
+    // (Red) so the nonblack restriction is exercised by a colored creature, not
+    // merely satisfied by colorlessness.
+    let attacked_you = create_object(
+        &mut state,
+        CardId(970),
+        PlayerId(1),
+        "Attacked You (A)".to_string(),
+        Zone::Battlefield,
+    );
+    let attacked_other = create_object(
+        &mut state,
+        CardId(971),
+        PlayerId(1),
+        "Attacked Other (B)".to_string(),
+        Zone::Battlefield,
+    );
+    for &creature in &[attacked_you, attacked_other] {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = Some(3);
+        obj.base_toughness = Some(3);
+        obj.power = Some(3);
+        obj.toughness = Some(3);
+        obj.color.push(ManaColor::Red);
+    }
+
+    // Populate the "attacked this turn" ledgers by DIRECT SEED (not a real
+    // combat step). The owner's focus is the cast → resolve pipeline (target
+    // legality + ParentTarget binding + counter landing), not the combat that
+    // populated the ledger; declaring real attackers in an imperative
+    // `from_state` setup is heavy, so seed the per-defender ledger the same way
+    // the `attacked_you_this_turn_scopes_to_caster_defender` filter test does.
+    //   Board-wide set (CR 508.6): both were declared as attackers this turn.
+    state.creatures_attacked_this_turn.insert(attacked_you);
+    state.creatures_attacked_this_turn.insert(attacked_other);
+    //   Per-defender ledger: A attacked P0 (the caster); B attacked P2, and also
+    //   P0 only in the discriminator case.
+    state
+        .creature_attacked_defenders_this_turn
+        .entry(attacked_you)
+        .or_default()
+        .insert(PlayerId(0));
+    let b_defenders = state
+        .creature_attacked_defenders_this_turn
+        .entry(attacked_other)
+        .or_default();
+    b_defenders.insert(PlayerId(2));
+    if b_also_attacked_you {
+        b_defenders.insert(PlayerId(0));
+    }
+
+    let jabari_ability = parse_effect_chain(
+        "Gain control of target nonartifact, nonblack creature that attacked you this turn and put a -1/-0 counter on it.",
+        AbilityKind::Spell,
+    );
+    let spell = create_object(
+        &mut state,
+        CardId(972),
+        PlayerId(0),
+        "Jabari's Influence".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        // Real card is {2}{U}; fund the pool below to match.
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        };
+        Arc::make_mut(&mut obj.abilities).push(jabari_ability);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    (state, spell, attacked_you, attacked_other)
+}
+
+/// Jabari's Influence — "Gain control of target nonartifact, nonblack creature
+/// that attacked you this turn and put a -1/-0 counter on it." — driven END TO
+/// END through the real cast → target-selection → resolution pipeline in a
+/// 3-player game where the two candidate creatures attacked DIFFERENT defenders.
+///
+/// This is the runtime companion to the parser SHAPE test
+/// `jabari_influence_scopes_target_and_chains_minus_one_zero_counter`
+/// (oracle_effect/tests.rs) and the filter-matcher test
+/// `attacked_you_this_turn_scopes_to_caster_defender` (filter.rs). Those two
+/// prove the AST shape and the `matches_target_filter` leg respectively; NEITHER
+/// exercises the actual cast/target-prompt/parent-target/counter-chaining path.
+/// A regression in the target prompt's defender scoping, the `ParentTarget`
+/// ("it") binding, or the `PutCounter` chaining would still pass both — so this
+/// test drives the whole chain through `apply()`.
+///
+/// Revert-failing on BOTH coupled defects:
+///   - CR 508.6 + CR 601.2c: creature B attacked ONLY P2, so it must NOT be a
+///     legal target of a spell P0 casts. With B illegal, exactly one legal
+///     target remains, so the engine auto-selects it (CR 601.2c: no player
+///     choice when a single legal target exists) and the committed spell targets
+///     A alone. If the `Some(defender)` eval regressed to a board-wide
+///     `contains`, B would also be legal — the auto-select would instead surface
+///     a `TargetSelection` window with BOTH creatures, so the committed-target
+///     assertion (`== [A]`) fails. The `b_also_attacked_you` discriminator below
+///     proves that two-legal-target case really does open the window here (so
+///     the primary case's window-skip is caused by defender scoping, not by an
+///     unrelated auto-skip — the negative claim is not vacuous, foot-gun #6).
+///   - CR 110.2 + CR 613.1b + CR 122.1a: after resolution, control of A must
+///     flip to P0 AND a -1/-0 counter must land on that SAME creature A (the
+///     chained `PutCounter { target: ParentTarget }`). If the counter chaining
+///     or the `ParentTarget` binding regressed, control would still change but
+///     the counter would be absent / on the wrong object.
+#[test]
+fn jabari_influence_casts_scopes_defender_target_and_lands_chained_counter() {
+    use crate::types::counter::CounterType;
+
+    let (mut state, spell, attacked_you, attacked_other) = build_jabari_influence_board(false);
+
+    // Cast through the pipeline; the pool covers the cost. With B illegal (it
+    // attacked only P2), exactly one legal target remains, so the engine
+    // auto-selects A (CR 601.2c) and commits the spell straight to the stack —
+    // no `TargetSelection` window opens.
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(972),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Jabari's Influence must be castable at post-combat main");
+
+    // DEFENDER-SCOPED TARGET LEGALITY (CR 508.6 + CR 601.2c): the committed
+    // spell targets A alone — B was filtered out of the legal set entirely.
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => {
+            let targets = &state
+                .stack
+                .last()
+                .expect("spell must be on the stack")
+                .ability()
+                .expect("stack entry is a spell with an ability")
+                .targets;
+            assert_eq!(
+                targets,
+                &vec![TargetRef::Object(attacked_you)],
+                "the auto-selected target must be A (attacked P0); B (attacked only \
+                 P2) must never be legal, got {targets:?}"
+            );
+        }
+        other => panic!("expected auto-select to commit to the stack (Priority), got {other:?}"),
+    }
+
+    // Drive resolution to stack-empty.
+    let mut guard = 0;
+    while !state.stack.is_empty() {
+        guard += 1;
+        assert!(
+            guard < 20,
+            "Jabari's Influence failed to resolve off the stack"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("passing priority must resolve the spell");
+    }
+
+    // CR 110.2 + CR 613.1b (Layer 2 control change): control of A flips to P0.
+    assert_eq!(
+        state.objects[&attacked_you].controller,
+        PlayerId(0),
+        "GainControl must transfer control of the targeted creature to the caster"
+    );
+    // B was never targeted — its control is unchanged.
+    assert_eq!(
+        state.objects[&attacked_other].controller,
+        PlayerId(1),
+        "the non-targeted creature's control must be untouched"
+    );
+
+    // CR 122.1a: the chained -1/-0 counter lands on the SAME creature (A) via
+    // the `PutCounter { target: ParentTarget }` sub-ability. Absent/misbound
+    // chaining would leave A with control changed but zero counters.
+    assert_eq!(
+        state.objects[&attacked_you]
+            .counters
+            .get(&CounterType::PowerToughness {
+                power: -1,
+                toughness: 0,
+            })
+            .copied(),
+        Some(1),
+        "the chained -1/-0 counter must land on the gained-control creature (ParentTarget)"
+    );
+    // Sharpen the parent-target binding: the counter is NOT on B.
+    assert!(
+        state.objects[&attacked_other].counters.is_empty(),
+        "the counter must not land on the non-targeted creature"
+    );
+
+    // ── Non-vacuous discriminator (card-test foot-gun #6) ──────────────────
+    // The SAME board with B ALSO having attacked P0 makes BOTH creatures legal
+    // targets, so the cast MUST now surface a real `TargetSelection` window
+    // whose `legal_targets` contains BOTH A and B. This proves the primary
+    // case's window-skip was caused by defender scoping filtering B out, not by
+    // some unrelated auto-resolution that would mask a board-wide regression.
+    let (mut state2, spell2, a2, b2) = build_jabari_influence_board(true);
+    apply_as_current(
+        &mut state2,
+        GameAction::CastSpell {
+            object_id: spell2,
+            card_id: CardId(972),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Jabari's Influence must be castable in the discriminator setup");
+    match &state2.waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            assert_eq!(target_slots.len(), 1, "GainControl has a single target slot");
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(a2))
+                    && target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Object(b2)),
+                "when BOTH creatures attacked P0, both must be legal targets, got {:?}",
+                target_slots[0].legal_targets
+            );
+        }
+        other => panic!(
+            "with two defender-matching creatures the engine must open a target window, got {other:?}"
+        ),
+    }
 }
 
 /// Passing priority during `ChooseXValue` is illegal — caster must commit

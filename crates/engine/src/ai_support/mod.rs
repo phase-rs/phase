@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::game::casting;
 use crate::game::layers;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
@@ -231,9 +232,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 pending_cast,
             },
             GameAction::ChooseActivationCostBranch { index },
-        ) => costs
-            .get(*index)
-            .is_none_or(|cost| !cost.is_payable(state, *player, pending_cast.object_id)),
+        ) => costs.get(*index).is_none_or(|cost| {
+            !casting::can_pay_ability_cost_now(
+                state,
+                *player,
+                pending_cast.object_id,
+                cost,
+                pending_cast.ability.context.ability_tag,
+            )
+        }),
         (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },

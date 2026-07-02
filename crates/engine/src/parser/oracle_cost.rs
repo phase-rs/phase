@@ -2123,6 +2123,30 @@ mod tests {
     }
 
     #[test]
+    fn equip_pay_mana_or_discard_parses_as_one_of() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+
+        assert_eq!(
+            parse_oracle_cost("Pay {3} or discard a card"),
+            AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 3,
+                            shards: vec![],
+                        },
+                    },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                ],
+            }
+        );
+    }
+    #[test]
     fn cost_pay_life_equal_to_commanders_color_identity() {
         // CR 903.4: War Room — "Pay life equal to the number of colors in your
         // commanders' color identity".
