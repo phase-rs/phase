@@ -1888,44 +1888,33 @@ pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticC
     })
 }
 
-/// True when `if_space_pos` is the space before "if" in an "as if" phrase.
-fn is_as_if_boundary(lower: &str, if_space_pos: usize) -> bool {
-    if_space_pos >= 2 && lower[..if_space_pos].ends_with("as")
+/// True when `if_offset` points at an `if …` gate immediately preceded by `as `
+/// (the `as if` phrase).
+fn is_as_if_gate_marker(input: &str, if_offset: usize) -> bool {
+    if_offset >= 3
+        && tag::<_, _, OracleError<'_>>("as ")
+            .parse(&input[if_offset - 3..if_offset])
+            .is_ok()
 }
 
 /// Split a trailing `" as long as <condition>"` rider, anchored on the last
 /// occurrence (restriction gates are terminal).
 fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
-    const MARKER: &str = " as long as ";
-    let pos = lower.rfind(MARKER)?;
-    Some(lower[pos + MARKER.len()..].trim_start())
+    let (_, _, tail) = nom_primitives::scan_last_at_word_boundaries_with_offset(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as long as ").parse(i)
+    })?;
+    Some(tail.trim_start())
 }
 
-/// Split a trailing `" if <condition>"` rider, skipping `as if` false positives.
+/// Split a trailing `" if <condition>"` rider, skipping `as if` false positives
+/// via word-boundary scanning with a nom `as ` prefix guard.
 fn split_trailing_if_condition(lower: &str) -> Option<&str> {
-    const MARKER: &str = " if ";
-    let mut end = lower.len();
-    while let Some(pos) = lower[..end].rfind(MARKER) {
-        if is_as_if_boundary(lower, pos) {
-            end = pos;
-            continue;
-        }
-        return Some(lower[pos + MARKER.len()..].trim_start());
-    }
-    None
-}
-
-fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
-    const MARKER: &str = " if ";
-    let mut end = tp.lower.len();
-    while let Some(pos) = tp.lower[..end].rfind(MARKER) {
-        if is_as_if_boundary(tp.lower, pos) {
-            end = pos;
-            continue;
-        }
-        return Some(&tp.original[pos + MARKER.len()..]);
-    }
-    None
+    let (_, _, tail) = nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+        lower,
+        |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        |if_offset| !is_as_if_gate_marker(lower, if_offset),
+    )?;
+    Some(tail.trim_start())
 }
 
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
@@ -1935,20 +1924,21 @@ fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
 /// `as long as` form is tried first so a card carrying both keywords anchors on
 /// the continuous form; a bare `if` gate uses the last valid trailing "if"
 /// (not an "as if" substring). As with the `as long as` peel, an unrecognized
-/// leaves the line unsupported rather than enforcing the restriction
-/// unconditionally.
+/// condition downstream leaves the line unsupported rather than enforcing the
+/// restriction unconditionally.
 pub(crate) fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
     split_trailing_as_long_as(lower).or_else(|| split_trailing_if_condition(lower))
 }
 
-/// CR 508.1 / CR 509.1c: Parse the trailing " if [condition]" clause of a
+/// CR 508.1c / CR 509.1b: Parse the trailing " if [condition]" clause of a
 /// combat-restriction static ("~ can't attack if defending player controls an
-/// untapped land"). Mirrors `parse_unless_static_condition`; delegates the
-/// condition body to `parse_static_condition` → `parse_inner_condition` (the
-/// single authority for game-state conditions).
+/// untapped land"; "~ can't block if you control an untapped land"). Mirrors
+/// `parse_unless_static_condition`; delegates the condition body to
+/// `parse_static_condition` → `parse_inner_condition` (the single authority
+/// for game-state conditions).
 pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
-    let condition_original = split_trailing_if_condition_tp(tp)?;
-    parse_static_condition(condition_original.trim_end_matches('.'))
+    let condition_text = split_trailing_if_condition(tp.lower)?;
+    parse_static_condition(condition_text.trim_end_matches('.'))
 }
 
 /// Result of the combat-tax nom parse.
