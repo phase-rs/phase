@@ -12,10 +12,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Effect, FilterProp, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -23,6 +23,7 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1141,6 +1142,121 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
     if let Some(sub) = def.sub_ability.as_mut() {
         retarget_creature_type_choice_dig_filters_in_ability(sub);
+    }
+}
+
+
+/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
+/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
+/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
+fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        reconcile_host_bound_phase_outs_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            reconcile_host_bound_phase_outs_in_ability(execute);
+        }
+    }
+}
+
+fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
+    if matches!(*def.effect, Effect::PhaseOut { .. })
+        && def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub))
+    {
+        upgrade_host_bound_phase_out_at_head(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        reconcile_host_bound_phase_outs_in_ability(sub);
+    }
+}
+
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
+    if host_bound_phase_in_tap_rider(&def.effect) {
+        return true;
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub))
+}
+
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
+    let Effect::PhaseOut { target } = *def.effect.clone() else {
+        return;
+    };
+
+    // Strip the tap-on-phase-in rider from the existing chain tail.
+    let mut tail = def.sub_ability.take();
+    while let Some(mut sub) = tail {
+        if host_bound_phase_in_tap_rider(&sub.effect) {
+            tail = sub.sub_ability.take();
+            break;
+        }
+        tail = sub.sub_ability.take();
+    }
+
+    let cant_phase_in = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }])],
+        duration: Some(Duration::UntilHostLeavesPlay),
+        target: Some(TargetFilter::ParentTarget),
+    };
+
+    let mut return_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseIn {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )));
+
+    let mut delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            effect: Box::new(return_ability),
+            uses_tracked_set: false,
+        },
+    );
+    delayed.sub_ability = tail;
+
+    let mut lock = AbilityDefinition::new(AbilityKind::Spell, cant_phase_in);
+    lock.sub_ability = Some(Box::new(delayed));
+
+    *def.effect = Effect::PhaseOut { target };
+    def.sub_ability = Some(Box::new(lock));
+}
+
+fn host_bound_phase_in_tap_rider(effect: &Effect) -> bool {
+    match effect {
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => true,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            host_bound_phase_in_tap_rider(&inner.effect)
+                || inner
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| host_bound_phase_in_tap_rider(&sub.effect))
+        }
+        _ => false,
     }
 }
 
@@ -4072,6 +4188,7 @@ pub(crate) fn parse_oracle_ir(
 
     reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
+    reconcile_host_bound_phase_outs(&mut result);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

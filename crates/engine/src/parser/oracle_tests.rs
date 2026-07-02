@@ -17227,3 +17227,91 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
         } if name == "fellowship"
     ));
 }
+#[test]
+fn oubliette_host_bound_parse_structure() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        DelayedTriggerCondition, Duration, Effect, EffectScope, TapStateChange, TargetFilter,
+    };
+    use crate::types::statics::StaticMode;
+
+    let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
+    let parsed = parse_oracle_text(text, "Oubliette", &[], &["Enchantment".to_string()], &[]);
+
+    assert_eq!(parsed.triggers.len(), 1);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("Oubliette ETB trigger must have execute");
+
+    assert!(
+        matches!(
+            *execute.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(_),
+            }
+        ),
+        "expected PhaseOut targeting a creature, got {:?}",
+        execute.effect
+    );
+
+    let lock = execute
+        .sub_ability
+        .as_ref()
+        .expect("PhaseOut must chain to CantPhaseIn lock");
+    match lock.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } => {
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(static_abilities[0].mode, StaticMode::CantPhaseIn);
+            assert_eq!(duration.as_ref(), Some(&Duration::UntilHostLeavesPlay));
+            assert_eq!(target.as_ref(), Some(&TargetFilter::ParentTarget));
+        }
+        other => panic!("expected CantPhaseIn GenericEffect, got {other:?}"),
+    }
+
+    let delayed = lock
+        .sub_ability
+        .as_ref()
+        .expect("CantPhaseIn lock must chain to host-leaves delayed trigger");
+    match delayed.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition,
+            effect,
+            uses_tracked_set: false,
+            ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::SelfRef,
+                }
+            );
+            match effect.effect.as_ref() {
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                } => {
+                    let tap = effect
+                        .sub_ability
+                        .as_ref()
+                        .expect("PhaseIn must tap as it phases in");
+                    assert!(matches!(
+                        tap.effect.as_ref(),
+                        Effect::SetTapState {
+                            target: TargetFilter::ParentTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        }
+                    ));
+                }
+                other => panic!("expected delayed PhaseIn, got {other:?}"),
+            }
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+}
+

@@ -6048,6 +6048,19 @@ fn spell_matches_cost_filter(
         TargetFilter::Not { filter: inner } => {
             !spell_matches_cost_filter(state, caster, spell_id, inner, source_id)
         }
+        // CR 201.2: "spells with the chosen name" (Disruptor Flute).
+        TargetFilter::HasChosenName => {
+            let Some(source_obj) = state.objects.get(&source_id) else {
+                return false;
+            };
+            cant_cast_filter_matches(state, spell_obj, filter, source_obj)
+        }
+        TargetFilter::Named { .. } => {
+            let Some(source_obj) = state.objects.get(&source_id) else {
+                return false;
+            };
+            cant_cast_filter_matches(state, spell_obj, filter, source_obj)
+        }
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
         _ => false,
