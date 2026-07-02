@@ -473,6 +473,33 @@ impl<'a> PlannerServices<'a> {
         apply_candidate(state, candidate)
     }
 
+    /// Sample up to `sample_count` legal continuations, prior-ranked with
+    /// legality backfill: candidates are sorted by prior (desc), applied in
+    /// order, and illegal ones (`apply_candidate` → None) are skipped WITHOUT
+    /// consuming a sample slot, so a high-prior illegal candidate does not
+    /// starve the sample. Returns each surviving continuation paired with the
+    /// prior that produced it. `&self` — only reads via `apply_candidate`.
+    fn sample_backfilled_continuations(
+        &self,
+        state: &GameState,
+        mut priors: Vec<PolicyPrior>,
+        sample_count: usize,
+    ) -> Vec<(f64, GameState)> {
+        priors.sort_by(|a, b| {
+            b.prior
+                .partial_cmp(&a.prior)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        priors
+            .into_iter()
+            .filter_map(|prior| {
+                let sim = self.apply_candidate(state, &prior.candidate)?;
+                Some((prior.prior, sim))
+            })
+            .take(sample_count)
+            .collect()
+    }
+
     pub fn evaluate_state(&self, state: &GameState) -> f64 {
         self.evaluate_with_strategy(state)
     }
@@ -726,11 +753,14 @@ impl<'a> PlannerServices<'a> {
     }
 
     pub fn planner_evaluation(&mut self, state: &GameState) -> PlannerEvaluation {
+        // Rollout leaf skips upfront legality validation — illegal candidates are
+        // dropped at apply time by `sample_backfilled_continuations`
+        // (`apply_candidate` → None), mirroring the beam path. This removes one
+        // clone-and-apply-per-candidate probe (`state_clone_for_legality`).
         let ctx = self.build_decision_context(state);
-        let candidates = self.validate_candidates(state, ctx.candidates.clone());
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         PlannerEvaluation {
-            priors: self.policy_priors(state, &ctx, &candidates, scoring_player),
+            priors: self.policy_priors(state, &ctx, &ctx.candidates, scoring_player),
             value: self.evaluate_for_planner(state),
         }
     }
@@ -780,21 +810,15 @@ impl<'a> PlannerServices<'a> {
 
         let rollout_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         let sample_count = self.config.search.rollout_samples.max(1) as usize;
-        let mut priors = evaluation.priors;
-        priors.sort_by(|a, b| {
-            b.prior
-                .partial_cmp(&a.prior)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let candidates = priors.into_iter().take(sample_count);
+        let continuations =
+            self.sample_backfilled_continuations(state, evaluation.priors, sample_count);
+        if continuations.is_empty() {
+            return self.quiesced_leaf_eval(state);
+        }
         let is_maximizing = rollout_player == self.ai_player;
-        candidates
-            .filter_map(|prior| {
-                let sim = self.apply_candidate(state, &prior.candidate)?;
-                let continuation = self.rollout_estimate(&sim, depth - 1);
-                Some(continuation + (prior.prior * 0.05))
-            })
+        continuations
+            .into_iter()
+            .map(|(prior, sim)| self.rollout_estimate(&sim, depth - 1) + (prior * 0.05))
             .reduce(|best, value| {
                 if is_maximizing {
                     best.max(value)
@@ -842,8 +866,10 @@ impl BeamContinuationPlanner {
         let ctx = services.build_decision_context(state);
         // Skip upfront validation in beam search — invalid candidates are handled
         // by apply_candidate returning None in the loop below. This avoids cloning
-        // the state once per candidate just to test validity.
-        // (planner_evaluation retains validation for MCTS expansion correctness.)
+        // the state once per candidate just to test validity. The rollout leaf
+        // path (planner_evaluation → sample_backfilled_continuations) applies the
+        // same skip: illegal candidates are dropped when apply_candidate returns
+        // None during backfill sampling, not by an upfront clone-per-candidate probe.
         if ctx.candidates.is_empty() {
             return services.evaluate_state_quiesced(state);
         }
@@ -968,6 +994,7 @@ pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
+    use engine::game::perf_counters;
     use engine::game::zones::create_object;
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
@@ -1365,6 +1392,216 @@ mod tests {
             "Creature on stack should evaluate similarly to in hand after quiescence. \
              Stack eval: {eval_stack}, hand eval: {eval_hand}, delta: {}",
             eval_stack - eval_hand
+        );
+    }
+
+    /// Fixture: player 0 has a playable land in hand and an open land drop, so
+    /// candidate generation yields a `PlayLand` candidate. That candidate hits
+    /// `validate_candidates`' clone arm (mod.rs `_ =>`), giving these tests a
+    /// live legality-probe path to measure against.
+    fn make_state_with_land() -> GameState {
+        let mut state = make_state();
+        state.lands_played_this_turn = 0;
+        let land_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.controller = PlayerId(0);
+        state
+    }
+
+    // T1: planner_evaluation must not clone-and-apply per candidate for legality
+    // (Edit 1 removed the validate_candidates probe from the rollout leaf).
+    #[test]
+    fn planner_evaluation_records_zero_legality_clones() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+
+        // Pre-warm the candidate cache and the generation-side recorders
+        // (filter.rs:137, mana_abilities.rs:1256, costs.rs:1080) so the measured
+        // windows below capture only legality-probe clones, not one-time
+        // generation costs. build_decision_context is cached thereafter.
+        let ctx = services.build_decision_context(&state);
+
+        // Reach-guard: the fixture's PlayLand candidate drives validate_candidates
+        // into its clone arm, proving the probe path is live for this input.
+        perf_counters::reset();
+        let _validated = services.validate_candidates(&state, ctx.candidates.clone());
+        assert!(
+            perf_counters::snapshot().state_clone_for_legality >= 1,
+            "reach-guard: validate_candidates must clone at least once for the PlayLand candidate"
+        );
+
+        // Measure: planner_evaluation must not probe legality.
+        perf_counters::reset();
+        let _eval = services.planner_evaluation(&state);
+        assert_eq!(
+            perf_counters::snapshot().state_clone_for_legality,
+            0,
+            "planner_evaluation must not clone-and-apply per candidate for legality"
+        );
+    }
+
+    // T2: sample_backfilled_continuations sorts by prior (desc), skips illegal
+    // candidates WITHOUT consuming a sample slot, and pairs each survivor with
+    // its own prior.
+    #[test]
+    fn sample_backfilled_continuations_backfills_past_illegal_high_prior() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+
+        let illegal = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Utility,
+            },
+        };
+        let legal = CandidateAction {
+            action: GameAction::PassPriority,
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Pass,
+            },
+        };
+
+        // Reach-guards: prove the fixtures take the intended apply branch.
+        assert!(
+            services.apply_candidate(&state, &illegal).is_none(),
+            "reach-guard: the illegal candidate must fail apply (→ None)"
+        );
+        assert!(
+            services.apply_candidate(&state, &legal).is_some(),
+            "reach-guard: the legal candidate must apply cleanly (→ Some)"
+        );
+
+        let illegal_prior = PolicyPrior {
+            candidate: illegal.clone(),
+            prior: 0.9,
+        };
+        let legal_prior = PolicyPrior {
+            candidate: legal.clone(),
+            prior: 0.1,
+        };
+
+        // sample_count=1: the high-prior illegal candidate is backfilled past, and
+        // the single surviving slot carries the legal candidate. A take-then-filter
+        // implementation would take the illegal top, drop it, and return [].
+        let sampled = services.sample_backfilled_continuations(
+            &state,
+            vec![illegal_prior.clone(), legal_prior.clone()],
+            1,
+        );
+        assert_eq!(
+            sampled.len(),
+            1,
+            "backfill must fill the single slot with the legal candidate"
+        );
+        assert_eq!(
+            sampled[0].0, 0.1,
+            "the surviving continuation must carry the legal candidate's prior"
+        );
+
+        // Sibling: two legal candidates below the illegal top → both survive at count=2.
+        let legal_a = PolicyPrior {
+            candidate: legal.clone(),
+            prior: 0.2,
+        };
+        let legal_b = PolicyPrior {
+            candidate: legal.clone(),
+            prior: 0.15,
+        };
+        let two = services.sample_backfilled_continuations(
+            &state,
+            vec![illegal_prior.clone(), legal_a, legal_b],
+            2,
+        );
+        assert_eq!(two.len(), 2, "both legal candidates survive backfill");
+        assert!(
+            two.iter().all(|(p, _)| *p <= 0.2),
+            "only the legal priors (<= 0.2) survive; the illegal 0.9 top is dropped"
+        );
+
+        // Sibling: empty priors → empty result.
+        assert!(services
+            .sample_backfilled_continuations(&state, Vec::new(), 1)
+            .is_empty());
+
+        // Sibling: all-illegal → empty result (nothing to backfill from).
+        assert!(
+            services
+                .sample_backfilled_continuations(
+                    &state,
+                    vec![illegal_prior.clone(), illegal_prior.clone()],
+                    2,
+                )
+                .is_empty(),
+            "all-illegal priors yield no continuations"
+        );
+    }
+
+    // T3′: rollout_estimate at its production entry point must not probe legality.
+    // PINNED to a land-only empty-stack fixture: every sampled continuation leaves
+    // an empty stack, so the depth-0 leaf never enters quiesce → build_decision_context
+    // (mod.rs:584), which would otherwise fire the generation recorders.
+    #[test]
+    fn rollout_estimate_probe_free_at_production_entry() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+
+        // Pre-warm the generation recorders (cached thereafter).
+        let _ = services.build_decision_context(&state);
+
+        // Reach-guard A: the production leaf eval yields priors.
+        let eval = services.planner_evaluation(&state);
+        assert!(
+            !eval.priors.is_empty(),
+            "reach-guard A: planner_evaluation must produce priors"
+        );
+
+        // Reach-guard B: sampled continuations exist AND all leave an empty stack.
+        let sample_count = services.config.search.rollout_samples.max(1) as usize;
+        let continuations =
+            services.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        assert!(
+            !continuations.is_empty(),
+            "reach-guard B: at least one legal continuation must be sampled"
+        );
+        assert!(
+            continuations.iter().all(|(_, sim)| sim.stack.is_empty()),
+            "T3′ requires an empty-stack fixture so the depth-0 leaf never enters \
+             quiesce → build_decision_context (mod.rs:584)"
+        );
+
+        // Reach-guard C: deadline unexpired — closes the mod.rs early-return.
+        assert!(
+            !services.deadline.expired(),
+            "reach-guard C: the deadline must be live so rollout descends"
+        );
+
+        // Measure: the production rollout entry must not probe legality.
+        perf_counters::reset();
+        let v = services.rollout_estimate(&state, 1);
+        assert!(v.is_finite(), "rollout must return a finite estimate");
+        assert_eq!(
+            perf_counters::snapshot().state_clone_for_legality,
+            0,
+            "rollout_estimate must not clone-and-apply per candidate for legality"
         );
     }
 }
