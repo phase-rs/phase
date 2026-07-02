@@ -279,6 +279,7 @@ export function PlayerArea({
             zone="lands"
             side="left"
             className="justify-start px-0"
+            showCollapseControl={isOwnArea}
           />
         </>
       ),
@@ -301,6 +302,7 @@ export function PlayerArea({
           side="right"
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
+          showCollapseControl={isOwnArea}
         />
       ),
     },
@@ -411,8 +413,14 @@ export function PlayerArea({
   ) : null;
 
   const landColumnExtraOverlay = landColumnExtra ? (
+    // The stack anchors at the middle-row bottom and grows upward, so at bottom-0
+    // it rides up over the lowest lands / the collapsed land tile. Drop it into
+    // the outer column's reserved `pb-8` gutter (full, non-compact only — compact
+    // height has no bottom padding to borrow) so it clears the land row.
     <div
-      className="pointer-events-none absolute bottom-0 left-2 z-30"
+      className={`pointer-events-none absolute bottom-0 left-2 z-30 ${
+        isCompactHeight ? "" : "translate-y-8"
+      }`}
       data-testid="land-column-extra"
     >
       <div className="pointer-events-auto">{landColumnExtra}</div>

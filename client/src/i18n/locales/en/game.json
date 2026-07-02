@@ -152,6 +152,12 @@
       "sacrifice": "Hidden objects that can be sacrificed.",
       "selected": "Hidden objects currently selected for the active choice.",
       "target": "Hidden objects that are legal targets."
+    },
+    "collapse": {
+      "label": "Collapse row",
+      "auto": "Auto",
+      "on": "Always on",
+      "off": "Always off"
     }
   },
   "permanent": {

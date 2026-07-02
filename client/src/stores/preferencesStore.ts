@@ -76,6 +76,13 @@ export type BattlefieldCardDisplay = "art_crop" | "full_card";
  *  {@link useResolvedCommandZoneDisplay}, mirroring the `boardBackground`
  *  "auto-wubrg" resolve-at-use-site precedent. */
 export type CommandZoneDisplay = "compact" | "inline" | "auto";
+/** Whether a battlefield sub-row (lands / support) collapses into its summary
+ *  tile. "auto" = collapse once the row exceeds the crowding threshold (the
+ *  prior fixed behavior); "on" = always collapse into the tile; "off" = never
+ *  collapse (always show the full row). Resolved at the use-site in
+ *  {@link BattlefieldZoneOverflow}, mirroring the `commandZoneDisplay`
+ *  tri-state "auto" precedent. Lands and support each carry their own value. */
+export type ZoneCollapseMode = "auto" | "on" | "off";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
@@ -276,6 +283,8 @@ function buildDefaultPreferences(): PreferencesState {
     collapsedFolderIds: [],
     lastSeenChangelogId: undefined,
     commandZoneDisplay: "auto",
+    collapseLands: "auto",
+    collapseSupport: "auto",
     tapRotation: "mtga",
     spellPaymentMode: "auto",
     handSort: "none",
@@ -341,6 +350,10 @@ interface PreferencesState {
   lastSeenChangelogId?: number;
   /** Command-zone layout mode (inline dock / compact pile / auto-by-viewport). */
   commandZoneDisplay: CommandZoneDisplay;
+  /** Whether the lands sub-row collapses into its summary tile (auto/on/off). */
+  collapseLands: ZoneCollapseMode;
+  /** Whether the support sub-row collapses into its summary tile (auto/on/off). */
+  collapseSupport: ZoneCollapseMode;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
   /** Persisted sort order for the player's own hand (display-only — never
@@ -419,6 +432,8 @@ interface PreferencesActions {
   setCollapsedFolderIds: (ids: string[]) => void;
   setLastSeenChangelogId: (id: number) => void;
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
+  setCollapseLands: (mode: ZoneCollapseMode) => void;
+  setCollapseSupport: (mode: ZoneCollapseMode) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
   setHandSort: (sort: SortKey) => void;
@@ -568,6 +583,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCollapsedFolderIds: (ids) => set({ collapsedFolderIds: ids }),
       setLastSeenChangelogId: (id) => set({ lastSeenChangelogId: id }),
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
+      setCollapseLands: (mode) => set({ collapseLands: mode }),
+      setCollapseSupport: (mode) => set({ collapseSupport: mode }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
       setHandSort: (sort) => set({ handSort: sort }),
@@ -728,7 +745,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 19,
+      version: 20,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -765,6 +782,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          no unread dot for entries that predate this upgrade.
       // v18 → v19: Add handSort; legacy stores default to "none" (insertion
       //          order — the prior hand behavior) via the shallow merge.
+      // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
+      //          "auto" (the prior threshold-driven collapse) via the shallow
+      //          merge, so existing users see no behavior change.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

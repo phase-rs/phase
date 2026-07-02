@@ -152,6 +152,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Réduire la rangée",
+      "auto": "Auto",
+      "on": "Toujours activé",
+      "off": "Toujours désactivé"
     }
   },
   "permanent": {
