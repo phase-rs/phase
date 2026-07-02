@@ -586,6 +586,24 @@ fn dual_gated_cant_attack_and_cant_block_requires_both_gates_parsed() {
     );
 }
 
+/// CR 508.1c + CR 509.1b: Attached-subject dual-gated combat lines must not be
+/// split by the self-ref dual-gate handler (SelfRef would scope the Aura, not
+/// the enchanted creature).
+#[test]
+fn dual_gated_attached_subject_defers_from_self_ref_splitter() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't attack if there's another creature on the battlefield and can't block if an enchantment is on the battlefield.",
+    );
+    assert!(
+        !defs.iter().any(|d| {
+            matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock)
+                && d.affected == Some(TargetFilter::SelfRef)
+        }),
+        "attached-subject dual gate must not emit SelfRef combat statics, got {:?}",
+        defs
+    );
+}
+
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
 /// number of Islands you control can't block this creature." must lower to a
 /// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a

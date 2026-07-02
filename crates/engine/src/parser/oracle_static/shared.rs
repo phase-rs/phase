@@ -1106,6 +1106,8 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // CR 508.1c + CR 509.1b + CR 611.3a: "~ can't attack if <cond> and can't block
     // if <cond>" (The Fallen Apart) — each restriction carries its own trailing
     // gate; must split before the single-gate `can't block` dispatch arm.
+    // Attached-subject forms ("enchanted creature …") defer to the established
+    // subject parser — SelfRef would scope the Aura/Equipment, not the host.
     if let Some(defs) = try_parse_dual_gated_cant_attack_and_cant_block(&tp, &stripped) {
         return defs;
     }
@@ -1950,10 +1952,29 @@ fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &s
     Ok((input, (attack_cond, block_cond)))
 }
 
+/// True when a dual-gated combat line's leading subject is the static source
+/// (~ / this creature / …), not an attached-subject or scoped form.
+fn dual_gated_combat_restriction_is_self_subject(tp: &TextPair<'_>) -> bool {
+    if attached_subject_filter(tp).is_some() {
+        return false;
+    }
+    let Some(subject_end) = tp.lower.find("can't attack if ") else {
+        return false;
+    };
+    let subject = tp.lower[..subject_end].trim();
+    subject == "~"
+        || subject == "it"
+        || SELF_REF_TYPE_PHRASES.contains(&subject)
+        || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject)
+}
+
 fn try_parse_dual_gated_cant_attack_and_cant_block(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
+    if !dual_gated_combat_restriction_is_self_subject(tp) {
+        return None;
+    }
     let (remainder, (attack_cond_lower, block_cond_lower)) =
         parse_dual_gated_cant_attack_block(tp.lower).ok()?;
     if !remainder.trim().trim_end_matches('.').is_empty()
