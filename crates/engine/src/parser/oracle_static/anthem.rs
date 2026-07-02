@@ -751,6 +751,18 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
             return format!("~ is {}", rest.trim());
         }
     }
+    // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
+    // this turn" / "it entered the battlefield this turn" (Crew Captain's
+    // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
+    // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
+    // canonical "~ entered …" templating the context-free grammar resolves to
+    // SourceEnteredThisTurn. Exact match on the tail; only reached on the
+    // SelfRef path, so the attached-subject "it" stays an honest gap.
+    if let Some(rest) = nom_tag_lower(&lower, &lower, "it entered ") {
+        if matches!(rest.trim(), "this turn" | "the battlefield this turn") {
+            return format!("~ entered {}", rest.trim());
+        }
+    }
     condition.to_string()
 }
 

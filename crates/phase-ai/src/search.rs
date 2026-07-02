@@ -1859,8 +1859,15 @@ fn score_candidates_core(
                 rung_scored.push((r.candidate.action.clone(), score));
             }
 
-            if completed {
-                best_scored = rung_scored; // deepest completed rung so far
+            // "Fully completed" also requires the deadline to be live after the
+            // LAST candidate: expiry mid-final-evaluation is invisible to the
+            // per-candidate entry check and would accept a rung whose tail score
+            // was truncated. Rung 0 stays exempt (atomic once entered — it is the
+            // no-regression floor, == origin/main's deadline collapse). Node-budget
+            // exhaustion deliberately does NOT discard: the deepest rung consuming
+            // its full `max_nodes` reproduces origin/main's single fixed-depth pass.
+            if completed && (iter_depth == 0 || !services.deadline.expired()) {
+                best_scored = rung_scored; // deepest fully-completed rung so far
             } else {
                 break;
             }

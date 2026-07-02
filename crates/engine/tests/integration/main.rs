@@ -390,6 +390,7 @@ mod issue_4267_sefris_tortured_existence;
 mod issue_4269_nested_shambler_death_tokens;
 mod issue_4271_birthing_ritual_cmc_filter;
 mod issue_4272_birthing_ritual_etb_triggers;
+mod issue_4356_trouble_in_pairs;
 mod issue_4357_molecule_man;
 mod issue_4358_hama_pashar_dungeon;
 mod issue_4379_convoke_cancel_untap;
