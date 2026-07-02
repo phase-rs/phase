@@ -38910,3 +38910,123 @@ fn without_paying_graveyard_free_cast_bypasses_paid_offer() {
         "the without_paying graveyard cast must reach the stack for free"
     );
 }
+
+#[test]
+fn combined_spell_ability_def_tags_top_level_spell_tails_sequential_sibling() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(97_001),
+        PlayerId(0),
+        "Two-Line Spell".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&spell).unwrap();
+    obj.card_types.core_types.push(CoreType::Instant);
+    obj.base_card_types = obj.card_types.clone();
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    ));
+
+    let combined = combined_spell_ability_def(state.objects.get(&spell).unwrap())
+        .expect("spell abilities should combine");
+    let sub = combined
+        .sub_ability
+        .as_deref()
+        .expect("second top-level spell instruction should be appended");
+    assert_eq!(
+        sub.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "top-level spell instructions must resolve as independent siblings"
+    );
+}
+
+#[test]
+fn heal_draws_on_the_next_turns_upkeep() {
+    use crate::game::scenario::GameScenario;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let heal = scenario
+        .add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Heal",
+            true,
+            "Prevent the next 1 damage that would be dealt to any target this turn.\n\
+             Draw a card at the beginning of the next turn's upkeep.",
+        )
+        .id();
+    scenario.add_spell_to_library_top(PlayerId(0), "Future Draw", true);
+
+    let mut runner = scenario.build();
+    runner.cast(heal).target_player(PlayerId(0)).resolve();
+
+    let mut guard = 0;
+    while !(runner.state().phase == Phase::Upkeep && runner.state().active_player == PlayerId(1)) {
+        guard += 1;
+        assert!(
+            guard < 80,
+            "turn progression stalled before the next turn's upkeep"
+        );
+        if !runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass to resolve stack");
+            continue;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass to advance the turn");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("declare no blockers");
+            }
+            other => panic!("unexpected waiting state during turn progression: {other:?}"),
+        }
+    }
+
+    while !runner.state().stack.is_empty() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve delayed trigger");
+    }
+
+    let p0 = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == PlayerId(0))
+        .expect("player 0 exists");
+    assert_eq!(
+        p0.hand.len(),
+        1,
+        "Heal must draw exactly one card on the next turn's upkeep"
+    );
+}

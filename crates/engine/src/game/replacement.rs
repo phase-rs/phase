@@ -972,6 +972,23 @@ fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKi
         .map(|repl| repl.shield_kind)
 }
 
+/// CR 615.5 + CR 510.2: Oracle-text prevention shields carry riders in
+/// `execute`; resolving spells install `runtime_execute` instead. During a
+/// combat-damage batch, `replace_combat_damage_batch` drains `execute` riders
+/// per prevented event inline, while `fire_combat_prevention_riders` handles
+/// only `runtime_execute`.
+fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
+}
+
 /// CR 614.9: Read back the captured chosen-object recipient stashed in the
 /// matched replacement's `redirect_target` field (set at resolution time for
 /// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
@@ -1380,12 +1397,21 @@ fn damage_done_applier(
             // `last_effect_count` stamp are deferred to the post-batch step in
             // `combat_damage.rs` — emitting them per-source here would fragment
             // the rider's `EventContextAmount` across attackers.
-            if prevented_amount > 0 && !accumulated_in_batch {
-                events.push(GameEvent::DamagePrevented {
-                    source_id,
-                    target,
-                    amount: prevented_amount,
-                });
+            //
+            // Exception: `execute`-template shields (Mindskinner, Weeping Angel)
+            // drain per-event inside `replace_combat_damage_batch` and need the
+            // per-event prevented amount stamped here so `EventContextAmount`
+            // resolves when that inline drain runs.
+            let per_event_execute_followup =
+                accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
+            if prevented_amount > 0 && (!accumulated_in_batch || per_event_execute_followup) {
+                if !accumulated_in_batch {
+                    events.push(GameEvent::DamagePrevented {
+                        source_id,
+                        target,
+                        amount: prevented_amount,
+                    });
+                }
                 // CR 615.5: Stash the prevented amount as the chain's last effect
                 // count so a post-replacement follow-up effect (e.g. Phyrexian
                 // Hydra's "Put a -1/-1 counter on ~ for each 1 damage prevented

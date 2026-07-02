@@ -5,15 +5,22 @@ import { useTranslation } from "react-i18next";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
+import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
+import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
+
+// Stable empty lookup so an undefined `objects` (pre-game) never busts the
+// organizer's filter memo with a fresh `{}` each render.
+const EMPTY_OBJECTS: Record<string, GameObject> = {};
 
 export function MobileHandDrawer() {
   const { t } = useTranslation("game");
@@ -64,6 +71,25 @@ export function MobileHandDrawer() {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
 
+  // Display-only organizing of the player's own hand: persisted sort + ephemeral
+  // hide-filter, sharing the discard grid's mechanism. The drawer is a flat grid
+  // with no reorder, so every axis is safe to apply (no ReorderHand hazard).
+  const handSort = usePreferencesStore((s) => s.handSort);
+  const setHandSort = usePreferencesStore((s) => s.setHandSort);
+  const handFilter = useUiStore((s) => s.handFilter);
+  const setHandFilter = useUiStore((s) => s.setHandFilter);
+  const handCardIds = useMemo(
+    () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
+    [player?.hand, objects, pendingObjectId],
+  );
+  const organizer = useCardOrganizer({
+    cards: handCardIds,
+    objects: objects ?? EMPTY_OBJECTS,
+    playableIds: playableObjectIds,
+    sort: { value: handSort, onChange: setHandSort },
+    filter: { value: handFilter, onChange: setHandFilter },
+  });
+
   // Close the drawer first so the context menu isn't rendered beneath the
   // drawer's full-screen panel; coordinates flow through from the tap.
   const handleDebugOpen = useCallback(
@@ -102,10 +128,6 @@ export function MobileHandDrawer() {
 
   if (!player || !objects) return null;
 
-  const handObjects = player.hand
-    .map((id) => objects[id])
-    .filter((obj) => obj && obj.id !== pendingObjectId);
-
   return (
     <AnimatePresence>
       {isOpen && (
@@ -138,23 +160,36 @@ export function MobileHandDrawer() {
               }
             }}
           >
-            <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
-              <span className="text-sm font-semibold text-white/80">
-                {t("hand.handTitle", { count: handObjects.length })}
-              </span>
-              <button
-                onClick={() => setOpen(false)}
-                className="rounded-lg px-3 py-1 text-xs font-medium text-white/70 hover:bg-white/10 active:bg-white/20"
-              >
-                {t("common:actions.close")}
-              </button>
+            <div className="flex shrink-0 flex-col gap-2 px-4 pt-3 pb-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-white/80">
+                  {t("hand.handTitle", { count: handCardIds.length })}
+                </span>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="rounded-lg px-3 py-1 text-xs font-medium text-white/70 hover:bg-white/10 active:bg-white/20"
+                >
+                  {t("common:actions.close")}
+                </button>
+              </div>
+              <CardOrganizerToolbar
+                sort={organizer.sort}
+                onSortChange={organizer.setSort}
+                filter={organizer.filter}
+                onFilterChange={organizer.setFilter}
+                showSort
+                showFilter
+                disabled={pendingObjectId != null}
+              />
             </div>
 
             <div
               className="grid gap-3 overflow-y-auto overscroll-contain px-3 pb-4"
               style={{ gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))" }}
             >
-              {handObjects.map((obj) => {
+              {organizer.ordered.map((id) => {
+                const obj = objects[id];
+                if (!obj) return null;
                 const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
                 return (
                   <DrawerCard

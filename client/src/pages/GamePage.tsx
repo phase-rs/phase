@@ -1335,10 +1335,12 @@ function GamePageContent({
         {showFlowHelpNudge && <FlowHelpNudge />}
         {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
-        <TurnStatusLine />
-        {!isSpectatorMode && (
+        {isSpectatorMode ? (
+          <TurnStatusLine />
+        ) : (
           <>
             <div className="flex items-center gap-1.5">
+              <TurnStatusLine />
               <HandBadge />
               <FullControlToggle />
             </div>

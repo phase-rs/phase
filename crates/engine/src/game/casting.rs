@@ -4,7 +4,7 @@ use crate::types::ability::{
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
     Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
     PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
     TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
@@ -399,6 +399,11 @@ pub(crate) fn combined_spell_ability_def(
 }
 
 fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+    // CR 608.2c: when the cast pipeline merges multiple top-level spell
+    // instructions (multi-line spells or fused split halves), each appended
+    // root is the next printed instruction, not a within-clause continuation.
+    let mut next = next;
+    next.sub_link = SubAbilityLink::SequentialSibling;
     let mut node = ability;
     while node.sub_ability.is_some() {
         node = node

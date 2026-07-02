@@ -235,9 +235,8 @@ export default defineConfig(({ mode }) => ({
             // R2 serves `max-age=60, must-revalidate` with ETags, so the
             // StaleWhileRevalidate background refresh is a 304 revalidation,
             // not a re-download — the cached copy serves instantly and
-            // offline, mirroring the card-locale-sidecars reasoning. Without
-            // this rule the image-URL lookup layer (scryfall-data.json) is
-            // unavailable offline even when the images themselves are cached.
+            // offline, mirroring the card-locale-sidecars reasoning. This keeps
+            // the image-URL lookup layer (scryfall-data.json) available offline.
             urlPattern:
               /\/(scryfall-data|scryfall-printings|scryfall-token-images|scryfall-sets|card-names|card-data-meta|set-list|decks|draft-pools|coverage-data|coverage-summary)\.json$/,
             handler: "StaleWhileRevalidate",
@@ -264,13 +263,17 @@ export default defineConfig(({ mode }) => ({
             // Chrome pads to ~7MB each against origin quota; `fetchOptions`
             // upgrades the SW-side fetch to CORS (Scryfall sends
             // `access-control-allow-origin: *`), so cached entries count at
-            // true size. This cache is also the offline card-image store that
-            // an explicit "download deck for offline" prefetch warms.
+            // true size. `credentials: "omit"` is required: crossorigin-less
+            // <img> requests carry `credentials: "include"`, which fetchOptions
+            // would otherwise inherit, and the CORS check hard-fails wildcard
+            // ACAO for credentialed requests — every Scryfall fetch would
+            // reject. This cache is also the offline card-image store that an
+            // explicit "download deck for offline" prefetch warms.
             urlPattern: /^https:\/\/(cards|backs|svgs)\.scryfall\.io\//,
             handler: "CacheFirst",
             options: {
               cacheName: "scryfall-images",
-              fetchOptions: { mode: "cors" },
+              fetchOptions: { mode: "cors", credentials: "omit" },
               expiration: {
                 maxEntries: 4000,
                 maxAgeSeconds: 31536000,
