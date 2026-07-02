@@ -112,6 +112,33 @@ describe("dispatchResolveAll progress", () => {
     expect(resolveAll).toHaveBeenCalledTimes(1);
     expect(useGameStore.getState().isResolvingAll).toBe(false);
   });
+
+  it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {
+    const submitAction = vi
+      .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
+      .mockResolvedValue({ events: [] });
+
+    useGameStore.setState({
+      gameState: stateWithStack(3),
+      adapter: {
+        submitAction,
+        getState: vi.fn().mockResolvedValue(stateWithStack(2)),
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    // Arena semantics: yield THIS seat's priority windows via the engine's
+    // auto-pass session — never a host-driven batch drain over human seats.
+    expect(submitAction).toHaveBeenCalledTimes(1);
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      0,
+    );
+    // The batch busy-state must stay untouched — there is no local drain loop.
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
+  });
 });
 
 type EngineResolveAll = (

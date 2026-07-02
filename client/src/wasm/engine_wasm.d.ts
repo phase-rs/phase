@@ -103,8 +103,8 @@ export function get_ai_action(difficulty: string, player_id: number): any;
  * Score all candidate actions and return `[GameAction, score]` tuples.
  * Used by AI workers for root parallelism — each worker scores independently,
  * then results are merged on the main thread.
- * `rng_seed` seeds the game state's RNG so each worker's MCTS explores
- * different paths through the search tree, producing diverse score vectors.
+ * `rng_seed` seeds the game state's RNG so each worker's beam search explores
+ * different orderings, producing diverse score vectors.
  */
 export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
 
