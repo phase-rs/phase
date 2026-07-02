@@ -896,18 +896,13 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 
     // Cloned before `apply` consumes `action` — recorded into REPLAY_LOG only
-    // on the success path below. Debug actions (handled above) never reach
-    // here, so sandbox card-spawning never pollutes a replay recording.
+    // on the success path below. CreateCard is handled above and never
+    // reaches here.
     let action_for_replay = action.clone();
+    let is_debug_action = matches!(action, GameAction::Debug(_));
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => {
-            REPLAY_LOG.with(|cell| {
-                let mut log = cell.take();
-                if let Some(log) = log.as_mut() {
-                    log.push_action(actor, action_for_replay);
-                }
-                cell.set(log);
-            });
+            record_replay_action(is_debug_action, actor, action_for_replay);
             to_js(&result)
         }
         Err(e) => {
@@ -918,6 +913,38 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         Ok(val) => val,
         Err(e) => e,
     }
+}
+
+/// Record a successfully-applied action into REPLAY_LOG, or invalidate any
+/// in-progress recording if it was a (non-CreateCard) debug action.
+///
+/// Every `GameAction::Debug` variant other than `CreateCard` reaches this
+/// point (unlike CreateCard, they mutate state already tracked by
+/// `GameState` rather than resolving against the WASM-local `CardDatabase`,
+/// so they aren't intercepted earlier in `submit_action`) — but
+/// `reconstruct_initial_state` (`game/replay.rs`) never sets `debug_mode`
+/// when rebuilding a replay's starting state, so a recorded debug action
+/// would hit the `!state.debug_mode` gate in `apply` (`game/engine.rs`) and
+/// desync playback. Rather than recording it and failing later, invalidate
+/// any in-progress recording here — the same way
+/// `handle_debug_create_card_inner` invalidates it for CreateCard — so
+/// `export_replay_log` can't produce a log that silently can't be replayed.
+///
+/// Factored out of `submit_action` so it's testable under plain `cargo test`
+/// without going through `to_js`, which requires a JS runtime (see
+/// `handle_debug_create_card`'s doc comment for the same split).
+fn record_replay_action(is_debug_action: bool, actor: PlayerId, action_for_replay: GameAction) {
+    REPLAY_LOG.with(|cell| {
+        if is_debug_action {
+            cell.set(None);
+        } else {
+            let mut log = cell.take();
+            if let Some(log) = log.as_mut() {
+                log.push_action(actor, action_for_replay);
+            }
+            cell.set(log);
+        }
+    });
 }
 
 fn handle_debug_create_card(
@@ -2158,7 +2185,7 @@ mod replay_bridge_tests {
         );
 
         // Mirror what `submit_action` does on every successful action: apply,
-        // then push the same action it just applied into REPLAY_LOG.
+        // then record it via the same `record_replay_action` helper.
         for _ in 0..6 {
             let waiting = with_state(|state| state.waiting_for.clone()).expect("game initialized");
             let WaitingFor::Priority { player } = waiting else {
@@ -2171,13 +2198,7 @@ mod replay_bridge_tests {
                 applied,
                 "passing priority while waiting on it is always legal"
             );
-            REPLAY_LOG.with(|cell| {
-                let mut log = cell.take();
-                if let Some(log) = log.as_mut() {
-                    log.push_action(player, GameAction::PassPriority);
-                }
-                cell.set(log);
-            });
+            record_replay_action(false, player, GameAction::PassPriority);
         }
 
         let replay_json =
@@ -2297,5 +2318,44 @@ mod replay_bridge_tests {
 
         clear_game_state();
         CARD_DB.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// A non-`CreateCard` debug action (e.g. `DrawCards`) reaches
+    /// `record_replay_action` through the normal `submit_action` path — it
+    /// is not intercepted earlier the way `CreateCard` is. `reconstruct_initial_state`
+    /// never enables `debug_mode`, so a recorded debug action would fail the
+    /// `!state.debug_mode` gate in `apply` on playback and desync the replay.
+    /// Recording must be invalidated instead, mirroring the CreateCard case.
+    #[test]
+    fn non_create_card_debug_action_invalidates_the_in_progress_recording() {
+        clear_game_state();
+
+        let state = GameState::new_two_player(13);
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        assert!(has_replay_recording());
+
+        let debug_action = GameAction::Debug(engine::types::actions::DebugAction::DrawCards {
+            player_id: PlayerId(0),
+            count: 1,
+        });
+        record_replay_action(true, PlayerId(0), debug_action);
+
+        assert!(
+            !has_replay_recording(),
+            "a non-CreateCard debug action must invalidate any in-progress \
+             recording too — replay reconstruction never enables debug_mode, \
+             so recording it would produce a replay that desyncs on playback"
+        );
+
+        clear_game_state();
     }
 }
