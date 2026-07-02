@@ -2042,10 +2042,13 @@ pub(crate) fn parse_static_line_inner(
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
-        // CR 509.1c: a trailing "unless [cost]" or "if [board-state]" clause
-        // scopes the restriction; attach whichever is present.
-        if let Some(condition) =
-            parse_unless_static_condition(&tp).or_else(|| parse_if_static_condition(&tp))
+        // CR 509.1c + CR 611.3a: a trailing "unless [cost]", "as long as
+        // [board-state]", or "if [board-state]" clause scopes the restriction;
+        // attach whichever is present. "as long as" is tried before "if" to match
+        // `split_trailing_gate_condition`'s precedence.
+        if let Some(condition) = parse_unless_static_condition(&tp)
+            .or_else(|| parse_as_long_as_static_condition(&tp))
+            .or_else(|| parse_if_static_condition(&tp))
         {
             def.condition = Some(condition);
         }
@@ -2086,10 +2089,14 @@ pub(crate) fn parse_static_line_inner(
         let mut def = StaticDefinition::new(mode)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
-        // CR 508.1: a trailing "unless [cost]" or "if [board-state]" clause
-        // scopes the restriction; attach whichever is present.
-        if let Some(condition) =
-            parse_unless_static_condition(&tp).or_else(|| parse_if_static_condition(&tp))
+        // CR 508.1 + CR 611.3a: a trailing "unless [cost]", "as long as
+        // [board-state]", or "if [board-state]" clause scopes the restriction;
+        // attach whichever is present. "as long as" is tried before "if" to match
+        // `split_trailing_gate_condition`'s precedence (Seer of the Bright Side:
+        // "... can't attack or block as long as it has a stun counter on it.").
+        if let Some(condition) = parse_unless_static_condition(&tp)
+            .or_else(|| parse_as_long_as_static_condition(&tp))
+            .or_else(|| parse_if_static_condition(&tp))
         {
             def.condition = Some(condition);
         }

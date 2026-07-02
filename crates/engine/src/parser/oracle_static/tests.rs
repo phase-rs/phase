@@ -376,6 +376,79 @@ fn wirecat_cant_attack_or_block_gated_on_enchantment_exists() {
     );
 }
 
+/// CR 508.1 + CR 611.3a: A combat-restriction static may be gated by a trailing
+/// "as long as <condition>" rider, not just "if"/"unless". "As long as" and "if"
+/// both express a continuous game-state gate (CR 611.3a), yet the can't-attack /
+/// can't-attack-or-block / can't-block arms peeled only "unless"/"if" — dropping
+/// the "as long as" rider and enforcing the restriction UNCONDITIONALLY (Seer of
+/// the Bright Side would never be able to attack/block regardless of its stun
+/// counter). Regression for the added "as long as" keyword branch. The condition
+/// bodies already parse via `parse_static_condition`; only the keyword peel was
+/// missing.
+#[test]
+fn cant_attack_or_block_gated_on_trailing_as_long_as() {
+    // Trailing "as long as" + a counter condition (Seer of the Bright Side).
+    let seer = crate::parser::oracle::parse_oracle_text(
+        "This creature can't attack or block as long as it has a stun counter on it.",
+        "Seer of the Bright Side",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = seer
+        .statics
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttackOrBlock)
+        .expect("expected a CantAttackOrBlock static");
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(_),
+                minimum: 1,
+                ..
+            })
+        ),
+        "the 'as long as it has a stun counter' rider must gate the restriction, got {:?}",
+        def.condition
+    );
+    assert!(
+        seer.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        seer.parse_warnings
+    );
+
+    // The "if" and "unless" keyword peels must still work (no regression).
+    for (text, name) in [
+        (
+            "This creature can't attack or block if an enchantment is on the battlefield.",
+            "Wirecat",
+        ),
+        (
+            "This creature can't block as long as you control another creature.",
+            "AsLongAsBlock",
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|d| d.condition.is_some()),
+            "{name}: restriction must carry its gate condition, got {:?}",
+            parsed.statics
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name}: no clause should be swallowed; warnings = {:?}",
+            parsed.parse_warnings
+        );
+    }
+}
+
 /// CR 508.1 + CR 611.3a: A trailing "if there's a[n]/another <type> on the
 /// battlefield" gate on a "can't attack" static (Shauku, Endbringer: "Shauku
 /// can't attack if there's another creature on the battlefield.") must attach as

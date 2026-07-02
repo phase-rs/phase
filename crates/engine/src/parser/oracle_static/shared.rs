@@ -1898,6 +1898,21 @@ pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondi
     parse_static_condition(if_text.original)
 }
 
+/// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
+/// combat-restriction static ("~ can't attack or block as long as it has a stun
+/// counter on it" — Seer of the Bright Side). "As long as" and "if" both express
+/// a continuous game-state gate on a static ability (CR 611.3a), so this mirrors
+/// [`parse_if_static_condition`] exactly, delegating the condition body to
+/// `parse_static_condition` → `parse_inner_condition` (the single authority for
+/// game-state conditions). Restriction arms peel "unless"/"if" but historically
+/// dropped the "as long as" rider on their SelfRef restriction, enforcing it
+/// unconditionally; this closes that keyword gap without touching the shared
+/// condition grammar.
+pub(crate) fn parse_as_long_as_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+    let (_, as_long_as_text) = tp.split_around(" as long as ")?;
+    parse_static_condition(as_long_as_text.original)
+}
+
 /// Result of the combat-tax nom parse.
 pub(crate) struct CombatTaxParse {
     pub(super) mode: StaticMode,
