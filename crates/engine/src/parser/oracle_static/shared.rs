@@ -1942,6 +1942,7 @@ fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
 /// CR 508.1c + CR 509.1b: Split a compound "~ can't attack if <A> and can't block
 /// if <B>" static into two gated restrictions (The Fallen Apart).
 fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (input, _) = take_until("can't attack if ").parse(input)?;
     let (input, _) = tag("can't attack if ").parse(input)?;
     let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
     let (input, _) = tag(" and can't block if ").parse(input)?;
