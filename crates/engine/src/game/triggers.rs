@@ -4170,6 +4170,8 @@ pub(crate) fn dispatch_synthetic_trigger(
     events_out: &mut Vec<GameEvent>,
 ) -> bool {
     let mut pending = vec![PendingTriggerContext::single(trigger)];
+    // CR 603.2d: Synthetic dungeon room triggers (CR 309.4c) must pass through
+    // the same doubling pipeline as event-collected triggers.
     apply_trigger_doubling(state, &mut pending);
     let mut iter = pending.into_iter();
     while let Some(trigger_context) = iter.next() {
@@ -4758,6 +4760,8 @@ fn trigger_cause_matches(
                 && obj.card_types.core_types.contains(&CoreType::Creature)
         }
         TriggerCause::RoomEntered => {
+            // CR 309.4c: Room abilities of dungeons you own trigger an
+            // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
     }

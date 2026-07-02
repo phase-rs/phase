@@ -550,6 +550,7 @@ pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
 ) -> Option<StaticDefinition> {
+    let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
@@ -2410,7 +2411,7 @@ pub(crate) fn parse_static_line_inner(
     // e.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
     // Excludes lines handled by PerTurnCastLimit ("can't cast more than"),
     // CantCastDuring ("can't cast spells during"), and CantCastFrom ("can't cast spells from").
-    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text) {
+    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text, &raw_lower) {
         return Some(def);
     }
 
@@ -2915,8 +2916,11 @@ pub(crate) fn parse_static_line_inner(
 
     // CR 309.4c: Hama Pashar — "Room abilities of dungeons you own trigger
     // an additional time."
-    if nom_primitives::scan_contains(tp.lower, "room abilities of dungeons you own")
-        && nom_primitives::scan_contains(tp.lower, "trigger an additional time")
+    if nom_tag_tp(
+        &tp,
+        "room abilities of dungeons you own trigger an additional time",
+    )
+    .is_some()
     {
         return Some(
             StaticDefinition::new(StaticMode::DoubleTriggers {

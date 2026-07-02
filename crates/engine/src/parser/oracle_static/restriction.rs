@@ -936,7 +936,22 @@ pub(crate) fn parse_per_player_conditional_prohibition(
 /// - "[Subject] can't cast spells with the chosen name" (Alhammarret)
 /// - "[Subject] can't cast spells of the chosen type" (Archon of Valor's Reach)
 /// - "Enchanted creature's controller can't cast [type] spells" (Brand of Ill Omen)
-pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
+///
+/// `raw_lower` is the pre-`strip_reminder_text` lowercase line so trailing
+/// `(as long as/if <condition>)` gates are not lost to reminder stripping.
+pub(crate) fn parse_cant_cast_type_spells(
+    tp: &str,
+    text: &str,
+    raw_lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 611.3a: gate parentheticals must be read from the raw line — `strip_reminder_text`
+    // removes every parenthetical span before this parser runs.
+    let gate_condition_text = match extract_trailing_parenthetical_gate_condition(raw_lower) {
+        ParentheticalGateExtract::Unrecognized => return None,
+        ParentheticalGateExtract::Recognized(cond) => Some(cond),
+        ParentheticalGateExtract::Absent | ParentheticalGateExtract::Benign => None,
+    };
+
     // Exclude patterns handled by other parsers
     if nom_primitives::scan_contains(tp, "can't cast more than")
         || nom_primitives::scan_contains(tp, "can't cast spells during")
@@ -970,18 +985,14 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     // 2. Match "can't cast "
     let after_cant_cast = nom_tag_lower(predicate, predicate, "can't cast ")?;
 
-    // 3. Strip trailing period and parenthetical conditions
     let trimmed = after_cant_cast.trim_end_matches('.');
-    // Strip trailing parenthetical like "(as long as this creature is on the battlefield)"
-    let trimmed = if let Some(pos) = trimmed.rfind(" (") {
-        trimmed[..pos].trim()
-    } else {
-        trimmed
-    };
 
     // --- "spells with mana value N or less/greater" ---
     if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells with mana value ") {
-        return parse_cant_cast_mana_value(rest, who, text);
+        return attach_parsed_static_gate(
+            parse_cant_cast_mana_value(rest, who, text)?,
+            gate_condition_text,
+        );
     }
 
     // --- "spells with the chosen name" ---
@@ -989,7 +1000,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
         let def = StaticDefinition::new(StaticMode::CantBeCast { who })
             .affected(TargetFilter::HasChosenName)
             .description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells of the chosen type" ---
@@ -1001,14 +1012,14 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
         let def = StaticDefinition::new(StaticMode::CantBeCast { who })
             .affected(filter)
             .description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells of the chosen color" ---
     if nom_tag_lower(trimmed, trimmed, "spells of the chosen color").is_some() {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells with the same name as ..." ---
@@ -1017,7 +1028,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     if nom_tag_lower(trimmed, trimmed, "spells with the same name as ").is_some() {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells with even mana values" / "spells with odd mana values" ---
@@ -1026,14 +1037,14 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells by paying alternative costs" ---
     if nom_tag_lower(trimmed, trimmed, "spells by paying alternative cost").is_some() {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "[type] spells" / "[type] spell" — standard type-based prohibition ---
@@ -1060,7 +1071,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     if let Some(filter) = spell_filter {
         def = def.affected(filter);
     }
-    Some(def)
+    attach_parsed_static_gate(def, gate_condition_text)
 }
 
 /// Parse passive voice "[Type] spells can't be cast" pattern.
@@ -1582,6 +1593,14 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         );
     }
 
+    // CR 305.1 + CR 601.2a + CR 114.4: Unlimited combined permission —
+    // "You may play lands and cast permanent spells from your graveyard."
+    // (Wrenn and Realmbreaker emblem). Composed through the shared branch
+    // filter parser so trailing rules text is not silently dropped.
+    if let Some(def) = try_parse_unlimited_combined_graveyard_permission(text, lower) {
+        return Some(def);
+    }
+
     // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive once-per-turn permission —
     // "Once during each of your turns, you may play a <land-filter> or cast a
     // <spell-filter> from your graveyard." (The Eighth Doctor, Serra Paragon).
@@ -1810,6 +1829,46 @@ fn try_parse_disjunctive_graveyard_cast_permission(
             play_mode: CardPlayMode::Play,
             // Stack-exit redirect is wrong for the granted leave-battlefield
             // rider (see doc comment); leave it unset.
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 305.1 + CR 601.2a + CR 114.4: Parse unlimited combined graveyard
+/// permission — "You may play <land-filter> and cast <spell-filter> from your
+/// graveyard." — using the shared branch-filter grammar and rejecting any
+/// trailing rules-bearing suffix.
+fn try_parse_unlimited_combined_graveyard_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "you may play ")?;
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " and cast ")
+        .ok()
+        .map(|(_, pair)| pair)?;
+    let (spell_branch, after_graveyard) =
+        nom_primitives::split_once_on(spell_branch, " from your graveyard")
+            .ok()
+            .map(|(_, pair)| pair)?;
+    if !after_graveyard.trim().trim_start_matches('.').is_empty() {
+        return None;
+    }
+    let land_filter = parse_graveyard_branch_filter(land_branch.trim())?;
+    let spell_filter = parse_graveyard_branch_filter(spell_branch.trim())?;
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
             graveyard_destination_replacement: None,
             extra_cost: None,
         })

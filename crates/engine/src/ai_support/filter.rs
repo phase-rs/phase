@@ -612,6 +612,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
+        // CR 700.2: modality reads `obj.modal`, an apply()-constant printed-card
+        // field on the candidate — safe to memoize.
+        | FilterProp::Modal
         | FilterProp::IsCommander => true,
 
         // SAFE only when the embedded `QuantityExpr` is memo-safe.
