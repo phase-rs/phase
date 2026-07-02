@@ -1116,7 +1116,7 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
         FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
-        FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
+        FilterProp::AttackedThisTurn { .. } => Some("AttackedThisTurn"),
         FilterProp::BlockedThisTurn => Some("BlockedThisTurn"),
         FilterProp::AttackedOrBlockedThisTurn => Some("AttackedOrBlockedThisTurn"),
         FilterProp::EnchantedBy => Some("EnchantedBy"),

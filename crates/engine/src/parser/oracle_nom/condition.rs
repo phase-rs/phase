@@ -5757,7 +5757,7 @@ fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition
     let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
     alt((
         value(
-            make_source_history_absence(FilterProp::AttackedThisTurn),
+            make_source_history_absence(FilterProp::AttackedThisTurn { defender: None }),
             tag("attack this turn"),
         ),
         value(
@@ -12157,7 +12157,7 @@ mod tests {
     fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
         let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
         assert_eq!(rest, "");
-        assert_source_history_absence(c, FilterProp::AttackedThisTurn);
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn { defender: None });
     }
 
     #[test]

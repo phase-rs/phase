@@ -232,7 +232,9 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // CR 400.7: object entered the battlefield this turn.
         Permanents::EnteredTheBattlefieldThisTurn => prop_filter(FilterProp::EnteredThisTurn),
         // CR 508.1a: creature attacked this turn.
-        Permanents::AttackedThisTurn => prop_filter(FilterProp::AttackedThisTurn),
+        Permanents::AttackedThisTurn => {
+            prop_filter(FilterProp::AttackedThisTurn { defender: None })
+        }
         // CR 509.1a: creature blocked this turn.
         Permanents::BlockedThisTurn => prop_filter(FilterProp::BlockedThisTurn),
         // CR 510.1: object was dealt damage during this turn.
@@ -389,7 +391,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         },
         // CR 508.1a: "didn't attack this turn" — negation of attacked-this-turn.
         Permanents::DidntAttackThisTurn => TargetFilter::Not {
-            filter: Box::new(prop_filter(FilterProp::AttackedThisTurn)),
+            filter: Box::new(prop_filter(FilterProp::AttackedThisTurn { defender: None })),
         },
         // CR 400.7: "didn't enter the battlefield this turn" — negation of EnteredThisTurn.
         Permanents::DidntEnterTheBattlefieldThisTurn => TargetFilter::Not {

@@ -3879,7 +3879,8 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if ~ attacked this turn",
                 TriggerCondition::SourceMatchesFilter {
                     filter: TargetFilter::Typed(
-                        TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
                     ),
                 },
             ),
