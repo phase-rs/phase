@@ -1,18 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId } from "../../../adapter/types.ts";
 import { CardImage } from "../../card/CardImage.tsx";
 import { objectImageProps } from "../../../services/cardImageLookup.ts";
-import {
-  orderCards,
-  groupCards,
-  applyBulk,
-  rangeAdd,
-  type SortKey,
-  type GroupKey,
-} from "./gridSelection.ts";
+import { applyBulk, rangeAdd } from "./gridSelection.ts";
+import { useCardOrganizer } from "./useCardOrganizer.ts";
+import { CardOrganizerToolbar } from "./CardOrganizerToolbar.tsx";
 
 export interface SelectableCardGridProps {
   cards: ObjectId[];
@@ -53,12 +48,12 @@ export default function SelectableCardGrid({
   showToolbar,
 }: SelectableCardGridProps) {
   const { t } = useTranslation("game");
-  const [sort, setSort] = useState<SortKey>("none");
-  const [group, setGroup] = useState<GroupKey>("none");
+  // Shared organize mechanism. The grid surfaces sort + group (no hide-filter):
+  // hiding eligible cards mid-prompt would confuse a "choose N" selection, so the
+  // filter axis stays "none" here while the player's hand opts into it.
+  const { sort, setSort, group, setGroup, ordered, groups } = useCardOrganizer({ cards, objects });
   const lastIndexRef = useRef<number | null>(null);
 
-  const ordered = useMemo(() => orderCards(cards, objects, sort), [cards, objects, sort]);
-  const groups = useMemo(() => groupCards(ordered, objects, group), [ordered, objects, group]);
   const orderedIndexMap = useMemo(
     () => new Map(ordered.map((id, i) => [id, i])),
     [ordered],
@@ -130,24 +125,15 @@ export default function SelectableCardGrid({
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("all")}>{t("cardChoice.bulk.selectAll")}</button>
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("invert")}>{t("cardChoice.bulk.invert")}</button>
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("clear")}>{t("cardChoice.bulk.clear")}</button>
-          <label className="ml-auto flex items-center gap-1 text-slate-300">
-            {t("cardChoice.bulk.sortLabel")}
-            <select className="rounded bg-black/40 px-1 py-0.5" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-              <option value="none">{t("cardChoice.bulk.optNone")}</option>
-              <option value="name">{t("cardChoice.bulk.optName")}</option>
-              <option value="cmc">{t("cardChoice.bulk.optCmc")}</option>
-              <option value="type">{t("cardChoice.bulk.optType")}</option>
-              <option value="color">{t("cardChoice.bulk.optColor")}</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-1 text-slate-300">
-            {t("cardChoice.bulk.groupLabel")}
-            <select className="rounded bg-black/40 px-1 py-0.5" value={group} onChange={(e) => setGroup(e.target.value as GroupKey)}>
-              <option value="none">{t("cardChoice.bulk.optNone")}</option>
-              <option value="type">{t("cardChoice.bulk.optType")}</option>
-              <option value="color">{t("cardChoice.bulk.optColor")}</option>
-            </select>
-          </label>
+          <CardOrganizerToolbar
+            className="ml-auto flex items-center gap-2 text-slate-300"
+            sort={sort}
+            onSortChange={setSort}
+            group={group}
+            onGroupChange={setGroup}
+            showSort
+            showGroup
+          />
         </div>
       )}
       <div style={GRID_TILE_VARS} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-1">

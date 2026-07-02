@@ -91,6 +91,28 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             }
         }
 
+        // CR 704.4: state-based actions pay no attention to what happens during
+        // the resolution of a spell or ability. If a replacement choice is
+        // ALREADY pending when this check runs, resolution is paused mid-event and
+        // the object-destroying SBAs below must not fire against a not-yet-settled
+        // object. The only way to reach here with `pending_replacement` set is
+        // `reconcile_terminal_result`'s player-loss safety net (engine.rs) running
+        // the loop while paused on a CR 616.1 replacement-order choice — e.g. a
+        // permanent entering as a 0/0 with two order-material "+1/+1 counters" ETB
+        // replacements whose application order the controller must choose. Its
+        // counters have not landed yet, so running `check_zero_toughness`
+        // (CR 704.5f) now would wrongly send the still-entering 0/0 to the
+        // graveyard. The normal priority-gated loop always enters with no pending
+        // replacement, and the player-loss block above cannot create one, so this
+        // guard is inert outside the reconcile path. The player-loss SBAs above
+        // have already run (the safety net's sole purpose); the remaining SBAs run
+        // on the next pass once the choice is answered. The later
+        // `pending_replacement` guard (after lethal-damage) still handles
+        // regeneration replacements created *within* this loop.
+        if state.pending_replacement.is_some() {
+            return;
+        }
+
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
         // be put into the command zone by its owner. This pauses the SBA loop to
         // ask the player, similar to the legend rule.
@@ -1803,6 +1825,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .description("Rest in Peace".to_string());
@@ -1932,6 +1955,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .description("Rest in Peace".to_string());
@@ -3171,6 +3195,123 @@ mod tests {
         // P1 eliminated but game continues
         assert!(state.players[1].is_eliminated);
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_object_destroying_suppressed_while_replacement_choice_pending() {
+        // CR 704.4 + CR 616.1: reproduces the reconcile_terminal_result path —
+        // the player-loss safety net runs the SBA loop while resolution is paused
+        // mid-entry on a replacement-order choice. The concurrent player-loss SBA
+        // must still fire, but the object-destroying zero-toughness SBA must NOT
+        // run against a permanent still entering as a 0/0 (its counters have not
+        // landed). Three players so eliminating one does not end the game.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+
+        // A permanent mid-entry as a 0/0 (ETB counters not yet placed), P0's.
+        let entering = create_creature(&mut state, CardId(9130), PlayerId(0), "Entering 0/0", 0, 0);
+
+        // A replacement choice is pending: resolution is paused mid-event. The
+        // proposed event's contents are irrelevant here — only `is_some()` matters.
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+
+        // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
+        // the SBA loop mid-choice in the first place.
+        state.players[2].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Player-loss SBA still processed (guard sits AFTER the player-loss block)...
+        assert!(
+            state.players[2].is_eliminated,
+            "player-loss SBA must still run while a replacement choice is pending"
+        );
+        // ...but the still-entering 0/0 is spared (CR 704.4): zero-toughness skipped.
+        assert_eq!(
+            state.objects[&entering].zone,
+            Zone::Battlefield,
+            "a 0-toughness creature must NOT be destroyed while a replacement choice \
+             is pending mid-resolution (CR 704.4); got {:?}",
+            state.objects[&entering].zone,
+        );
+
+        // Sanity: once the choice is answered (no pending replacement), the SAME
+        // 0-toughness creature IS destroyed — proving the guard, not some unrelated
+        // exemption, is what spared it above.
+        state.pending_replacement = None;
+        check_state_based_actions(&mut state, &mut events);
+        assert_eq!(
+            state.objects[&entering].zone,
+            Zone::Graveyard,
+            "with no pending replacement the zero-toughness SBA (CR 704.5f) must \
+             destroy the 0/0"
+        );
+    }
+
+    #[test]
+    fn sba_object_destroying_unfrozen_after_parked_chooser_eliminated() {
+        // CR 800.4a + CR 704.4: complements the sibling suppression test — here the
+        // eliminated player IS the parked chooser, so do_eliminate clears
+        // pending_replacement, the sba.rs guard no longer bails, and the
+        // object-destroying SBAs resume WITHIN the same check. 3 players so the game
+        // continues after one elimination.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+
+        // P0's 0/0 — spared by the guard while a replacement is pending.
+        let entering = create_creature(&mut state, CardId(9130), PlayerId(0), "Entering 0/0", 0, 0);
+
+        // Chooser C = P2 is ALSO the loser (0 life). Latched key = ReplacementChoice{P2}.
+        state.players[2].life = 0;
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(2),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(2),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[2].is_eliminated);
+        assert!(
+            state.pending_replacement.is_none(),
+            "the eliminated chooser's parked replacement must be cleared"
+        );
+        // Revert-failing vs no-clear: with the choice cleared, the guard no longer
+        // bails and CR 704.5f destroys the 0/0.
+        assert_eq!(
+            state.objects[&entering].zone,
+            Zone::Graveyard,
+            "once the parked chooser leaves, object-destroying SBAs resume and the 0/0 dies"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::GameOver { .. }),
+            "two survivors remain — the game must continue"
+        );
     }
 
     #[test]
@@ -4480,6 +4621,7 @@ mod tests {
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .description("Return to the battlefield instead of dying".to_string());

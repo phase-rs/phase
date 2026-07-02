@@ -1468,6 +1468,15 @@ fn spell_cast_targets(
         .filter(|targets| !targets.is_empty())
 }
 
+/// CR 603.2c + CR 608.2c: Committed targets of a spell still on the stack (or
+/// re-read from the stack while a `SpellCast` trigger event is in scope).
+pub(crate) fn triggering_spell_targets(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+) -> Option<Vec<crate::types::ability::TargetRef>> {
+    spell_cast_targets(state, spell_id)
+}
+
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
 /// triggering spell's committed targets at resolution time.
 ///

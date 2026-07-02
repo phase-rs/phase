@@ -822,6 +822,72 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
         .any(def_tree_has_exile_parent_rider)
 }
 
+/// CR 614.1a + CR 608.2n: True when any node is a `CastFromZone` (or `Counter`)
+/// whose sub-ability / else-ability chain carries a graveyard-redirect rider
+/// targeting the cast/countered spell (`ParentTarget`) — to exile, a library
+/// position (Kylox's Voltstrider → bottom), or the owner's hand. This is the
+/// "if that spell would be put into a graveyard, [dest] instead" rider; its
+/// leading conditional is represented by the structural pairing, not swallowed.
+///
+/// SCOPED to the cast/counter parent on purpose: a bare
+/// `PutAtLibraryPosition { ParentTarget }` / `ChangeZone { Hand, ParentTarget }`
+/// is a COMMON standalone effect (Conundrum Sphinx "puts it on the bottom of
+/// their library", etc.) and must NOT suppress an unrelated condition swallow.
+/// The exile case is also covered narrowly by `def_tree_has_exile_parent_rider`
+/// (Exile-to-parent is rare outside riders); this adds the library/hand
+/// destinations only inside the redirect-rider context.
+fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::CastFromZone { .. } | Effect::Counter { .. }
+    ) && (def
+        .sub_ability
+        .as_deref()
+        .is_some_and(def_is_graveyard_redirect_to_parent)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(def_is_graveyard_redirect_to_parent))
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_cast_graveyard_redirect_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_cast_graveyard_redirect_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_cast_graveyard_redirect_rider)
+}
+
+/// A graveyard-redirect rider body: a move of the cast/countered spell
+/// (`ParentTarget`) to exile, the owner's hand, or a library position. Walks the
+/// sub-ability chain so an intervening continuation does not hide the rider.
+fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: crate::types::zones::Zone::Exile | crate::types::zones::Zone::Hand,
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            ..
+        } | Effect::PutAtLibraryPosition {
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(def_is_graveyard_redirect_to_parent)
+}
+
 /// CR 119.7 + CR 608.2c: True when any ability/trigger tree contains a
 /// `CantGainLife` grant scoped to `ParentTarget` — the structural encoding of
 /// Screaming Nemesis's "If a player is dealt damage this way, they can't gain
@@ -877,12 +943,17 @@ fn any_ability_has_dealt_damage_this_way_life_lock(parsed: &ParsedAbilities) -> 
 }
 
 fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
-    parsed.abilities.iter().any(def_tree_has_exile_parent_rider)
-        || parsed.triggers.iter().any(|t| {
-            t.execute
-                .as_deref()
-                .is_some_and(def_tree_has_exile_parent_rider)
-        })
+    let has = |f: fn(&AbilityDefinition) -> bool| {
+        parsed.abilities.iter().any(f)
+            || parsed
+                .triggers
+                .iter()
+                .any(|t| t.execute.as_deref().is_some_and(f))
+    };
+    // Exile-to-parent matched anywhere (narrow); library/hand only in the
+    // cast/counter redirect-rider context (CR 614.1a) so a standalone library
+    // placement does not falsely suppress an unrelated condition swallow.
+    has(def_tree_has_exile_parent_rider) || has(def_tree_has_cast_graveyard_redirect_rider)
 }
 
 fn target_filter_has_zone(filter: &TargetFilter, zone: Zone) -> bool {
@@ -1469,10 +1540,10 @@ fn detect_dynamic_qty(
         // `Effect::ProliferateTarget`. The counter-kind iteration is intrinsic to
         // the proliferate operation, not a swallowed `QuantityExpr` count.
         "\"type\":\"ProliferateTarget\"",
-        // CR 702.122: Strive — "this spell costs {N} more for each target
+        // CR 207.2c + CR 601.2f: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
-        "\"strive_cost\":{",
+        "\"striveCost\":{",
         // CR 702.139 / CR 702.41: Affinity / Improvise / Convoke style
         // built-in cost mods — captured as `keywords` entries with cost
         // payload, not as in-AST quantity expressions.
@@ -1938,6 +2009,45 @@ fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
 }
 
+/// CR 614.12: "[you may] put a creature card from your hand onto the
+/// battlefield. If that card is an enchantment card, it enters tapped and
+/// attacking." (Summoner's Grimoire). The leading moved-object type condition
+/// is represented by the typed `Effect::ChangeZone.enters_modified_if` gate, so
+/// it is not a swallowed condition.
+///
+/// Unlike `plotted_grant_linkage_is_only_if_marker` / `dig_if_you_do_is_only_if_marker`
+/// (which AST-gate externally via a parsed-tree walk), this folds the AST gate
+/// INSIDE via a `"enters_modified_if":` JSON probe — the same JSON-substring
+/// pattern the `source_rider` / `countered_spell_zone` / `PreventDamage` gates in
+/// `detect_condition_if` use. Because the field carries `skip_serializing_if =
+/// Option::is_none`, `None` never serializes, so the substring appears ONLY when
+/// the gate is `Some` (N4). It is text-scoped: the represented enters-modifier
+/// clause is located and dropped via the shared `is_moved_object_enters_modifier_clause`
+/// combinator, and suppression fires ONLY when no OTHER bare " if " remains — so
+/// a compound card carrying the gate AND a separate dropped " if " still flags.
+fn enters_modified_if_is_only_if_marker(stripped: &str, ast_json: &str) -> bool {
+    // allow-noncombinator: structural AST-shape JSON probe (mirrors source_rider / countered_spell_zone)
+    if !ast_json.contains("\"enters_modified_if\":") {
+        return false;
+    }
+    // Text-scoped: drop the represented moved-object enters-modifier clause(s)
+    // sentence-by-sentence (mirrors `strip_cr_implicit_if_phrases`), then check
+    // whether any OTHER bare " if " survives.
+    let residual: String = stripped
+        .split('.')
+        .filter(|sentence| {
+            !crate::parser::oracle_effect::sequence::is_moved_object_enters_modifier_clause(
+                sentence,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -2013,6 +2123,14 @@ fn detect_condition_if(
     // same `Dig`; the "if you do" linkage IS represented by the optional `Dig`
     // (declining the look stops the whole chain), not swallowed.
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
+        return;
+    }
+    // CR 614.12: "[you may] put a creature card ... If that card is an
+    // enchantment card, it enters tapped and attacking" (Summoner's Grimoire).
+    // The leading moved-object type condition is represented by the typed
+    // `enters_modified_if` gate on the absorbed ChangeZone. Text-scoped: only
+    // suppresses when that enters-modifier clause is the card's only bare " if ".
+    if enters_modified_if_is_only_if_marker(&stripped, ast_json) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -3416,7 +3534,10 @@ mod tests {
         assert!(
             parsed.statics.iter().any(|s| matches!(
                 s.mode,
-                StaticMode::SpendManaAsAnyColor { spell_filter: None }
+                StaticMode::SpendManaAsAnyColor {
+                    spell_filter: None,
+                    activation_source_filter: None,
+                }
             )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
             parsed.statics
@@ -4341,6 +4462,23 @@ mod tests {
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
+    /// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore's "If that creature was cast
+    /// for its warp cost, it also gains trample and haste" rider is represented as
+    /// a grant sub-ability with `condition: CastVariantPaid { variant: Warp,
+    /// subject: Target }`, so the `Condition_If` detector must not flag it. Before
+    /// the parser arm was added the condition was dropped and this swallow fired
+    /// (the measured coverage gap). Reverting the parser arm re-fires it.
+    #[test]
+    fn condition_if_accepts_full_bore_target_warp_grant() {
+        let full_bore = parse_named(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was \
+             cast for its warp cost, it also gains trample and haste until end of turn.",
+            "Full Bore",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&full_bore, "Condition_If"));
+    }
+
     /// CR 701.6a: "If that spell is countered this way, put it [somewhere]"
     /// — the redirect destination is encoded as `countered_spell_zone` on the
     /// Counter effect.  Its presence IS the conditional gate (Memory Lapse,
@@ -4448,6 +4586,51 @@ mod tests {
         ));
         assert!(!super::dig_if_you_do_is_only_if_marker(
             "you may look at the top five cards. if you do, reveal a land. if you control a forest, draw a card."
+        ));
+    }
+
+    /// CR 614.12: Summoner's Grimoire — the granted ability's "if that card is
+    /// an enchantment card" clause materializes the typed `enters_modified_if`
+    /// gate, so it is represented, not swallowed. With that as the card's only
+    /// " if ", `Swallow:Condition_If` must clear (the card flips supported).
+    /// Revert (field never set / marker absent) re-flags Condition_If.
+    #[test]
+    fn condition_if_accepts_grimoire_moved_type_enter_modifier() {
+        let grimoire = parse_named(
+            "Job select\nEquipped creature is a Shaman in addition to its other types and \
+             has \"Whenever this creature attacks, you may put a creature card from your hand \
+             onto the battlefield. If that card is an enchantment card, it enters tapped and \
+             attacking.\"\nAbraxas — Equip {3}",
+            "Summoner's Grimoire",
+            &["Artifact", "Equipment"],
+        );
+        assert!(!has_swallowed_detector(&grimoire, "Condition_If"));
+    }
+
+    /// CR 614.12 (N-A non-vacuity): the enters-modifier exemption is
+    /// text-scoped — it clears only the represented clause, so a card carrying
+    /// the gate AND a separate unrelated dropped " if " still flags. This FAILS
+    /// if the marker is implemented whole-AST instead of text-scoped.
+    #[test]
+    fn enters_modified_if_exemption_is_text_scoped() {
+        let ast = "{\"enters_modified_if\":{\"type\":\"Typed\"}}";
+        // The represented enters-modifier clause is the card's only " if " -> suppress.
+        assert!(super::enters_modified_if_is_only_if_marker(
+            "you may put a creature card from your hand onto the battlefield. if that card \
+             is an enchantment card, it enters tapped and attacking.",
+            ast,
+        ));
+        // Gate present BUT a separate unrelated " if " survives -> do NOT suppress.
+        assert!(!super::enters_modified_if_is_only_if_marker(
+            "you may put a creature card from your hand onto the battlefield. if that card \
+             is an enchantment card, it enters tapped and attacking. if you control a \
+             forest, draw a card.",
+            ast,
+        ));
+        // No AST gate (clause not structurally represented) -> do NOT suppress.
+        assert!(!super::enters_modified_if_is_only_if_marker(
+            "if that card is an enchantment card, it enters tapped and attacking.",
+            "{}",
         ));
     }
 
@@ -5951,5 +6134,188 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             jinnie.replacements
         );
         assert!(!has_swallowed_detector(&jinnie, "Replacement_Instead"));
+    }
+
+    /// CR 601.2 + CR 609.4b + CR 614.1a: Quistis Trepe's ETB must lower to a real
+    /// `Effect::CastFromZone` carrying `mana_spend_permission: Some(AnyTypeOrColor)`
+    /// (full-cost graveyard cast with the any-type concession), with the trailing
+    /// "exile it instead" rider rebound onto the cast spell as a
+    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT degraded to a bare
+    /// `GenericEffect{SpendManaAsAnyColor}` that drops the cast.
+    ///
+    /// DISCRIMINATING: reverting the Q1 head parser
+    /// (`try_parse_cast_target_from_graveyard_any_mana`) flips the effect back to
+    /// `GenericEffect{SpendManaAsAnyColor}` (no `CastFromZone`), failing the
+    /// effect-type assertion; reverting Commit 1's rider rebind generalization
+    /// binds the exile rider to the triggering source (Quistis), so the
+    /// sub-ability target is no longer `ParentTarget`.
+    #[test]
+    fn quistis_cast_from_graveyard_is_castfromzone_with_any_type_mana_and_exile_rider() {
+        use crate::types::ability::{Effect, ManaSpendPermission, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let parsed = parse_named(
+            "Blue Magic — When Quistis Trepe enters, you may cast target instant or sorcery \
+             card from a graveyard, and mana of any type can be spent to cast that spell. \
+             If that spell would be put into a graveyard, exile it instead.",
+            "Quistis Trepe",
+            &["Legendary", "Creature"],
+        );
+
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Quistis must carry an ETB trigger effect");
+
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            mana_spend_permission,
+            driver,
+            ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            !without_paying_mana_cost,
+            "Quistis casts at full cost (CR 609.4b is payment-mode, not free)"
+        );
+        // CR 608.2g: the graveyard any-mana cast is a during-resolution paid cast,
+        // routed by the explicit driver — not a lingering permission.
+        assert_eq!(
+            *driver,
+            crate::types::ability::CastFromZoneDriver::DuringResolution,
+            "Quistis lowers to a during-resolution cast (CR 608.2g)"
+        );
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor),
+            "the any-type concession must ride the CastFromZone grant"
+        );
+        // Cast from a graveyard (any controller) — InZone Graveyard, no owner.
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard));
+
+        // Exile rider rebound onto the cast spell (ParentTarget), not Quistis.
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .expect("the exile-instead rider must attach as a sub-ability");
+        match &*rider.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert_eq!(*target, TargetFilter::ParentTarget);
+            }
+            other => panic!("expected ChangeZone{{Exile, ParentTarget}} rider, got {other:?}"),
+        }
+
+        // No node degrades to GenericEffect{SpendManaAsAnyColor}.
+        fn chain_has_spend_mana_generic(def: &AbilityDefinition) -> bool {
+            let here = matches!(
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        crate::types::statics::StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            );
+            here || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_spend_mana_generic)
+        }
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(chain_has_spend_mana_generic),
+            "the cast must not degrade to GenericEffect{{SpendManaAsAnyColor}}"
+        );
+        // The reflexive-if swallow marker must clear.
+        assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 611.2a + CR 108.3 (multiplayer FINDING-4): Tinybones the Pickpocket casts
+    /// "from that player's graveyard" — the combat-damaged player's. The
+    /// `CastFromZone` target MUST carry `Owned{TriggeringPlayer}` so a 3+ player
+    /// game restricts the cast to that one player's graveyard, never any
+    /// opponent's. Also carries `mana_spend_permission: Some(AnyTypeOrColor)`.
+    ///
+    /// DISCRIMINATING: reverting the FINDING-4 owner-add in
+    /// `try_parse_cast_target_from_graveyard_any_mana` drops the
+    /// `Owned{TriggeringPlayer}` property; reverting the Q1 head parser degrades
+    /// the whole clause to `GenericEffect{SpendManaAsAnyColor}` (no CastFromZone).
+    #[test]
+    fn tinybones_cast_from_damaged_player_graveyard_owned_triggering_player_any_mana() {
+        use crate::types::ability::{
+            ControllerRef, Effect, FilterProp, ManaSpendPermission, TargetFilter,
+        };
+        use crate::types::zones::Zone;
+
+        let parsed = parse_named(
+            "Deathtouch\nWhenever Tinybones deals combat damage to a player, you may cast \
+             target nonland permanent card from that player's graveyard, and mana of any \
+             type can be spent to cast that spell.",
+            "Tinybones, the Pickpocket",
+            &["Legendary", "Creature"],
+        );
+
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Tinybones must carry a combat-damage trigger effect");
+
+        let Effect::CastFromZone {
+            target,
+            mana_spend_permission,
+            without_paying_mana_cost,
+            ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                execute.effect
+            );
+        };
+        assert!(!without_paying_mana_cost, "full-cost cast");
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor)
+        );
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard));
+
+        // FINDING-4: owner constraint bound to the triggering (damaged) player.
+        fn has_owned_triggering(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+                    matches!(
+                        p,
+                        FilterProp::Owned {
+                            controller: ControllerRef::TriggeringPlayer
+                        }
+                    )
+                }),
+                TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                    filters.iter().any(has_owned_triggering)
+                }
+                TargetFilter::Not { filter } => has_owned_triggering(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            has_owned_triggering(target),
+            "Tinybones must restrict the cast to the damaged player's graveyard \
+             via Owned{{TriggeringPlayer}}; got {target:?}"
+        );
     }
 }
