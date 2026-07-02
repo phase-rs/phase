@@ -12,6 +12,13 @@
     "data": "Dane"
   },
   "gameplay": {
+    "collapseLands": "Zwiń Lands",
+    "collapseSupport": "Zwiń Support",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Zawsze wł.",
+      "off": "Zawsze wył."
+    },
     "title": "Rozgrywka",
     "language": "Język",
     "cardSize": "Rozmiar kart",

@@ -3220,6 +3220,10 @@ fn deflecting_swat_choose_new_targets_for_spell_or_ability() {
     );
     assert_eq!(r.abilities.len(), 1, "abilities={:?}", r.abilities);
     assert!(
+        r.abilities[0].optional,
+        "CR 608.2d: 'you may choose new targets' must stay optional"
+    );
+    assert!(
         matches!(
             r.abilities[0].effect.as_ref(),
             Effect::ChangeTargets {
@@ -3240,6 +3244,49 @@ fn deflecting_swat_choose_new_targets_for_spell_or_ability() {
         panic!("expected Or(StackSpell, StackAbility), got {target:?}");
     };
     assert!(filters.contains(&TargetFilter::StackSpell));
+}
+
+#[test]
+fn speedball_choose_new_targets_trigger_rider_is_optional() {
+    use crate::types::ability::AbilityDefinition;
+    use crate::types::game_state::RetargetScope;
+
+    fn contains_optional_retarget(def: &AbilityDefinition) -> bool {
+        (matches!(
+            def.effect.as_ref(),
+            Effect::ChangeTargets {
+                scope: RetargetScope::All,
+                ..
+            }
+        ) && def.optional)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(contains_optional_retarget)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_optional_retarget)
+    }
+
+    let r = parse(
+        "Whenever a player casts a spell that targets Speedball, he gets +2/+2 until end of turn. \
+         You may choose new targets for that spell.",
+        "Speedball, New Warrior",
+        &[],
+        &["Creature"],
+        &["Human", "Hero"],
+    );
+
+    assert_eq!(r.triggers.len(), 1, "triggers={:#?}", r.triggers);
+    let exec = r.triggers[0]
+        .execute
+        .as_ref()
+        .expect("Speedball trigger must have an execute ability");
+    assert!(
+        contains_optional_retarget(exec),
+        "trigger body must include optional ChangeTargets rider, got {exec:#?}"
+    );
 }
 
 /// Issue #1990 — Spellskite must parse to forced-self `ChangeTargets` so the
@@ -11876,6 +11923,16 @@ fn strive_line_consumed_not_reparsed() {
     assert!(
         !has_strive_ability,
         "strive line should be consumed, not produce an ability"
+    );
+    assert!(
+        r.statics.is_empty(),
+        "strive line should be consumed, not produce a static: {:#?}",
+        r.statics
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "strive cost should satisfy swallow detection without fake statics: {:?}",
+        r.parse_warnings
     );
 }
 

@@ -3,8 +3,8 @@ use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::targeting;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    CounterSourceRider, CounteredSpellDestination, Duration, Effect, EffectError, EffectKind,
-    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind};
@@ -176,11 +176,19 @@ pub fn resolve(
                         Zone::Exile
                     } else {
                         match &countered_spell_zone {
-                            Some(CounteredSpellDestination::Hand) => Zone::Hand,
-                            Some(CounteredSpellDestination::Library { position }) => {
+                            Some(SpellStackToGraveyardReplacement::Hand) => Zone::Hand,
+                            Some(SpellStackToGraveyardReplacement::Library { position }) => {
                                 library_position = Some(position.clone());
                                 Zone::Library
                             }
+                            // CR 614.1a: `Exile` is a member of the shared
+                            // destination type (cast-this-way rider), but the
+                            // COUNTER parser never emits it — exile-on-counter is
+                            // handled by the `exile_instead_of_graveyard_on_counter`
+                            // branch above, so reaching here would mean a redundant
+                            // (not double) exile. Kept as an explicit arm to keep
+                            // the match exhaustive without a wildcard.
+                            Some(SpellStackToGraveyardReplacement::Exile) => Zone::Exile,
                             None => Zone::Graveyard,
                         }
                     };
@@ -479,6 +487,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .description("If a card would be put into a graveyard, exile it instead.".to_string())
@@ -685,6 +694,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),

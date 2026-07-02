@@ -251,6 +251,20 @@ fn selection_has_distinct_quality(
                 None => false,
             })
         }
+        // CR 110.4: distinct-permanent-type check ignores non-permanent card
+        // types (Kindred/Tribal etc.), so only permanent types are inserted.
+        SharedQuality::PermanentType => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj
+                    .card_types
+                    .core_types
+                    .iter()
+                    .filter(|card_type| card_type.is_permanent_type())
+                    .all(|card_type| seen.insert(*card_type)),
+                None => false,
+            })
+        }
         SharedQuality::CreatureType => {
             distinct_string_sets(state, chosen, |obj| obj.card_types.subtypes.clone())
         }
@@ -961,6 +975,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1064,6 +1079,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1140,6 +1156,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1399,6 +1416,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1436,6 +1454,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),

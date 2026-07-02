@@ -148,8 +148,8 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 
 ### Phase 5 — Tests
 
-- [ ] Parser test: Oracle text → correct `ReplacementDefinition`
-- [ ] Pipeline test: proposed event → replacement applies → modified event
+- [ ] Parser test: Oracle text → correct `ReplacementDefinition` (verbatim Oracle text, never a paraphrase)
+- [ ] Pipeline test: proposed event → replacement applies → modified event — with an assertion that FAILS if the change is reverted; any "replacement does NOT apply" assertion needs a positive reach-guard proving the card parsed (see `/card-test` foot-gun 6)
 - [ ] Engine flow test: full game action → replacement → zone change → post-effect
 - [ ] Provenance test: identify the selected replacement identity carried through `ReplacementId`, `PendingReplacement`, `ProposedEvent::applied`, or the relevant pending/pre-zone-change state. Assert the selected replacement's execute/decline/rider/effect is the one consumed.
 - [ ] Candidate-count tests when applicable: 0 candidates, exactly 1 candidate, and 2+ candidates where CR 616.1 order choice matters.

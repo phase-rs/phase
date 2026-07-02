@@ -3562,6 +3562,31 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
 
+    // CR 508.1 + CR 608.2c: "its controller controls" / "their controller
+    // controls" — the controller of the anaphoric object ("it"). In a trigger
+    // subject context the anaphor is the triggering source, whose controller is
+    // the triggering player (the active player who declared attackers per
+    // CR 508.1, or whichever player the triggering event identifies); otherwise
+    // ("it" refers to a chosen parent target) it is that target's controller.
+    // The subject discriminator is a verbatim mirror of `resolve_pronoun_target`
+    // / `resolve_it_pronoun`, so "its controller" binds to the SAME anaphor as a
+    // sibling "shares … with it" clause. Present-tense only; a past-tense
+    // look-back ("its controller controlled") would be a new alt() arm.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("its controller controls"),
+        tag("their controller controls"),
+    ))
+    .parse(trimmed)
+    {
+        let ctrl = match &ctx.subject {
+            Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+                ControllerRef::TriggeringPlayer
+            }
+            _ => ControllerRef::ParentTargetController,
+        };
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+
     // Delegate to nom_filter::parse_zone_controller which handles common patterns,
     // then fall through to additional nom-based patterns.
     if let Ok((rest, ctrl)) = nom_filter::parse_zone_controller(trimmed) {
@@ -5068,6 +5093,15 @@ pub(crate) fn parse_shared_quality(
         value(SharedQuality::CreatureType, tag("creature type")),
         value(SharedQuality::CardType, tag("card types")),
         value(SharedQuality::CardType, tag("card type")),
+        // CR 110.4: the six permanent types (artifact, battle, creature,
+        // enchantment, land, planeswalker) are only a SUBSET of the card types.
+        // "share a permanent type" must NOT map to SharedQuality::CardType,
+        // because CR 205.2a card types also include non-permanent types like
+        // Kindred/Tribal: two permanents sharing only Kindred would wrongly
+        // satisfy "share a permanent type". Map to the narrower
+        // SharedQuality::PermanentType instead (Role Reversal, Cloudstone Curio).
+        value(SharedQuality::PermanentType, tag("permanent types")),
+        value(SharedQuality::PermanentType, tag("permanent type")),
         value(SharedQuality::LandType, tag("land types")),
         value(SharedQuality::LandType, tag("land type")),
         value(SharedQuality::Color, tag("colors")),
@@ -10539,6 +10573,50 @@ mod tests {
         assert_eq!(len_ws, " defending player controls".len());
     }
 
+    // CR 508.1 + CR 608.2c: the "its controller controls" anaphoric suffix binds
+    // to the controller of "it". Mondassian Colony Ship class: "for each other
+    // creature its controller controls that shares a creature type with it". In a
+    // trigger-subject context (subject = the attacking creature) the anaphor is
+    // the triggering source, so the controller is the triggering player; with no
+    // subject (or a self/any subject) the anaphor is a chosen parent target, so
+    // the controller is that target's controller.
+    #[test]
+    fn parse_controller_suffix_its_controller_controls_anaphor() {
+        // Trigger-subject context → TriggeringPlayer (the attacking player).
+        let trigger_ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let (ctrl, len) = parse_controller_suffix("its controller controls", &trigger_ctx)
+            .expect("its controller controls should resolve a controller scope");
+        assert_eq!(ctrl, ControllerRef::TriggeringPlayer);
+        assert_eq!(len, "its controller controls".len());
+
+        // "their controller controls" is the same anaphor (plural pronoun).
+        let (ctrl_their, _) =
+            parse_controller_suffix("their controller controls", &trigger_ctx).unwrap();
+        assert_eq!(ctrl_their, ControllerRef::TriggeringPlayer);
+
+        // No-subject context → ParentTargetController (compound-effect anaphor),
+        // mirroring `resolve_pronoun_target`'s `None`/`SelfRef`/`Any` arm.
+        let default_ctx = ParseContext::default();
+        let (ctrl_parent, len_parent) =
+            parse_controller_suffix(" its controller controls", &default_ctx)
+                .expect("no-subject variant should resolve");
+        assert_eq!(ctrl_parent, ControllerRef::ParentTargetController);
+        assert_eq!(len_parent, " its controller controls".len());
+
+        // SelfRef subject is a self-ETB context — no non-source triggering
+        // object — so it also binds to the parent target, not the source.
+        let selfref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let (ctrl_self, _) =
+            parse_controller_suffix("its controller controls", &selfref_ctx).unwrap();
+        assert_eq!(ctrl_self, ControllerRef::ParentTargetController);
+    }
+
     // End-to-end target verb path: a representative effect phrase parses to a
     // Typed filter scoped to the defending player. Generic type phrase, not a
     // card name (The Tarrasque class: "fights target creature defending player
@@ -11807,6 +11885,43 @@ mod tests {
                 reference: Some(reference),
                 relation: SharedQualityRelation::Shares,
             } if matches!(reference.as_ref(), TargetFilter::TrackedSet { id } if *id == TrackedSetId(0))
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn parse_shared_quality_permanent_type_maps_to_permanent_type() {
+        // CR 110.4: "permanent type" names only the six permanent types, a
+        // strict subset of the card types (CR 205.2a). The recognizer maps
+        // both the singular and plural forms to SharedQuality::PermanentType
+        // (NOT CardType), so a shared non-permanent card type like Kindred
+        // cannot satisfy "share a permanent type" (Role Reversal wording).
+        let (rest, q) = parse_shared_quality("permanent type").expect("singular");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+        let (rest, q) = parse_shared_quality("permanent types").expect("plural");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_shares_permanent_type_with_it_consumed() {
+        // Cloudstone Curio: "... permanent you control that shares a permanent
+        // type with it ...". The relative clause must be consumed and lowered
+        // to a SharesQuality{PermanentType} constraint (CR 110.4 narrowing:
+        // NOT CardType, so a shared Kindred-only pairing does not match;
+        // previously the clause was silently dropped).
+        let (filter, rest) = parse_type_phrase("permanent that shares a permanent type with it");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::PermanentType,
+                relation: SharedQualityRelation::Shares,
+                ..
+            }
         )));
         assert!(rest.trim().is_empty(), "remainder: {rest:?}");
     }

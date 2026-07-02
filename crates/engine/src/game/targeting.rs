@@ -648,6 +648,9 @@ pub fn resolved_targets(
         if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
             return targets;
         }
+        if let Some(targets) = parent_target_refs_from_spell_cast_event(state) {
+            return targets;
+        }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
             return vec![target];
@@ -1054,6 +1057,22 @@ fn parent_target_refs_from_attack_trigger_context(state: &GameState) -> Option<V
         .map(|id| TargetRef::Object(*id))
         .collect();
     (!targets.is_empty()).then_some(targets)
+}
+
+/// CR 603.2c + CR 608.2c: "one of those permanents" on a spell-cast trigger
+/// (Orvar, the All-Form) inherits the triggering spell's committed object
+/// targets while the `SpellCast` event is still in scope.
+fn parent_target_refs_from_spell_cast_event(state: &GameState) -> Option<Vec<TargetRef>> {
+    let spell_id = match state.current_trigger_event.as_ref()? {
+        GameEvent::SpellCast { object_id, .. } => *object_id,
+        _ => return None,
+    };
+    let targets = super::restrictions::triggering_spell_targets(state, spell_id)?;
+    let object_targets: Vec<TargetRef> = targets
+        .into_iter()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .collect();
+    (!object_targets.is_empty()).then_some(object_targets)
 }
 
 fn blocked_attacker_from_event(
@@ -4453,6 +4472,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![second.clone()],
             source,

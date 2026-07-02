@@ -599,6 +599,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         count_param,
         library_position: None,
         is_cost_payment: _,
+        enters_modified_if: _,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) && zone == Zone::Hand {
@@ -626,6 +627,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 count_param,
                 library_position: None,
                 is_cost_payment: false,
+                enters_modified_if: None,
             };
         }
     }
