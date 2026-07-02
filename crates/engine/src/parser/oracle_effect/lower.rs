@@ -4200,9 +4200,11 @@ fn strip_controls_permanent_clause(
     ))
 }
 
-/// CR 122.1 + CR 122.2: Strip a "who has/have N or more <kind> counters"
-/// relative clause after an "each opponent"/"each player" subject. Returns
-/// `PlayerFilter::PlayerAttribute` and the verb-phrase remainder.
+/// CR 122.1 + CR 122.2 + CR 402.1 + CR 403.3: Strip a "who has/have N or more
+/// <attribute>" relative clause after an "each opponent"/"each player" subject.
+/// Covers counters, hand size, cards drawn, and battlefield-entry predicates via
+/// `parse_player_attribute_attr_clause`. Returns `PlayerFilter::PlayerAttribute`
+/// and the verb-phrase remainder.
 fn strip_player_attribute_clause(
     base: &PlayerFilter,
     rest: &str,
