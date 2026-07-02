@@ -179,6 +179,10 @@
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Elegir",
+    "fanConfirm": "Confirmar ({{count}})",
+    "viewAttachments_one": "Ver carta anexada",
+    "viewAttachments_other": "Ver {{count}} cartas anexadas",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
