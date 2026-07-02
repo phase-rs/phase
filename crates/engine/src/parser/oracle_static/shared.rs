@@ -2129,11 +2129,9 @@ fn there_is_exists_on_battlefield_condition(input: &str) -> OracleResult<'_, Sta
     let (input, subject) = take_until(" on the battlefield").parse(input)?;
     let (input, _) = tag(" on the battlefield").parse(input)?;
     let subject = subject.trim();
-    // Strip the indefinite article but keep "another " (source exclusion).
-    let type_text = subject
-        .strip_prefix("an ")
-        .or_else(|| subject.strip_prefix("a "))
-        .unwrap_or(subject);
+    // Strip the indefinite article ("a"/"an") but keep "another " — parse_article's
+    // trailing-space word boundary leaves "another <type>" (source exclusion) intact.
+    let (type_text, _) = opt(nom_primitives::parse_article).parse(subject)?;
     let (filter, remainder) = parse_type_phrase(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(OracleError::new(
