@@ -21733,8 +21733,9 @@ fn effect_exchange_control_two_permanents_share_permanent_type() {
     // Role Reversal: "Exchange control of two target permanents that share a
     // permanent type." Quantified two-target shape whose shared-quality
     // suffix uses "permanent type" instead of "card type" (Shifting
-    // Loyalties). CR 110.4 + CR 205.2a: permanent types are card types, so the
-    // constraint lowers to SharedQuality::CardType on both identical slots.
+    // Loyalties). CR 110.4: permanent types are only a SUBSET of the card
+    // types, so the constraint lowers to the narrower
+    // SharedQuality::PermanentType on both identical slots (NOT CardType).
     use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TypeFilter};
     let e = parse_effect("exchange control of two target permanents that share a permanent type");
     match e {
@@ -21757,12 +21758,12 @@ fn effect_exchange_control_two_permanents_share_permanent_type() {
                 tf.properties.iter().any(|p| matches!(
                     p,
                     FilterProp::SharesQuality {
-                        quality: SharedQuality::CardType,
+                        quality: SharedQuality::PermanentType,
                         relation: SharedQualityRelation::Shares,
                         ..
                     }
                 )),
-                "expected a shared-card-type constraint, got {:?}",
+                "expected a shared-permanent-type constraint, got {:?}",
                 tf.properties
             );
         }
