@@ -400,6 +400,7 @@ export function PlayerArea({
     <div
       className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[165%] -translate-y-full"}`}
       data-debug-label="HUD"
+      {...(mode === "full" ? { "data-player-hud-anchor": "" } : {})}
     >
       {/* Inner node owns the drag offset so the outer `-translate-x-1/2`
           centering transform is never clobbered. */}
