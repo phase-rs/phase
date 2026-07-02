@@ -13593,6 +13593,8 @@ fn spell_cost_reduction_for_creatures_that_attacked_preserves_damage_effect() {
 
 #[test]
 fn negative_self_casting_restriction_stays_metadata() {
+    use crate::types::statics::StaticMode;
+
     let r = parse(
             "You can't cast Rock Jockey if you've played a land this turn.\nYou can't play lands if Rock Jockey was cast this turn.",
             "Rock Jockey",
@@ -13608,6 +13610,19 @@ fn negative_self_casting_restriction_stays_metadata() {
                 condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
             }),
         }]
+    );
+    assert!(
+        r.statics.iter().any(|d| {
+            matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && matches!(
+                    d.condition,
+                    Some(StaticCondition::And { ref conditions })
+                        if conditions.contains(&StaticCondition::WasCast { zone: None })
+                            && conditions.contains(&StaticCondition::SourceEnteredThisTurn)
+                )
+        }),
+        "Rock Jockey's gated CantPlayLand static must survive full-card dispatch, got statics={:?}",
+        r.statics
     );
     assert!(
         r.abilities

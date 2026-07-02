@@ -451,21 +451,6 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     )
 }
 
-/// Split a trailing " as long as <condition>" rider off a static line, returning
-/// the condition text when present (combinator form, no string-method dispatch).
-fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
-    opt(preceded(
-        (
-            take_until::<_, _, OracleError<'_>>(" as long as "),
-            tag(" as long as "),
-        ),
-        rest,
-    ))
-    .parse(lower)
-    .ok()
-    .and_then(|(_, condition)| condition)
-}
-
 /// CR 509.1b: "Creatures with power <comparison> <quantity> can't
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
@@ -524,26 +509,6 @@ fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_power_comparison),
         _ => false,
     }
-}
-
-/// CR 611.3a: A static restriction may carry a trailing gate introduced by
-/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
-/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
-/// this turn." Returns the condition text for `parse_static_condition`. The
-/// `as long as` form is tried first so a card carrying both keywords anchors on
-/// the continuous form; a bare `if` gate is the fallback. As with
-/// `split_trailing_as_long_as`, an unrecognized condition downstream leaves the
-/// line unsupported rather than enforcing the restriction unconditionally.
-fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
-    split_trailing_as_long_as(lower).or_else(|| {
-        opt(preceded(
-            (take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")),
-            rest,
-        ))
-        .parse(lower)
-        .ok()
-        .and_then(|(_, condition)| condition)
-    })
 }
 
 pub(crate) fn parse_static_line_inner(
