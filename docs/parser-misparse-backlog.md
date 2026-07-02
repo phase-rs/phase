@@ -5219,7 +5219,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (4 cards)
+### 31. Other / uncategorized misparse  (2 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5229,8 +5229,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Flaccify
 - Merfolk Falconer
-- Rush of Dread
-- The Goose Mother
 
 </details>
 
