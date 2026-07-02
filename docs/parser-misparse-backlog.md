@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 34
-- **Distinct cards implicated:** 4832
-- **Total card appearances across root causes:** 4866 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 33
+- **Distinct cards implicated:** 4824
+- **Total card appearances across root causes:** 4858 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -36,16 +36,15 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
 | 23 | Effect modeled with structurally wrong variant / ability class | 51 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
-| 25 | Wrong / dropped effect duration | 30 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 25 | Wrong / dropped effect duration | 32 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 21 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 20 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 29 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
 | 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
-| 31 | 'another'/'other' self-exclusion FilterProp dropped | 10 | oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed |
-| 32 | Other / uncategorized misparse | 7 | manual triage |
-| 33 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
-| 34 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
+| 31 | Other / uncategorized misparse | 7 | manual triage |
+| 32 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
+| 33 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5024,7 +5023,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 25. Wrong / dropped effect duration  (30 cards)
+### 25. Wrong / dropped effect duration  (32 cards)
 
 **Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
 
@@ -5042,6 +5041,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ferris Wheel
 - Firja's Retribution
 - Fraying Sanity
+- Furious Rise
 - Glorious End
 - Golden Guardian
 - Jinx
@@ -5061,6 +5061,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Plant a Sapling
 - Superior Foes of Spider-Man
 - Trickery Charm
+- Unstable Amulet
 - War of the Last Alliance
 
 </details>
@@ -5217,28 +5218,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. 'another'/'other' self-exclusion FilterProp dropped  (10 cards)
-
-**Signature.** Target/sacrifice filter omits FilterProp::Another; the 'another'/'other' qualifier excluding the source object is not propagated.
-
-**Fix hint.** oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed
-
-<details><summary>Cards</summary>
-
-- Furious Rise
-- Haze Frog
-- High-Society Hunter
-- Hotel of Fears
-- Incremental Blight
-- Incremental Growth
-- Morkrut Necropod
-- Mukotai Soulripper
-- Redcap Gutter-Dweller
-- Unstable Amulet
-
-</details>
-
-### 32. Other / uncategorized misparse  (7 cards)
+### 31. Other / uncategorized misparse  (7 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5256,7 +5236,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 33. Duplicate / spurious effect or modification emitted  (7 cards)
+### 32. Duplicate / spurious effect or modification emitted  (7 cards)
 
 **Signature.** A single Oracle instruction is lowered to two effects (double ChangeZone after search, duplicate modification) or a phantom node with no Oracle basis is injected.
 
@@ -5274,7 +5254,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 34. 'Unless'-payment / escape-cost clause dropped  (6 cards)
+### 33. 'Unless'-payment / escape-cost clause dropped  (6 cards)
 
 **Signature.** An 'unless its controller pays/sacrifices/discards' alternative is modeled unconditionally; the unless_pay cost or sacrifice-alternative branch is absent.
 

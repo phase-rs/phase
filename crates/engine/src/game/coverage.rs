@@ -825,6 +825,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::PermanentType => "permanent type",
                     SharedQuality::LandType => "land type",
                 };
                 let prefix = match relation {

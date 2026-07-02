@@ -21729,6 +21729,49 @@ fn effect_exchange_control_quantified_two_target_creatures() {
 }
 
 #[test]
+fn effect_exchange_control_two_permanents_share_permanent_type() {
+    // Role Reversal: "Exchange control of two target permanents that share a
+    // permanent type." Quantified two-target shape whose shared-quality
+    // suffix uses "permanent type" instead of "card type" (Shifting
+    // Loyalties). CR 110.4: permanent types are only a SUBSET of the card
+    // types, so the constraint lowers to the narrower
+    // SharedQuality::PermanentType on both identical slots (NOT CardType).
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TypeFilter};
+    let e = parse_effect("exchange control of two target permanents that share a permanent type");
+    match e {
+        Effect::ExchangeControl { target_a, target_b } => {
+            assert_eq!(
+                target_a, target_b,
+                "quantified shape: both slot filters identical"
+            );
+            let TargetFilter::Typed(ref tf) = target_a else {
+                panic!("target_a should be Typed, got {target_a:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Permanent)),
+                "expected a Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::PermanentType,
+                        relation: SharedQualityRelation::Shares,
+                        ..
+                    }
+                )),
+                "expected a shared-permanent-type constraint, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("Expected ExchangeControl, got {other:?}"),
+    }
+}
+
+#[test]
 fn effect_exchange_control_compound_distinct_filters() {
     // Compound shape with per-slot legality (Political Trickery / Trade the Helm shape):
     // each slot carries its own controller-relative filter. Assert on the

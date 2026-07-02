@@ -400,6 +400,7 @@ mod issue_4560_winter_soldier;
 mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;
 mod issue_4663_chosen_x_ptcomparison_targets;
+mod issue_4792_isochron_scepter;
 mod issue_4829_zenith_chronicler;
 mod issue_4830_orvar_land_copy;
 mod issue_4835_intimidation_tactics;
