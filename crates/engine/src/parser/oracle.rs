@@ -1150,57 +1150,48 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
 /// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
 fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
     for ability in &mut result.abilities {
-        reconcile_host_bound_phase_outs_in_ability(ability, None);
+        reconcile_host_bound_phase_outs_in_ability(ability);
     }
     for trigger in &mut result.triggers {
-        let host_text = trigger.description.as_deref();
         if let Some(execute) = trigger.execute.as_mut() {
-            reconcile_host_bound_phase_outs_in_ability(execute, host_text);
+            reconcile_host_bound_phase_outs_in_ability(execute);
         }
     }
 }
 
-fn reconcile_host_bound_phase_outs_in_ability(
-    def: &mut AbilityDefinition,
-    host_text: Option<&str>,
-) {
-    let context_text = host_text.or(def.description.as_deref()).map(str::to_owned);
+fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
     let should_upgrade = matches!(*def.effect, Effect::PhaseOut { .. })
         && def
             .sub_ability
             .as_ref()
-            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub, context_text.as_deref()));
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()));
     if should_upgrade {
-        upgrade_host_bound_phase_out_at_head(def, context_text.as_deref());
+        upgrade_host_bound_phase_out_at_head(def);
         return;
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        reconcile_host_bound_phase_outs_in_ability(sub, host_text);
+        reconcile_host_bound_phase_outs_in_ability(sub);
     }
 }
 
-fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition, host_text: Option<&str>) -> bool {
-    if is_host_bound_phase_in_tap_rider_node(def, host_text) {
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
+    if is_host_bound_phase_in_tap_rider_node(def) {
         return true;
     }
     def.sub_ability
         .as_ref()
-        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub, host_text))
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()))
 }
 
-fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition, host_text: Option<&str>) {
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
     let Effect::PhaseOut { target } = *def.effect.clone() else {
         return;
     };
 
-    // Strip the tap-on-phase-in rider from the existing chain tail.
-    let mut tail = def.sub_ability.take();
-    while let Some(mut sub) = tail {
-        if is_host_bound_phase_in_tap_rider_node(&sub, host_text) {
-            tail = sub.sub_ability.take();
-            break;
-        }
-        tail = sub.sub_ability.take();
+    let (tail, removed_rider) = remove_host_bound_tap_rider_from_chain(def.sub_ability.take());
+    if !removed_rider {
+        def.sub_ability = tail;
+        return;
     }
 
     let cant_phase_in = Effect::GenericEffect {
@@ -1247,7 +1238,30 @@ fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition, host_text: 
     def.sub_ability = Some(Box::new(lock));
 }
 
-fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition, host_text: Option<&str>) -> bool {
+/// Remove only the host-bound tap rider node, preserving any intervening siblings.
+fn remove_host_bound_tap_rider_from_chain(
+    chain: Option<Box<AbilityDefinition>>,
+) -> (Option<Box<AbilityDefinition>>, bool) {
+    let Some(mut node) = chain else {
+        return (None, false);
+    };
+
+    if is_host_bound_phase_in_tap_rider_node(&node) {
+        return (node.sub_ability.take(), true);
+    }
+
+    if let Some(sub) = node.sub_ability.take() {
+        let (new_sub, found) = remove_host_bound_tap_rider_from_chain(Some(sub));
+        node.sub_ability = new_sub;
+        if found {
+            return (Some(node), true);
+        }
+    }
+
+    (Some(node), false)
+}
+
+fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition) -> bool {
     if !matches!(
         def.effect.as_ref(),
         Effect::SetTapState {
@@ -1258,21 +1272,17 @@ fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition, host_text: Opt
     ) {
         return false;
     }
-    if def
-        .description
+    def.description
         .as_deref()
         .is_some_and(host_bound_phase_in_tap_phrase)
-    {
-        return true;
-    }
-    host_text.is_some_and(host_bound_phase_in_tap_phrase)
 }
 
 fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
+    use crate::parser::oracle_nom::primitives::scan_contains;
     let lower = text.to_ascii_lowercase();
-    lower.contains("as it phases in this way")
-        || lower.contains("as that creature phases in this way")
-        || lower.contains("as that permanent phases in this way")
+    scan_contains(&lower, "as it phases in this way")
+        || scan_contains(&lower, "as that creature phases in this way")
+        || scan_contains(&lower, "as that permanent phases in this way")
 }
 
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {

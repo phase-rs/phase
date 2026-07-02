@@ -1435,6 +1435,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // ── Build AbilityDefinition from ClauseIr ──
         let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        def.description = Some(clause_ir.source_text.clone());
         // CR 608.2c: This clause's link to its parent = the boundary that
         // SEPARATED the previous clause from this one. A `Sentence` boundary
         // marks a `SequentialSibling` (next printed instruction, resolves even

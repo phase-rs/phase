@@ -17345,3 +17345,65 @@ fn phase_out_with_unrelated_tap_does_not_upgrade_to_host_bound_lock() {
         "a generic tap after PhaseOut must not be rewritten into a host-bound CantPhaseIn lock"
     );
 }
+
+#[test]
+fn phase_out_preserves_intervening_tap_before_host_bound_rider() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{Effect, EffectScope, TapStateChange, TargetFilter};
+    use crate::types::statics::StaticMode;
+
+    let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature. Tap that creature as it phases in this way.";
+    let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have execute");
+
+    let lock = execute
+        .sub_ability
+        .as_ref()
+        .expect("host-bound PhaseOut must chain to CantPhaseIn lock");
+    assert!(
+        matches!(
+            lock.effect.as_ref(),
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities
+                .iter()
+                .any(|static_def| static_def.mode == StaticMode::CantPhaseIn)
+        ),
+        "expected CantPhaseIn lock, got {:?}",
+        lock.effect
+    );
+
+    let delayed = lock
+        .sub_ability
+        .as_ref()
+        .expect("CantPhaseIn lock must chain to host-leaves delayed trigger");
+    let intervening_tap = delayed
+        .sub_ability
+        .as_ref()
+        .expect("intervening tap must survive before the delayed PhaseIn rider");
+    assert!(
+        matches!(
+            intervening_tap.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }
+        ),
+        "intervening parent-target tap must be preserved, got {:?}",
+        intervening_tap.effect
+    );
+    assert!(
+        !intervening_tap
+            .description
+            .as_deref()
+            .is_some_and(|text| text
+                .to_ascii_lowercase()
+                .contains("as it phases in this way")),
+        "intervening tap must not be classified as the host-bound rider"
+    );
+}
