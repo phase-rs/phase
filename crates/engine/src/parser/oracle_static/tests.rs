@@ -449,6 +449,39 @@ fn cant_attack_or_block_gated_on_trailing_as_long_as() {
     }
 }
 
+/// CR 611.3a vs duration seam: "for as long as" is effect-duration text
+/// (`Duration::ForAsLongAs`), NOT a trailing static-restriction gate. The
+/// combat-restriction "as long as" peel must reject it so Promise of Loyalty
+/// ("Each of those creatures can't attack you or planeswalkers you control for
+/// as long as it has a vow counter on it") does not gain a bogus static
+/// `HasCounters` gate — that clause belongs to the duration/effect pipeline.
+/// Building-block guard on `parse_as_long_as_static_condition` (the peel), with
+/// the bare "as long as" form asserted to still parse (no over-rejection).
+#[test]
+fn as_long_as_peel_rejects_for_as_long_as_duration() {
+    // Promise of Loyalty: "for as long as" is duration text — must NOT gate here.
+    let dur = "creatures can't attack you for as long as it has a vow counter on it";
+    let dur_l = dur.to_lowercase();
+    assert!(
+        super::shared::parse_as_long_as_static_condition(
+            &crate::parser::oracle_util::TextPair::new(dur, &dur_l)
+        )
+        .is_none(),
+        "\"for as long as\" is duration text and must not attach as a static gate"
+    );
+
+    // Bare "as long as" (Seer of the Bright Side) must still parse as a gate.
+    let gate = "this creature can't attack or block as long as it has a stun counter on it";
+    let gate_l = gate.to_lowercase();
+    assert!(
+        super::shared::parse_as_long_as_static_condition(
+            &crate::parser::oracle_util::TextPair::new(gate, &gate_l)
+        )
+        .is_some(),
+        "bare \"as long as\" must still attach as a static gate (no over-rejection)"
+    );
+}
+
 /// CR 508.1 + CR 611.3a: A trailing "if there's a[n]/another <type> on the
 /// battlefield" gate on a "can't attack" static (Shauku, Endbringer: "Shauku
 /// can't attack if there's another creature on the battlefield.") must attach as

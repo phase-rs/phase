@@ -1909,6 +1909,16 @@ pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondi
 /// unconditionally; this closes that keyword gap without touching the shared
 /// condition grammar.
 pub(crate) fn parse_as_long_as_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+    // CR 611.3a vs duration seam: "for as long as" is effect-duration/provenance
+    // text (`Duration::ForAsLongAs` — Promise of Loyalty: "... can't attack you
+    // or planeswalkers you control for as long as it has a vow counter on it"),
+    // NOT a trailing static-restriction gate. Only a bare "as long as" introduces
+    // a continuous game-state gate here; reject the "for as long as" form so it
+    // stays with the duration/effect pipeline rather than being mis-attached as a
+    // static condition.
+    if tp.split_around(" for as long as ").is_some() {
+        return None;
+    }
     let (_, as_long_as_text) = tp.split_around(" as long as ")?;
     parse_static_condition(as_long_as_text.original)
 }
