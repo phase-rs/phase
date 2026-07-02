@@ -1964,19 +1964,24 @@ fn try_parse_dual_gated_cant_attack_and_cant_block(
     }
     let attack_cond = tp_slice_from_lower_substr(tp, attack_cond_lower)?;
     let block_cond = tp_slice_from_lower_substr(tp, block_cond_lower.trim_end_matches('.'))?;
-    let mut attack = StaticDefinition::new(StaticMode::CantAttack)
-        .affected(TargetFilter::SelfRef)
-        .description(text.to_string());
-    if let Some(condition) = parse_static_condition(attack_cond.trim()) {
-        attack.condition = Some(condition);
-    }
-    let mut block = StaticDefinition::new(StaticMode::CantBlock)
-        .affected(TargetFilter::SelfRef)
-        .description(text.to_string());
-    if let Some(condition) = parse_static_condition(block_cond.trim()) {
-        block.condition = Some(condition);
-    }
-    Some(vec![attack, block])
+    let (Some(attack_condition), Some(block_condition)) = (
+        parse_static_condition(attack_cond.trim()),
+        parse_static_condition(block_cond.trim()),
+    ) else {
+        // CR 508.1c + CR 509.1b: both gates must decompose — an unrecognized
+        // rider must not collapse to unconditional CantAttack / CantBlock.
+        return Some(vec![]);
+    };
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::SelfRef)
+            .condition(attack_condition)
+            .description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantBlock)
+            .affected(TargetFilter::SelfRef)
+            .condition(block_condition)
+            .description(text.to_string()),
+    ])
 }
 
 fn tp_slice_from_lower_substr<'a>(tp: &'a TextPair<'a>, lower_substr: &str) -> Option<&'a str> {

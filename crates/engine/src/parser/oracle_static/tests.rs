@@ -503,12 +503,50 @@ fn shauku_cant_attack_gated_on_another_creature_exists() {
 }
 
 /// CR 508.1c + CR 509.1b: The Fallen Apart — compound "~ can't attack if <A> and
-/// can't block if <B>" must split into separate gated CantAttack and CantBlock
-/// statics instead of mis-dispatching to a lone CantBlock.
+/// can't block if <B>" must not collapse to unconditional combat restrictions
+/// when either gate is unrecognized; the line stays unsupported (honest).
 #[test]
-fn fallen_apart_dual_gated_cant_attack_and_cant_block_split() {
+fn fallen_apart_dual_gated_unrecognized_gates_stay_unsupported() {
     let defs = parse_static_line_multi(
         "~ can't attack if it has no legs and can't block if it has no arms.",
+    );
+    assert!(
+        !defs.iter().any(|d| {
+            matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock)
+                && d.condition.is_none()
+        }),
+        "unrecognized dual gates must not emit unconditional CantAttack/CantBlock, got {:?}",
+        defs
+    );
+    assert!(
+        defs.is_empty(),
+        "unmodeled leg/arm gates must leave the line unsupported, got {:?}",
+        defs
+    );
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "~ can't attack if it has no legs and can't block if it has no arms.",
+        "The Fallen Apart",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed
+            .statics
+            .iter()
+            .any(|d| { matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock) }),
+        "full dispatch must not emit combat restrictions without parsed gates, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 508.1c + CR 509.1b: Dual-gated attack/block lines emit separate statics
+/// only when both trailing gates decompose.
+#[test]
+fn dual_gated_cant_attack_and_cant_block_requires_both_gates_parsed() {
+    let defs = parse_static_line_multi(
+        "~ can't attack if there's another creature on the battlefield and can't block if an enchantment is on the battlefield.",
     );
     assert_eq!(
         defs.len(),
@@ -525,32 +563,26 @@ fn fallen_apart_dual_gated_cant_attack_and_cant_block_split() {
         .find(|d| d.mode == StaticMode::CantBlock)
         .expect("expected CantBlock static");
     assert!(
-        attack.condition.is_none(),
-        "leg gate not yet modeled; restriction must still split, got {:?}",
+        matches!(
+            attack.condition,
+            Some(StaticCondition::QuantityComparison {
+                rhs: QuantityExpr::Fixed { value: 2 },
+                ..
+            })
+        ),
+        "attack gate must be ObjectCount(creature) >= 2, got {:?}",
         attack.condition
     );
     assert!(
-        block.condition.is_none(),
-        "arm gate not yet modeled; restriction must still split, got {:?}",
+        matches!(
+            block.condition,
+            Some(StaticCondition::QuantityComparison {
+                rhs: QuantityExpr::Fixed { value: 1 },
+                ..
+            })
+        ),
+        "block gate must be ObjectCount(enchantment) >= 1, got {:?}",
         block.condition
-    );
-
-    let parsed = crate::parser::oracle::parse_oracle_text(
-        "~ can't attack if it has no legs and can't block if it has no arms.",
-        "The Fallen Apart",
-        &[],
-        &["Creature".to_string()],
-        &[],
-    );
-    assert_eq!(
-        parsed
-            .statics
-            .iter()
-            .filter(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))
-            .count(),
-        2,
-        "full dispatch must split into CantAttack + CantBlock, got {:?}",
-        parsed.statics
     );
 }
 
