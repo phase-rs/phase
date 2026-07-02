@@ -5219,7 +5219,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (7 cards)
+### 31. Other / uncategorized misparse  (4 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5227,12 +5227,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Bound by Moonsilver
-- Bound in Gold
 - Flaccify
 - Merfolk Falconer
 - Rush of Dread
-- Sorcerous Sight
 - The Goose Mother
 
 </details>
