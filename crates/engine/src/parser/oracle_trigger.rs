@@ -18,7 +18,9 @@ use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
-use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
+use super::oracle_nom::filter::{
+    parse_color_property, parse_enters_origin_zone, parse_with_property,
+};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -1214,6 +1216,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
+    }
+    if let Some(ability) = execute.as_deref_mut() {
+        rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+            &def,
+            ability,
+            &modifiers.effect_lower,
+        );
     }
 
     def.execute = execute;
@@ -12523,12 +12532,45 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
 /// Returns `None` if `parse_type_phrase` reports `TargetFilter::Any` or leaves
 /// residual text — both indicate the phrase was not a pure type qualifier.
 fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
+    // CR 105.2b: bare color-quality qualifiers ("multicolored", "monocolored",
+    // "colorless") are color-count properties, not type phrases.
+    if let Ok((remainder, prop)) = parse_color_property(qualifier) {
+        if remainder.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![prop]),
+            ));
+        }
+    }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)
     } else {
         None
     }
+}
+
+/// CR 102.1 + CR 603.2c: On "whenever a player casts..." triggers, "each other
+/// player" excludes the caster (the triggering player), not the source's
+/// controller. The effect-chain stripper maps bare "each other player" to
+/// `Opponent` (controller-relative); rewrite here once the trigger subject is
+/// known to be any player.
+fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+    trigger_def: &TriggerDefinition,
+    ability: &mut AbilityDefinition,
+    effect_lower: &str,
+) {
+    if trigger_def.mode != TriggerMode::SpellCast || trigger_def.valid_target.is_some() {
+        return;
+    }
+    if !scan_contains(effect_lower, "each other player") {
+        return;
+    }
+    if ability.player_scope != Some(PlayerFilter::Opponent) {
+        return;
+    }
+    ability.player_scope = Some(PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::TriggeringPlayer),
+    });
 }
 
 /// Parse a post-spell modifier phrase (text between "spell" and the timing tail).

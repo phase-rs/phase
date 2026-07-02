@@ -5426,10 +5426,18 @@ fn players_to_scope_opt(players: &Players) -> ScopeOutcome {
             engine_type: "PlayerFilter",
             needed_variant: "OpponentOf(reference)".to_string(),
         }),
-        Ps::Other(_) => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "PlayerFilter",
-            needed_variant: "OtherThan(reference)".to_string(),
-        }),
+        // CR 102.1 + CR 603.2c: "each other player" relative to the trigger
+        // event's named player (the caster on spell-cast triggers). Zenith
+        // Chronicler, Hive Mind, Curse of Echoes class.
+        Ps::Other(inner) => match inner.as_ref() {
+            Player::Trigger_ThatPlayer => Ok(Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })),
+            other => Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "PlayerFilter",
+                needed_variant: format!("OtherThan({other:?})"),
+            }),
+        },
         Ps::Ref_TargetPlayers => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "PlayerFilter",
             needed_variant: "target-ref via Effect::*::target_player (Ref_TargetPlayers)"
@@ -7010,6 +7018,28 @@ mod tests {
             &PtValue::Quantity(QuantityExpr::Fixed { value: 5 })
         );
         assert_eq!(count, &QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn each_other_player_than_triggering_player_scopes_all_except() {
+        use crate::schema::types::{Action, Actions, Player, Players};
+        use engine::types::ability::{Effect, PlayerFilter};
+
+        let actions = Actions::ActionList(vec![Action::EachPlayerAction(
+            Box::new(Players::Other(Box::new(Player::Trigger_ThatPlayer))),
+            Box::new(Action::DrawACard),
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.player_scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })
+        );
+        assert!(matches!(*ability.effect, Effect::Draw { .. }));
     }
 
     #[test]
