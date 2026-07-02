@@ -18,6 +18,7 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 2. **CI/Tilt green is necessary, NOT sufficient.** Green CI proves it compiles and existing tests pass. It does **not** prove correctness, no-regression, or performance. Never present "CI green" as evidence a PR is ready. For every PR you must additionally:
    - **Trace the changed logic by hand**, end to end, for the target case AND 2–3 sibling cases in the class AND the obvious edge cases (multiplayer, zero/empty, interaction with existing effects). Confirm it actually produces the rules-correct result — not merely that it "conforms to CLAUDE.md."
    - **Verify the tests DISCRIMINATE.** For every assertion, ask: *would this fail if the fix were reverted?* An assertion that passes both before and after the fix is coverage theater. A bug-fix PR must have at least one runtime test that drives the engine through the real pipeline (`apply()` / scenario runner) and would fail without the change. Name any behavior with no discriminating test as a gap, and add the missing test before enqueue.
+   - **Read the parse-diff sticky comment (engine/parser-surface PRs).** CI posts a sticky comment (marker `<!-- coverage-parse-diff -->`) with the card-level parse changes this PR introduces — it exists *for the reviewing LLM* and is required evidence, not optional context. Fetch its full body and confront the card diff against the PR's claimed scope: unexplained gained/lost/changed cards are findings (scope contamination or unintended parser blast radius). The `pr_review.py` packet's `parse_diff` field carries presence/state/`updated_at`; compare `updated_at` against the head's push time to confirm the diff reflects the current head. If the comment is absent but engine source changed, treat it as missing evidence and check whether CI ran for the current head before reviewing.
 
 3. **Regressions, performance, and clean architecture are first-class enqueue gates.** Before enqueue, answer each with evidence:
    - *Regression:* which existing cards/paths could this break? Anything touching a shared resolver, the casting/priority path, the protection/targeting gate, the layer system, or combat — i.e. code with many callers — gets a hand-traced blast-radius review and, where coverage is thin, a new regression test.
@@ -230,6 +231,15 @@ The judgement is yours (the maintainer or the agent executing the skill) — kee
 
 If `## Anchored on` is absent, do not penalize — the policy is new and most existing PRs will lack it. Just apply normal Architecture Review.
 
+### Contributor standing gauge (informs scrutiny level)
+
+`python3 scripts/pr_review.py recommend <N>` returns an advisory `contributor` block — `standing`, `scrutiny`, `scrutiny_reasons`, `recurrence`, `first_contribution` — derived from local review history plus `contributor_standing` in the review host's gitignored `private-overrides.json` (other hosts see only derived standing). Use it alongside the Tier line:
+
+- A self-declared `Tier: Frontier` PR whose author sits at `elevated` or `maintainer_attention` scrutiny gets Standard-tier scrutiny regardless of the declared tier — declared tier never outranks observed track record.
+- When `recurrence` lists the same signal class you just found in review, say so in the review comment ("Nth PR with `<signal>` in the last 60 days") — repeat-after-feedback is the primary pattern the maintainer wants surfaced.
+- `first_contribution` → apply the full evidence bar and point the author at the `docs/AI-CONTRIBUTOR.md` gates in the first review comment.
+- When your review finds a quality-signal defect, attach `signals` (closed vocabulary) to the recorded outcome event — this review's defects only, never re-recorded history — so recurrence stays derivable.
+
 ## Checkout
 
 Prefer a worktree for contributor PRs. If using the main workspace, first verify the current changes are intentional and do not overwrite or stash them.
@@ -274,6 +284,8 @@ Resolve conflicts in the same architectural style as the surrounding code. Do no
 **The `main.rs` mod-line tax (recurring, deterministic).** `crates/engine/tests/integration/main.rs` is rustfmt-sorted (`reorder_modules`), and every test-carrying PR appends a `mod issue_XXXX;` line. Two test PRs near each other in the queue therefore conflict **deterministically** on that file, and GitHub's auto-rebase bails (leaving the PR `DIRTY`). The resolution is always the same: keep **both** mod lines, in sorted order. This is a merge-queue serialization artifact, not a contributor defect — resolve it mechanically and move on. (Inline `#[cfg(test)]` tests avoid it entirely.)
 
 If `origin/main` is already an ancestor and there are no conflicts, skip the merge — repeatedly bringing-current adds noise to the PR history without changing mergeability under the queue.
+
+**One targeted exception — `baseline_pending` parse-diff.** The parse-diff CI step is merge-base-pinned and immune to branch staleness (see `ci.yml` "Parse-detail diff vs base baseline"), so staleness alone is never a reason to bring-current-and-push. But when the sticky parse-diff comment shows *Baseline pending* (packet reason `review_parse_baseline_pending`), the merge-base's R2 baseline has likely aged out of retention and will **never** populate — bringing the branch current with `origin/main` and pushing is the remedy, because a fresh merge-base has a live baseline and the re-triggered CI regenerates the diff. Do this *before* the review so the card diff is available as evidence (and remember a push to an enqueued PR cancels auto-merge — re-run `gh pr merge --auto` after).
 
 ## Review Comment Resolution
 
