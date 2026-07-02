@@ -789,14 +789,30 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
 /// and then delegating to `parse_static_line_multi` so compound forms
 /// (e.g., cross-mode conjunctions) emit all their constituent statics
 /// rather than silently dropping the extras.
-fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<StaticDefinition> {
-    if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
-        return vec![def];
+///
+/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), cant-cast
+/// gate parentheticals stripped by `strip_reminder_text` are re-applied without
+/// passing raw reminder parentheticals through the general static parser.
+fn parse_static_line_with_graveyard_keyword_continuation(
+    line: &str,
+    raw_line_for_cant_cast_gates: Option<&str>,
+    card_name_for_cant_cast_gates: Option<&str>,
+) -> Vec<StaticDefinition> {
+    let mut defs = if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
+        vec![def]
+    } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
+        vec![def]
+    } else {
+        parse_static_line_multi(line)
+    };
+    if let (Some(raw), Some(card_name)) =
+        (raw_line_for_cant_cast_gates, card_name_for_cant_cast_gates)
+    {
+        defs = crate::parser::oracle_static::apply_raw_parenthetical_cant_cast_gate(
+            defs, raw, card_name,
+        );
     }
-    if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
-        return vec![def];
-    }
-    parse_static_line_multi(line)
+    defs
 }
 
 /// CR 614.6 + CR 701.26b: A single `<subject> can't <P1> and can't <P2>`
@@ -823,8 +839,8 @@ fn parse_static_replacement_compound(
     let left = format!("{subject} can't {p1}");
     let right = format!("{subject} can't {p2}");
 
-    let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left);
-    let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right);
+    let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left, None, None);
+    let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right, None, None);
     let left_repl = parse_replacement_line(&left, card_name);
     let right_repl = parse_replacement_line(&right, card_name);
 
@@ -1209,6 +1225,8 @@ where
             .statics
             .extend(parse_static_line_with_graveyard_keyword_continuation(
                 modeled_sentence,
+                None,
+                None,
             ));
         result.abilities.push(make_unimplemented(unmodeled_tail));
         return true;
@@ -2407,7 +2425,7 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Normalize card self-references for static parsing (replace card name with ~)
+        // Normalize card self-references for static parsing (replace card name with ~).
         let static_line = normalize_self_refs_for_static(&line, card_name);
         let static_line_lower = static_line.to_lowercase();
         if push_same_is_true_static_tail(
@@ -2453,7 +2471,11 @@ pub(crate) fn parse_oracle_ir(
         // Intercept only that narrow class so we do not steal ordinary spell
         // instruction lines that happen to have static-like phrasing.
         if is_spell {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             let is_self_color_cda = defs.len() == 1
                 && defs[0].characteristic_defining
                 && defs[0].affected == Some(TargetFilter::SelfRef)
@@ -2476,7 +2498,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_speed_unlock_sentence(&lower) {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -2535,7 +2561,11 @@ pub(crate) fn parse_oracle_ir(
                     if !trimmed.is_empty() {
                         let clause_dot = format!("{trimmed}.");
                         result.statics.extend(
-                            parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                            parse_static_line_with_graveyard_keyword_continuation(
+                                &clause_dot,
+                                None,
+                                None,
+                            ),
                         );
                     }
                 }
@@ -2545,7 +2575,11 @@ pub(crate) fn parse_oracle_ir(
             // Compound detection (CR 602.5 can't-be-activated, cross-mode conjunctions,
             // life-total locks, etc.) is already owned by `parse_static_line_multi`,
             // which the wrapper below delegates to.
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -3090,7 +3124,11 @@ pub(crate) fn parse_oracle_ir(
         // 2 life rather than pay that mana." K'rrik class. Must run before Priority 7
         // because is_static_pattern does not classify this shape.
         if is_pay_life_as_colored_mana_pattern(&lower) {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -3122,7 +3160,11 @@ pub(crate) fn parse_oracle_ir(
                 result.replacements.push(rep_def);
                 consumed = true;
             }
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 consumed = true;
@@ -3274,8 +3316,11 @@ pub(crate) fn parse_oracle_ir(
                 // otherwise consume the line before Priority 14 for instants/sorceries.
                 if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                    let mut defs =
-                        parse_static_line_with_graveyard_keyword_continuation(&effect_static);
+                    let mut defs = parse_static_line_with_graveyard_keyword_continuation(
+                        &effect_static,
+                        None,
+                        None,
+                    );
                     if !defs.is_empty() {
                         if let Some(cond) = ability_word_to_condition(&aw_name) {
                             for def in &mut defs {
@@ -3301,7 +3346,11 @@ pub(crate) fn parse_oracle_ir(
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
                             result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                                parse_static_line_with_graveyard_keyword_continuation(
+                                    &clause_dot,
+                                    None,
+                                    None,
+                                ),
                             );
                         }
                     }
@@ -3318,7 +3367,11 @@ pub(crate) fn parse_oracle_ir(
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
                             result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                                parse_static_line_with_graveyard_keyword_continuation(
+                                    &clause_dot,
+                                    None,
+                                    None,
+                                ),
                             );
                         }
                     }
@@ -3329,7 +3382,11 @@ pub(crate) fn parse_oracle_ir(
                 // "attacks or blocks each combat if able" → MustAttack + MustBlock, life-total
                 // locks, etc.) is already owned by `parse_static_line_multi`, which the wrapper
                 // delegates to.
-                let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+                let defs = parse_static_line_with_graveyard_keyword_continuation(
+                    &static_line,
+                    Some(raw_line),
+                    Some(card_name),
+                );
                 if !defs.is_empty() {
                     result.statics.extend(defs);
                     i += 1;
@@ -3952,8 +4009,11 @@ pub(crate) fn parse_oracle_ir(
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                let mut defs =
-                    parse_static_line_with_graveyard_keyword_continuation(&effect_static);
+                let mut defs = parse_static_line_with_graveyard_keyword_continuation(
+                    &effect_static,
+                    None,
+                    None,
+                );
                 if !defs.is_empty() {
                     if let Some(cond) = aw_condition.clone() {
                         for def in &mut defs {
@@ -3982,7 +4042,11 @@ pub(crate) fn parse_oracle_ir(
         // heuristics miss it. Try the actual static parser before falling through
         // to generic dispatch/unimplemented categorization.
         let static_line = normalize_self_refs_for_static(&line, card_name);
-        let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+        let defs = parse_static_line_with_graveyard_keyword_continuation(
+            &static_line,
+            Some(raw_line),
+            Some(card_name),
+        );
         if !defs.is_empty() {
             result.statics.extend(defs);
             i += 1;

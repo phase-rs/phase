@@ -8203,6 +8203,47 @@ fn trigger_spell_or_ability_opponent_controls_counters_a_spell() {
 }
 
 #[test]
+fn trigger_a_spell_youve_cast_is_countered() {
+    // CR 701.6a + CR 108.4: Multani's Presence -- the passive dual of the
+    // countering-side arm. The trigger fires when a spell YOU control leaves
+    // the stack via a counter, so it gates the *countered* spell through
+    // `valid_card` (the `SpellCountered` event's `object_id`), not the
+    // countering source through `valid_source`.
+    let def = parse_trigger_line(
+        "Whenever a spell you've cast is countered, draw a card.",
+        "Multani's Presence",
+    );
+    assert_eq!(def.mode, TriggerMode::Countered);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    // The passive form must NOT populate `valid_source` (that gates the
+    // countering source, the active-side semantics).
+    assert_eq!(def.valid_source, None);
+}
+
+#[test]
+fn trigger_a_spell_you_control_is_countered() {
+    // CR 108.4: the plain "you control" possessive is synonymous with
+    // "you've cast" for a spell (a spell's controller is its caster), so it
+    // routes to the same `ControllerRef::You` `valid_card` filter.
+    let def = parse_trigger_line(
+        "Whenever a spell you control is countered, draw a card.",
+        "Hypothetical Own-Spell Countered Watcher",
+    );
+    assert_eq!(def.mode, TriggerMode::Countered);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
 fn trigger_you_sacrifice_a_creature() {
     let def = parse_trigger_line(
         "Whenever you sacrifice a creature, draw a card.",

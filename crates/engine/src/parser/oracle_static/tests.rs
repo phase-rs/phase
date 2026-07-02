@@ -487,6 +487,58 @@ fn hour_of_revelation_cost_reduction_gated_on_battlefield_count() {
     );
 }
 
+/// CR 601.2f + CR 611.3a: A self-spell cost reduction gated on an opponent's
+/// board count — Lashwhip Predator: "This spell costs {2} less to cast if your
+/// opponents control three or more creatures." — must attach the count gate with
+/// the OPPONENT controller scope (not swallow it, and not read it as your own).
+#[test]
+fn lashwhip_predator_cost_reduction_gated_on_opponents_creature_count() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {2} less to cast if your opponents control three or more creatures.",
+        "Lashwhip Predator",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("expected a ModifyCost self-spell reduction");
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 3 },
+    }) = &def.condition
+    else {
+        panic!(
+            "cost reduction must be gated on ObjectCount(opponents' creatures) >= 3, got {:?}",
+            def.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed creature filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "gate filter must count creatures, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::Opponent),
+        "count must be scoped to opponents, got {:?}",
+        tf.controller
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the opponent board-state gate must attach, not be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
@@ -1035,6 +1087,127 @@ fn cant_be_sacrificed_static_splits_from_pump() {
         defs.iter()
             .any(|d| matches!(d.mode, StaticMode::Continuous)),
         "the +1/+1 grant must be preserved"
+    );
+}
+
+/// CR 613.4c: `parse_fixed_pt_in_text` accepts the copula ("has"/"have")
+/// alongside "gets"/"get" so equip/anthem lines phrased with "has +N/+M"
+/// resolve to the same additive P/T grant. The sign-required modifier and the
+/// counter-suffix guard keep the copula from mis-firing on keyword grants
+/// ("has protection from red") or counter-placement lines.
+#[test]
+fn parse_fixed_pt_in_text_accepts_copula() {
+    // Copula grants (the FIX 1 broadening):
+    assert_eq!(
+        parse_fixed_pt_in_text("has +2/+2 and has flying"),
+        Some((2, 2))
+    );
+    assert_eq!(parse_fixed_pt_in_text("have +0/+2"), Some((0, 2)));
+    // Positive control — the pre-existing "gets" path still works:
+    assert_eq!(parse_fixed_pt_in_text("gets +3/+3"), Some((3, 3)));
+}
+
+/// CR 613.4c + CR 122.1a: revert-failing negatives. "has protection from red"
+/// must NOT parse a P/T grant (sign-required modifier fails on "protection"),
+/// and a "-1/-1 counters" placement line must NOT misfire into an anthem (the
+/// counter-suffix guard is the load-bearing exclusion — Melira, Sylvok Outcast).
+#[test]
+fn parse_fixed_pt_in_text_rejects_keyword_and_counter() {
+    // Keyword grant, not a P/T grant:
+    assert_eq!(parse_fixed_pt_in_text("has protection from red"), None);
+    // Counter placement, not a static grant (Melira class):
+    assert_eq!(
+        parse_fixed_pt_in_text("creatures you control can't have -1/-1 counters put on them"),
+        None
+    );
+    // Singular "counter" suffix is also excluded:
+    assert_eq!(parse_fixed_pt_in_text("has +1/+1 counters on it"), None);
+}
+
+/// CR 613.4c + CR 702.16g/i: Tinfoil Helm — "Equipped creature has +2/+2 and has
+/// protection from aliens, birds, eldrazi, lizards, mutants, robots, yetis, and
+/// hybrid mana." must produce ONE Continuous `StaticDefinition` (affected =
+/// EquippedBy) carrying AddPower{2} + AddToughness{2} AND all eight Protection
+/// modifications. The copula pump (FIX 1) and the bare-comma-list protection
+/// expansion (FIX 2) both land on the same equipped-creature grant.
+#[test]
+fn tinfoil_helm_copula_pump_and_bare_list_protection() {
+    use crate::types::keywords::ProtectionTarget;
+
+    let defs = parse_static_line_multi(
+        "Equipped creature has +2/+2 and has protection from aliens, birds, eldrazi, lizards, mutants, robots, yetis, and hybrid mana.",
+    );
+    let continuous = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("expected a Continuous grant on the equipped creature");
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "expected +2 power (copula pump), got {:?}",
+        continuous.modifications
+    );
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "expected +2 toughness (copula pump), got {:?}",
+        continuous.modifications
+    );
+    let protection_count = continuous
+        .modifications
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_),
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        protection_count, 8,
+        "expected eight separate Protection modifications, got {:?}",
+        continuous.modifications
+    );
+    // Spot-check a subtype quality landed as a Protection entry (CardType
+    // fall-through — CR 702.16a) rather than being dropped.
+    assert!(
+        continuous.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Quality(q)),
+            } if q.contains("birds")
+        ) || matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(q)),
+            } if q.contains("birds")
+        )),
+        "expected a 'birds' protection entry, got {:?}",
+        continuous.modifications
+    );
+}
+
+/// CR 122.1a + CR 613.4c: Melira, Sylvok Outcast — "Creatures you control can't
+/// have -1/-1 counters put on them." must NOT produce any AddPower/AddToughness
+/// modification. This is the revert-failing regression guard for the
+/// counter-suffix exclusion: without it the copula ("have") would greedily read
+/// "-1/-1" as a static P/T debuff anthem.
+#[test]
+fn melira_counter_prohibition_is_not_a_pump() {
+    let mods = parse_continuous_modifications(
+        "creatures you control can't have -1/-1 counters put on them",
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "counter-prohibition line must not yield a P/T grant, got {:?}",
+        mods
     );
 }
 
@@ -14144,7 +14317,9 @@ fn passive_spells_with_chosen_name_cant_be_cast() {
 
 #[test]
 fn cant_cast_spells_with_chosen_name_parenthetical() {
-    // Alhammarret full text with parenthetical condition
+    // CR 101.2 + CR 611.3a + CR 113.6b: Alhammarret full text — the
+    // parenthetical "(as long as this creature is on the battlefield)" must gate
+    // the CantBeCast prohibition, not be stripped into an unconditional lock.
     let def = parse_static_line(
             "Your opponents can't cast spells with the chosen name (as long as this creature is on the battlefield).",
         )
@@ -14156,6 +14331,104 @@ fn cant_cast_spells_with_chosen_name_parenthetical() {
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        }),
+        "parenthetical gate must require the source on the battlefield"
+    );
+}
+
+/// CR 101.2 + CR 611.3a: Parenthetical `if` gates cant-cast prohibitions the
+/// same way `as long as` does. Building-block parity with
+/// `split_trailing_gate_condition` on Rock Jockey.
+#[test]
+fn cant_cast_spells_with_chosen_name_parenthetical_if_gate() {
+    let def = parse_static_line(
+        "Your opponents can't cast spells with the chosen name (if this creature is on the battlefield).",
+    )
+    .unwrap();
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        })
+    );
+}
+
+/// CR 101.2: An unrecognized parenthetical gate on a cant-cast prohibition must
+/// leave the line unsupported rather than enforcing unconditionally.
+#[test]
+fn cant_cast_spells_unrecognized_parenthetical_gate_stays_unsupported() {
+    let def = parse_static_line(
+        "Your opponents can't cast spells with the chosen name (as long as the sky is green).",
+    );
+    assert!(
+        def.is_none(),
+        "unrecognized parenthetical gate must decline, got {def:?}"
+    );
+}
+
+/// CR 101.2 + CR 611.3a: Benign (non-gate) reminder parentheticals must still be
+/// stripped without poisoning the prohibition body parse.
+#[test]
+fn cant_cast_spells_benign_parenthetical_still_parses() {
+    let def = parse_static_line(
+        "Your opponents can't cast spells with the chosen name (this is reminder text).",
+    )
+    .expect("benign parenthetical must not block cant-cast parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+    assert_eq!(def.condition, None);
+}
+
+/// CR 101.2 + CR 611.3a + CR 113.6b: Full-card dispatch must route Alhammarret's
+/// parenthetical gate to CantBeCast with no swallowed clause.
+#[test]
+fn alhammarret_cant_cast_chosen_name_gated_on_source_on_battlefield() {
+    let oracle =
+        "Your opponents can't cast spells with the chosen name (as long as this creature is on the battlefield).";
+    let defs = parse_static_line_multi(oracle);
+    let cant = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeCast { .. }))
+        .expect("expected a CantBeCast static gated by source-on-battlefield");
+    assert_eq!(cant.affected, Some(TargetFilter::HasChosenName));
+    assert_eq!(
+        cant.condition,
+        Some(StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        })
+    );
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Alhammarret, High Arbiter",
+        &[],
+        &["Creature".to_string()],
+        &["Sphinx".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeCast { .. })
+                && d.condition == cant.condition
+                && d.affected == cant.affected),
+        "full dispatch must produce the gated CantBeCast, got statics={:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
 }
 
 /// CR 101.2 + CR 107.3: Gaddock Teeg class — passive-voice prohibition on
@@ -17463,6 +17736,123 @@ fn cant_be_activated_compound_aura_with_cant_crew() {
                 TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
             ))
     }));
+}
+
+#[test]
+fn cant_be_activated_compound_aura_with_cant_crew_and_activation_clause() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent can't attack, block, or crew Vehicles, and its activated abilities can't be activated unless they're mana abilities.",
+    );
+    let expected_affected =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
+    let modes: Vec<&StaticMode> = defs.iter().map(|def| &def.mode).collect();
+
+    for mode in [
+        StaticMode::CantAttack,
+        StaticMode::CantBlock,
+        StaticMode::CantCrew,
+    ] {
+        assert!(
+            modes.contains(&&mode),
+            "compound Aura text should emit {mode:?}; got {modes:?}"
+        );
+    }
+
+    let cant_be_activated = defs
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::CantBeActivated { .. }))
+        .expect("compound Aura text should emit CantBeActivated");
+    match &cant_be_activated.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(*who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, &expected_affected);
+            assert_eq!(*exemption, ActivationExemption::ManaAbilities);
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+    assert!(defs
+        .iter()
+        .all(|def| def.affected == Some(expected_affected.clone())));
+}
+
+#[test]
+fn cant_be_activated_compound_aura_with_crew_only_activation_clause() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent can't crew Vehicles, and its activated abilities can't be activated unless they're mana abilities.",
+    );
+    let expected_affected =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
+    let modes: Vec<&StaticMode> = defs.iter().map(|def| &def.mode).collect();
+
+    assert_eq!(defs.len(), 2, "expected crew lock plus activation lock");
+    assert!(modes.contains(&&StaticMode::CantCrew));
+    assert!(!modes.contains(&&StaticMode::CantAttack));
+    assert!(!modes.contains(&&StaticMode::CantBlock));
+
+    let cant_be_activated = defs
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::CantBeActivated { .. }))
+        .expect("crew-only compound Aura text should emit CantBeActivated");
+    match &cant_be_activated.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(*who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, &expected_affected);
+            assert_eq!(*exemption, ActivationExemption::ManaAbilities);
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+    assert!(defs
+        .iter()
+        .all(|def| def.affected == Some(expected_affected.clone())));
+}
+
+#[test]
+fn cant_be_activated_compound_equipment_with_transform_clause() {
+    let defs = parse_static_line_multi(
+        "Equipped creature can't attack, block, or transform, and its activated abilities can't be activated.",
+    );
+    let expected_affected =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
+    let modes: Vec<&StaticMode> = defs.iter().map(|def| &def.mode).collect();
+
+    for mode in [
+        StaticMode::CantAttack,
+        StaticMode::CantBlock,
+        StaticMode::Other("CantTransform".to_string()),
+    ] {
+        assert!(
+            modes.contains(&&mode),
+            "compound Equipment text should emit {mode:?}; got {modes:?}"
+        );
+    }
+
+    let cant_be_activated = defs
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::CantBeActivated { .. }))
+        .expect("compound Equipment text should emit CantBeActivated");
+    match &cant_be_activated.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(*who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, &expected_affected);
+            assert_eq!(*exemption, ActivationExemption::None);
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+    assert!(defs
+        .iter()
+        .all(|def| def.affected == Some(expected_affected.clone())));
 }
 
 #[test]

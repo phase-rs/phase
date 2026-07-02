@@ -11709,6 +11709,42 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    // CR 701.6a + CR 603.2 + CR 108.4: "Whenever a spell you've cast is
+    // countered" is the *passive* dual of the countering-side arm above -- it
+    // fires when a spell whose controller is you leaves the stack via a
+    // counter. `TriggerMode::Countered` matches on `SpellCountered` events;
+    // `valid_card` gates the *countered* spell (the event's `object_id`), so a
+    // `You` controller filter restricts the trigger to your own countered
+    // spells, exactly as `valid_card_matches` evaluates it inside
+    // `match_countered`. This differs from the arm above, which gates the
+    // *countering* source via `valid_source`. A spell's controller is
+    // "you've cast"/"you control" both (CR 108.4), so both possessive forms
+    // route to the single `ControllerRef::You` filter.
+    fn parse_own_spell_countered_line(i: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            all_consuming(preceded(
+                alt((tag("whenever "), tag("when "))),
+                preceded(
+                    tag("a spell "),
+                    terminated(
+                        alt((tag("you've cast"), tag("you control"))),
+                        tag(" is countered"),
+                    ),
+                ),
+            )),
+        )
+        .parse(i)
+    }
+    if parse_own_spell_countered_line(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Countered;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        return Some((TriggerMode::Countered, def));
+    }
+
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
