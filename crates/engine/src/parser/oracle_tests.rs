@@ -17314,4 +17314,3 @@ fn oubliette_host_bound_parse_structure() {
         other => panic!("expected CreateDelayedTrigger, got {other:?}"),
     }
 }
-

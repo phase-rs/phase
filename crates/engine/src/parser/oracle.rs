@@ -1145,7 +1145,6 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
-
 /// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
 /// carry a host-bound re-entry rider ("Tap that creature as it phases in this
 /// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
