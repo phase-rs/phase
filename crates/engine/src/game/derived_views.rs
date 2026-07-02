@@ -1455,6 +1455,10 @@ mod tests {
                     if labels == &["Draw two cards, then discard two cards.".to_string()]
             )
         }));
+        assert!(
+            runner.state().pending_cast.is_none(),
+            "successful cast finalization must clear transient pending_cast state"
+        );
     }
 
     #[test]

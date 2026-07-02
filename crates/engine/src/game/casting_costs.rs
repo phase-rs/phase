@@ -6084,6 +6084,13 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             chosen_mode_labels,
         },
     );
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.object_id == object_id)
+    {
+        state.pending_cast = None;
+    }
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {
