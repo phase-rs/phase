@@ -4306,9 +4306,11 @@ fn zone_change_record_matches_property(
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        // Intentionally fail-closed for both `None` (board-wide) and `Some`
-        // (defender-scoped): the zone-change snapshot captures no attack history,
-        // matching the `Attacking { defender }` look-back behavior.
+        // CR 400.7: a permanent that changes zones becomes a new object with no
+        // memory of its previous existence, so the zone-change snapshot captures
+        // no attack history. Intentionally fail-closed for both `None` (board-wide)
+        // and `Some` (defender-scoped), matching the `Attacking { defender }`
+        // look-back behavior.
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
