@@ -42,6 +42,20 @@ pub(crate) struct EffectChainIr {
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
 }
 
+/// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication
+/// directive. Such a clause replicates the immediately-preceding sibling effect for
+/// a different actor. Typed (never a `bool`/`String`) so the deferred player-set
+/// fanout — "each opponent … does the same" (the Curse cycle, Warp World / Morphic
+/// Tide) — slots in as a clean enum extension rather than a re-architecture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum DoesTheSameSubject {
+    /// CR 115.1a + CR 601.2c: "[then] target opponent does the same / does so." —
+    /// replicate the preceding action for a single targeted opponent (The Wedding
+    /// of River Song). The opponent is a cast-time target (CR 601.2c); at
+    /// resolution they perform the same action on their own objects (CR 608.2d).
+    TargetOpponent,
+}
+
 /// Special-case clause actions that modify or attach to adjacent clauses during lowering.
 ///
 /// The chunk loop's special-case handlers (otherwise, instead, alt-cost rider, etc.)

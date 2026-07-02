@@ -1,11 +1,10 @@
 //! Issue #2938 — Deflecting Swat must offer a retarget step for the targeted
 //! spell or ability (CR 115.7d), not silently resolve as a no-op `TargetOnly`.
 //!
-//! Root cause: `strip_optional_effect_prefix` in the effect-chain chunk loop
-//! stripped the leading "you may " from "you may choose new targets for …"
-//! without consulting the specialized-phrase blocklist that `peel_clause` uses.
-//! The peeled remainder failed `try_parse_change_targets` and fell through to
-//! the generic `choose` imperative, producing `TargetOnly { ParentTarget }`.
+//! Root cause: the effect-chain chunk loop must retain the full "you may choose
+//! new targets for ..." surface form so the retarget parser can distinguish true
+//! retarget effects from copy-retarget riders, then carry that retained "you
+//! may" modal onto the parsed `ChangeTargets` ability.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
@@ -82,8 +81,8 @@ fn deflecting_swat_parses_change_targets_not_target_only() {
         }
     ));
     assert!(
-        !parsed.abilities[0].optional,
-        "retarget is mandatory once Deflecting Swat resolves; optional=false"
+        parsed.abilities[0].optional,
+        "CR 608.2d: 'you may choose new targets' must be optional at resolution"
     );
 
     let Effect::ChangeTargets { target, .. } = parsed.abilities[0].effect.as_ref() else {
@@ -151,6 +150,18 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
     });
 
     runner.cast(swat).target_objects(&[bolt_id]).commit();
+
+    pass_priority_until(&mut runner, |waiting| {
+        matches!(waiting, WaitingFor::OptionalEffectChoice { .. })
+    });
+
+    let WaitingFor::OptionalEffectChoice { player, .. } = &runner.state().waiting_for else {
+        unreachable!();
+    };
+    assert_eq!(*player, P0);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept Deflecting Swat retarget choice");
 
     pass_priority_until(&mut runner, |waiting| {
         matches!(waiting, WaitingFor::RetargetChoice { .. })

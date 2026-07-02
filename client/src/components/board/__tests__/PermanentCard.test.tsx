@@ -217,6 +217,19 @@ describe("PermanentCard attachments", () => {
     expect(host.style.zIndex).toBe("80");
   });
 
+  it("does not recursively render cyclic attachment graphs", () => {
+    const gameState = makeState();
+    gameState.objects[1].attached_to = { type: "Object", data: 2 };
+    gameState.objects[2].attachments = [1];
+    gameState.objects[3].attachments = [];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.querySelectorAll('[data-object-id="1"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-object-id="2"]')).toHaveLength(1);
+  });
+
   it("collapses multiple direct attachments until the host is hovered", () => {
     const secondEquipment = makeObject({
       id: 4,

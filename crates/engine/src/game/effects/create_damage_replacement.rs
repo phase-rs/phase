@@ -1,4 +1,5 @@
 use crate::game::effects::choose_damage_source;
+use crate::game::effects::prevent_damage::resolve_source_filter;
 use crate::types::ability::{
     DamageRedirectTarget, Effect, EffectError, EffectKind, PreventionAmount, ReplacementDefinition,
     ResolvedAbility, TargetFilter, TargetRef,
@@ -78,9 +79,21 @@ pub fn resolve(
     let resolved_source_filter = match &source_filter {
         Some(TargetFilter::ChosenDamageSource) => {
             match state.last_chosen_damage_source.as_ref() {
-                Some(choice) => Some(TargetFilter::SpecificObject {
-                    id: choice.source_id,
-                }),
+                Some(_choice) => {
+                    // CR 609.7b: Resolve the chosen damage source filter to check if
+                    // the source matches the filter.
+                    let resolved = resolve_source_filter(
+                        &TargetFilter::ChosenDamageSource,
+                        state,
+                        ability.source_id,
+                        &ability.targets,
+                    );
+                    if matches!(resolved, TargetFilter::None) {
+                        None
+                    } else {
+                        Some(resolved)
+                    }
+                }
                 None => {
                     // CR 609.7a: prompt the source choice; stash self so the
                     // shield is built on the second pass with the choice known.
@@ -221,6 +234,12 @@ pub fn resolve(
                 obj.replacement_definitions.push(shield);
             }
         } else {
+            // CR 109.4 + CR 614.1a: Anchor the installing controller so a
+            // controller-relative `damage_source_filter` (e.g. Desperate Gambit's
+            // chosen "source you control" recheck) matches under the sentinel host.
+            if shield.source_controller.is_none() {
+                shield.source_controller = Some(ability.controller);
+            }
             state.pending_damage_replacements.push(shield);
         }
     }
@@ -855,6 +874,50 @@ mod tests {
         assert_eq!(
             state.players[0].life, 17,
             "controller takes the 3 redirected damage"
+        );
+    }
+
+    /// CR 609.7b: A prior `ChooseDamageSource { You }` threads its candidate
+    /// filter into the captured one-shot shield alongside the chosen object id.
+    #[test]
+    fn chosen_source_with_you_control_filter_threads_recheck() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::game_state::ChosenDamageSource;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_creature(&mut state, PlayerId(0), "Chosen Source");
+        let you_control = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::default().controller(ControllerRef::You),
+        );
+        state.last_chosen_damage_source = Some(ChosenDamageSource {
+            source_id: source,
+            source_filter: you_control.clone(),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                combat_scope: None,
+                target_filter: None,
+                modification: Some(DamageModification::Double),
+                redirect_to: None,
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        state.last_chosen_damage_source = None;
+
+        assert_eq!(
+            state.objects.get(&source).unwrap().replacement_definitions[0].damage_source_filter,
+            Some(TargetFilter::And {
+                filters: vec![TargetFilter::SpecificObject { id: source }, you_control],
+            })
         );
     }
 

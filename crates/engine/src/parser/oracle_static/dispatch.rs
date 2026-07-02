@@ -1,4 +1,5 @@
 // CR 604 — `parse_static_line_inner` category dispatch.
+use super::super::oracle_nom::error::oracle_err;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
@@ -8,6 +9,56 @@ use super::{
     restriction::*, type_change::*,
 };
 use crate::types::statics::ProhibitionScope;
+
+/// CR 201.5: Consume a self-reference subject — `~` (produced by
+/// `normalize_card_name_refs` for "text that refers to the object it's on by
+/// name") or a typed self-reference phrase ("this creature", "this permanent",
+/// …). Used by dynamic referent parsing where the subject is the static's own
+/// source ("where X is ~'s power").
+fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("~").parse(input) {
+        return Ok((rest, ()));
+    }
+    for phrase in SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
+
+/// CR 208.1 + CR 113.7: Parse the dynamic referent of a "{X} … less to activate,
+/// where X is [source]'s {power|toughness|mana value}" activated-ability cost
+/// reduction (Agatha of the Vile Cauldron — "where X is Agatha's power", which
+/// `normalize_card_name_refs` rewrites to "where X is ~'s power"). Returns the
+/// typed `QuantityRef` scoped to the static's source object (`ObjectScope::Source`),
+/// so the reduction reads the source's post-layer characteristic at
+/// cost-determination time (CR 113.7).
+fn parse_where_x_is_self_stat(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag(", where x is ").parse(input)?;
+    let (input, _) = parse_self_reference_subject(input)?;
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+            tag("'s power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+            tag("'s toughness"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Source,
+            },
+            tag("'s mana value"),
+        ),
+    ))
+    .parse(input)
+}
 
 /// Whether the inverted `"As long as <cond>, <effect>"` detector may fire.
 ///
@@ -37,6 +88,36 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     ))
     .parse(lower)
     .is_ok()
+}
+
+/// CR 305.2: static land-play permissions with an explicit additional-drop
+/// count greater than the ordinary +1 grant. `u8::MAX` represents "any
+/// number"; runtime summing saturates so it stays effectively unbounded when
+/// combined with ordinary extra drops.
+fn parse_static_additional_land_drop_count(input: &str) -> OracleResult<'_, u8> {
+    all_consuming(terminated(
+        preceded(
+            (opt(tag("you may ")), tag("play ")),
+            alt((
+                value(u8::MAX, tag("any number of lands")),
+                value(2, tag("two additional lands")),
+            )),
+        ),
+        (
+            opt((
+                space1,
+                alt((
+                    tag("on each of your turns"),
+                    tag("on each of their turns"),
+                    tag("during each of your turns"),
+                    tag("during each of their turns"),
+                )),
+            )),
+            opt(tag(".")),
+            space0,
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 502.3: Trailing "during their untap step(s)" clause of the
@@ -385,6 +466,86 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
     .and_then(|(_, condition)| condition)
 }
 
+/// CR 509.1b: "Creatures with power <comparison> <quantity> can't
+/// block this creature." — a can't-be-blocked-by restriction whose blocker
+/// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
+/// "Creatures with power less than the number of Islands you control can't block
+/// this creature."). Sibling of `parse_source_power_block_restriction` (which
+/// fixes the threshold to `~'s power` and targets `creatures you control`); this
+/// arm accepts any `parse_target` power-comparison filter — including a dynamic
+/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// subject-first "creatures with power … can't block this creature" wording
+/// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
+/// is the inverse of the intended restriction.
+fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinition> {
+    // allow-noncombinator: split on the fixed clause anchor, not parsing dispatch.
+    let (filter_text, after) = text.split_once(" can't block ")?;
+    // CR 509.1b: the restriction is on blocking the SOURCE ("this creature"/"~").
+    let after = after.trim().trim_end_matches('.').trim().to_lowercase();
+    if after != "this creature" && after != "~" {
+        return None;
+    }
+    // Reuse the shared filter grammar so the power comparison + dynamic threshold
+    // ("less than the number of Islands you control") lower through one authority.
+    let (filter, remainder) = parse_target(filter_text.trim());
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !target_filter_has_power_comparison(&filter)
+    {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
+fn target_filter_has_power_comparison(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_has_power_comparison),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_power_comparison)
+        }
+        TargetFilter::Not { filter } => target_filter_has_power_comparison(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            ..
+        } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_power_comparison),
+        _ => false,
+    }
+}
+
+/// CR 611.3a: A static restriction may carry a trailing gate introduced by
+/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
+/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
+/// this turn." Returns the condition text for `parse_static_condition`. The
+/// `as long as` form is tried first so a card carrying both keywords anchors on
+/// the continuous form; a bare `if` gate is the fallback. As with
+/// `split_trailing_as_long_as`, an unrecognized condition downstream leaves the
+/// line unsupported rather than enforcing the restriction unconditionally.
+fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
+    split_trailing_as_long_as(lower).or_else(|| {
+        opt(preceded(
+            (take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")),
+            rest,
+        ))
+        .parse(lower)
+        .ok()
+        .and_then(|(_, condition)| condition)
+    })
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -620,6 +781,25 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 702.170f: "You may plot [filter] cards from the top of your library."
+    // Plot-from-library permission (Fblthp, Lost on the Range). Dispatched
+    // BEFORE the cast-permission arm so plot lines are claimed by the plot
+    // parser. The cast arm anchors on "you may play"/"you may cast" while this
+    // anchors on "you may plot", so there is no real collision — ordering
+    // documents intent and guards against future drift. Plot is a CR 702.170
+    // special action (Library → Exile, later Exile → Stack), categorically
+    // distinct from the cast permission's CR 601.2a Library → Stack cast.
+    if let Some(result) = try_parse_top_of_library_plot_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 702.170f + CR 702.170a: "The top card of your library has plot[. The
+    // plot cost is equal to its mana cost]." Mechanic-establishing plot grant
+    // for the top library card (Fblthp). Also claimed ahead of the cast arm.
+    if let Some(result) = try_parse_top_of_library_has_plot(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
     // top of your library [rider]." Top-of-library cast permission class
     // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future, Vivien
@@ -680,12 +860,21 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 609.4b: "You may spend mana as though it were mana of any color to
+    // activate abilities of <subject>." (Agatha's Soul Cauldron / Joiner Adept).
+    if let Some(def) = try_parse_spend_any_color_to_activate_abilities(&text, &tp) {
+        return Some(def);
+    }
+
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
         return Some(
-            StaticDefinition::new(StaticMode::SpendManaAsAnyColor { spell_filter: None })
-                .affected(TargetFilter::Player)
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+            })
+            .affected(TargetFilter::Player)
+            .description(text.to_string()),
         );
     }
 
@@ -1794,6 +1983,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_power_threshold_block_restriction(&text) {
+        return Some(def);
+    }
+
     // CR 506.5 + CR 508.1c: "~ can only attack alone" — CombatAlone(Attack, MustBeSole).
     // The creature may attack only if it is the sole attacker (Master of Cruelties).
     // Must precede the generic "can't attack" arm to avoid mis-dispatch.
@@ -1924,6 +2117,15 @@ pub(crate) fn parse_static_line_inner(
     // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
     // prohibition where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "If an opponent/a player would search a library, that player searches the top N cards ... instead" ---
+    // CR 701.23f + CR 614.1a: Aven Mindcensor class. Replaces a SEARCHER-scoped
+    // library search with a top-N search. `who` scopes which searcher is
+    // restricted; `count` is the visible portion. Runtime enforcement is in
+    // game/effects/search_library.rs::library_search_top_limit.
+    if let Some(def) = parse_restrict_search_to_top(&tp, &text) {
         return Some(def);
     }
 
@@ -2226,6 +2428,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- CR 121.1 / CR 613.11: Draw-source redirection ("draw cards from the
+    // bottom of your library rather than the top") — River Song, "Meet in
+    // Reverse". ---
+    if let Some(def) = parse_draw_from_bottom(tp.lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
     // CR 502.3: Effects can keep permanents from untapping during the untap step.
     if nom_primitives::scan_contains(tp.lower, "doesn't untap during")
@@ -2492,39 +2701,79 @@ pub(crate) fn parse_static_line_inner(
     // abilities of sources with the chosen name cost {2} more to activate").
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount, mode, subject_filter), _)) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("activated abilities of ").parse(i)?;
-        let (i, subject) = take_until(" cost ").parse(i)?;
-        let (i, _) = tag(" cost ").parse(i)?;
-        let (i, amount) =
-            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
-        let (i, _) = tag(" ").parse(i)?;
-        let (i, mode) = alt((
-            value(CostModifyMode::Reduce, tag("less to activate")),
-            value(CostModifyMode::Raise, tag("more to activate")),
-        ))
-        .parse(i)?;
-        Ok((i, (amount, mode, subject.to_string())))
-    }) {
-        // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
-        // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
-        let affected = parse_chosen_name_source_filter(&subject_filter)
-            .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
-        // CR 118.7: a one-mana floor only applies to reductions.
-        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
-            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
-            .flatten();
-        return Some(
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode,
-                keyword: "activated".to_string(),
-                amount,
-                minimum_mana,
-                dynamic_count: None,
-            })
-            .affected(affected)
-            .description(text.to_string()),
-        );
+    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = tag("activated abilities of ").parse(i)?;
+            let (i, subject) = take_until(" cost ").parse(i)?;
+            let (i, _) = tag(" cost ").parse(i)?;
+            // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds)
+            // or the variable `{X}` (Agatha), whose value is supplied by the
+            // trailing "where X is …" referent parsed below.
+            let (i, (amount_n, is_x)) = nom::sequence::delimited(
+                tag("{"),
+                alt((
+                    map(nom_primitives::parse_number, |n| (n, false)),
+                    value((0u32, true), tag("x")),
+                )),
+                tag("}"),
+            )
+            .parse(i)?;
+            let (i, _) = tag(" ").parse(i)?;
+            let (i, mode) = alt((
+                value(CostModifyMode::Reduce, tag("less to activate")),
+                value(CostModifyMode::Raise, tag("more to activate")),
+            ))
+            .parse(i)?;
+            // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
+            // ("where X is ~'s power", Agatha).
+            let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+            Ok((
+                i,
+                (amount_n, is_x, mode, subject.to_string(), dynamic_count),
+            ))
+        })
+    {
+        // CR 601.2f: A fixed `{N}` reduces by exactly `N`; a `{X}` reduces by
+        // `1 × resolve_quantity(dynamic_count)` (Agatha: X = ~'s power). A bare
+        // `{X}` with no recognized referent is unresolvable — leave it for a
+        // later branch (ultimately unsupported) rather than emit a wrong amount.
+        let resolved: Option<(u32, Option<QuantityRef>)> = if is_x {
+            dynamic_count.map(|qty| (1u32, Some(qty)))
+        } else {
+            Some((amount_n, None))
+        };
+        if let Some((amount, dynamic_count)) = resolved {
+            // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
+            // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
+            let affected = parse_chosen_name_source_filter(&subject_filter)
+                .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+            // CR 118.7: a one-mana floor only applies to reductions.
+            let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+                .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+                .flatten();
+            return Some(
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode,
+                    keyword: "activated".to_string(),
+                    amount,
+                    minimum_mana,
+                    dynamic_count,
+                })
+                .affected(affected)
+                .description(text.to_string()),
+            );
+        }
+    }
+
+    // --- CR 116.2 + CR 118.7a: special-action (plot/unlock) cost reduction ---
+    // "Plotting cards from your hand costs {N} less" (Doc Aurlock, CR 116.2k) /
+    // "Unlock costs you pay cost {N} less" (Inquisitive Glimmer, CR 116.2m). A
+    // dedicated `SpecialAction` axis, NOT the generic activated-ability reducer
+    // above — plot/unlock payments carry no `AbilityTag`, so routing them
+    // through `ReduceAbilityCost { keyword: "activated" }` would never fire and
+    // would wrongly let "activated abilities cost less" reduce plot costs.
+    if let Some(def) = parse_action_cost_reduction(&text, &lower) {
+        return Some(def);
     }
 
     // --- CR 601.2f: Cost-floor statics (Trinisphere class) ---
@@ -2578,12 +2827,13 @@ pub(crate) fn parse_static_line_inner(
         let def = StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
             .affected(affected)
             .description(text.to_string());
-        // CR 611.3a: a trailing "as long as <condition>" gates the restriction
-        // (Limited Resources: "... as long as ten or more lands are on the
-        // battlefield"). If the rider is present but its condition is NOT
-        // recognized, leave the whole line unsupported (return None) rather than
-        // marking it a CantPlayLand enforced unconditionally.
-        return match split_trailing_as_long_as(tp.lower) {
+        // CR 611.3a: a trailing "as long as <condition>" (Limited Resources:
+        // "... as long as ten or more lands are on the battlefield") or "if
+        // <condition>" (Rock Jockey: "... if this creature was cast this turn")
+        // gates the restriction. If the rider is present but its condition is
+        // NOT recognized, leave the whole line unsupported (return None) rather
+        // than marking it a CantPlayLand enforced unconditionally.
+        return match split_trailing_gate_condition(tp.lower) {
             Some(condition_text) => Some(def.condition(parse_static_condition(condition_text)?)),
             None => Some(def),
         };
@@ -2636,17 +2886,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "play an additional land" / "play two additional lands" ---
-    // CR 305.2: Determine the count at parse time and carry it as typed data.
-    if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
+    // --- "play any number of lands" / counted additional land-drop grants ---
+    // The ordinary +1 phrase ("play an additional land") is handled by the
+    // rule-static subject/predicate shell so embedded subjects such as
+    // "Each player who last chose green anchor ..." keep their affected filter.
+    if let Ok((_, count)) = parse_static_additional_land_drop_count(tp.lower) {
         return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
-                .description(text.to_string()),
-        );
-    }
-    if nom_primitives::scan_contains(tp.lower, "play an additional land") {
-        return Some(
-            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }

@@ -1036,6 +1036,9 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Exile { .. }
             | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
+            // CR 118.12: `ExileWithAggregate` has no unless-payment dialog; an
+            // unpayable unless cost falls through to the effect (rules-correct).
+            | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
             // CR 122.6 + CR 118.12: `RemoveCounter { target: Some(_) }`
             // (e.g., Chisei "a permanent you control") requires an
@@ -2920,7 +2923,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
         let library_repl =
@@ -2937,7 +2942,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
 

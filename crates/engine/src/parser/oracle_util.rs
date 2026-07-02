@@ -587,6 +587,64 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     Some((QuantityExpr::Fixed { value: base }, rest))
 }
 
+/// Typed signal distinguishing which count-word `parse_count_expr` consumed.
+///
+/// The numeric value of a count is the same whether the text said "a", "an",
+/// "1", "any", or "another" — all yield `QuantityExpr::Fixed { value: 1 }`. But
+/// "another" is not merely a quantity: it is the source-exclusion qualifier.
+/// Callers that build a target from the remainder need to re-apply that
+/// exclusion (`FilterProp::Another`) to the parsed filter, and they must
+/// distinguish the exclusion word from an ordinary article without re-matching
+/// the raw string at the call site (CLAUDE.md forbids stringly-typed dispatch).
+/// This enum is that typed signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountWord {
+    /// The count word was the source-exclusion "another" — the consuming caller
+    /// must re-apply `FilterProp::Another` to the target it builds.
+    SourceExclusion,
+    /// Any other count form (article "a"/"an", a digit/word number, "X", "any",
+    /// a fraction, an arithmetic offset, etc.) — no source exclusion implied.
+    Plain,
+}
+
+/// Sibling of [`parse_count_expr`] that additionally reports, via a typed
+/// [`CountWord`], whether the consumed count word was the source-exclusion
+/// "another" (as opposed to "a"/"an"/a number/"X"/"any"/a fraction).
+///
+/// Used by the sacrifice imperative path, where "sacrifice another creature or
+/// land" must re-apply `FilterProp::Another` to the parsed target so the source
+/// can't sacrifice itself (Morkrut Necropod, #4513). It dispatches the
+/// source-exclusion "another " via a nom `tag()` BEFORE delegating to
+/// `parse_count_expr` for every other count form, so the numeric result is
+/// identical to `parse_count_expr` and the only addition is the typed word
+/// signal. The remainder shape (leading whitespace trimmed) matches
+/// `parse_count_expr` exactly.
+pub(crate) fn parse_count_expr_with_exclusion(
+    text: &str,
+) -> Option<(QuantityExpr, &str, CountWord)> {
+    let text = text.trim_start();
+    let lower = text.to_lowercase();
+    // Source-exclusion "another " — implicit count of 1 that ALSO excludes
+    // the ability source from the matched set.
+    // Detected here as a typed `CountWord::SourceExclusion` so the caller can
+    // re-apply `FilterProp::Another` without re-matching the string.
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, OracleError<'_>>("another "),
+        )
+        .parse(i)
+    }) {
+        return Some((
+            QuantityExpr::Fixed { value: 1 },
+            rest.trim_start(),
+            CountWord::SourceExclusion,
+        ));
+    }
+    let (expr, rest) = parse_count_expr(text)?;
+    Some((expr, rest, CountWord::Plain))
+}
+
 /// CR 107.3a: Strip a trailing "[, ]where x is " binder clause from the
 /// (already-lowercased) text following a bare `X`, returning the lowercase
 /// description that defines the variable. Shared by every count-position
@@ -1402,10 +1460,14 @@ const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
 /// narrow guard avoids touching every other card. The phrase is restored after
 /// normalization so the dispatcher sees the real keyword-action text.
 fn mask_card_name_keyword_action(text: &str, card_name: &str) -> Option<(String, Vec<String>)> {
-    // CR 701.40a / CR 701.58a / CR 701.62a: keyword actions whose phrasing can
-    // be an entire card name. These are full keyword-action verb phrases, not
-    // bare nouns, so an exact (case-insensitive) card-name match is unambiguous.
-    const KEYWORD_ACTIONS: &[&str] = &["manifest dread", "cloak", "manifest"];
+    // CR 701.19a / CR 701.40a / CR 701.58a / CR 701.62a: keyword actions whose
+    // phrasing can be an entire card name. These are full keyword-action verb
+    // phrases, not bare nouns, so an exact (case-insensitive) card-name match is
+    // unambiguous. "regenerate" (CR 701.19a) is the card Regenerate — without
+    // masking, the leading verb collapses to the self-reference `~` and the
+    // effect ("Regenerate target creature.") parses to a bare, verbless
+    // `~ target creature`.
+    const KEYWORD_ACTIONS: &[&str] = &["manifest dread", "cloak", "manifest", "regenerate"];
     let name_lower = card_name.trim().to_ascii_lowercase();
     // allow-noncombinator: Iterator::find over the keyword-action table (slice
     // selection), not string-dispatch parsing.
@@ -1752,6 +1814,15 @@ pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
             return Some((Comparator::LT, n as i32));
         }
     }
+    // "exactly N" — CR 608.2c post-effect equality condition ("if its power is
+    // exactly 20"). Uses a nom `tag` combinator (parser-combinator gate scopes
+    // src/parser/ and rejects new string-literal strip_prefix dispatch).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(text) {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::EQ, n as i32));
+        }
+    }
     None
 }
 
@@ -1792,6 +1863,28 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_keyword_action_card_name_regenerate() {
+        // CR 701.19a: the card Regenerate's own name IS the keyword-action verb.
+        // `mask_card_name_keyword_action` must protect the leading verb from `~`
+        // normalization; otherwise "Regenerate target creature." collapses to the
+        // verbless self-reference "~ target creature" and fails to parse.
+        assert_eq!(
+            normalize_card_name_refs("Regenerate target creature.", "Regenerate"),
+            "Regenerate target creature."
+        );
+        // Longer words containing the keyword phrase are not masked (guard
+        // against over-masking): only free-standing "regenerate" occurrences are
+        // spared.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Regenerate target creature. When it's regenerated, tap it.",
+                "Regenerate"
+            ),
+            "Regenerate target creature. When it's regenerated, tap it."
         );
     }
 

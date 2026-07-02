@@ -1037,8 +1037,10 @@ impl GameObject {
     pub fn apply_perpetual_modification(
         &mut self,
         modification: &crate::types::ability::PerpetualModification,
+        all_creature_types: &[String],
     ) {
         use crate::types::ability::PerpetualModification;
+        use crate::types::card_type::CoreType;
         match modification {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
                 // The base_* fields are the persistent baseline the layer pass
@@ -1046,6 +1048,102 @@ impl GameObject {
                 // change permanent and zone-independent.
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
+            }
+            PerpetualModification::ModifyPowerToughness {
+                power_delta,
+                toughness_delta,
+            } => {
+                let base_power = self
+                    .base_power
+                    .or(self.power)
+                    .unwrap_or(0)
+                    .saturating_add(*power_delta);
+                let base_toughness = self
+                    .base_toughness
+                    .or(self.toughness)
+                    .unwrap_or(0)
+                    .saturating_add(*toughness_delta);
+                self.base_power = Some(base_power);
+                self.base_toughness = Some(base_toughness);
+            }
+            PerpetualModification::GrantKeywords { keywords } => {
+                for keyword in keywords {
+                    if !self.keywords.contains(keyword) {
+                        self.keywords.push(keyword.clone());
+                    }
+                    // CR 613.1: perpetual keyword grants must survive the layer
+                    // pass's `keywords = base_keywords.clone()` reset — mirror
+                    // base_* P/T edits and the crew-keyword test seeding pattern.
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
+            }
+            PerpetualModification::Become {
+                creature_subtypes,
+                power,
+                toughness,
+                keywords,
+            } => {
+                // CR 613.1d + CR 613.1f + CR 613.4b: update the persistent
+                // type, keyword, and base-P/T baselines while retaining
+                // non-creature subtypes (Artifact, Aura, etc.).
+                self.sync_missing_base_characteristics();
+                if !self
+                    .base_card_types
+                    .core_types
+                    .contains(&CoreType::Creature)
+                {
+                    self.base_card_types.core_types.push(CoreType::Creature);
+                }
+                self.base_card_types.subtypes.retain(|subtype| {
+                    !all_creature_types
+                        .iter()
+                        .any(|creature_type| creature_type.eq_ignore_ascii_case(subtype))
+                });
+                for subtype in creature_subtypes {
+                    if !self
+                        .base_card_types
+                        .subtypes
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(subtype))
+                    {
+                        self.base_card_types.subtypes.push(subtype.clone());
+                    }
+                }
+                self.base_power = Some(*power);
+                self.base_toughness = Some(*toughness);
+                for keyword in keywords {
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
+            }
+            PerpetualModification::ModifyCost { mode, amount } => {
+                // CR 601.2f: realize the perpetual self-cost modifier as a
+                // synthetic self-spell `ModifyCost` static. The self-spell cost collector
+                // reads LIVE `static_definitions` (casting.rs `collect_self_spell_cost_modifiers`)
+                // and the hand-zone layer pass re-syncs only `keywords` from base
+                // (layers.rs) — so push to BOTH live and base, mirroring the GrantKeywords
+                // arm (keywords + base_keywords): the live copy makes it visible to a
+                // from-hand cast immediately; the base copy survives the battlefield layer
+                // reset (`static_definitions = base.clone()`). `apply_perpetual_modification`
+                // runs once per `ApplyPerpetual` resolution (single caller, effects/perpetual.rs)
+                // so there is no double-injection; multiple distinct grants intentionally stack.
+                use crate::types::ability::TargetFilter;
+                use crate::types::statics::StaticMode;
+                self.sync_missing_base_characteristics();
+                let synthetic =
+                    crate::types::ability::StaticDefinition::new(StaticMode::ModifyCost {
+                        mode: *mode,
+                        amount: amount.clone(),
+                        spell_filter: None,
+                        dynamic_count: None,
+                    })
+                    .affected(TargetFilter::SelfRef)
+                    .active_zones(crate::types::zones::self_spell_cost_mod_active_zones());
+                self.static_definitions.push(synthetic.clone());
+                Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
             }
         }
         self.perpetual_mods.push(modification.clone());
@@ -1350,6 +1448,10 @@ impl GameObject {
             colors: self.color.clone(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
+            // CR 110.5: Capture live tap status. This snapshot is taken while the
+            // object is still in its public zone (mana-spent / attack-declaration
+            // captures), so `self.tapped` is authoritative.
+            tapped: self.tapped,
         }
     }
 
@@ -1374,11 +1476,15 @@ impl GameObject {
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
-    pub fn reset_for_battlefield_entry(&mut self, turn_number: u32) {
+    pub fn reset_for_battlefield_entry(&mut self, turn_number: u32, timestamp: u64) {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
         self.incarnation += 1;
+        // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
+        // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
+        // functioning statics) is a deferred hook (see scope boundary).
+        self.timestamp = timestamp;
         self.base_controller = Some(self.owner);
         self.controller = self.owner;
         self.entered_battlefield_turn = Some(turn_number);
@@ -1652,6 +1758,22 @@ impl GameObject {
             ChosenAttribute::Keyword(k) => Some(k),
             _ => None,
         })
+    }
+
+    /// CR 608.2d: Look up ALL stored chosen keywords (Greymond, Avacyn's
+    /// Stalwart "choose two abilities from among first strike, vigilance, and
+    /// lifelink" persists two `ChosenAttribute::Keyword` entries). The plural
+    /// companion to `chosen_keyword`; read by
+    /// `ContinuousModification::AddChosenKeyword` at Layer 6 evaluation so a
+    /// multi-keyword choice grants every chosen ability, not just the first.
+    pub fn chosen_keywords(&self) -> Vec<&Keyword> {
+        self.chosen_attributes
+            .iter()
+            .filter_map(|a| match a {
+                ChosenAttribute::Keyword(k) => Some(k),
+                _ => None,
+            })
+            .collect()
     }
 
     /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen

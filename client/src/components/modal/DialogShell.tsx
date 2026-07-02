@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
+import { useIsNarrowViewport } from "./DialogHost.tsx";
 
 interface DialogShellProps {
   eyebrow?: ReactNode;
@@ -42,6 +43,7 @@ export function DialogShell({
 }: DialogShellProps) {
   const { t } = useTranslation("game");
   const peek = useOptionalDialogPeek();
+  const isNarrow = useIsNarrowViewport();
   const inspectHoverProps = useInspectHoverProps();
   const resolvedEyebrow = eyebrow ?? t("dialogShell.eyebrow");
   const cardHoverProps =
@@ -127,7 +129,12 @@ export function DialogShell({
               </div>
             ) : null}
           </div>
-          {peek ? <PeekTab onClick={peek.togglePeek} /> : null}
+          {peek ? (
+            <PeekTab
+              onClick={peek.togglePeek}
+              direction={isNarrow ? "bottom" : "right"}
+            />
+          ) : null}
         </motion.div>
       </motion.div>
     </AnimatePresence>
@@ -182,8 +189,8 @@ export function DialogHeader({
  * Pill tab attached to the edge the dialog slides toward when peeked. The
  * pulsing glow signals "actionable affordance — click me to peek." Mirrors
  * `PeekRestoreTab`'s `direction` axis so the collapse cue points the same way
- * the modal exits: the right edge on wide viewports, the bottom edge on narrow
- * ones (where the dialog slides down rather than sideways).
+ * the modal exits: the right edge on wide viewports, the top-right corner on
+ * narrow ones (where the dialog slides down rather than sideways).
  */
 export function PeekTab({
   onClick,
@@ -195,21 +202,21 @@ export function PeekTab({
   const { t } = useTranslation("game");
   const shouldReduceMotion = useReducedMotion();
 
-  // Glow is offset toward the edge the modal slides to (+x right / +y bottom)
-  // so it visually radiates toward the battlefield the player wants to peek at.
+  // Wide viewports: glow biased toward the slide-off edge. Mobile top-corner
+  // tab uses a centered pulse so the affordance reads symmetric on a square btn.
   const restingShadow =
     direction === "right"
       ? "0 18px 36px rgba(0,0,0,0.55), 14px 0 0 -8px rgba(34,211,238,0)"
-      : "0 18px 36px rgba(0,0,0,0.55), 0 14px 0 -8px rgba(34,211,238,0)";
+      : "0 8px 20px rgba(0,0,0,0.45), 0 0 0 0 rgba(34,211,238,0)";
   const pulseShadow =
     direction === "right"
       ? "0 18px 36px rgba(0,0,0,0.55), 18px 0 36px rgba(34,211,238,0.65)"
-      : "0 18px 36px rgba(0,0,0,0.55), 0 18px 36px rgba(34,211,238,0.65)";
+      : "0 8px 20px rgba(0,0,0,0.45), 0 0 24px rgba(34,211,238,0.65)";
 
   const positionClass =
     direction === "right"
       ? "right-0 top-1/2 h-24 w-9 -translate-y-1/2 translate-x-1/3"
-      : "bottom-0 left-1/2 h-9 w-24 -translate-x-1/2 translate-y-1/3";
+      : "right-3 top-1 h-9 w-9 -translate-y-1/3";
 
   // The chevron points the way the modal exits: right as-is, down when rotated.
   const iconClass =

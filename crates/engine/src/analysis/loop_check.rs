@@ -163,18 +163,18 @@ pub fn detect_loop(
     }
     // CR 732.2a: and a resource must have strictly advanced without an
     // unsustainable consumed-axis deficit for the loop's controller — otherwise
-    // nothing goes unbounded. This is controller-aware (see `is_progress`):
+    // nothing goes unbounded. This is controller-aware (see `net_progress_for`):
     // PR-0's `ResourceVector::is_net_progress` treats *any* player's life/mana
     // going negative as disqualifying, which is correct for a self-sustainability
     // question but wrongly rejects a damage/drain/mill loop whose entire point is
     // to drive an OPPONENT's life or library down. The caller supplies the loop's
     // `controller`, so the consumed-axis constraint is scoped to that player and
     // opponent depletion is treated as progress.
-    if !is_progress(delta, controller) {
+    if !delta.net_progress_for(controller) {
         return None;
     }
 
-    let unbounded = unbounded_axes_for(delta, controller);
+    let unbounded = delta.unbounded_axes_for(controller);
     // `is_progress` guarantees ≥1 unbounded axis, but guard the empty case
     // defensively so a returned certificate always names ≥1 axis.
     if unbounded.is_empty() {
@@ -276,58 +276,6 @@ pub(crate) fn live_mandatory_loop_winner(
     matches!(cert.win_kind, WinKind::LethalDamage).then_some(winner)
 }
 
-/// CR 732.2a: controller-scoped net-progress. Returns true iff the cycle makes
-/// unbounded progress on ≥1 axis without leaving the loop's controller(s) with an
-/// unsustainable net deficit on a *consumed* axis (their own life or mana).
-///
-/// Distinct from [`ResourceVector::is_net_progress`] (PR-0) only in *who* the
-/// consumed-axis constraint applies to:
-/// - **Controller life/mana net-negative ⇒ not sustainable ⇒ false** (a loop that
-///   bleeds its own controller stops on its own).
-/// - **Opponent life net-negative ⇒ progress** (the drain/damage win). Opponent
-///   library net-negative ⇒ progress (the mill win).
-/// - All other axes (damage, tokens, draws, casts, counters, triggers, combats,
-///   turns, the controller's gained mana) count as progress when strictly up.
-fn is_progress(delta: &ResourceVector, controller: PlayerId) -> bool {
-    // CR 106.1: a loop that net-spends mana across the whole pool is not
-    // sustainable. Mana is not attributed per player in the summed `mana` array,
-    // so any net-negative color is a controller-side deficit.
-    if delta.mana.iter().any(|&n| n < 0) {
-        return false;
-    }
-    // CR 119: the controller losing life across the cycle is unsustainable.
-    for (pid, &n) in &delta.life {
-        if *pid == controller && n < 0 {
-            return false;
-        }
-    }
-    !unbounded_axes_for(delta, controller).is_empty()
-}
-
-/// The unbounded axes of `delta`, with the opponent-vs-controller sign rules a
-/// win classifier needs. Builds on [`ResourceVector::unbounded_components`] (which
-/// reports every strictly-positive axis plus any nonzero library) and additionally
-/// surfaces an **opponent's life loss** (negative life on a non-controller) as the
-/// drain win axis — `unbounded_components` only reports positive life (lifegain),
-/// so a pure drain loop would otherwise name no axis.
-fn unbounded_axes_for(delta: &ResourceVector, controller: PlayerId) -> Vec<ResourceAxis> {
-    let mut out: Vec<ResourceAxis> = delta
-        .unbounded_components()
-        .into_iter()
-        .map(|(axis, _)| axis)
-        .collect();
-    // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
-    for (pid, &n) in &delta.life {
-        if n < 0 && *pid != controller {
-            let axis = ResourceAxis::Life(*pid);
-            if !out.contains(&axis) {
-                out.push(axis);
-            }
-        }
-    }
-    out
-}
-
 /// Derive the [`WinKind`] from the measured per-cycle delta.
 ///
 /// Classification is by the **most decisive** unbounded axis, in CR loss-priority
@@ -340,7 +288,7 @@ fn unbounded_axes_for(delta: &ResourceVector, controller: PlayerId) -> Vec<Resou
 /// / life loss from / mill on a player who is *not* the loop's controller is an
 /// opponent loss condition; the corpus rows are two-player, so any non-controller
 /// player is the opponent.
-fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) -> WinKind {
+pub(crate) fn classify_win_kind(controller: PlayerId, delta: &ResourceVector) -> WinKind {
     // CR 704.5a: a player at 0 life loses — so unbounded damage is a WIN only when
     // the damaged player is an OPPONENT (a non-controller). Damage to the loop's
     // own controller (self-ping offset by lifegain) is an advantage engine, not a
@@ -926,6 +874,43 @@ mod tests {
             live_mandatory_loop_winner(&start, &end, &delta),
             None,
             "a determinate single-loser outcome is unambiguous only in 2-player"
+        );
+    }
+
+    /// MP COMMANDER SAFETY (the load-bearing firewall): a 4-player table with a single
+    /// faller (P1 drains, P0 gains) while P2 and P3 sit STATIC must NOT name a winner.
+    /// This is the partial-net-progress drain — only one opponent is draining, the other
+    /// two are untouched and alive — so a forced single-loser outcome is NOT determinate
+    /// (CR 104.2a is unambiguous only at two living players). The `living.len() != 2`
+    /// early-return is what holds the line; commander infinites that drain just one pod
+    /// member must not hand the game to P0 while the rest of the table is alive.
+    ///
+    /// REVERT-FAIL: delete the `living.len() != 2` gate in `live_mandatory_loop_winner`
+    /// WITHOUT adding an all-opponents-fall predicate ⇒ the single-faller path names
+    /// `Some(P0)` while P2/P3 live ⇒ this assertion flips. (Strengthens the 3-player
+    /// `live_winner_three_player_is_none` to the 4-player commander count.)
+    #[test]
+    fn mp_partial_net_progress_drain_no_premature_gameover() {
+        let mut end = GameState::new_two_player(7);
+        for seat in 2..=3u8 {
+            let mut p = end.players[1].clone();
+            p.id = pid(seat);
+            end.players.push(p);
+        }
+        assert_eq!(
+            end.players.iter().filter(|p| !p.is_eliminated).count(),
+            4,
+            "fixture sanity: four living players"
+        );
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1); // ONLY P1 drains
+        delta.life.insert(pid(0), 1); // P0 gains (the would-be winner)
+                                      // P2 and P3 carry no delta entry ⇒ static (map_delta drops zero-delta keys).
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            None,
+            "a 4-player single-faller must not shortcut to a winner while P2/P3 are alive"
         );
     }
 

@@ -99,7 +99,9 @@ fn reanimation_effect(target: TargetFilter) -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }
 

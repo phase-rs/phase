@@ -1470,7 +1470,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(10),
@@ -1879,6 +1881,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1955,6 +1958,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: basalt,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2027,6 +2031,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2989,6 +2994,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![],
                 counters: Default::default(),
+                tapped: false,
             },
         });
 

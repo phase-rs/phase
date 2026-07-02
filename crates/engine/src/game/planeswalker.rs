@@ -15,6 +15,29 @@ use super::priority;
 use super::stack;
 
 use crate::types::ability::ResolvedAbility;
+use crate::types::events::ActivatedAbilityKind;
+
+/// CR 602.2 + CR 606.2: Classify an activated ability as `Loyalty` or `Normal`
+/// by inspecting the source object's ability definition at `ability_index`. A
+/// loyalty ability (CR 606.1) is one whose cost adds or removes loyalty counters.
+/// Used to populate `GameEvent::AbilityActivated { kind, .. }` at the activation
+/// sites that know the source object and ability index. Returns `Normal` when the
+/// object or ability cannot be found, or when the cost is not a loyalty cost.
+pub(crate) fn activated_ability_kind(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> ActivatedAbilityKind {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|o| o.abilities.get(ability_index))
+        .and_then(|a| a.cost.as_ref())
+        .filter(|c| crate::types::ability::is_loyalty_ability_cost(c))
+        .map_or(ActivatedAbilityKind::Normal, |_| {
+            ActivatedAbilityKind::Loyalty
+        })
+}
 
 /// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn.
 /// CR 606.1: Loyalty abilities are activated abilities with a loyalty symbol in their cost.
@@ -311,6 +334,8 @@ fn finalize_loyalty_activation(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id: pw_id,
+        // CR 606.2: This is the non-targeted loyalty-activation path.
+        kind: activated_ability_kind(state, pw_id, ability_index),
     });
     state.lands_tapped_for_mana.remove(&player);
     priority::clear_priority_passes(state);
@@ -693,6 +718,52 @@ mod tests {
         });
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);
         assert!(result.is_err());
+    }
+
+    /// CR 606.2: a targeted `[-X]` loyalty ability's printed cost is
+    /// `RemoveCounter { X loyalty counters }`, which `is_loyalty_ability_cost`
+    /// recognizes. The X-cost path clears `pending.activation_cost` before the
+    /// targeted finalize (casting_costs.rs), so the kind MUST be derived from the
+    /// stable printed cost via `activated_ability_kind` — reading the cleared
+    /// `pending.activation_cost` would mis-classify it `Normal` and the
+    /// "whenever you activate a loyalty ability" trigger would miss this subclass.
+    #[test]
+    fn activated_ability_kind_classifies_minus_x_loyalty() {
+        let mut state = setup();
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Vraska",
+            5,
+            vec![make_minus_x_loyalty_ability(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            })],
+        );
+        assert_eq!(
+            activated_ability_kind(&state, pw, 0),
+            crate::types::events::ActivatedAbilityKind::Loyalty,
+            "a [-X] loyalty ability's printed cost must classify as Loyalty"
+        );
+
+        // Sibling: a non-loyalty activated ability classifies as Normal.
+        let normal_pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Tinkerer",
+            0,
+            vec![AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+        );
+        assert_eq!(
+            activated_ability_kind(&state, normal_pw, 0),
+            crate::types::events::ActivatedAbilityKind::Normal,
+        );
     }
 
     #[test]

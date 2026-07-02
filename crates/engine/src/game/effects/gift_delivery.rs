@@ -111,16 +111,10 @@ fn deliver_card_draw(
             else {
                 return;
             };
-            let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-                return;
-            };
-
-            let cards_to_draw: Vec<_> = player
-                .library
-                .iter()
-                .take(count as usize)
-                .copied()
-                .collect();
+            // CR 121.1 + CR 613.11: route card selection through the single
+            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
+            // honored on the gift draw too.
+            let cards_to_draw = super::draw::select_cards_to_draw(state, player_id, count as usize);
 
             for obj_id in cards_to_draw {
                 zones::move_to_zone(state, obj_id, Zone::Hand, events);
@@ -170,9 +164,13 @@ fn create_gift_token(
         obj.base_card_types = card_type;
     }
 
+    // CR 613.7d: the gift token enters the battlefield, so it receives a
+    // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+    let entry_timestamp = state.next_timestamp();
+
     // CR 400.7 + CR 302.6 + CR 603.6a: Single authority for ETB state.
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.reset_for_battlefield_entry(state.turn_number);
+        obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
     }
 
     crate::game::layers::mark_layers_full(state);

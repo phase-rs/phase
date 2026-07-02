@@ -78,6 +78,7 @@ fn player_context_target(
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTargetOwner
     ) {
         Some(TargetRef::Player(super::resolve_player_for_context_ref(
             state,
@@ -1363,6 +1364,19 @@ fn collect_matching_players(
                 && match player_filter {
                     PlayerFilter::Controller => p.id == source_controller,
                     PlayerFilter::All => true,
+                    // CR 608.2c + CR 109.4: all players except the anchor's set.
+                    // The generic predicate authority is used here; ability-target
+                    // anchors are resolved by the player_scope driver, not by this
+                    // damage-population helper.
+                    PlayerFilter::AllExcept { ref exclude } => {
+                        !crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            exclude,
+                            source_controller,
+                            source_id,
+                        )
+                    }
                     PlayerFilter::Opponent => p.id != source_controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -1451,6 +1465,20 @@ fn collect_matching_players(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the
+                    // triggering (casting) player, resolved live from the
+                    // trigger event; fail closed when no event is in scope.
+                    // Mirrors the recipient predicate in `matches_player_scope`
+                    // so the variant has one consistent meaning across all
+                    // consumers, including CR 102.3 team-opponent handling via
+                    // `players::is_opponent`.
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| {
+                            crate::game::players::is_opponent(state, caster, p.id)
+                        }),
                     // CR 608.2c + CR 701.38: Match each player who cast a vote
                     // for the recorded choice index. Mirrors the
                     // `ZoneChangedThisWay` arm — consults the transient
@@ -1563,6 +1591,16 @@ pub fn resolve_each_player(
                 && match &player_filter {
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
+                    // CR 608.2c + CR 109.4: all players except the anchor's set.
+                    PlayerFilter::AllExcept { exclude } => {
+                        !crate::game::effects::matches_player_scope(
+                            state,
+                            p.id,
+                            exclude,
+                            ability.controller,
+                            ability.source_id,
+                        )
+                    }
                     PlayerFilter::Opponent => p.id != ability.controller,
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
@@ -1655,6 +1693,20 @@ pub fn resolve_each_player(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the
+                    // triggering (casting) player, resolved live from the
+                    // trigger event; fail closed when no event is in scope.
+                    // Mirrors the recipient predicate in `matches_player_scope`
+                    // so the variant has one consistent meaning across all
+                    // consumers, including CR 102.3 team-opponent handling via
+                    // `players::is_opponent`.
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| {
+                            crate::game::players::is_opponent(state, caster, p.id)
+                        }),
                     // CR 608.2c + CR 701.38: Match each player who cast a vote
                     // for the recorded choice index in the most recent vote.
                     PlayerFilter::VotedFor { choice_index } => state
@@ -1934,8 +1986,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChosenAttribute, ContinuousModification, ControllerRef, Duration, FilterProp, ObjectScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
+        DamageChannel, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -3794,6 +3847,109 @@ mod tests {
         } else {
             panic!("expected DamageDealt event");
         }
+    }
+
+    /// CR 120.10 + CR 120.6: the Torch the Witness / Orbital Plunge class —
+    /// "deals N damage to target creature. If excess damage was dealt this way,
+    /// <follow-up>". Drives the full chain through `resolve_ability_chain` so the
+    /// `last_effect_excess_amount` stamping and the
+    /// `PreviousEffectAmount { channel: Excess }` eval are both exercised.
+    ///
+    /// This is the Excess-vs-Total *discriminating* test the channel exists for:
+    /// the overkill leg fixes total != excess (6 vs 2) so a Total-summing resolver
+    /// would put the WRONG number (6) in the excess query; the exact-lethal leg
+    /// (excess 0, total 4) is where the channels DIVERGE on the GT-0 gate — Excess
+    /// declines the follow-up, but a Total fallback (the reverted bug) would
+    /// wrongly fire it (4 > 0). Reverting the channel to `Total` flips the
+    /// exact-lethal assertion.
+    #[test]
+    fn deal_damage_excess_channel_sums_excess_not_total_and_gates_followup() {
+        use crate::types::ability::{ManaContribution, ManaProduction};
+        use crate::types::mana::{ManaColor, ManaType};
+
+        // Returns (resolution-end state, red mana produced by the gated follow-up).
+        fn run(amount: u32, toughness: i32) -> (GameState, usize) {
+            let mut state = GameState::new_two_player(42);
+            let target_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Ogre".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&target_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.toughness = Some(toughness);
+            }
+            let mut ability = make_ability(amount, vec![TargetRef::Object(target_id)]);
+            let mut followup = ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            followup.condition = Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Excess,
+            });
+            ability.sub_ability = Some(Box::new(followup));
+
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .unwrap();
+            let red = state.players[0].mana_pool.count_color(ManaType::Red);
+            (state, red)
+        }
+
+        // Overkill: 6 damage to a 4-toughness creature → total 6, excess 2.
+        let (overkill, overkill_red) = run(6, 4);
+        assert_eq!(
+            overkill.last_effect_excess_amount,
+            Some(2),
+            "Excess channel must sum per-event excess (6-4=2), NOT the marked total"
+        );
+        assert_eq!(
+            overkill.last_effect_amount,
+            Some(6),
+            "Total channel sums marked damage (6)"
+        );
+        assert_ne!(
+            overkill.last_effect_excess_amount, overkill.last_effect_amount,
+            "fixture is discriminating: a Total-summing resolver yields 6, not the excess 2"
+        );
+        assert_eq!(
+            overkill_red, 1,
+            "excess>0 → the excess-gated follow-up fires"
+        );
+
+        // Exact lethal: 4 damage to a 4-toughness creature → total 4, excess 0.
+        let (lethal, lethal_red) = run(4, 4);
+        assert_eq!(
+            lethal.last_effect_excess_amount, None,
+            "zero excess → the excess channel is empty"
+        );
+        assert_eq!(
+            lethal.last_effect_amount,
+            Some(4),
+            "total channel still carries the marked 4"
+        );
+        assert_eq!(
+            lethal_red, 0,
+            "excess==0 → follow-up declines; a Total-channel fallback (the reverted bug) \
+             would WRONGLY fire here because total 4 > 0"
+        );
     }
 
     #[test]
