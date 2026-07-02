@@ -47,7 +47,7 @@ use crate::types::ability::{
     TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
@@ -3900,6 +3900,21 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                         TypedFilter::creature()
                             .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
                     ),
+                },
+            ),
+            // CR 603.4 + CR 122: source-scoped "if ~ has counters on it" — the
+            // trigger resolves only if the source permanent currently has at
+            // least one counter of any type (The Ozolith, Denry Klin). Maps to
+            // the existing, already-evaluated `TriggerCondition::HasCounters`,
+            // so no new variant is needed. Distinct from the past-tense
+            // event-subject "if it had counters on it" (`HadCounters`) handled
+            // by `try_extract_had_counter_condition`.
+            (
+                "if ~ has counters on it",
+                TriggerCondition::HasCounters {
+                    counters: CounterMatch::Any,
+                    minimum: 1,
+                    maximum: None,
                 },
             ),
             // CR 603.4: past-turn life loss.

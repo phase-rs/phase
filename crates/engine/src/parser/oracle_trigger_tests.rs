@@ -442,6 +442,40 @@ fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
 }
 
 #[test]
+fn intervening_if_source_has_counters_on_it_populates_condition() {
+    // CR 603.4 + CR 122: source-scoped "if ~ has counters on it" gates the
+    // trigger on the source permanent currently having at least one counter of
+    // any type, mapping to the existing, already-evaluated
+    // `TriggerCondition::HasCounters` — no new variant. Distinct from the
+    // past-tense event-subject "if it had counters on it" (`HadCounters`).
+    let expected = Some(TriggerCondition::HasCounters {
+        counters: CounterMatch::Any,
+        minimum: 1,
+        maximum: None,
+    });
+
+    // The Ozolith — without the gate it would offer the counter-move every
+    // combat even when it holds no counters.
+    let ozolith = parse_trigger_line(
+        "At the beginning of combat on your turn, if The Ozolith has counters on it, \
+         you may move all counters from The Ozolith onto target creature.",
+        "The Ozolith",
+    );
+    assert_eq!(ozolith.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(ozolith.execute.is_some());
+
+    // Denry Klin, Editor in Chief — the same source-scoped gate on an ETB trigger.
+    let denry = parse_trigger_line(
+        "Whenever a nontoken creature you control enters, if Denry Klin, Editor in Chief \
+         has counters on it, proliferate.",
+        "Denry Klin, Editor in Chief",
+    );
+    assert_eq!(denry.condition, expected);
+    assert!(denry.execute.is_some());
+}
+
+#[test]
 fn trigger_etb_self() {
     let def = parse_trigger_line(
         "When this creature enters, it deals 1 damage to each opponent.",
