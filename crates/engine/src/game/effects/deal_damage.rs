@@ -809,6 +809,59 @@ fn stash_remaining_damage_chain(
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
+/// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
+/// `EachSourceDealsDamage` Phase-B pause. `already_replaced` sources have
+/// completed Phase B (replacements applied) and are stashed as
+/// `ApplyPostReplacementDamage` nodes (skip re-replacement). `raw_remaining`
+/// sources have not yet entered Phase B and are stashed as `DealDamage` nodes
+/// (full pipeline). Both segments share a single `sub_ability` tail so
+/// downstream effects fire exactly once after the combined batch completes.
+fn stash_each_source_combined_continuation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    already_replaced: &[(DamageContext, ProposedEvent)],
+    raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+) {
+    let controller = ability.controller;
+
+    // Build the head node: prioritise already-replaced (ApplyPostReplacementDamage)
+    // over raw (DealDamage) so Phase-C application fires before Phase-B for any
+    // remaining-raw sources.
+    let mut head_opt: Option<ResolvedAbility> = None;
+
+    for (ctx, event) in already_replaced {
+        if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+            match head_opt.as_mut() {
+                None => head_opt = Some(node),
+                Some(h) => append_to_sub_chain(h, node),
+            }
+        }
+    }
+
+    for (source_id, target, amount) in raw_remaining {
+        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        match head_opt.as_mut() {
+            None => head_opt = Some(node),
+            Some(h) => append_to_sub_chain(h, node),
+        }
+    }
+
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        match head_opt.as_mut() {
+            None => {
+                // Nothing to stash — forward sub_ability so downstream fires.
+                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+                return;
+            }
+            Some(h) => append_to_sub_chain(h, sub.as_ref().clone()),
+        }
+    }
+
+    if let Some(head) = head_opt {
+        append_to_pending_continuation(state, Some(Box::new(head)));
+    }
+}
+
 /// CR 120.1 + CR 616.1e: Stash a remaining-source damage continuation where each
 /// node carries its OWN damage-source id. Unlike `stash_remaining_damage_chain`
 /// (single source for every node), this preserves PER-SOURCE identity through a
@@ -2037,19 +2090,87 @@ pub fn resolve_each_source_deals_damage(
         }
     }
 
+    // CR 616.1 + CR 120.3: Two-phase batch application preserving the
+    // simultaneous-damage guarantee (CR 120.6 + CR 120.10): marks accumulate
+    // on a shared recipient before any Phase-C consequence (lifelink, excess)
+    // is resolved.
+    //
+    // Phase B — apply replacements for every source, collecting
+    // (DamageContext, ProposedEvent) pairs for Phase C. If any source's
+    // replacement needs a player choice, the sources already collected in
+    // `replaced` (Phase B complete) are stashed as `ApplyPostReplacementDamage`
+    // continuations and the remaining raw entries are stashed as `DealDamage`
+    // continuations (they still need the full replacement pipeline).
+    let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
+    let mut phase_b_paused_at: Option<usize> = None;
+    let mut phase_b_waiting_for_player: Option<crate::types::player::PlayerId> = None;
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
-        match apply_damage_to_target(state, ctx, target.clone(), *dmg, false, events)? {
+        let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
+        else {
+            // Gate prevented this source's damage — skip, no stash entry needed.
+            continue;
+        };
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                replaced.push((*ctx, event));
+            }
+            ReplacementResult::Prevented => {
+                // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
+                // "-1/-1 counter for each 1 damage prevented") inline so it
+                // resolves "immediately afterward" as the rule requires.
+                if state.post_replacement_continuation.is_some() {
+                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    );
+                }
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1e: replacement for source `i` needs a player choice —
+                // pause Phase B. Stash pre-Phase-B tail as `DealDamage` nodes
+                // (they still need replacement). The `replace_event` call already
+                // registered the pending replacement in state; we just set
+                // `waiting_for` and return.
+                phase_b_paused_at = Some(i);
+                phase_b_waiting_for_player = Some(player);
+                break;
+            }
+        }
+    }
+
+    if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
+        state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+        // Source `pause_at` is mid-Phase-B (replacement choice in flight via
+        // `waiting_for`); `handle_replacement_choice` will call
+        // `apply_damage_after_replacement` for it directly after resolution.
+        // Stash `replaced` (Phase-B-complete) as `ApplyPostReplacementDamage`
+        // and `entries[pause_at+1..]` (Phase-B-incomplete) as `DealDamage` in
+        // a single combined chain — one `sub_ability` tail so downstream fires
+        // exactly once.
+        let raw_remaining = entries[pause_at + 1..]
+            .iter()
+            .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
+        stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
+        mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+        return Ok(());
+    }
+
+    // Phase C — apply all already-replaced damage events. If any source's
+    // Phase C needs a choice (e.g. life-gain or lifelink replacement per CR
+    // 614.7), stash the remaining already-replaced sources as
+    // `ApplyPostReplacementDamage` so they bypass the replacement pipeline
+    // (replacements have already been applied in Phase B).
+    for (i, (ctx, event)) in replaced.iter().enumerate() {
+        match apply_damage_after_replacement(state, ctx, event.clone(), false, events) {
             DamageResult::Applied(_) => {}
             DamageResult::NeedsChoice => {
-                // CR 120.3 + CR 616.1e: a replacement on this source's damage needs
-                // a player choice — pause. Stash the remaining entries with
-                // PER-SOURCE identity so each resumes through its own source's
-                // keywords/LKI, then mark the parent kind so the drain re-emits the
-                // `EachSourceDealsDamage` EffectResolved the non-pause tail fires.
-                let remaining = entries[i + 1..]
+                // CR 120.4b + CR 616.1e: stash remaining Phase-B-complete sources
+                // as `ApplyPostReplacementDamage` continuations (skip re-running
+                // replacement), then mark the parent kind for drain bookkeeping.
+                let remaining_refs: Vec<(&DamageContext, ProposedEvent)> = replaced[i + 1..]
                     .iter()
-                    .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
-                stash_remaining_each_source_damage(state, ability, remaining);
+                    .map(|(ctx, ev)| (ctx, ev.clone()))
+                    .collect();
+                stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
                 mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
                 return Ok(());
             }
