@@ -262,6 +262,59 @@ fn cant_play_land_unrecognized_gate_stays_unsupported() {
     );
 }
 
+/// CR 305.1 + CR 601.2 + CR 400.7: A trailing "if <condition>" gates "can't play
+/// lands" the same way "as long as" does (Rock Jockey: "You can't play lands if
+/// this creature was cast this turn."). "<source> was cast this turn" composes
+/// the existing `WasCast` + `SourceEnteredThisTurn` primitives — cast AND entered
+/// this turn ⇒ cast this turn. Regression for BOTH the dropped trailing `if`
+/// gate (previously swallowed → unconditional restriction) and the composed
+/// condition.
+#[test]
+fn rock_jockey_cant_play_land_gated_on_source_cast_this_turn() {
+    let defs = parse_static_line_multi("You can't play lands if this creature was cast this turn.");
+    let cant = defs
+        .iter()
+        .find(|d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand"))
+        .expect("expected a CantPlayLand static gated by the cast-this-turn condition");
+    let Some(StaticCondition::And { conditions }) = &cant.condition else {
+        panic!(
+            "expected an And(WasCast, SourceEnteredThisTurn) gate, got {:?}",
+            cant.condition
+        );
+    };
+    assert!(
+        conditions.contains(&StaticCondition::WasCast { zone: None }),
+        "gate must require the source was cast, got {conditions:?}"
+    );
+    assert!(
+        conditions.contains(&StaticCondition::SourceEnteredThisTurn),
+        "gate must require the source entered this turn, got {conditions:?}"
+    );
+
+    // Full-card dispatch must route the line to the gated static with no swallowed
+    // clause (the trailing `if` gate is no longer dropped).
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "You can't play lands if this creature was cast this turn.",
+        "Rock Jockey",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.statics.iter().any(
+            |d| matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && d.condition == cant.condition
+        ),
+        "full dispatch must produce the gated CantPlayLand, got statics={:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.

@@ -237,6 +237,7 @@ pub fn resolve(
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: false,
+                    enters_modified_if: None,
                 };
                 return Ok(());
             }
@@ -329,6 +330,7 @@ pub fn resolve(
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: false,
+                    enters_modified_if: None,
                 };
                 return Ok(());
             }
@@ -504,6 +506,7 @@ pub fn resolve_all(
                 count_param: 0,
                 library_position: None,
                 is_cost_payment: false,
+                enters_modified_if: None,
             };
             return Ok(());
         }

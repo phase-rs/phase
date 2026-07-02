@@ -45,7 +45,7 @@ fn put_library_top(runner: &mut engine::game::scenario::GameRunner, id: ObjectId
 fn assert_riot_replacement_choice(runner: &engine::game::scenario::GameRunner) {
     let WaitingFor::ReplacementChoice {
         candidate_count,
-        candidate_descriptions,
+        candidates,
         ..
     } = &runner.state().waiting_for
     else {
@@ -56,11 +56,10 @@ fn assert_riot_replacement_choice(runner: &engine::game::scenario::GameRunner) {
     };
     assert_eq!(*candidate_count, 2);
     assert!(
-        candidate_descriptions
+        candidates
             .iter()
-            .any(|description| description.contains("Riot")),
-        "replacement choice should identify Riot, got {:?}",
-        candidate_descriptions
+            .any(|candidate| candidate.description.contains("Riot")),
+        "replacement choice should identify Riot, got {candidates:?}"
     );
 }
 
@@ -93,6 +92,7 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![TargetRef::Object(wurm)],
         rhythm,

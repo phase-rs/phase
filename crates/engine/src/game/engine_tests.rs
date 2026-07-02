@@ -402,7 +402,7 @@ fn setup_game_at_main_phase() -> GameState {
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
 /// squirrel state). The AI `SimulationFilter` legality probe
-/// (`apply_as_current_for_legality`) discards its mutated clone and only
+/// (`apply_as_current_for_simulation`) discards its mutated clone and only
 /// reads `.is_ok()`, so it must NOT run `finalize_display_state`'s
 /// board-global mana-availability sweep — that sweep is O(N^2) on a board of
 /// hundreds of mana sources and the filter pays it once per candidate.
@@ -413,7 +413,7 @@ fn apply_for_legality_skips_display_mana_sweep() {
     let mut sim = setup_game_at_main_phase();
     sim.public_state_dirty.mana_display_dirty = true;
     crate::game::perf_counters::reset();
-    apply_as_current_for_legality(&mut sim, GameAction::PassPriority).unwrap();
+    apply_as_current_for_simulation(&mut sim, GameAction::PassPriority).unwrap();
     assert_eq!(
         crate::game::perf_counters::snapshot().mana_display_sweeps,
         0,
@@ -889,6 +889,172 @@ fn walking_ballista_db_load_path_enters_with_x_counters() {
             .unwrap_or_default(),
         4,
         "Walking Ballista must enter with X=4 +1/+1 counters (DB-load path)"
+    );
+}
+
+/// CR 704.4 + CR 616.1 + CR 614.1c + CR 704.5f: Walking Ballista enters with
+/// X +1/+1 counters while the controller also has TWO order-material
+/// counter-modifying replacements — Branching Evolution ("twice that many")
+/// and Ozolith, the Shattered Spire ("that many plus one"). Placing the ETB
+/// counters is replaced by both, and because `(N*2)+1 != (N+1)*2` the CR
+/// 616.1 application order is material, so the engine pauses on a
+/// `ReplacementChoice`. That pause happens DURING the resolution of the
+/// Ballista spell. Per CR 704.4 ("state-based actions pay no attention to
+/// what happens during the resolution of a spell or ability") SBAs must NOT
+/// fire while the choice is pending — otherwise the 0/0 Ballista is sent to
+/// the graveyard (CR 704.5f) before its entering counters land. Regression
+/// test for that interaction: single-replacement cases never paused, so the
+/// existing `walking_ballista_*` tests did not catch it.
+#[test]
+fn walking_ballista_enters_with_counters_survives_with_two_material_replacements() {
+    let mut state = setup_game_at_main_phase();
+
+    // Branching Evolution: doubles +1/+1 counters put on your creatures.
+    let branching = create_object(
+        &mut state,
+        CardId(9140),
+        PlayerId(0),
+        "Branching Evolution".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&branching)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Enchantment];
+    apply_oracle_to_object(
+        &mut state,
+        branching,
+        "Branching Evolution",
+        "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.",
+    );
+
+    // Ozolith, the Shattered Spire: adds one to +1/+1 counter placements.
+    let ozolith = create_object(
+        &mut state,
+        CardId(9141),
+        PlayerId(0),
+        "Ozolith, the Shattered Spire".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&ozolith)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Artifact];
+    apply_oracle_to_object(
+        &mut state,
+        ozolith,
+        "Ozolith, the Shattered Spire",
+        "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.",
+    );
+
+    let ballista = create_object(
+        &mut state,
+        CardId(9130),
+        PlayerId(0),
+        "Walking Ballista".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&ballista).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Construct".to_string());
+        obj.power = Some(0);
+        obj.toughness = Some(0);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        };
+    }
+    apply_oracle_to_object(
+        &mut state,
+        ballista,
+        "Walking Ballista",
+        "Walking Ballista enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.",
+    );
+
+    let player = state
+        .players
+        .iter_mut()
+        .find(|player| player.id == PlayerId(0))
+        .unwrap();
+    for _ in 0..8 {
+        player.mana_pool.add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: ballista,
+            card_id: CardId(9130),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    // CR 704.4: the spell is mid-resolution, paused on the CR 616.1 ordering
+    // choice. The Ballista must NOT have been killed by a 0-toughness SBA —
+    // its entering counters have simply not been placed yet.
+    assert_eq!(
+        state.objects[&ballista].zone,
+        Zone::Battlefield,
+        "Walking Ballista must still be entering (not dead) while the CR 616.1 \
+         replacement-order choice is pending. Got zone {:?}, waiting_for={:?}",
+        state.objects[&ballista].zone,
+        state.waiting_for,
+    );
+
+    // The pause must actually be the CR 616.1 replacement-order choice. Without
+    // this, a future change that auto-orders the two doublers (no choice
+    // surfaced) would still land 9/10 counters with the Ballista alive, so every
+    // assertion below — and the "still entering" one above — would pass vacuously
+    // while the SBA-suppression-during-ReplacementChoice branch went unexercised.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected a CR 616.1 replacement-order choice pending mid-entry, got {:?}",
+        state.waiting_for,
+    );
+
+    // CR 616.1: answer the (possibly repeated) replacement-order choices.
+    let mut guard = 0;
+    while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resolve replacement order choice");
+        guard += 1;
+        assert!(guard < 8, "replacement-order choice did not terminate");
+    }
+
+    // CR 614.1c: counters land before the resolution settles; the Ballista is
+    // a live (4+1)*2 = 10/10 (or 9/9 for the other ordering — either way >0).
+    assert_eq!(
+        state.objects[&ballista].zone,
+        Zone::Battlefield,
+        "Walking Ballista must survive once its entering counters are placed. \
+         counters={:?}",
+        state.objects[&ballista].counters,
+    );
+    let counters = state.objects[&ballista]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or_default();
+    assert!(
+        counters >= 9,
+        "Walking Ballista must enter with the doubled/incremented counters \
+         (9 or 10 depending on CR 616.1 order), got {counters}"
     );
 }
 

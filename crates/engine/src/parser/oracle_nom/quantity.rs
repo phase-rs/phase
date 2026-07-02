@@ -26,8 +26,8 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
+    ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
     ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1999,7 +1999,7 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
                 group_by: None,
                 damage_kind: DamageKindFilter::NoncombatOnly,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             tag("total amount of noncombat damage dealt to your opponents this turn"),
         ),
@@ -2018,7 +2018,7 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             tag("damage dealt to target opponent this turn"),
         ),
@@ -8250,7 +8250,7 @@ mod tests {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             }
         );
 
@@ -8287,7 +8287,7 @@ mod tests {
                 group_by: None,
                 damage_kind: DamageKindFilter::NoncombatOnly,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             }
         );
     }

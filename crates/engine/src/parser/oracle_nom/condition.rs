@@ -24,10 +24,10 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
-    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageGroupKey, DamageKindFilter,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
-    QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
+    DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -237,7 +237,7 @@ fn parse_type_phrase_nonempty(input: &str) -> OracleResult<'_, TargetFilter> {
 ///     opponent controlled" from Rith, Liberated Primeval).
 ///
 /// All forms map to `DamageDealtThisTurn { source: Any, target: <filter>,
-/// excess_only: true }` compared ≥ 1, which is true when at least one
+/// channel: Excess }` compared ≥ 1, which is true when at least one
 /// `DamageRecord` this turn targeted a matching object with `excess > 0`.
 fn parse_subject_was_dealt_excess_damage_this_turn(
     input: &str,
@@ -274,7 +274,7 @@ fn parse_subject_was_dealt_excess_damage_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
                 // CR 120.10: Only match records where the damage was overkill.
-                excess_only: true,
+                channel: DamageChannel::Excess,
             },
             1,
         ),
@@ -318,7 +318,7 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             amount,
         ),
@@ -373,7 +373,7 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::CombatOnly,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -404,7 +404,7 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -440,7 +440,7 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -1758,15 +1758,25 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
 /// continuations such as "Then if ~ has power 7 or greater, …" (Cloud,
 /// Ex-SOLDIER). Without it, those clauses silently swallow the condition and
 /// the gated sub-ability fires unconditionally.
-fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+pub(crate) fn parse_source_power_toughness_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, qty) = alt((parse_possessive_property, parse_subject_has_property)).parse(input)?;
+    // CR 208.1: "exactly N" → EQ (Amalia Benavides Aguirre: "if its power is
+    // exactly 20"). The "exactly " prefix is consumed before the number, mirroring
+    // the proven "exactly N" → EQ leaf in `parse_hand_size_predicate`; otherwise
+    // the standard "N or less" / "N or greater" thresholds select LE / GE.
+    let (rest, exactly) = opt(tag("exactly ")).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
-    // Comparator: "or less" / "or greater"
-    let (rest, comparator) = alt((
-        value(Comparator::LE, tag(" or less")),
-        value(Comparator::GE, tag(" or greater")),
-    ))
-    .parse(rest)?;
+    let (rest, comparator) = if exactly.is_some() {
+        (rest, Comparator::EQ)
+    } else {
+        alt((
+            value(Comparator::LE, tag(" or less")),
+            value(Comparator::GE, tag(" or greater")),
+        ))
+        .parse(rest)?
+    };
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -4376,7 +4386,7 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             amount,
         ),
@@ -11251,6 +11261,41 @@ mod tests {
         }
     }
 
+    /// CR 208.1: "its power is exactly N" → `EQ` (Amalia Benavides Aguirre). The
+    /// equality leaf is added alongside the existing "or less"/"or greater"
+    /// thresholds, which must still parse unchanged (no regression).
+    #[test]
+    fn test_its_power_is_exactly_n() {
+        let (rest, c) = parse_inner_condition("its power is exactly 20").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            }
+        );
+        // No regression: threshold forms still select LE / GE.
+        for (text, cmp) in [
+            ("its power is 2 or less", Comparator::LE),
+            ("its power is 2 or greater", Comparator::GE),
+            ("its toughness is exactly 5", Comparator::EQ),
+        ] {
+            let (_, parsed) = parse_inner_condition(text).unwrap();
+            match parsed {
+                StaticCondition::QuantityComparison { comparator, .. } => {
+                    assert_eq!(comparator, cmp, "{text:?}")
+                }
+                other => panic!("{text:?} → {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_gendered_possessive_pronoun_power_condition() {
         // CR 201.5: "her"/"his"/"their power is N" refers to the source creature,
@@ -12424,7 +12469,7 @@ mod tests {
                                 group_by: Some(DamageGroupKey::SourceId),
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12456,7 +12501,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12489,7 +12534,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12522,7 +12567,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12553,7 +12598,7 @@ mod tests {
                         group_by: None,
                         damage_kind: DamageKindFilter::Any,
 
-                        excess_only: false,
+                        channel: DamageChannel::Total,
                     },
                 },
                 comparator: Comparator::GE,
@@ -12584,7 +12629,7 @@ mod tests {
                             group_by: None,
                             damage_kind: DamageKindFilter::CombatOnly,
 
-                            excess_only: false,
+                            channel: DamageChannel::Total,
                         },
                 },
             comparator: Comparator::GE,
@@ -12624,7 +12669,7 @@ mod tests {
                     qty: QuantityRef::DamageDealtThisTurn {
                         damage_kind: DamageKindFilter::CombatOnly,
 
-                        excess_only: false,
+                        channel: DamageChannel::Total,
                         ..
                     },
                 },
@@ -14478,7 +14523,7 @@ mod tests {
 
     /// CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "that creature was dealt
     /// excess damage this turn" is the Maarika-class intervening-if. It must map
-    /// to a `DamageDealtThisTurn` check with `excess_only: true` whose target is
+    /// to a `DamageDealtThisTurn` check with `channel: Excess` whose target is
     /// bound to `TargetFilter::EventTarget` — the *specific* damaged object of
     /// the trigger — not a generic creature filter. A generic filter would let
     /// the condition fire off an unrelated creature's earlier excess hit.
@@ -14493,7 +14538,7 @@ mod tests {
                     qty:
                         QuantityRef::DamageDealtThisTurn {
                             ref target,
-                            excess_only,
+                            channel,
                             ..
                         },
                 },
@@ -14503,7 +14548,7 @@ mod tests {
         else {
             panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
         };
-        assert!(excess_only, "excess_only must be true");
+        assert_eq!(channel, DamageChannel::Excess, "channel must be Excess");
         assert_eq!(
             target.as_ref(),
             &TargetFilter::EventTarget,
@@ -14533,9 +14578,9 @@ mod tests {
 
     /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's "a creature or
     /// planeswalker an opponent controlled was dealt excess damage this turn"
-    /// must parse as an opponent-filtered DamageDealtThisTurn with excess_only.
+    /// must parse as an opponent-filtered DamageDealtThisTurn with channel:Excess.
     /// `parse_type_phrase` produces `TargetFilter::Or` for compound types, so
-    /// this test checks that excess_only is set and the target is non-Any.
+    /// this test checks that the channel is Excess and the target is non-Any.
     #[test]
     fn parse_inner_condition_typed_subject_was_dealt_excess_damage_this_turn() {
         let (rest, cond) = parse_inner_condition(
@@ -14549,7 +14594,7 @@ mod tests {
                     qty:
                         QuantityRef::DamageDealtThisTurn {
                             ref target,
-                            excess_only,
+                            channel,
                             ..
                         },
                 },
@@ -14559,7 +14604,7 @@ mod tests {
         else {
             panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
         };
-        assert!(excess_only, "excess_only must be true");
+        assert_eq!(channel, DamageChannel::Excess, "channel must be Excess");
         // parse_type_phrase emits Or{Typed(Creature+Opp), Typed(Planeswalker+Opp)}
         // for compound types — verify the filter is non-trivial (not Any).
         assert!(

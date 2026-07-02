@@ -1463,6 +1463,32 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         }
     }
 
+    // CR 601.2 + CR 400.7: "<source> was cast this turn" gates on the source
+    // having been cast (WasCast) AND having entered this turn
+    // (SourceEnteredThisTurn) — a permanent that was cast and entered this turn
+    // was necessarily cast this turn, while one put onto the battlefield (not
+    // cast) or cast on an earlier turn fails one conjunct. Composed from the two
+    // existing leaf primitives rather than a new `SourceWasCastThisTurn` variant
+    // (compose-don't-proliferate). `parse_inner_condition` above recognizes the
+    // bare "<source> was cast" (→ `WasCast`) but not the "this turn" tightening,
+    // so the compound is handled here. Rock Jockey: "You can't play lands if this
+    // creature was cast this turn."
+    for self_ref in ["it ", "this creature ", "this permanent ", "~ "] {
+        let Some(after_ref) = nom_tag_lower(tp.lower, tp.lower, self_ref) else {
+            continue;
+        };
+        if nom_tag_lower(after_ref, after_ref, "was cast this turn")
+            .is_some_and(|remainder| remainder.trim().is_empty())
+        {
+            return Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::WasCast { zone: None },
+                    StaticCondition::SourceEnteredThisTurn,
+                ],
+            });
+        }
+    }
+
     // Compound " and " splitting: try splitting on " and ", parse both halves recursively.
     // Only succeeds if BOTH halves parse independently — avoids false splits on
     // noun phrases like "artifacts and creatures".
