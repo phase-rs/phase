@@ -22243,3 +22243,94 @@ fn granted_ability_inner_unless_stays_inside_quoted_ability() {
         "the granted ability's inner `unless` must NOT become a static-grant condition"
     );
 }
+
+/// CR 613.1f: A keyword-loss list joined by the inclusive " or " connective
+/// (Urborg: "Target creature loses first strike or swampwalk until end of
+/// turn") removes every listed keyword. Building-block coverage: the loss
+/// clause must split on " or " and emit one `RemoveKeyword` per keyword, exactly
+/// as the " and " conjunction already does. The duration suffix is stripped by
+/// the effect-chain caller before this building block runs, so the bare
+/// (duration-free) clause is the correct unit to test here.
+#[test]
+fn loses_keyword_or_keyword_splits_into_two_remove_keywords() {
+    let mods = parse_continuous_modifications("loses first strike or swampwalk");
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::FirstStrike,
+        }),
+        "expected RemoveKeyword(FirstStrike), got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Landwalk("Swamp".to_string()),
+        }),
+        "expected RemoveKeyword(Landwalk(Swamp)), got {mods:?}"
+    );
+    // Reach-guard: exactly the two listed removals, nothing spurious.
+    assert_eq!(
+        mods.len(),
+        2,
+        "expected exactly two RemoveKeyword mods, got {mods:?}"
+    );
+    // The " and " conjunction must remain equivalent (no regression).
+    let and_mods = parse_continuous_modifications("loses first strike and swampwalk");
+    assert_eq!(
+        mods, and_mods,
+        "\" or \" loss must match \" and \" loss: {mods:?} vs {and_mods:?}"
+    );
+}
+
+/// End-to-end (Urborg): the second activated ability
+/// "{T}: Target creature loses first strike or swampwalk until end of turn."
+/// must parse — not fall through to Unimplemented — with both keyword removals
+/// bound to the targeted creature (`ParentTarget`) for `UntilEndOfTurn`.
+#[test]
+fn urborg_loses_first_strike_or_swampwalk_parses_end_to_end() {
+    use crate::types::ability::Duration;
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{T}: Add {B}.\n{T}: Target creature loses first strike or swampwalk until end of turn.",
+        "Urborg",
+        &[],
+        &[],
+        &[],
+    );
+    // Two activated abilities: the mana ability and the keyword-loss ability.
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "expected two activated abilities"
+    );
+    let loss = &parsed.abilities[1];
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+    } = &*loss.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", loss.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert!(
+        matches!(target, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)),
+        "must target a creature, got {target:?}"
+    );
+    assert_eq!(static_abilities.len(), 1, "one keyword-loss static");
+    let mods = &static_abilities[0].modifications;
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::FirstStrike,
+        }),
+        "expected RemoveKeyword(FirstStrike), got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Landwalk("Swamp".to_string()),
+        }),
+        "expected RemoveKeyword(Landwalk(Swamp)), got {mods:?}"
+    );
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget),
+        "keyword removal must bind to the targeted creature"
+    );
+}

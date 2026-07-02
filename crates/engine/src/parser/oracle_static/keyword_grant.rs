@@ -1431,8 +1431,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // CR 702: "lose [keyword]" / "loses [keyword]" — keyword removal.
     if let Some(keyword_text) = extract_lose_keyword_clause(&unquoted_text) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
-                modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
+            // CR 613.1f: an ability-removal list joined by " or " (Urborg:
+            // "loses first strike or swampwalk") removes every listed keyword the
+            // creature has — removing an absent keyword is a no-op, so the
+            // inclusive "or" is equivalent to the " and " conjunction the shared
+            // `split_keyword_list` already splits. Break each part on " or " so
+            // every keyword maps to its own RemoveKeyword.
+            for segment in split_lose_or_segments(part.as_ref()) {
+                if let Some(kw) = map_keyword(segment.trim().trim_end_matches('.')) {
+                    modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
+                }
             }
         }
     }
@@ -1707,4 +1715,28 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // Reuses the building block from oracle_keyword.rs which handles inline,
     // comma-continuation, and Oxford comma protection patterns.
     super::oracle_keyword::expand_protection_parts(&parts)
+}
+
+/// CR 613.1f: Split one keyword-loss segment on the inclusive " or " connective.
+///
+/// Old-frame ability-removal lists use " or " instead of " and " (Urborg:
+/// "loses first strike or swampwalk"). Both connectives mean "remove every
+/// listed keyword the object has" — CR 613.1f applies ability-removing effects
+/// at layer 6, and removing an ability the object lacks is a no-op, so the two
+/// connectives are semantically identical for removal (there is no player
+/// choice in the text). The shared `split_keyword_list` splits the " and " /
+/// Oxford-comma forms but deliberately NOT " or " (a grant list "has A or B"
+/// would be a choice, not both); scoping the " or " split to the loss path
+/// keeps that distinction. Combinator-driven per the nom mandate: a
+/// `separated_list1` over `tag(" or ")`, each segment consuming up to the next
+/// separator (or the remainder for the final segment). Returns the whole input
+/// as a single segment when no separator is present.
+fn split_lose_or_segments(part: &str) -> Vec<&str> {
+    separated_list1(
+        tag::<_, _, OracleError<'_>>(" or "),
+        alt((take_until(" or "), rest)),
+    )
+    .parse(part)
+    .map(|(_, segments)| segments)
+    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| vec![part])
 }
