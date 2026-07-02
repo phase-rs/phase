@@ -1150,40 +1150,45 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
 /// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
 fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
     for ability in &mut result.abilities {
-        reconcile_host_bound_phase_outs_in_ability(ability);
+        reconcile_host_bound_phase_outs_in_ability(ability, None);
     }
     for trigger in &mut result.triggers {
+        let host_text = trigger.description.as_deref();
         if let Some(execute) = trigger.execute.as_mut() {
-            reconcile_host_bound_phase_outs_in_ability(execute);
+            reconcile_host_bound_phase_outs_in_ability(execute, host_text);
         }
     }
 }
 
-fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
-    if matches!(*def.effect, Effect::PhaseOut { .. })
+fn reconcile_host_bound_phase_outs_in_ability(
+    def: &mut AbilityDefinition,
+    host_text: Option<&str>,
+) {
+    let context_text = host_text.or(def.description.as_deref()).map(str::to_owned);
+    let should_upgrade = matches!(*def.effect, Effect::PhaseOut { .. })
         && def
             .sub_ability
             .as_ref()
-            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub))
-    {
-        upgrade_host_bound_phase_out_at_head(def);
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub, context_text.as_deref()));
+    if should_upgrade {
+        upgrade_host_bound_phase_out_at_head(def, context_text.as_deref());
         return;
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        reconcile_host_bound_phase_outs_in_ability(sub);
+        reconcile_host_bound_phase_outs_in_ability(sub, host_text);
     }
 }
 
-fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
-    if host_bound_phase_in_tap_rider(&def.effect) {
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition, host_text: Option<&str>) -> bool {
+    if is_host_bound_phase_in_tap_rider_node(def, host_text) {
         return true;
     }
     def.sub_ability
         .as_ref()
-        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub))
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub, host_text))
 }
 
-fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition, host_text: Option<&str>) {
     let Effect::PhaseOut { target } = *def.effect.clone() else {
         return;
     };
@@ -1191,7 +1196,7 @@ fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
     // Strip the tap-on-phase-in rider from the existing chain tail.
     let mut tail = def.sub_ability.take();
     while let Some(mut sub) = tail {
-        if host_bound_phase_in_tap_rider(&sub.effect) {
+        if is_host_bound_phase_in_tap_rider_node(&sub, host_text) {
             tail = sub.sub_ability.take();
             break;
         }
@@ -1242,21 +1247,32 @@ fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
     def.sub_ability = Some(Box::new(lock));
 }
 
-fn host_bound_phase_in_tap_rider(effect: &Effect) -> bool {
-    match effect {
+fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition, host_text: Option<&str>) -> bool {
+    if !matches!(
+        def.effect.as_ref(),
         Effect::SetTapState {
             state: TapStateChange::Tap,
+            target: TargetFilter::ParentTarget,
             ..
-        } => true,
-        Effect::CreateDelayedTrigger { effect: inner, .. } => {
-            host_bound_phase_in_tap_rider(&inner.effect)
-                || inner
-                    .sub_ability
-                    .as_ref()
-                    .is_some_and(|sub| host_bound_phase_in_tap_rider(&sub.effect))
         }
-        _ => false,
+    ) {
+        return false;
     }
+    if def
+        .description
+        .as_deref()
+        .is_some_and(host_bound_phase_in_tap_phrase)
+    {
+        return true;
+    }
+    host_text.is_some_and(host_bound_phase_in_tap_phrase)
+}
+
+fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("as it phases in this way")
+        || lower.contains("as that creature phases in this way")
+        || lower.contains("as that permanent phases in this way")
 }
 
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {

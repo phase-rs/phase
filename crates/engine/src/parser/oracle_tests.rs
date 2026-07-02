@@ -17314,3 +17314,34 @@ fn oubliette_host_bound_parse_structure() {
         other => panic!("expected CreateDelayedTrigger, got {other:?}"),
     }
 }
+
+#[test]
+fn phase_out_with_unrelated_tap_does_not_upgrade_to_host_bound_lock() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::Effect;
+    use crate::types::statics::StaticMode;
+
+    let text = "When this enchantment enters, target creature phases out. Tap that creature.";
+    let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have execute");
+
+    assert!(matches!(*execute.effect, Effect::PhaseOut { .. }));
+    let has_cant_phase_in_lock = execute.sub_ability.as_ref().is_some_and(|sub| {
+        matches!(
+            sub.effect.as_ref(),
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities
+                .iter()
+                .any(|static_def| static_def.mode == StaticMode::CantPhaseIn)
+        )
+    });
+    assert!(
+        !has_cant_phase_in_lock,
+        "a generic tap after PhaseOut must not be rewritten into a host-bound CantPhaseIn lock"
+    );
+}
