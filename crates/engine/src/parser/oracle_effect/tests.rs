@@ -741,9 +741,10 @@ use crate::types::ability::{
     CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
     Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
     DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition, LinkedExileScope,
-    ManaContribution, ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-    PlayerRelation, PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+    ManaContribution, ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee,
+    PerpetualModification, PlayerFilter, PlayerRelation, PreventionScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+    TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -28289,8 +28290,6 @@ fn perpetual_parser_maps_self_base_pt() {
 
 #[test]
 fn perpetual_parser_maps_referenced_base_pt() {
-    use crate::types::ability::PerpetualModification;
-
     // "the duplicate …" (Three Tree Battalion's conjured copy) binds to the
     // most-recently-created object the preceding Conjure published.
     let e = parse_effect("the duplicate perpetually has base power and toughness 1/1.");

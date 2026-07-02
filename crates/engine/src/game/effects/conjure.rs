@@ -213,7 +213,7 @@ fn resolve_duplicate_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ConjureCard, QuantityExpr, TargetRef};
+    use crate::types::ability::{ConjureCard, PerpetualModification, QuantityExpr, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -267,8 +267,6 @@ mod tests {
     /// conjured card — not the conjuring source.
     #[test]
     fn conjure_publishes_last_created_for_perpetual_subability() {
-        use crate::types::ability::PerpetualModification;
-
         let mut state = GameState::new_two_player(7);
 
         // The conjuring permanent. The perpetual edit must not land on it.
