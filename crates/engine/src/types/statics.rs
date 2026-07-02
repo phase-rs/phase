@@ -589,6 +589,9 @@ pub enum TriggerCause {
     /// `GameEvent::DamageDealt` whose target is a creature controlled by the
     /// doubler's controller.
     ControlledCreatureDealtDamage,
+    /// CR 309.4c: Trigger was caused by entering a dungeon room
+    /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
+    RoomEntered,
 }
 
 impl fmt::Display for TriggerCause {
@@ -604,6 +607,7 @@ impl fmt::Display for TriggerCause {
             TriggerCause::ControlledCreatureDealtDamage => {
                 write!(f, "ControlledCreatureDealtDamage")
             }
+            TriggerCause::RoomEntered => write!(f, "RoomEntered"),
         }
     }
 }
