@@ -2758,8 +2758,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
-        // CR 508.1: "a creature is attacking you" → IsPresent(creature attacking you)
-        parse_creature_attacking_you,
+        // CR 508.1: "a[n] [filter] creature is attacking[ you]" → IsPresent(filter + attacking)
+        parse_filtered_creature_is_attacking,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -2968,27 +2968,36 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
-/// Parse "you control a/an/another [type]" → IsPresent with filter.
-///
-/// Generalized: uses `parse_type_phrase` so any type phrase is supported,
-/// not just hardcoded creature/artifact/enchantment/planeswalker.
-/// "another" is handled by passing "another [type]" to `parse_type_phrase`,
-/// which recognizes "another" and adds `FilterProp::Another`.
-/// CR 508.1: "a creature is attacking you" — presence check for an attacker
-/// whose defending player is the controller. Gates Confront the Assault's
-/// casting restriction and the Swat Away / Heroic Return cost reductions.
-/// Lowers to `IsPresent` over a creature filter carrying `FilterProp::Attacking
-/// { defender: You }` — the same filter "for each creature attacking you" uses.
-fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("a creature is attacking you").parse(input)?;
-    let mut filter = TypedFilter::creature();
-    filter.properties.push(FilterProp::Attacking {
-        defender: Some(ControllerRef::You),
-    });
+/// CR 508.1: "a[n] [filter] creature is attacking[ you]" — presence check for
+/// an attacker, optionally qualified by a type/color/keyword filter. Gates
+/// Confront the Assault's casting restriction, the Swat Away / Heroic Return
+/// cost reductions (bare "a creature is attacking you"), and the filtered Trap
+/// cycle's alternative costs — Nemesis Trap ("a white creature is attacking"),
+/// Slingbow Trap ("a black creature with flying is attacking"). The qualifier
+/// is delegated to `parse_type_phrase` (mirrors `parse_creature_has_keyword`)
+/// so the whole class of attacker filters is covered by one combinator rather
+/// than the former bare-only literal. Lowers to `IsPresent` over the filter
+/// with `FilterProp::Attacking { defender }` appended — the same property
+/// "for each creature attacking you" uses.
+fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = opt(parse_article).parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (after, defender) = preceded(
+        opt(tag(" ")),
+        alt((
+            value(Some(ControllerRef::You), tag("is attacking you")),
+            value(None::<ControllerRef>, tag("is attacking")),
+        )),
+    )
+    .parse(remainder)?;
+    let filter = add_filter_property(filter, FilterProp::Attacking { defender });
     Ok((
-        rest,
+        after,
         StaticCondition::IsPresent {
-            filter: Some(TargetFilter::Typed(filter)),
+            filter: Some(filter),
         },
     ))
 }
@@ -7920,6 +7929,79 @@ mod tests {
                 "filter should carry Attacking {{ defender: You }}, got {tf:?}"
             ),
             other => panic!("expected IsPresent with attacking filter, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 105.1: Nemesis Trap — "a white creature is attacking"
+    /// qualifies the bare attacker presence check with a color filter. No
+    /// trailing "you": the attacker may be attacking any player.
+    #[test]
+    fn test_filtered_creature_is_attacking_color() {
+        let (rest, c) = parse_inner_condition("a white creature is attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasColor {
+                            color: ManaColor::White
+                        }
+                    )),
+                    "filter should carry HasColor(White), got {tf:?}"
+                );
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    "filter should carry Attacking {{ defender: None }}, got {tf:?}"
+                );
+            }
+            other => panic!("expected IsPresent with a white attacking filter, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 702.9: Slingbow Trap — "a black creature with flying is
+    /// attacking" stacks a color filter and a keyword filter onto the same
+    /// attacker presence check.
+    #[test]
+    fn test_filtered_creature_is_attacking_color_and_keyword() {
+        let (rest, c) = parse_inner_condition("a black creature with flying is attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasColor {
+                            color: ManaColor::Black
+                        }
+                    )),
+                    "filter should carry HasColor(Black), got {tf:?}"
+                );
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying
+                        }
+                    )),
+                    "filter should carry WithKeyword(Flying), got {tf:?}"
+                );
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    "filter should carry Attacking {{ defender: None }}, got {tf:?}"
+                );
+            }
+            other => {
+                panic!("expected IsPresent with a black flying attacking filter, got {other:?}")
+            }
         }
     }
 
