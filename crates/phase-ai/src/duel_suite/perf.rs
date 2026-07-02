@@ -697,6 +697,13 @@ impl ReproMarginReport {
 /// MAX current across `runs`; `margin_ceiling` reuses `fail_threshold` so the band
 /// formula has exactly one authority.
 pub fn repro_margin_report(baseline: &PerfReport, runs: &[PerfReport]) -> ReproMarginReport {
+    // Zero runs would make every `worst_current` default to `base` and the
+    // whole table vacuously OK — a silent pass when validation runs failed to
+    // generate or were misconfigured.
+    assert!(
+        !runs.is_empty(),
+        "repro_margin_report requires at least one validation run"
+    );
     let mut rows = Vec::with_capacity(baseline.counters.0.len());
     for (key, &base) in &baseline.counters.0 {
         let worst_current = runs
@@ -1206,5 +1213,14 @@ mod tests {
         let baseline = mk_report(&[("present", 100), ("dropped", 100)]);
         let runs = [mk_report(&[("present", 101)])];
         let _ = repro_margin_report(&baseline, &runs);
+    }
+
+    // Matrix M-margin (hostile): zero validation runs panics loudly — otherwise
+    // every `worst_current` defaults to `base` and the table vacuously passes.
+    #[test]
+    #[should_panic(expected = "at least one validation run")]
+    fn repro_margin_panics_on_empty_runs() {
+        let baseline = mk_report(&[("counter", 100)]);
+        let _ = repro_margin_report(&baseline, &[]);
     }
 }

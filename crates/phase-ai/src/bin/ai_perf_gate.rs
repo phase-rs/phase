@@ -142,8 +142,6 @@ fn run_parent_gate(args: &Args) {
             std::process::exit(2);
         }
     };
-    let data_root_str = path_str(&args.data_root);
-
     // Spawn K children SEQUENTIALLY (blocking .status()); each is an independent
     // process with a fresh std RandomState, hence an independent trajectory.
     let mut samples = Vec::with_capacity(PERF_SAMPLE_COUNT);
@@ -151,13 +149,13 @@ fn run_parent_gate(args: &Args) {
     for i in 0..PERF_SAMPLE_COUNT {
         let tmp_i =
             std::env::temp_dir().join(format!("ai-perf-sample-{}-{i}.json", std::process::id()));
+        // Registered BEFORE the spawn so every failure path below cleans it up.
+        temp_paths.push(tmp_i.clone());
         let status = Command::new(&exe)
-            .args([
-                "--emit-sample",
-                path_str(&tmp_i),
-                "--data-root",
-                data_root_str,
-            ])
+            .arg("--emit-sample")
+            .arg(&tmp_i)
+            .arg("--data-root")
+            .arg(&args.data_root)
             .stdout(Stdio::null()) // GAP 4: parent's stdout stays a clean table
             .stderr(Stdio::inherit()) // child diagnostics still visible in CI logs
             .status();
@@ -185,14 +183,21 @@ fn run_parent_gate(args: &Args) {
                 std::process::exit(2);
             }
         }
-        temp_paths.push(tmp_i);
     }
 
     let mut current = median_report(&samples);
     // Stamp provenance the parent can compute without loading the DB.
     current.git_sha = command_output("git", &["rev-parse", "--short=12", "HEAD"]);
     let db_path = args.data_root.join("card-data.json");
-    current.card_data_hash = command_output("git", &["hash-object", path_str(&db_path)]);
+    current.card_data_hash = command_output(
+        "git",
+        &[
+            "hash-object",
+            db_path
+                .to_str()
+                .expect("card-data path must be valid UTF-8"),
+        ],
+    );
 
     eprintln!(
         "perf suite: seed={} action_cap={} sample_count={} scenarios={:?} wall_clock={}ms",
@@ -316,10 +321,6 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn path_str(path: &Path) -> &str {
-    path.to_str().unwrap_or("")
 }
 
 fn write_report(report: &PerfReport, path: &Path) -> Result<(), std::io::Error> {
