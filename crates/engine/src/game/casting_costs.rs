@@ -5535,7 +5535,7 @@ pub(super) fn pay_and_push_adventure(
 /// Shared by `pay_and_push_adventure` (normal casting) and the
 /// `(ManaPayment, PassPriority)` handler (after interactive mana payment).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn finalize_cast(
+pub(crate) fn finalize_cast(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,

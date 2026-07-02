@@ -1424,13 +1424,18 @@ mod tests {
 
     #[test]
     fn derive_views_surfaces_chosen_modal_modes_on_stack() {
+        use crate::game::casting_costs::finalize_cast;
+        use crate::game::stack::push_to_stack;
+        use crate::types::game_state::PendingCast;
+
         let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
         let spell = create_object(
             &mut state,
             CardId(1),
-            PlayerId(0),
+            player,
             "Brotherhood's End".to_string(),
-            Zone::Stack,
+            Zone::Hand,
         );
         if let Some(obj) = state.objects.get_mut(&spell) {
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -1445,27 +1450,55 @@ mod tests {
                 ..Default::default()
             });
         }
-        state.stack.push_back(StackEntry {
-            id: spell,
-            source_id: spell,
-            controller: PlayerId(0),
-            kind: StackEntryKind::Spell {
-                card_id: CardId(1),
-                ability: None,
-                casting_variant: CastingVariant::Normal,
-                actual_mana_spent: 3,
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "modal".to_string(),
+                description: None,
             },
-        });
-        state.stack_paid_facts.insert(
+            Vec::new(),
             spell,
-            StackPaidSnapshot {
-                actual_mana_spent: 3,
-                chosen_mode_labels: vec![
-                    "Destroy all artifacts with mana value 3 or less.".to_string()
-                ],
-                ..Default::default()
-            },
+            player,
         );
+        let mut pending = PendingCast::new(spell, CardId(1), ability, ManaCost::NoCost);
+        pending.chosen_modes = vec![1];
+        state.pending_cast = Some(Box::new(pending));
+
+        push_to_stack(
+            &mut state,
+            StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: player,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut Vec::new(),
+        );
+
+        let ability = state
+            .pending_cast
+            .as_ref()
+            .expect("pending cast")
+            .ability
+            .clone();
+        let mut events = Vec::new();
+        finalize_cast(
+            &mut state,
+            player,
+            spell,
+            CardId(1),
+            ability,
+            &ManaCost::NoCost,
+            CastingVariant::Normal,
+            None,
+            Zone::Hand,
+            &mut events,
+        )
+        .expect("finalize_cast should succeed");
 
         let views = derive_views(&state, None);
         let details = views

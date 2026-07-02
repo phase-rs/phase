@@ -325,6 +325,8 @@ function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
       return fact.data.variant;
     case "Convoked":
       return t("stack.paidConvoked", { count: fact.data.count });
+    case "ChosenModes":
+      return fact.data.labels.join("; ");
     default:
       return "";
   }
