@@ -30,7 +30,7 @@ fn reach_active_players_end_step(runner: &mut engine::game::scenario::GameRunner
             WaitingFor::OrderTriggers { .. } => {
                 runner
                     .act(GameAction::OrderTriggers { order: vec![0] })
-                    .ok();
+                    .expect("ordering triggers should succeed");
             }
             _ if runner.state().phase == Phase::End => return,
             _ => runner.pass_both_players(),

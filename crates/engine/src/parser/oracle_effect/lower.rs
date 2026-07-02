@@ -13,7 +13,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_quantity_ref,
+    parse_player_counter_attribute_suffix, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -3668,11 +3668,11 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(controls_scope), deconjugated);
     }
 
-    // CR 122.1f + CR 109.5: "who has/have N or more <kind> counters" restricts
+    // CR 122.1 + CR 122.2: "who has/have N or more <kind> counters" restricts
     // the player set to those whose per-candidate counter total meets the
     // threshold (Ixhel, Scion of Atraxa: "each opponent who has three or more
     // poison counters exiles …"; Glissa's Retriever quantity path shares the
-    // same attr-clause grammar via `parse_player_counter_attr_clause`).
+    // same attr-clause grammar via `parse_player_counter_attribute_suffix`).
     if let Some((attr_scope, after_clause)) = strip_player_attribute_clause(&scope, rest) {
         let deconjugated = subject::deconjugate_verb(&after_clause);
         return (Some(attr_scope), deconjugated);
@@ -4200,39 +4200,22 @@ fn strip_controls_permanent_clause(
     ))
 }
 
-/// CR 122.1f + CR 109.5: Strip a "who has/have N or more <kind> counters"
+/// CR 122.1 + CR 122.2: Strip a "who has/have N or more <kind> counters"
 /// relative clause after an "each opponent"/"each player" subject. Returns
 /// `PlayerFilter::PlayerAttribute` and the verb-phrase remainder.
 fn strip_player_attribute_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::{CountScope, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     let relation = match base {
         PlayerFilter::Opponent => PlayerRelation::Opponent,
         PlayerFilter::All => PlayerRelation::All,
         _ => return None,
     };
     let lower = rest.to_lowercase();
-    let ((attr, count), remainder) = nom_on_lower(rest, &lower, |i| {
-        let (i, _) = tag("who ").parse(i)?;
-        let (i, _) = alt((tag("have "), tag("has "))).parse(i)?;
-        let (i, n) = nom_primitives::parse_number(i)?;
-        let (i, _) = tag(" or more ").parse(i)?;
-        let (i, kind) = nom_quantity::parse_player_counter_kind(i)?;
-        let (i, _) = tag(" counter").parse(i)?;
-        let (i, _) = opt(tag("s")).parse(i)?;
-        Ok((
-            i,
-            (
-                QuantityRef::PlayerCounter {
-                    kind,
-                    scope: CountScope::ScopedPlayer,
-                },
-                n as i32,
-            ),
-        ))
-    })?;
+    let ((attr, count), remainder) =
+        nom_on_lower(rest, &lower, parse_player_counter_attribute_suffix).ok()?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;

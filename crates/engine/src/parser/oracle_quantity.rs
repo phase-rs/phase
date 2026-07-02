@@ -1404,7 +1404,17 @@ fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
     .parse(input)
 }
 
-/// CR 122.1f + CR 122.1: "who have N or more <kind> counters" → the candidate's
+/// CR 122.1 + CR 122.2: "who have/has N or more <kind> counters" → the candidate's
+/// named player-counter total. Delegates kind recognition to the shared
+/// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
+/// all covered.
+pub(crate) fn parse_player_counter_attribute_suffix(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, i32)> {
+    parse_player_counter_attr_clause(input)
+}
+
+/// CR 122.1 + CR 122.2: "who have/has N or more <kind> counters" → the candidate's
 /// named player-counter total. Delegates kind recognition to the shared
 /// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
 /// all covered.
