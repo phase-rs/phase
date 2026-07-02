@@ -17358,7 +17358,7 @@ fn rewrite_filter_keyword(filter: &mut TargetFilter, new_keyword: &Keyword) {
 }
 
 /// Swap the granted keyword inside a `StaticCondition` to `new_keyword`.
-fn rewrite_condition_keyword(condition: &mut StaticCondition, new_keyword: &Keyword) {
+pub(crate) fn rewrite_condition_keyword(condition: &mut StaticCondition, new_keyword: &Keyword) {
     match condition {
         StaticCondition::IsPresent {
             filter: Some(filter),

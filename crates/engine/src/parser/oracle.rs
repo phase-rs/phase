@@ -27,7 +27,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
@@ -51,9 +51,10 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::dispatch_line_nom;
+use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
-    try_parse_temporal_delayed_trigger_ability,
+    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
@@ -1233,6 +1234,91 @@ where
     }
 
     false
+}
+
+/// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
+/// continuation across a graveyard-keyword-gated static grant (Cairn Wanderer).
+///
+/// The modeled sentence "As long as a creature card with <kw> is in a graveyard,
+/// this creature has <kw>" parses to ONE gated `StaticDefinition` (grant
+/// `AddKeyword { kw }` gated on `IsPresent(<kw>-card in a graveyard)`). Each
+/// keyword in the trailing list clones that template, swapping BOTH the granted
+/// keyword and the gate condition's `WithKeyword`, so each keyword is granted
+/// independently — only while a creature card WITH that keyword is in a graveyard
+/// (CR 611.3a per-keyword conditional continuous static). This is the plain-
+/// `StaticDefinition` analogue of `attach_same_is_true_keywords` (which operates
+/// on the trigger path's `GenericEffect`), reusing the same keyword-list parser
+/// (`try_parse_same_is_true_continuation`) and keyword-rewrite building block
+/// (`rewrite_condition_keyword`) so it covers the whole class, not one card.
+///
+/// Returns `false` (leaving the line for the generic dispatch) when the modeled
+/// sentence, the keyword list, or the gated template cannot be recovered. Any
+/// continuation keyword that resolves to `Keyword::Unknown` (unqualified
+/// `protection` / `landwalk`) is emitted as an explicit `Unimplemented` residual
+/// rather than an inert `AddKeyword(Unknown)` static, so it stays a loud
+/// unsupported gap in coverage instead of silently reading as supported.
+fn push_graveyard_keyword_same_is_true_tail(
+    result: &mut ParsedAbilities,
+    line: &str,
+    lower: &str,
+) -> bool {
+    let Some((modeled_sentence, tail)) =
+        split_same_is_true_static_tail(line, lower, parse_graveyard_keyword_grant_sentence)
+    else {
+        return false;
+    };
+    // No cant-cast gate applies to a graveyard-keyword grant, so the raw-line /
+    // card-name gate params are None (matching the other non-cant-cast callers).
+    let mut statics =
+        parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None);
+    // The modeled sentence must yield exactly the gated keyword grant to clone.
+    let Some(template) = statics.first().cloned() else {
+        return false;
+    };
+    // CR 611.3a: only distribute a genuinely gated grant. If the modeled sentence
+    // ever parsed without its graveyard-presence condition, fall through to the
+    // generic path rather than cloning an UNGATED grant per keyword — that would
+    // reintroduce the unconditional over-grant this distribution exists to remove.
+    if template.condition.is_none() {
+        return false;
+    }
+    let Some(keywords) = try_parse_same_is_true_continuation(tail) else {
+        return false;
+    };
+    // CR 611.3a coverage-honesty: a continuation keyword that resolves to
+    // `Keyword::Unknown` (an unqualified `protection` / `landwalk` — those keyword
+    // abilities require a quality/subtype that a bare continuation clause does not
+    // supply) is NOT semantically modeled. Cloning it into an
+    // `AddKeyword(Keyword::Unknown(_))` static would still read as Continuous-mode
+    // "supported" in `game/coverage.rs` (which checks static mode + child
+    // grant-abilities/triggers, not the granted keyword's identity), letting the
+    // card become coverage-supported while that clause does nothing. Keep those as
+    // an explicit `Unimplemented` residual so they remain a loud unsupported gap.
+    let mut unqualified: Vec<String> = Vec::new();
+    for keyword in &keywords {
+        if let Keyword::Unknown(name) = keyword {
+            unqualified.push(name.clone());
+            continue;
+        }
+        let mut new_def = template.clone();
+        for modification in &mut new_def.modifications {
+            if let ContinuousModification::AddKeyword { keyword: kw } = modification {
+                *kw = keyword.clone();
+            }
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_condition_keyword(condition, keyword);
+        }
+        statics.push(new_def);
+    }
+    result.statics.extend(statics);
+    if !unqualified.is_empty() {
+        result.abilities.push(make_unimplemented(&format!(
+            "the same is true for {}",
+            unqualified.join(", ")
+        )));
+    }
+    true
 }
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
@@ -2428,6 +2514,15 @@ pub(crate) fn parse_oracle_ir(
         // Normalize card self-references for static parsing (replace card name with ~).
         let static_line = normalize_self_refs_for_static(&line, card_name);
         let static_line_lower = static_line.to_lowercase();
+        // CR 611.3a + CR 702: "As long as a creature card with <kw> is in a
+        // graveyard, this creature has <kw>. The same is true for <keyword list>."
+        // (Cairn Wanderer) — distribute the gated grant per keyword before the
+        // chosen/every-type same-is-true arms (which gap the tail) or the generic
+        // static path (which mis-tokenizes the keyword list) can claim the line.
+        if push_graveyard_keyword_same_is_true_tail(&mut result, &static_line, &static_line_lower) {
+            i += 1;
+            continue;
+        }
         if push_same_is_true_static_tail(
             &mut result,
             &static_line,
