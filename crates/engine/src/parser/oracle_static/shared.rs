@@ -1542,6 +1542,12 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "a[n] [type] is on the battlefield" (Wirecat: "... if an enchantment is on
+    // the battlefield") — singular existence gate = ObjectCount(type) >= 1.
+    if let Some(condition) = parse_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "it shares a color with the most common color among all permanents
     // [or a color tied for most common]" (Heroic Defiance)
     if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
@@ -2012,6 +2018,41 @@ fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticConditi
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 611.3a: "a[n] [type] is on the battlefield" → an existence gate, i.e.
+/// `ObjectCount(type) >= 1` (Wirecat: "This creature can't attack or block if an
+/// enchantment is on the battlefield."). Singular counterpart of
+/// `count_on_battlefield_condition` ("[N] or more [type] are on the
+/// battlefield"); it reuses the same `ObjectCount >= n` shape with `n = 1`. The
+/// type phrase must consume the whole subject, mirroring the count form's guard.
+pub(crate) fn parse_exists_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("an "), tag("a "))).parse(input)?;
+    let (input, type_text) = take_until(" is on the battlefield").parse(input)?;
+    let (input, _) = tag(" is on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }

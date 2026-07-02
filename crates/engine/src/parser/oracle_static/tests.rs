@@ -315,6 +315,67 @@ fn rock_jockey_cant_play_land_gated_on_source_cast_this_turn() {
     );
 }
 
+/// CR 508.1 + CR 611.3a: A trailing "if a[n] <type> is on the battlefield" gate
+/// on a "can't attack or block" static (Wirecat: "This creature can't attack or
+/// block if an enchantment is on the battlefield.") must attach as a condition,
+/// not be swallowed. "a[n] <type> is on the battlefield" is an existence gate =
+/// ObjectCount(<type>) >= 1 (singular counterpart of the "N or more … are on the
+/// battlefield" count form). Regression for the dropped gate → the restriction
+/// previously applied unconditionally.
+#[test]
+fn wirecat_cant_attack_or_block_gated_on_enchantment_exists() {
+    let defs = parse_static_line_multi(
+        "This creature can't attack or block if an enchantment is on the battlefield.",
+    );
+    let restr = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttackOrBlock)
+        .expect("expected a CantAttackOrBlock static gated by the enchantment-exists condition");
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    }) = &restr.condition
+    else {
+        panic!(
+            "expected ObjectCount(enchantment) >= 1 gate, got {:?}",
+            restr.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed enchantment filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Enchantment),
+        "gate filter must be enchantments, got {:?}",
+        tf.type_filters
+    );
+
+    // Full-card dispatch must attach the gate with no swallowed clause.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This creature can't attack or block if an enchantment is on the battlefield.",
+        "Wirecat",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantAttackOrBlock && d.condition == restr.condition),
+        "full dispatch must produce the gated CantAttackOrBlock, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
