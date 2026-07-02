@@ -1104,6 +1104,21 @@ fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
     }
 }
 
+/// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
+/// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
+/// "cards" base defaults to `IsChosenCardType`; realign those dig filters once
+/// the persisted choice is known to be creature-type.
+fn retarget_creature_type_choice_dig_filters(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        retarget_creature_type_choice_dig_filters_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            retarget_creature_type_choice_dig_filters_in_ability(execute);
+        }
+    }
+}
+
 fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
     if let Effect::Dig { filter, .. } = &mut *def.effect {
         retarget_chosen_card_type_to_creature_type(filter);
@@ -1113,9 +1128,6 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
-/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
-/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
-/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     if types.iter().any(|card_type| card_type == "Creature") {
         Some(ChosenSubtypeKind::CreatureType)
