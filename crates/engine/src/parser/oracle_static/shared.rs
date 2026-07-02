@@ -1111,6 +1111,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c + CR 509.1b + CR 611.3a: "<grant> and can't attack if <A> and
+    // can't block if <B>" (Cagemail-class pump plus gated combat drawbacks).
+    // The bare dual-gate splitter declines when the subject carries a leading
+    // grant; peel the conjunct and append both gated combat statics.
+    if let Some(defs) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
+        return defs;
+    }
+
     // Check compound must-attack/block first — may return multiple.
     if let Some(defs) = try_parse_scoped_must_attack_block(&lower, &stripped) {
         return defs;
@@ -2017,6 +2025,75 @@ fn try_parse_dual_gated_cant_attack_and_cant_block(
             .condition(block_condition)
             .description(text.to_string()),
     ])
+}
+
+/// CR 508.1c + CR 509.1b + CR 611.3a: Decompose `"<grant> and can't attack if
+/// <A> and can't block if <B>"` into the leading grant static(s) plus gated
+/// `CantAttack` and `CantBlock` companions sharing the grant's `affected`.
+///
+/// Without this split the dual-gate arm declines (the subject prefix carries the
+/// grant) and the bare `try_split_and_cant_attack` / `try_split_and_cant_block`
+/// arms decline (non-terminal gated tails), so only the pump grant is emitted.
+fn try_split_grant_and_dual_gated_combat(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+
+    let (grant_lower, _matched, gates_lower) =
+        nom_primitives::scan_preceded(tp.lower, |i: &str| {
+            let (i, _) = alt((
+                tag::<_, _, VE>(" and can't attack if "),
+                tag::<_, _, VE>(" and can\u{2019}t attack if "),
+            ))
+            .parse(i)?;
+            Ok((i, ()))
+        })?;
+
+    let (remainder, (gate_subject, attack_cond_lower, block_cond_lower)) =
+        parse_dual_gated_cant_attack_block(gates_lower).ok()?;
+    if !gate_subject.trim().is_empty()
+        || !remainder.trim().is_empty()
+        || attack_cond_lower.is_empty()
+        || block_cond_lower.is_empty()
+    {
+        return None;
+    }
+
+    let grant_text = lower_subslice_to_original(tp, grant_lower.trim())?;
+    let grant_line = format!("{}.", grant_text.trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&grant_line);
+    if defs.is_empty() {
+        return None;
+    }
+
+    let affected = defs.iter().find_map(|def| def.affected.clone())?;
+
+    let attack_cond = lower_subslice_to_original(tp, attack_cond_lower)?;
+    let block_cond = lower_subslice_to_original(tp, block_cond_lower)?;
+    let (Some(attack_condition), Some(block_condition)) = (
+        parse_static_condition(attack_cond.trim()),
+        parse_static_condition(block_cond.trim()),
+    ) else {
+        return None;
+    };
+
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+    defs.push(
+        StaticDefinition::new(StaticMode::CantAttack)
+            .affected(affected.clone())
+            .condition(attack_condition)
+            .description(text.to_string()),
+    );
+    defs.push(
+        StaticDefinition::new(StaticMode::CantBlock)
+            .affected(affected)
+            .condition(block_condition)
+            .description(text.to_string()),
+    );
+    Some(defs)
 }
 
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by

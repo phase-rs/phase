@@ -639,28 +639,52 @@ fn dual_gated_attached_subject_defers_from_self_ref_splitter() {
     }
 }
 
-/// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions must not be preempted
-/// by the dual-gate splitter — the leading pump/keyword grant defers to the
-/// established `and can't attack` / `and can't block` splitters.
+/// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions emit the pump grant
+/// plus both gated combat statics on the enchanted/equipped host.
 #[test]
 fn dual_gated_attached_grant_plus_restrictions_not_preempted() {
     let defs = parse_static_line_multi(
         "Enchanted creature gets +2/+2 and can't attack if there's another creature on the battlefield and can't block if an enchantment is on the battlefield.",
     );
+    assert_eq!(
+        defs.len(),
+        3,
+        "expected Continuous grant + gated CantAttack + gated CantBlock, got {:?}",
+        defs
+    );
     assert!(
         defs.iter()
             .any(|d| matches!(d.mode, StaticMode::Continuous)),
-        "pump grant must not be dropped by the dual-gate splitter, got {:?}",
+        "pump grant must not be dropped, got {:?}",
         defs
     );
+    let attack = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected gated CantAttack static");
+    let block = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBlock)
+        .expect("expected gated CantBlock static");
     assert!(
-        !(defs.len() == 2
-            && defs
-                .iter()
-                .all(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))),
-        "grant+restriction line must not collapse to only dual-gated combat statics, got {:?}",
-        defs
+        attack.condition.is_some() && block.condition.is_some(),
+        "both combat restrictions must carry parsed gates, got attack={:?} block={:?}",
+        attack.condition,
+        block.condition
     );
+    for def in [attack, block] {
+        let Some(TargetFilter::Typed(tf)) = &def.affected else {
+            panic!(
+                "expected Typed enchanted-creature filter, got {:?}",
+                def.affected
+            );
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::EnchantedBy),
+            "combat restriction must affect the enchanted creature, got {:?}",
+            tf
+        );
+    }
 }
 
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
