@@ -10419,7 +10419,7 @@ mod tests {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::NumberRange { min: 0, max: 20 },
+                    choice_type: ChoiceType::NumberRange { min: 0, max: 20, .. },
                     persist: true,
                     ..
                 }

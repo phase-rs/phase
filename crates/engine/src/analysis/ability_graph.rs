@@ -1001,6 +1001,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
     b.finish()
