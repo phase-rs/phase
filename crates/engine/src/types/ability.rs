@@ -1085,15 +1085,6 @@ pub enum CountScope {
     SourceChosenPlayer,
     All,
     Opponents,
-    /// CR 109.4 + CR 115.1 + CR 608.2c: The controller of the resolving
-    /// ability's first object target — "its controller" anaphoring the
-    /// controller of the targeted object (Corrupted Resolve: "counter target
-    /// spell if its controller is poisoned"). The `CountScope`-axis analogue of
-    /// `PlayerScope::ParentObjectTargetController`; resolved via
-    /// `ability_utils::parent_target_controller`. Unlike the other scopes this
-    /// one is target-relative, so the player-iteration helpers cannot answer it
-    /// — `resolve_ref` resolves it directly from `ability.targets`.
-    TargetController,
 }
 
 fn default_count_scope_controller() -> CountScope {
@@ -4373,15 +4364,25 @@ pub enum QuantityRef {
     /// - Rad:    CR 122.1i + CR 728.
     /// - Experience and Ticket are covered only by the generic CR 122.1.
     ///
-    /// Scope covers `Controller`, `Opponents`, `All`, and — for the
-    /// object-target-relative reading ("if its controller is poisoned",
-    /// Corrupted Resolve) — `TargetController`. A targeted-*player* variant
-    /// ("target opponent has N experience counters") is still unrepresented;
-    /// add it when a card forces it.
+    /// Scope is currently limited to `Controller`, `Opponents`, and `All`.
+    /// Targeted-player variants ("target opponent has N experience counters")
+    /// are not yet represented; extending `CountScope` with a `TargetPlayer`
+    /// arm is a future change when a card forces it.
     PlayerCounter {
         kind: PlayerCounterKind,
         scope: CountScope,
     },
+    /// CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: The `kind` player-counter
+    /// total on the controller of the resolving ability's first object target —
+    /// "its controller" anaphoring the controller of the targeted object
+    /// (Corrupted Resolve: "counter target spell if its controller is
+    /// poisoned"; `>= 1` poison == "poisoned" per CR 122.1f). Resolved via
+    /// `ability_utils::parent_target_controller`, mirroring the target-relative
+    /// `TargetObjectManaValue` sibling of `ObjectManaValue`. Kept distinct from
+    /// `PlayerCounter { scope }` — that reads an aggregate over a `CountScope`
+    /// player set (controller/opponents/all), whereas this reads one specific
+    /// target-derived player, an axis the aggregate `CountScope` cannot express.
+    TargetControllerCounter { kind: PlayerCounterKind },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
     /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope

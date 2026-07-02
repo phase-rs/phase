@@ -349,6 +349,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOn { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -606,6 +607,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -790,6 +792,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -1570,23 +1573,21 @@ fn resolve_ref(
         // scope resolves to a single player; Opponents/All may span multiple.
         // Per-player u32 is widened to u64 before summing; the i32::try_from
         // saturates on the (only theoretically reachable) overflow.
-        QuantityRef::PlayerCounter { kind, scope } => match scope {
-            // CR 109.4 + CR 115.1 + CR 608.2c: "its controller is poisoned"
-            // (Corrupted Resolve) reads the counters on the controller of the
-            // first object target. Resolved here rather than in `scoped_players`
-            // because the target-controller lookup needs the resolving
-            // `ability`, which the player-iteration helper is not threaded.
-            CountScope::TargetController => ability
-                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-                .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
-            _ => {
-                let total: u64 = scoped_players(state, scope, ctx, controller)
-                    .map(|p| u64::from(p.player_counter(kind)))
-                    .sum();
-                i32::try_from(total).unwrap_or(i32::MAX)
-            }
-        },
+        QuantityRef::PlayerCounter { kind, scope } => {
+            let total: u64 = scoped_players(state, scope, ctx, controller)
+                .map(|p| u64::from(p.player_counter(kind)))
+                .sum();
+            i32::try_from(total).unwrap_or(i32::MAX)
+        }
+        // CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: the `kind` player-counter
+        // total on the controller of the first object target — "its controller
+        // is poisoned" (Corrupted Resolve). Needs the resolving `ability` to
+        // reach `ability.targets`, so it lives here rather than in the
+        // player-iteration helpers. Missing target / controller reads as 0.
+        QuantityRef::TargetControllerCounter { kind } => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
@@ -3110,11 +3111,6 @@ fn scoped_players<'a>(
         }
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
-        // CR 115.1: target-relative; not answerable from player iteration alone
-        // (no `ability` here). `resolve_ref` resolves `TargetController`
-        // directly via `parent_target_controller`, so this path is never taken
-        // for it — exclude defensively rather than mis-scope to the controller.
-        CountScope::TargetController => false,
     })
 }
 
@@ -3137,9 +3133,6 @@ fn count_scope_owner_matches(
         }
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
-        // CR 115.1: target-relative scope has no owner-axis reading; only the
-        // `PlayerCounter` poison path in `resolve_ref` constructs it.
-        CountScope::TargetController => false,
     }
 }
 
@@ -3159,9 +3152,6 @@ fn count_scope_actor_matches(
         }
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
-        // CR 115.1: target-relative scope has no actor-axis reading; only the
-        // `PlayerCounter` poison path in `resolve_ref` constructs it.
-        CountScope::TargetController => false,
     }
 }
 

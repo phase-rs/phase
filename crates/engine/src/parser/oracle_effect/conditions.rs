@@ -2678,9 +2678,8 @@ fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, A
         rest,
         AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::PlayerCounter {
+                qty: QuantityRef::TargetControllerCounter {
                     kind: crate::types::player::PlayerCounterKind::Poison,
-                    scope: CountScope::TargetController,
                 },
             },
             // CR 122.1f: "poisoned" == one or more poison counters.
@@ -6019,9 +6018,8 @@ mod tests {
 
         let expected = AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::PlayerCounter {
+                qty: QuantityRef::TargetControllerCounter {
                     kind: PlayerCounterKind::Poison,
-                    scope: CountScope::TargetController,
                 },
             },
             comparator: Comparator::GE,

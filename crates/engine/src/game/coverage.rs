@@ -1572,9 +1572,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
-                CountScope::TargetController => "its controller has",
             };
             format!("# of {kind} counters {scope_s}")
+        }
+        QuantityRef::TargetControllerCounter { kind } => {
+            format!("# of {kind} counters its controller has")
         }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
@@ -1980,7 +1982,6 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
         CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
-        CountScope::TargetController => "its controller's",
     }
 }
 
@@ -6574,6 +6575,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::TargetControllerCounter { .. } => ("TargetControllerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
         QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }

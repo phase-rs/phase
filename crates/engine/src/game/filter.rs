@@ -3225,9 +3225,6 @@ fn filter_count_scope_actor_matches(
         | CountScope::SourceChosenPlayer => actor == controller,
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
-        // CR 115.1: target-relative scope; only the `PlayerCounter` poison path
-        // in `resolve_ref` constructs it, never a filter-actor read.
-        CountScope::TargetController => false,
     }
 }
 

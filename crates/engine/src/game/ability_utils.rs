@@ -11051,15 +11051,15 @@ mod tests {
         );
     }
 
-    /// CR 122.1f + CR 109.4 + CR 115.1: `QuantityRef::PlayerCounter` under
-    /// `CountScope::TargetController` reads the poison counters on the controller
-    /// of the ability's first object target — "if its controller is poisoned"
-    /// (Corrupted Resolve) — never the ability's own controller. Discriminating:
-    /// the caster (P0) is heavily poisoned while the countered spell's controller
-    /// (P1) is not, so a controller-scoped misread would return a nonzero count.
+    /// CR 122.1f + CR 109.4 + CR 115.1: `QuantityRef::TargetControllerCounter`
+    /// reads the poison counters on the controller of the ability's first object
+    /// target — "if its controller is poisoned" (Corrupted Resolve) — never the
+    /// ability's own controller. Discriminating: the caster (P0) is heavily
+    /// poisoned while the countered spell's controller (P1) is not, so a
+    /// controller-scoped misread would return a nonzero count.
     #[test]
     fn target_controller_poison_reads_object_target_controller_not_caster() {
-        use crate::types::ability::{CountScope, QuantityExpr, QuantityRef};
+        use crate::types::ability::{QuantityExpr, QuantityRef};
         use crate::types::player::PlayerCounterKind;
 
         let mut state = GameState::new_two_player(42);
@@ -11084,9 +11084,8 @@ mod tests {
         // Corrupted Resolve cast by P0 (controller), targeting P1's stacked spell.
         let corrupted_resolve = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
         let poisoned_check = QuantityExpr::Ref {
-            qty: QuantityRef::PlayerCounter {
+            qty: QuantityRef::TargetControllerCounter {
                 kind: PlayerCounterKind::Poison,
-                scope: CountScope::TargetController,
             },
         };
 
