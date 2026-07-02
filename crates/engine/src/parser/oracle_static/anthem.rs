@@ -799,6 +799,47 @@ pub(crate) fn parse_continuous_gets_has(
         }
     }
 
+    // CR 611.3a: Split a trailing " unless [condition]" gate, mirroring the
+    // " as long as " form above. An "unless <cond>" rider grants the modification
+    // precisely when <cond> is FALSE, so the parsed condition is wrapped in `Not`
+    // (Tadeas, Juniper Ascendant: "has hexproof unless it's attacking" → AddKeyword
+    // gated on Not(SourceIsAttacking)). Only peel when the split sits OUTSIDE a
+    // quoted granted ability — a granted ability's own inner "unless" (e.g. "gains
+    // 'counter target spell unless its controller pays {1}'") must stay with the
+    // quoted text; balanced double quotes in the body signal the split is outside
+    // any "...". As with the " as long as " form, the self-pronoun condition
+    // subject ("it's attacking"/"it's tapped") is resolved to the source only for
+    // SelfRef grants — an attached-subject "it" keeps its enchanted/equipped
+    // binding and stays an honest gap.
+    if let Some((before_cond, after_cond)) = tp
+        .split_around(" unless ")
+        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
+    {
+        let continuous_text = before_cond.original;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        if let Some(mut def) =
+            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+        {
+            let typed = if matches!(affected, TargetFilter::SelfRef) {
+                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
+            } else {
+                parse_static_condition(condition_text)
+            };
+            let condition = match typed {
+                Some(inner) => StaticCondition::Not {
+                    condition: Box::new(inner),
+                },
+                None => StaticCondition::Not {
+                    condition: Box::new(StaticCondition::Unrecognized {
+                        text: format!("unless {condition_text}"),
+                    }),
+                },
+            };
+            def.condition = Some(condition);
+            return Some(def);
+        }
+    }
+
     // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and
     // +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
     // by its own count. Try this before the single-"for each" path so the second
