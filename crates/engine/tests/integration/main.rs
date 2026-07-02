@@ -386,6 +386,7 @@ mod issue_4249_elspeth_divine_visitation;
 mod issue_4250_octavia_cost_reduction;
 mod issue_4251_mad_wizards_lair;
 mod issue_4253_sanar_vivid;
+mod issue_4267_sefris_tortured_existence;
 mod issue_4269_nested_shambler_death_tokens;
 mod issue_4271_birthing_ritual_cmc_filter;
 mod issue_4272_birthing_ritual_etb_triggers;

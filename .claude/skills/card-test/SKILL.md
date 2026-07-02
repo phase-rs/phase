@@ -1,12 +1,12 @@
 ---
 name: card-test
-description: Canonical recipe for writing engine cast-pipeline tests. Use GameScenario + GameRunner::cast(...).resolve() and assert via CastOutcome deltas. Covers the five test-harness foot-guns (hand-written TargetRef vectors, incomplete modal target submission, wrong-point hand baseline, inline-keyword cards, AST-internal flag assertions) and the right-way fix for each. Use whenever writing or porting a runtime test that casts a spell and checks its effect.
+description: Canonical recipe for writing engine cast-pipeline tests. Use GameScenario + GameRunner::cast(...).resolve() and assert via CastOutcome deltas. Covers the six test-harness foot-guns (hand-written TargetRef vectors, incomplete modal target submission, wrong-point hand baseline, inline-keyword cards, AST-internal flag assertions, vacuous negative assertions) and the right-way fix for each. Use whenever writing or porting a runtime test that casts a spell and checks its effect.
 ---
 
 # card-test — the canonical cast-pipeline test recipe
 
 This skill gives ONE rigid recipe for runtime engine tests that cast a spell and
-assert its effect. It exists because five test-harness foot-guns recur; the
+assert its effect. It exists because six test-harness foot-guns recur; the
 [`SpellCast`] driver and [`CastOutcome`] (in `crates/engine/src/game/scenario.rs`)
 make them structurally impossible when you follow this recipe.
 
@@ -84,7 +84,7 @@ fn my_card_does_the_thing() {
 | `final_waiting_for()` | the state the pipeline halted in |
 | `state()` | read-only `&GameState` for assertions the typed accessors don't cover |
 
-## Anti-patterns — the five foot-guns and the right-way fix
+## Anti-patterns — the six foot-guns and the right-way fix
 
 1. **Hand-written `TargetRef` vectors.** Building a flat `Vec<TargetRef>` and
    submitting `SelectTargets { targets }` is fragile (`TargetRef` is non-`Copy`;
@@ -120,6 +120,20 @@ fn my_card_does_the_thing() {
    label the test SHAPE and assert via semantic accessors (e.g. a
    `MultiTargetSpec`), not internal bools.
 
+6. **Vacuous negative assertions.** A negative assertion (`!detector(...)`,
+   "no longer parses to X", "counter is NOT applied") passes for the wrong
+   reason when an upstream guard short-circuits before the code under test
+   runs. Canonical instance: `check_swallowed_clauses` returns early when any
+   parsed ability contains `Effect::Unimplemented`, so
+   `!has_swallowed_clause(...)` passes on a card that failed to parse at all —
+   the single most common review finding on contributor PRs.
+   *Fix:* every negative assertion must be paired with a positive reach-guard
+   in the same test proving the input got past the short-circuit (parse
+   succeeded, zero `Effect::Unimplemented` entries, the expected positive AST
+   shape, or a positive runtime delta on the sibling path). Better still,
+   replace the negative with a runtime regression whose assertion flips when
+   the fix is reverted.
+
 ## Hard rules
 
 - **Never call the raw `resolve()` stack function directly.** Drive through the
@@ -136,3 +150,9 @@ fn my_card_does_the_thing() {
   for that and are intentionally NOT driven through `cast()`.
 - **CR-annotate any assertion that encodes a rule** (verify the number against
   `docs/MagicCompRules.txt` before writing it).
+- **Use the card's verbatim Oracle text, never a paraphrase.** Build the test
+  card from the real card's exact Oracle text (`add_spell_to_hand_from_oracle`
+  with the verbatim string, or `add_real_card` for integration fixtures).
+  Paraphrased text can take a different parser branch than the real card, so
+  the test goes green while the actual card stays broken until card-data is
+  regenerated (see `project_parser_fix_inert_until_data_regen`).

@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 38
-- **Distinct cards implicated:** 4890
-- **Total card appearances across root causes:** 4924 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 37
+- **Distinct cards implicated:** 4887
+- **Total card appearances across root causes:** 4921 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -49,7 +49,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 35 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
 | 36 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
 | 37 | Cost-reduction static spell_filter / condition dropped | 4 | oracle_static.rs ModifyCost — capture spell_filter and gating condition |
-| 38 | 'You may' optionality dropped (mandatory instead of optional) | 3 | oracle parser — set optional:true when 'you may' governs the effect |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5380,19 +5379,5 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Dragonfire Blade
 - Progenitor's Icon
 - Visions of Ruin
-
-</details>
-
-### 38. 'You may' optionality dropped (mandatory instead of optional)  (3 cards)
-
-**Signature.** An effect's optional flag is false where Oracle 'you may' makes resolution optional.
-
-**Fix hint.** oracle parser — set optional:true when 'you may' governs the effect
-
-<details><summary>Cards</summary>
-
-- Decoy Gambit
-- Deflecting Swat
-- Speedball, New Warrior
 
 </details>

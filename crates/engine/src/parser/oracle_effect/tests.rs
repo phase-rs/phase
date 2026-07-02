@@ -544,6 +544,49 @@ fn reveal_until_doctors_companion_disjunct_is_keyword_presence() {
     );
 }
 
+// CR 701.20a: Back-reference reveal — the definite-article forms ("the card" /
+// "the cards") must lower to `Effect::Reveal { target: ParentTarget }` (the same
+// back-reference as the pronoun/demonstrative forms) instead of falling through
+// to Unimplemented. They appear as a bare follow-up clause after a look/dig step
+// ("Look at the top card of your library. Reveal the card. ...").
+#[test]
+fn reveal_the_card_backref_lowers_to_reveal_parent_target() {
+    for text in ["Reveal the card.", "Reveal the cards."] {
+        let effect = parse_effect(text);
+        assert_eq!(
+            effect,
+            Effect::Reveal {
+                target: TargetFilter::ParentTarget,
+            },
+            "back-reference reveal `{text}` must lower to Reveal {{ ParentTarget }}, got {effect:?}",
+        );
+    }
+}
+
+// The definite-article back-reference recognizer is anchored to a whole-clause
+// match, NOT a prefix. Compound reveal clauses that merely START with "reveal
+// the card(s)" describe distinct effects (splice selection, library reveal) and
+// must NOT be misclassified as a bare `Effect::Reveal { ParentTarget }`
+// back-reference.
+#[test]
+fn reveal_the_card_backref_does_not_hijack_compound_clauses() {
+    for text in [
+        "Reveal the cards you want to splice onto it.",
+        "Reveal the cards in your library.",
+        "Reveal the card you drew this way, then shuffle.",
+    ] {
+        let effect = parse_effect(text);
+        assert_ne!(
+            effect,
+            Effect::Reveal {
+                target: TargetFilter::ParentTarget,
+            },
+            "compound reveal `{text}` must NOT collapse into the bare back-reference \
+             Reveal {{ ParentTarget }}, got {effect:?}",
+        );
+    }
+}
+
 // CR 603.7b + CR 603.7c: a "whenever <trigger>, <effect>" delayed trigger
 // with NO "this turn"/"this combat" infix window (the duration was a consumed
 // prefix) must still split on the trigger-clause comma and produce a

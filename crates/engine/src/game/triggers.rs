@@ -7246,6 +7246,100 @@ pub mod tests {
         );
     }
 
+    /// CR 113.6 / CR 113.6b + CR 603.10a: end-to-end proof that Teval, the
+    /// Balanced Scale's "Whenever one or more cards leave your graveyard, create a
+    /// token" trigger is battlefield-only — it must fire while Teval is on the
+    /// battlefield and must NOT fire while Teval itself is in the graveyard.
+    /// (issue #765)
+    ///
+    /// The trigger references *other* cards leaving the graveyard (subject "cards",
+    /// not `~`/SelfRef), so it is a permanent's triggered ability that functions
+    /// only on the battlefield (CR 113.6) — it does not state that it functions
+    /// from any other zone (CR 113.6b), and only a self-referential leaves trigger
+    /// gets the CR 603.10a graveyard/exile look-back. This discriminates the fix:
+    /// with the reverted blanket `trigger_zones = [Battlefield, Graveyard, Exile]`
+    /// the graveyard case wrongly fires (the observable bug).
+    ///
+    /// Installs the *parsed* production trigger (not a hand-built one) and varies
+    /// only Teval's own zone across the two cases.
+    #[test]
+    fn teval_leave_graveyard_trigger_is_battlefield_only() {
+        // Real production parser output for Teval's trigger.
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever one or more cards leave your graveyard, create a 2/2 black \
+             Zombie Druid creature token.",
+            "Teval, the Balanced Scale",
+        );
+        assert_eq!(parsed.mode, TriggerMode::ChangesZoneAll);
+        assert_eq!(parsed.origin, Some(Zone::Graveyard));
+        // The fix under test: this non-self trigger is battlefield-only.
+        assert_eq!(parsed.trigger_zones, vec![Zone::Battlefield]);
+
+        // Build fresh state with Teval carrying the parsed trigger in `teval_zone`,
+        // then fire a DIFFERENT P0-owned card leaving the graveyard. Returns whether
+        // Teval's trigger reached the stack (or pending target selection).
+        let run_case = |teval_zone: Zone| -> bool {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+
+            let teval = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Teval, the Balanced Scale".to_string(),
+                teval_zone,
+            );
+            {
+                let obj = state.objects.get_mut(&teval).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.trigger_definitions.push(parsed.clone());
+            }
+
+            // A different P0-owned card leaves the graveyard (the batched event).
+            let leaver = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Some Card".to_string(),
+                Zone::Hand,
+            );
+            let event = zone_changed_event(
+                leaver,
+                Zone::Graveyard,
+                Zone::Hand,
+                vec![CoreType::Creature],
+                vec![],
+            );
+
+            process_triggers(&mut state, &[event]);
+
+            let on_stack = state.stack.iter().any(|entry| {
+                entry.source_id == teval
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+            });
+            let pending = state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|p| p.source_id == teval);
+            on_stack || pending
+        };
+
+        // (a) Teval on the battlefield → the leave-graveyard trigger fires.
+        assert!(
+            run_case(Zone::Battlefield),
+            "Teval on the battlefield must fire its leave-graveyard trigger"
+        );
+
+        // (b) Teval in the graveyard → the trigger must NOT fire (CR 113.6b).
+        // Reverting the fix (blanket graveyard/exile trigger_zones) makes this
+        // wrongly fire — the observable bug in issue #765.
+        assert!(
+            !run_case(Zone::Graveyard),
+            "Teval in the graveyard must NOT fire its battlefield-only trigger"
+        );
+    }
+
     /// CR 702.149a + CR 508.1a: the synthesized Training condition is a filtered
     /// `MinCoAttackers { minimum: 1, filter: Some(power > source) }`. This drives
     /// the *real* synthesized condition through `check_trigger_condition` to prove
