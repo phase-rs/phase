@@ -180,6 +180,10 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Pick",
+    "fanConfirm": "Confirm ({{count}})",
+    "viewAttachments_one": "View attached card",
+    "viewAttachments_other": "View {{count}} attached cards",
     "hiddenExileCards": "+{{count}} more exiled",
     "boardChoiceBadges": {
       "sacrifice": "Sac",

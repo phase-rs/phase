@@ -1371,13 +1371,7 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
 /// document "their" / "each player's own" semantics.
 fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, relation) = parse_player_population(input)?;
-    let (input, (attr, count)) = alt((
-        parse_player_counter_attr_clause,
-        parse_hand_size_attr_clause,
-        parse_cards_drawn_attr_clause,
-        parse_battlefield_entries_attr_clause,
-    ))
-    .parse(input)?;
+    let (input, (attr, count)) = parse_player_attribute_attr_clause(input)?;
     Ok((
         input,
         PlayerFilter::PlayerAttribute {
@@ -1404,12 +1398,12 @@ fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
     .parse(input)
 }
 
-/// CR 122.1f + CR 122.1: "who have N or more <kind> counters" → the candidate's
+/// CR 122.1 + CR 122.2: "who have/has N or more <kind> counters" → the candidate's
 /// named player-counter total. Delegates kind recognition to the shared
 /// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
 /// all covered.
 fn parse_player_counter_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
-    let (input, _) = tag("who have ").parse(input)?;
+    let (input, _) = alt((tag("who have "), tag("who has "))).parse(input)?;
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
     let (input, kind) = nom_quantity::parse_player_counter_kind(input)?;
@@ -1485,6 +1479,22 @@ fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (Quant
             n as i32,
         ),
     ))
+}
+
+/// CR 122.1 + CR 402.1 + CR 121.1 + CR 403.3: Shared attribute-clause tail
+/// after an "each player"/"each opponent" subject. Covers counter, hand-size,
+/// cards-drawn, and battlefield-entry predicates — the same class as
+/// `parse_player_attribute_predicate` without the leading population word.
+pub(crate) fn parse_player_attribute_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, i32)> {
+    alt((
+        parse_player_counter_attr_clause,
+        parse_hand_size_attr_clause,
+        parse_cards_drawn_attr_clause,
+        parse_battlefield_entries_attr_clause,
+    ))
+    .parse(input)
 }
 
 fn anaphoric_power_expr() -> QuantityExpr {

@@ -7,6 +7,9 @@ tier = "T2"
 [domain]
 rules_domain = "mtg-cr"
 
+[labels]
+frontend_deferred = "defer-fe"
+
 [hard_stops]
 patterns = [
   ".agents/skills/**",

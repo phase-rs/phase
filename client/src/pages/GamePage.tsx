@@ -109,6 +109,7 @@ import { ResolutionProgressOverlay } from "../components/board/ResolutionProgres
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
+import { AttachmentFan } from "../components/board/AttachmentFan.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
@@ -1617,6 +1618,14 @@ function GamePageContent({
             so the dialog's `fixed inset-0` shell anchors to the viewport
             instead of HudPlate's transform-CB bounding box. */}
         <PlayerEnchantmentsDialog />
+
+        {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
+            battlefield object): a centered spread of the host + attachments,
+            each with its live selection affordance. Opened by clicking a
+            permanent-with-attachments during a target/board-choice prompt or by
+            the host's ⧉ badge. Self-portals to document.body, so its mount point
+            here is incidental. */}
+        <AttachmentFan />
 
         {/* Optional additional cost choice (kicker, blight, "or pay") */}
         {waitingFor?.type === "OptionalCostChoice" &&

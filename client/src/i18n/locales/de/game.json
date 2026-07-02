@@ -179,6 +179,10 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wählen",
+    "fanConfirm": "Bestätigen ({{count}})",
+    "viewAttachments_one": "Angelegte Karte ansehen",
+    "viewAttachments_other": "{{count}} angelegte Karten ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {

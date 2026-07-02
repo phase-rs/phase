@@ -1,3 +1,4 @@
+pub mod ability_scan;
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
