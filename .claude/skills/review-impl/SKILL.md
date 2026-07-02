@@ -13,7 +13,8 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 2. Classify the surface area: engine logic, parser, frontend/UI, multiplayer/transport, AI heuristics, deck/format/feeds, build/CI/release, or docs.
 3. Apply only the relevant lenses below.
 4. If the scope is a PR, fetch existing bot/human review comments (Gemini, CodeRabbit, reviewers) and confirm-or-refute each against the current head with code evidence. Fold confirmed findings into your own. Never review in a vacuum — silently omitting a finding another reviewer already raised, or returning a verdict less severe than an open, unrefuted finding from another reviewer, is itself a defect.
-5. Report findings only. Silence means LGTM.
+5. If the scope is a PR touching engine/parser source, the parse-diff sticky comment (marker `<!-- coverage-parse-diff -->`) is required evidence: fetch its full body and confront the card-level diff against the PR's claimed scope. Unexplained gained/lost/changed cards are findings (unintended parser blast radius). A *Baseline pending* body means the diff is unavailable — flag it so the handler brings the branch current to regenerate it; an absent comment despite changed engine source means CI evidence is missing for the current head.
+6. Report findings only. Silence means LGTM.
 
 Skip checks CI already enforces:
 
