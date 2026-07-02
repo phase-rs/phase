@@ -442,6 +442,51 @@ fn kraken_of_the_straits_dynamic_power_cant_be_blocked_by() {
     );
 }
 
+/// CR 601.2f + CR 611.3a: A self-spell cost reduction gated on a board-state
+/// count — Hour of Revelation: "This spell costs {3} less to cast if there are
+/// ten or more nonland permanents on the battlefield." — must attach the count
+/// condition, not swallow it (an unconditional reduction is wrong). Exercises the
+/// existential "there are [N] or more [type] on the battlefield" phrasing routed
+/// into the cost-modifier condition extraction.
+#[test]
+fn hour_of_revelation_cost_reduction_gated_on_battlefield_count() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {3} less to cast if there are ten or more nonland permanents on the battlefield.",
+        "Hour of Revelation",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("expected a ModifyCost self-spell reduction");
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 10 },
+    }) = &def.condition
+    else {
+        panic!(
+            "cost reduction must be gated on ObjectCount(nonland permanents) >= 10, got {:?}",
+            def.condition
+        );
+    };
+    let dbg = format!("{filter:?}");
+    assert!(
+        dbg.contains("Permanent") && dbg.to_lowercase().contains("non"),
+        "gate filter must be nonland permanents, got {dbg}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the board-state gate must attach, not be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
