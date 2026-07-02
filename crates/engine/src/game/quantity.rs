@@ -1586,8 +1586,20 @@ fn resolve_ref(
         // player-iteration helpers. Missing target / controller reads as 0.
         QuantityRef::TargetControllerCounter { kind } => ability
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
+            .map_or(0, |pid| match kind {
+                // CR 810.10a + CR 810.10d: in Two-Headed Giant a player is
+                // "poisoned" through their team's shared poison total, so poison
+                // reads the team sum. CR 810.5: poison and life are the only
+                // shared resources — other player counters stay individual.
+                crate::types::player::PlayerCounterKind::Poison => {
+                    u32_to_i32_saturating(crate::game::players::team_poison_total(state, pid))
+                }
+                _ => state
+                    .players
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
+            }),
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
