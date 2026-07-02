@@ -1436,11 +1436,25 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             // creature has — removing an absent keyword is a no-op, so the
             // inclusive "or" is equivalent to the " and " conjunction the shared
             // `split_keyword_list` already splits. Break each part on " or " so
-            // every keyword maps to its own RemoveKeyword.
-            for segment in split_lose_or_segments(part.as_ref()) {
-                if let Some(kw) = map_keyword(segment.trim().trim_end_matches('.')) {
-                    modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
+            // every keyword maps to its own RemoveKeyword — but ONLY when every
+            // resulting segment is itself a keyword. A non-keyword tail such as
+            // "can't have hexproof or shroud" (Arcane Lighthouse's rider, handled
+            // elsewhere) must NOT be split, or its trailing "shroud" would map as
+            // a second, duplicate RemoveKeyword.
+            let part_trimmed = part.as_ref().trim().trim_end_matches('.');
+            let segments = split_lose_or_segments(part_trimmed);
+            let all_keywords = segments.len() > 1
+                && segments
+                    .iter()
+                    .all(|s| map_keyword(s.trim().trim_end_matches('.')).is_some());
+            if all_keywords {
+                for segment in segments {
+                    if let Some(kw) = map_keyword(segment.trim().trim_end_matches('.')) {
+                        modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
+                    }
                 }
+            } else if let Some(kw) = map_keyword(part_trimmed) {
+                modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
             }
         }
     }

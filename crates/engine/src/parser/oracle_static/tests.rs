@@ -22334,3 +22334,60 @@ fn urborg_loses_first_strike_or_swampwalk_parses_end_to_end() {
         "keyword removal must bind to the targeted creature"
     );
 }
+
+/// Regression (maintainer parse-diff, PR #4902): Arcane Lighthouse.
+///
+/// "Until end of turn, creatures your opponents control lose hexproof and
+/// shroud and can't have hexproof or shroud." The keyword-loss path splits the
+/// clause on " and " into `hexproof`, `shroud`, and the rider
+/// `can't have hexproof or shroud`. The " or " split introduced for Urborg
+/// ("loses first strike or swampwalk") must NOT fire on that rider: its
+/// trailing `shroud` maps to a keyword, so an unconditional split would emit a
+/// SECOND, duplicate `RemoveKeyword(Shroud)` — three removals instead of two.
+/// The rider ("can't have …") carries no removal of its own here; it is handled
+/// on its own path. Assert EXACTLY one Hexproof removal + one Shroud removal.
+#[test]
+fn arcane_lighthouse_lose_and_cant_have_or_rider_no_duplicate_removal() {
+    let mods = parse_continuous_modifications(
+        "lose hexproof and shroud and can't have hexproof or shroud",
+    );
+    let removals: Vec<_> = mods
+        .iter()
+        .filter(|m| matches!(m, ContinuousModification::RemoveKeyword { .. }))
+        .collect();
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Hexproof,
+        }),
+        "expected RemoveKeyword(Hexproof), got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Shroud,
+        }),
+        "expected RemoveKeyword(Shroud), got {mods:?}"
+    );
+    // The load-bearing assertion: NO duplicate Shroud from the "can't have
+    // hexproof or shroud" rider being mis-split on " or ". Exactly two removals.
+    assert_eq!(
+        removals.len(),
+        2,
+        "expected exactly two RemoveKeyword mods (one Hexproof, one Shroud) — the \
+         \"can't have hexproof or shroud\" rider must NOT add a duplicate Shroud; got {mods:?}"
+    );
+    let shroud_count = removals
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Shroud
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        shroud_count, 1,
+        "Shroud must be removed exactly once, got {mods:?}"
+    );
+}
