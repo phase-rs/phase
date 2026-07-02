@@ -2980,19 +2980,23 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
 /// with `FilterProp::Attacking { defender }` appended — the same property
 /// "for each creature attacking you" uses.
 fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticCondition> {
-    // CR 611.3a: "equipped creature" / "enchanted creature" is a self-referential
-    // subject (the host of THIS Equipment/Aura), not a generic board-wide filter —
-    // `parse_type_phrase` would otherwise happily match it as a creature with
-    // `FilterProp::EquippedBy`/`EnchantedBy`, silently swapping "is the specific
-    // creature this permanent is attached to attacking" for "does any equipped/
-    // enchanted creature exist that's attacking". That phrase is owned by
-    // `parse_attached_subject_combat_state` (the inverted-grant path) — defer to
-    // it by refusing to match here, mirroring how `parse_self_source_subject`
-    // excludes these same two prefixes for the source combat-state predicate.
-    if alt((tag("equipped creature "), tag("enchanted creature ")))
-        .parse(input)
-        .is_ok()
-    {
+    // CR 508.1a + CR 509.1a + CR 611.3a: every attached-subject prefix
+    // `parse_attached_subject_combat_state` owns — "enchanted permanent",
+    // "enchanted creature", "enchanted artifact", "enchanted land", "equipped
+    // creature" (see `parse_attached_condition_subject_core`) — is
+    // self-referential: the host of THIS Aura/Equipment, not a generic
+    // board-wide filter. `parse_type_phrase` would otherwise happily match
+    // any of these as a permanent/creature/artifact/land with
+    // `FilterProp::EnchantedBy`/`EquippedBy`, silently swapping "is the
+    // specific permanent this Aura/Equipment is attached to attacking" for
+    // "does any enchanted/equipped <type> exist that's attacking". That
+    // phrase is owned by `parse_attached_subject_combat_state` (the
+    // inverted-grant path) — defer to it by refusing to match here. Reuses
+    // `parse_attached_condition_subject` itself (rather than hand-listing its
+    // five tags again) so this guard can't drift out of sync with that
+    // subject set, mirroring how `parse_self_source_subject` excludes the
+    // same family of prefixes for the source combat-state predicate.
+    if parse_attached_condition_subject(input).is_ok() {
         return Err(oracle_err(input));
     }
     let (rest, _) = opt(parse_article).parse(input)?;
@@ -9251,6 +9255,47 @@ mod tests {
             )
         );
         assert_eq!(prop, FilterProp::Attacking { defender: None });
+    }
+
+    /// CR 611.3a: the non-creature `parse_attached_condition_subject_core`
+    /// subjects ("enchanted permanent" / "enchanted artifact" / "enchanted
+    /// land") must stay on the attached-subject seam too, not just "enchanted
+    /// creature" — `parse_filtered_creature_is_attacking` must reject all five
+    /// subjects that combinator owns, not just the two creature-typed ones.
+    #[test]
+    fn test_enchanted_non_creature_subjects_are_attacking_not_source_condition() {
+        let cases = [
+            (
+                "enchanted permanent is attacking",
+                TypeFilter::Permanent,
+                FilterProp::EnchantedBy,
+            ),
+            (
+                "enchanted artifact is attacking",
+                TypeFilter::Artifact,
+                FilterProp::EnchantedBy,
+            ),
+            (
+                "enchanted land is attacking",
+                TypeFilter::Land,
+                FilterProp::EnchantedBy,
+            ),
+        ];
+        for (text, type_filter, attachment_prop) in cases {
+            assert!(
+                parse_inner_condition(text).is_err(),
+                "{text} must not resolve via the generic filtered-attacker condition"
+            );
+            let (rest, (filter, prop)) = parse_attached_subject_combat_state(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(
+                    TypedFilter::new(type_filter).properties(vec![attachment_prop])
+                )
+            );
+            assert_eq!(prop, FilterProp::Attacking { defender: None });
+        }
     }
 
     #[test]
