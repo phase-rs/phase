@@ -376,6 +376,72 @@ fn wirecat_cant_attack_or_block_gated_on_enchantment_exists() {
     );
 }
 
+/// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
+/// number of Islands you control can't block this creature." must lower to a
+/// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a
+/// DYNAMIC power threshold (ObjectCount of Islands you control). Regression for
+/// the subject-first "creatures with power … can't block this creature" wording
+/// previously mis-dispatching to a bare `CantBlock { SelfRef }` (the inverse:
+/// "the source can't block") and swallowing the dynamic quantity.
+#[test]
+fn kraken_of_the_straits_dynamic_power_cant_be_blocked_by() {
+    let defs = parse_static_line_multi(
+        "Creatures with power less than the number of Islands you control can't block this creature.",
+    );
+    let def = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeBlockedBy { .. }))
+        .expect("expected a CantBeBlockedBy restriction on the source");
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::SelfRef),
+        "the restriction is on the source being blocked, got {:?}",
+        def.affected
+    );
+    let StaticMode::CantBeBlockedBy { filter } = &def.mode else {
+        unreachable!()
+    };
+    let dbg = format!("{filter:?}");
+    assert!(
+        dbg.contains("PtComparison") && dbg.contains("Power"),
+        "blocker filter must gate on power, got {dbg}"
+    );
+    assert!(
+        dbg.contains("ObjectCount") && dbg.contains("Island"),
+        "power threshold must be the DYNAMIC Islands-you-control count, got {dbg}"
+    );
+
+    // Full-card dispatch: no swallowed clause and no bogus CantBlock{SelfRef}.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Creatures with power less than the number of Islands you control can't block this creature.",
+        "Kraken of the Straits",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeBlockedBy { .. })),
+        "full dispatch must produce CantBeBlockedBy, got {:?}",
+        parsed.statics.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        !parsed
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantBlock),
+        "must NOT produce the inverse CantBlock, got {:?}",
+        parsed.statics.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.

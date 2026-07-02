@@ -466,6 +466,43 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
     .and_then(|(_, condition)| condition)
 }
 
+/// CR 509.1b: "Creatures with power <comparison> <quantity> can't
+/// block this creature." — a can't-be-blocked-by restriction whose blocker
+/// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
+/// "Creatures with power less than the number of Islands you control can't block
+/// this creature."). Sibling of `parse_source_power_block_restriction` (which
+/// fixes the threshold to `~'s power` and targets `creatures you control`); this
+/// arm accepts any `parse_target` power-comparison filter — including a dynamic
+/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// subject-first "creatures with power … can't block this creature" wording
+/// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
+/// is the inverse of the intended restriction.
+fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinition> {
+    // allow-noncombinator: split on the fixed clause anchor, not parsing dispatch.
+    let (filter_text, after) = text.split_once(" can't block ")?;
+    // The blocker subject must be power-qualified — a bare "creatures … can't
+    // block this creature" is a different (unconditional) shape handled elsewhere.
+    if !filter_text.to_lowercase().contains("with power") {
+        return None;
+    }
+    // CR 509.1b: the restriction is on blocking the SOURCE ("this creature"/"~").
+    let after = after.trim().trim_end_matches('.').trim().to_lowercase();
+    if after != "this creature" && after != "~" {
+        return None;
+    }
+    // Reuse the shared filter grammar so the power comparison + dynamic threshold
+    // ("less than the number of Islands you control") lower through one authority.
+    let (filter, remainder) = parse_target(filter_text.trim());
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
 /// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
 /// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
@@ -1920,6 +1957,10 @@ pub(crate) fn parse_static_line_inner(
     }
 
     if let Some(def) = parse_source_power_block_restriction(&text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_power_threshold_block_restriction(&text) {
         return Some(def);
     }
 
