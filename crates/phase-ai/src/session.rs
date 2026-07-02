@@ -320,10 +320,13 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::game_state::{GameState, PlayerDeckPool};
+    use engine::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
+    use engine::types::identifiers::ObjectId;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
     use std::sync::Arc;
+
+    use crate::projection::ProjectionHorizon;
 
     use super::{deck_pools_fingerprint, AiSession, SessionCache};
 
@@ -461,6 +464,73 @@ mod tests {
         );
         assert_eq!(elf.member_count, 4);
         assert_eq!(elf.lord_count, 4);
+    }
+
+    /// Test C — cache-hit primitive: two identical `get_or_project` calls
+    /// return the same cached `Arc` (pointer equality) and populate exactly one
+    /// cache entry. The already-at-horizon fixture makes `project_to`
+    /// short-circuit to `Confidence::Exact` deterministically. A third call
+    /// differing only in `ai_player` is a distinct key, so it neither collides
+    /// with the cached entry nor reuses its `Arc` — proving key sensitivity.
+    #[test]
+    fn get_or_project_caches_and_reuses_arc_on_identical_key() {
+        let mut s = GameState::new_two_player(42);
+        s.turn_number = 2;
+        s.active_player = PlayerId(1);
+        // reached_horizon only checks non-emptiness of this HashSet.
+        s.creatures_attacked_this_turn.insert(ObjectId(1));
+        s.stack.clear();
+        s.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let session = AiSession::empty();
+        let a = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        let b = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second identical get_or_project must return the cached Arc, not recompute"
+        );
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            1,
+            "identical keys must collapse to a single cache entry"
+        );
+
+        // Key sensitivity: same short-circuiting state but a different
+        // `ai_player` is a distinct ProjectionKey (reached_horizon is
+        // ai_player-independent, so this still resolves to Exact deterministically).
+        let c = session
+            .get_or_project(
+                &s,
+                PlayerId(1),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "a different ai_player is a different key and must not reuse the cached Arc"
+        );
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            2,
+            "a distinct key must add a second cache entry"
+        );
     }
 
     #[test]

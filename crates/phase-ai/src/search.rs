@@ -1504,7 +1504,12 @@ pub fn score_candidates_with_session(
         WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
     ) {
         let effective_profile = config.profile.with_strategy(&context.strategy);
-        if let Some(action) = deterministic_combat_choice(state, ai_player, &effective_profile) {
+        if let Some(action) = deterministic_combat_choice(
+            state,
+            ai_player,
+            &effective_profile,
+            Some(session.as_ref()),
+        ) {
             return vec![(action, 1.0)];
         }
     }
@@ -2234,6 +2239,7 @@ pub(crate) fn deterministic_choice(
             config.combat_lookahead,
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
+            context.map(|c| c.session.as_ref()),
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -2279,6 +2285,7 @@ fn deterministic_combat_choice(
     state: &GameState,
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
+    session: Option<&AiSession>,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
@@ -2293,6 +2300,7 @@ fn deterministic_combat_choice(
             false,
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
+            session,
         );
         return Some(validated_declare_attackers(state, attacks));
     }

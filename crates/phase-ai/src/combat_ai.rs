@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
@@ -19,6 +20,7 @@ use crate::config::AiProfile;
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
 use crate::projection::{project_to, Projection, ProjectionHorizon};
+use crate::session::AiSession;
 
 /// Block-legality static slices collected once per combat decision and threaded
 /// through the per-pair `can_block_pair` checks. Hoisting these out of the
@@ -142,6 +144,7 @@ pub fn choose_attackers_with_targets(
         false,
         None,
         None,
+        None,
     )
 }
 
@@ -152,6 +155,7 @@ pub fn choose_attackers_with_targets_with_profile(
     combat_lookahead: bool,
     valid_attacker_ids: Option<&[ObjectId]>,
     valid_attack_targets: Option<&[AttackTarget]>,
+    session: Option<&AiSession>,
 ) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
     if opponents.is_empty() {
@@ -347,14 +351,30 @@ pub fn choose_attackers_with_targets_with_profile(
         // crackback_damage sees scaled creatures (Ouroboroid class) and
         // attack-trigger pumps (Battle Cry, Mentor). Failure to project
         // falls through to current state — matches pre-projection behavior.
-        let projection = if combat_lookahead {
-            project_to(
-                state,
-                player,
-                opponents[0],
-                ProjectionHorizon::OpponentAttackersDeclared,
-            )
-            .ok()
+        let projection: Option<Arc<Projection>> = if combat_lookahead {
+            match session {
+                // Session present: route through the per-game projection cache
+                // (turn-scoped key; identical result to project_to on a miss,
+                // cached on subsequent identical combat decisions this turn).
+                Some(session) => session
+                    .get_or_project(
+                        state,
+                        player,
+                        opponents[0],
+                        ProjectionHorizon::OpponentAttackersDeclared,
+                    )
+                    .ok(),
+                // No session (public wrappers, tests): fall back to the free
+                // projection, wrapped in Arc to unify the branch type.
+                None => project_to(
+                    state,
+                    player,
+                    opponents[0],
+                    ProjectionHorizon::OpponentAttackersDeclared,
+                )
+                .ok()
+                .map(Arc::new),
+            }
         } else {
             None
         };
@@ -363,7 +383,7 @@ pub fn choose_attackers_with_targets_with_profile(
             player,
             &opponents,
             &attacking_ids,
-            projection.as_ref(),
+            projection.as_deref(),
         );
         if cb_damage >= my_life {
             // Sort non-vigilance attackers by value descending — hold back most valuable first
@@ -395,7 +415,7 @@ pub fn choose_attackers_with_targets_with_profile(
                     .map(|(_, &id)| id)
                     .collect();
                 let cb =
-                    crackback_damage(state, player, &opponents, &remaining, projection.as_ref());
+                    crackback_damage(state, player, &opponents, &remaining, projection.as_deref());
                 if cb < my_life {
                     break;
                 }
@@ -1813,7 +1833,10 @@ fn evaluate_block_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planner::quick_state_hash;
+    use crate::projection::ProjectionKey;
     use engine::game::zones::create_object;
+    use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
 
     fn setup() -> GameState {
@@ -3441,6 +3464,7 @@ mod tests {
             false,
             None,
             Some(&targets),
+            None,
         );
 
         // The lone 5/5 (>= loyalty 3) goes at the planeswalker; the 2/2s at the player.
@@ -3475,6 +3499,7 @@ mod tests {
             false,
             None,
             Some(&targets),
+            None,
         );
         assert!(
             attacks
@@ -3500,6 +3525,7 @@ mod tests {
             false,
             None,
             Some(&targets),
+            None,
         );
         assert!(
             attacks
@@ -3528,6 +3554,7 @@ mod tests {
             false,
             None,
             Some(&targets),
+            None,
         );
         assert!(
             attacks
@@ -3557,10 +3584,137 @@ mod tests {
             false,
             None,
             Some(&targets),
+            None,
         );
         assert_eq!(
             attacks.iter().find(|(id, _)| *id == bear).map(|(_, t)| *t),
             Some(AttackTarget::Player(PlayerId(1))),
+        );
+    }
+
+    // --- Session projection routing (perf pipeline 3) ---
+
+    /// Deterministic "already-at-horizon" fixture: the opponent (P1) is the
+    /// active player, sitting at priority with an attacker already declared and
+    /// an empty stack, so `project_to`'s already-at-horizon short-circuit
+    /// returns `Confidence::Exact` with no simulation and no wall-clock
+    /// dependence. P0 has a lone 2-power attacker (etb turn 1 ⇒ can_attack) and
+    /// P1 has no untapped blockers, so the entry point reaches the crackback
+    /// projection block (opponent_blockers empty ⇒ attacker pushed ⇒ objective
+    /// is not PushLethal).
+    fn session_projection_fixture() -> GameState {
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        // creatures_attacked_this_turn is a HashSet — reached_horizon only
+        // checks it is non-empty, so any ObjectId satisfies the predicate.
+        state.creatures_attacked_this_turn.insert(attacker);
+        state.stack.clear();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.players[1].life = 20;
+        state
+    }
+
+    /// Test A (revert-failing): with `combat_lookahead` on and a session
+    /// present, the combat projection is routed through `get_or_project`, which
+    /// populates the per-game cache under the exact turn-scoped key. Reverting
+    /// to the free `project_to` leaves the cache empty and flips both asserts.
+    #[test]
+    fn session_projection_populates_cache_with_exact_key() {
+        let state = session_projection_fixture();
+        let session = AiSession::empty();
+        let profile = AiProfile::default();
+
+        let _ = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &profile,
+            /* combat_lookahead = */ true,
+            None,
+            None,
+            Some(&session),
+        );
+
+        let expected = ProjectionKey {
+            state_hash: quick_state_hash(&state),
+            turn_number: state.turn_number,
+            active_player: state.active_player,
+            ai_player: PlayerId(0),
+            target_opponent: PlayerId(1),
+            horizon: ProjectionHorizon::OpponentAttackersDeclared,
+        };
+        let cache = session.projection_cache.read().unwrap();
+        assert_eq!(
+            cache.len(),
+            1,
+            "combat_lookahead projection must populate exactly one cache entry \
+             (revert-failing: free project_to caches nothing)"
+        );
+        assert!(
+            cache.contains_key(&expected),
+            "the cached projection must be keyed by the exact turn-scoped ProjectionKey"
+        );
+    }
+
+    /// Test A2 (positive reach-guard for Test A): the session is consulted
+    /// only when `combat_lookahead` is on. With it off, the same fixture leaves
+    /// the cache empty — proving Test A's non-empty cache is caused by the
+    /// lookahead routing, not by any incidental fixture side effect.
+    #[test]
+    fn session_projection_skipped_when_lookahead_off() {
+        let state = session_projection_fixture();
+        let session = AiSession::empty();
+        let profile = AiProfile::default();
+
+        let _ = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &profile,
+            /* combat_lookahead = */ false,
+            None,
+            None,
+            Some(&session),
+        );
+
+        assert!(
+            session.projection_cache.read().unwrap().is_empty(),
+            "with combat_lookahead off, no projection is taken and the cache stays empty"
+        );
+    }
+
+    /// Test B (behavior-neutral): routing the combat projection through the
+    /// session cache produces the identical attacker decision as the free
+    /// `project_to` path. This passes on reverted code too — by design — and
+    /// guards against a semantic drift in the caching refactor.
+    #[test]
+    fn session_projection_decision_neutral_vs_free() {
+        let state = session_projection_fixture();
+        let profile = AiProfile::default();
+
+        let with_session = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &profile,
+            /* combat_lookahead = */ true,
+            None,
+            None,
+            Some(&AiSession::empty()),
+        );
+        let without_session = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &profile,
+            /* combat_lookahead = */ true,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            with_session, without_session,
+            "session-cached projection must yield the identical attacker decision as the free path"
         );
     }
 }
