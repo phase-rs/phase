@@ -1294,12 +1294,12 @@ mod tests {
             "you can't play lands as if there were no rule",
             |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
             |if_offset| {
-                if_offset < 3
+                let Some(start) = if_offset.checked_sub(3) else {
+                    return true;
+                };
+                !"you can't play lands as if there were no rule".is_char_boundary(start)
                     || tag::<_, _, OracleError<'_>>("as ")
-                        .parse(
-                            &"you can't play lands as if there were no rule"
-                                [if_offset - 3..if_offset],
-                        )
+                        .parse(&"you can't play lands as if there were no rule"[start..if_offset])
                         .is_err()
             },
         );

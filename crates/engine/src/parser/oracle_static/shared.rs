@@ -1891,10 +1891,15 @@ pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticC
 /// True when `if_offset` points at an `if …` gate immediately preceded by `as `
 /// (the `as if` phrase).
 fn is_as_if_gate_marker(input: &str, if_offset: usize) -> bool {
-    if_offset >= 3
-        && tag::<_, _, OracleError<'_>>("as ")
-            .parse(&input[if_offset - 3..if_offset])
-            .is_ok()
+    let Some(start) = if_offset.checked_sub(3) else {
+        return false;
+    };
+    if !input.is_char_boundary(start) {
+        return false;
+    }
+    tag::<_, _, OracleError<'_>>("as ")
+        .parse(&input[start..if_offset])
+        .is_ok()
 }
 
 /// Split a trailing `" as long as <condition>"` rider, anchored on the last
