@@ -4,7 +4,6 @@ use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
 use super::blight_value::BlightValuePolicy;
-use super::blink_payoff::BlinkPayoffPolicy;
 use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
@@ -12,9 +11,6 @@ use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::context::PolicyContext;
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
-use super::enchantments_payoff::EnchantmentsPayoffPolicy;
-use super::energy_payoff::EnergyPayoffPolicy;
-use super::equipment_payoff::EquipmentPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
@@ -25,13 +21,14 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
-use super::lifegain_payoff::LifegainPayoffPolicy;
-use super::mill_payoff::MillPayoffPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
+use super::payoff::{
+    PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
+    EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
+};
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
-use super::reanimator_payoff::ReanimatorPayoffPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
@@ -284,11 +281,11 @@ impl Default for PolicyRegistry {
     fn default() -> Self {
         let policies: Vec<Box<dyn TacticalPolicy>> = vec![
             Box::new(AntiSelfHarmPolicy),
-            Box::new(super::artifact_synergy::ArtifactSynergyPolicy),
+            Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
-            Box::new(EnchantmentsPayoffPolicy),
-            Box::new(EquipmentPayoffPolicy),
+            Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
+            Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
             Box::new(TutorPolicy),
             Box::new(HandDisruptionPolicy),
@@ -306,7 +303,7 @@ impl Default for PolicyRegistry {
             Box::new(RecursionAwarenessPolicy),
             Box::new(BoardWipeTelegraphPolicy),
             Box::new(LifeTotalResourcePolicy),
-            Box::new(LifegainPayoffPolicy),
+            Box::new(PayoffPolicy::new(&LIFEGAIN_PAYOFF)),
             Box::new(CardAdvantagePolicy),
             Box::new(LandfallTimingPolicy),
             Box::new(RampTimingPolicy),
@@ -334,13 +331,13 @@ impl Default for PolicyRegistry {
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
-            Box::new(MillPayoffPolicy),
-            Box::new(EnergyPayoffPolicy),
+            Box::new(PayoffPolicy::new(&MILL_PAYOFF)),
+            Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
             Box::new(SeparatePilesTimingPolicy),
-            Box::new(ReanimatorPayoffPolicy),
-            Box::new(BlinkPayoffPolicy),
+            Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
+            Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

@@ -1,6 +1,6 @@
-//! Tests for `EquipmentPayoffPolicy`. Live in a sibling test module (declared
-//! from `policies/tests/mod.rs`) so `policies/equipment_payoff.rs` stays
-//! implementation-only and SOURCE-classified.
+//! Tests for the equipment-payoff spec (`PayoffPolicy::new(&EQUIPMENT_PAYOFF)`).
+//! Live in a sibling test module (declared from `policies/tests/mod.rs`) so the
+//! generic `policies/payoff.rs` stays implementation-only and SOURCE-classified.
 
 use std::sync::Arc;
 
@@ -24,10 +24,16 @@ use crate::features::DeckFeatures;
 use crate::session::AiSession;
 
 use super::super::context::PolicyContext;
-use super::super::equipment_payoff::EquipmentPayoffPolicy;
-use super::super::registry::{DecisionKind, PolicyId, PolicyVerdict, TacticalPolicy};
+use super::super::payoff::{PayoffPolicy, EQUIPMENT_PAYOFF};
+use super::super::registry::{
+    DecisionKind, PolicyId, PolicyRegistry, PolicyVerdict, TacticalPolicy,
+};
 
 const AI: PlayerId = PlayerId(0);
+
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&EQUIPMENT_PAYOFF)
+}
 
 fn features(commitment: f32, equipment_count: u32, payoff_count: u32) -> DeckFeatures {
     DeckFeatures {
@@ -139,10 +145,11 @@ fn delta_of(verdict: PolicyVerdict) -> (f64, String) {
 
 #[test]
 fn policy_identity() {
-    assert_eq!(EquipmentPayoffPolicy.id(), PolicyId::EquipmentPayoff);
-    assert!(EquipmentPayoffPolicy
-        .decision_kinds()
-        .contains(&DecisionKind::CastSpell));
+    assert_eq!(policy().id(), PolicyId::EquipmentPayoff);
+    assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::EquipmentPayoff));
 }
 
 // ─── activation gate ─────────────────────────────────────────────────────────
@@ -151,37 +158,28 @@ fn policy_identity() {
 fn opts_out_with_no_equipment() {
     let features = features(0.9, 0, 6);
     let state = GameState::new_two_player(7);
-    assert!(EquipmentPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_out_with_no_payoff() {
     let features = features(0.9, 12, 0);
     let state = GameState::new_two_player(7);
-    assert!(EquipmentPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_out_below_commitment_floor() {
     let features = features(0.1, 12, 6);
     let state = GameState::new_two_player(7);
-    assert!(EquipmentPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_in_with_equipment_and_payoff_above_floor() {
     let features = features(0.6, 12, 6);
     let state = GameState::new_two_player(7);
-    assert_eq!(
-        EquipmentPayoffPolicy.activation(&features, &state, AI),
-        Some(0.6)
-    );
+    assert_eq!(policy().activation(&features, &state, AI), Some(0.6));
 }
 
 // ─── verdict ─────────────────────────────────────────────────────────────────
@@ -196,9 +194,14 @@ fn deploy_equipment_scored() {
     let (context, config) = ai_context(0.8, 12, 6);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(EquipmentPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "deploy_equipment_for_payoff");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
+    // Value-identity: exact ported `deploy_equipment_bonus` (tier 1).
+    assert!(
+        (delta - AiConfig::default().policy_penalties.deploy_equipment_bonus).abs() < 1e-9,
+        "delta must equal the exact ported deploy_equipment_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -212,9 +215,19 @@ fn equipment_payoff_cast_scored() {
     let (context, config) = ai_context(0.8, 12, 6);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(EquipmentPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "equipment_payoff_cast");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
+    // Value-identity: exact ported `equipment_payoff_cast_bonus` (tier 2).
+    assert!(
+        (delta
+            - AiConfig::default()
+                .policy_penalties
+                .equipment_payoff_cast_bonus)
+            .abs()
+            < 1e-9,
+        "delta must equal the exact ported equipment_payoff_cast_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -227,7 +240,7 @@ fn non_equipment_spell_inert() {
     let (context, config) = ai_context(0.8, 12, 6);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(EquipmentPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "equipment_payoff_inert");
     assert_eq!(delta, 0.0);
 }

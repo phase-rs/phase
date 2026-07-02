@@ -368,6 +368,31 @@ pub struct PolicyPenalties {
     /// Consumed by `EnergyPayoffPolicy`.
     #[serde(default = "default_energy_cast_bonus")]
     pub energy_cast_bonus: f64,
+    /// Penalty for a "wasted cast" the AI should avoid — a spell that whiffs or
+    /// backfires: a legendary duplicate the legend rule will immediately kill, an
+    /// ETB whose only target is illegal, or a creature-targeting spell with no
+    /// legal creature target (beneficial with no own creature, harmful
+    /// creature-only with no opponent creature, or bounce with no opponent
+    /// permanent). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_wasted_cast_penalty")]
+    pub wasted_cast_penalty: f64,
+    /// Bonus for untapping the AI's own tapped creature (frees a blocker /
+    /// re-enables a tapped attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_own_tapped_bonus")]
+    pub untap_own_tapped_bonus: f64,
+    /// Penalty for an untap effect that would untap an opponent's tapped creature
+    /// (hands them back a blocker/attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_opponent_tapped_penalty")]
+    pub untap_opponent_tapped_penalty: f64,
+    /// Penalty for targeting an already-untapped creature with an untap effect —
+    /// no state change, so the effect is wasted. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_untapped_penalty")]
+    pub untap_untapped_penalty: f64,
+    /// Penalty for non-lethal removal aimed at a tapped opponent creature during
+    /// the pre-combat main phase — a tapped creature can't block, so there is no
+    /// urgency advantage over waiting. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_tapped_removal_no_urgency_penalty")]
+    pub tapped_removal_no_urgency_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -421,8 +446,29 @@ impl Default for PolicyPenalties {
             etb_payoff_cast_bonus: default_etb_payoff_cast_bonus(),
             mill_cast_bonus: default_mill_cast_bonus(),
             energy_cast_bonus: default_energy_cast_bonus(),
+            wasted_cast_penalty: default_wasted_cast_penalty(),
+            untap_own_tapped_bonus: default_untap_own_tapped_bonus(),
+            untap_opponent_tapped_penalty: default_untap_opponent_tapped_penalty(),
+            untap_untapped_penalty: default_untap_untapped_penalty(),
+            tapped_removal_no_urgency_penalty: default_tapped_removal_no_urgency_penalty(),
         }
     }
+}
+
+fn default_wasted_cast_penalty() -> f64 {
+    -8.0
+}
+fn default_untap_own_tapped_bonus() -> f64 {
+    8.0
+}
+fn default_untap_opponent_tapped_penalty() -> f64 {
+    -20.0
+}
+fn default_untap_untapped_penalty() -> f64 {
+    -6.0
+}
+fn default_tapped_removal_no_urgency_penalty() -> f64 {
+    -5.0
 }
 
 fn default_lethality_tapout_penalty() -> f64 {
@@ -614,6 +660,26 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "energy_cast_bonus",
         "new EnergyPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "wasted_cast_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_own_tapped_bonus",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_opponent_tapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_untapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "tapped_removal_no_urgency_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
 ];
 
@@ -1148,6 +1214,19 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
         assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
+    }
+
+    /// Value-identity guard for the `AntiSelfHarmPolicy` magnitudes migrated from
+    /// raw literals into config. Each default MUST equal the exact literal the
+    /// bespoke code used before the lift, so a mistyped port is caught here.
+    #[test]
+    fn policy_penalties_default_anti_self_harm_migrated_magnitudes() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.wasted_cast_penalty, -8.0);
+        assert_eq!(p.untap_own_tapped_bonus, 8.0);
+        assert_eq!(p.untap_opponent_tapped_penalty, -20.0);
+        assert_eq!(p.untap_untapped_penalty, -6.0);
+        assert_eq!(p.tapped_removal_no_urgency_penalty, -5.0);
     }
 
     #[test]

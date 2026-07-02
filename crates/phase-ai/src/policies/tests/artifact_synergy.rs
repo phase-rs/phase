@@ -1,6 +1,6 @@
-//! Tests for `ArtifactSynergyPolicy`. Live in a sibling test module (declared
-//! from `policies/tests/mod.rs`) so `policies/artifact_synergy.rs` stays
-//! implementation-only and SOURCE-classified.
+//! Tests for the artifact-synergy spec (`PayoffPolicy::new(&ARTIFACT_SYNERGY)`).
+//! Live in a sibling test module (declared from `policies/tests/mod.rs`) so the
+//! generic `policies/payoff.rs` stays implementation-only and SOURCE-classified.
 
 use std::sync::Arc;
 
@@ -21,11 +21,17 @@ use crate::features::artifacts::ArtifactsFeature;
 use crate::features::DeckFeatures;
 use crate::session::AiSession;
 
-use super::super::artifact_synergy::ArtifactSynergyPolicy;
 use super::super::context::PolicyContext;
-use super::super::registry::{DecisionKind, PolicyId, PolicyVerdict, TacticalPolicy};
+use super::super::payoff::{PayoffPolicy, ARTIFACT_SYNERGY};
+use super::super::registry::{
+    DecisionKind, PolicyId, PolicyRegistry, PolicyVerdict, TacticalPolicy,
+};
 
 const AI: PlayerId = PlayerId(0);
+
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&ARTIFACT_SYNERGY)
+}
 
 fn features_with_commitment(commitment: f32) -> DeckFeatures {
     DeckFeatures {
@@ -95,13 +101,11 @@ fn delta_of(verdict: PolicyVerdict) -> (f64, String) {
 
 #[test]
 fn policy_identity() {
-    assert_eq!(
-        ArtifactSynergyPolicy.id(),
-        PolicyId::ArtifactSynergyTactical
-    );
-    assert!(ArtifactSynergyPolicy
-        .decision_kinds()
-        .contains(&DecisionKind::CastSpell));
+    assert_eq!(policy().id(), PolicyId::ArtifactSynergyTactical);
+    assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::ArtifactSynergyTactical));
 }
 
 // ─── activation gate ─────────────────────────────────────────────────────────
@@ -110,19 +114,14 @@ fn policy_identity() {
 fn opts_out_below_commitment_floor() {
     let features = DeckFeatures::default(); // commitment 0.0
     let state = GameState::new_two_player(7);
-    assert!(ArtifactSynergyPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_in_above_floor() {
     let features = features_with_commitment(0.6);
     let state = GameState::new_two_player(7);
-    assert_eq!(
-        ArtifactSynergyPolicy.activation(&features, &state, AI),
-        Some(0.6)
-    );
+    assert_eq!(policy().activation(&features, &state, AI), Some(0.6));
 }
 
 // ─── verdict ─────────────────────────────────────────────────────────────────
@@ -151,9 +150,19 @@ fn affinity_for_artifacts_spell_preferred() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(ArtifactSynergyPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "artifact_cost_payoff");
     assert!(delta > 0.3, "expected a preference-band delta, got {delta}");
+    // Value-identity: exact ported `artifact_cost_payoff_bonus` (tier 1).
+    assert!(
+        (delta
+            - AiConfig::default()
+                .policy_penalties
+                .artifact_cost_payoff_bonus)
+            .abs()
+            < 1e-9,
+        "delta must equal the exact ported artifact_cost_payoff_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -174,11 +183,16 @@ fn plain_artifact_nudged() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(ArtifactSynergyPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "deploy_artifact_for_synergy");
     assert!(
         delta > 0.0 && delta <= 0.3,
         "expected a nudge-band delta, got {delta}"
+    );
+    // Value-identity: exact ported `deploy_artifact_bonus` (tier 2).
+    assert!(
+        (delta - AiConfig::default().policy_penalties.deploy_artifact_bonus).abs() < 1e-9,
+        "delta must equal the exact ported deploy_artifact_bonus; got {delta}"
     );
 }
 
@@ -200,7 +214,7 @@ fn non_artifact_spell_inert() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(ArtifactSynergyPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "artifact_synergy_inert");
     assert_eq!(delta, 0.0);
 }

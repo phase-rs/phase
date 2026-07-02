@@ -1287,8 +1287,8 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
 /// Score all candidate actions and return `[GameAction, score]` tuples.
 /// Used by AI workers for root parallelism — each worker scores independently,
 /// then results are merged on the main thread.
-/// `rng_seed` seeds the game state's RNG so each worker's MCTS explores
-/// different paths through the search tree, producing diverse score vectors.
+/// `rng_seed` seeds the game state's RNG so each worker's beam search explores
+/// different orderings, producing diverse score vectors.
 #[wasm_bindgen]
 pub fn get_ai_scored_candidates(
     difficulty: &str,
@@ -1299,7 +1299,7 @@ pub fn get_ai_scored_candidates(
 
     with_state_mut(|state| {
         // Re-seed the state RNG so each parallel worker explores different
-        // MCTS rollout paths and beam-search tie-breaking orders.
+        // beam-search rollout paths and tie-breaking orders.
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);

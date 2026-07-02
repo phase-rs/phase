@@ -3,6 +3,7 @@
 pub mod activation_marker_lint;
 pub mod artifact_synergy;
 pub mod blink_payoff;
+pub mod effect_classify_snapshot;
 pub mod enchantments_payoff;
 pub mod energy_payoff;
 pub mod equipment_payoff;

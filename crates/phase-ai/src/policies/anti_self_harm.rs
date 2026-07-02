@@ -281,7 +281,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                             && o.name == source.name
                     }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
-                .then_some(-8.0)
+                .then_some(ctx.penalties().wasted_cast_penalty)
         })
         .unwrap_or(0.0);
 
@@ -320,7 +320,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             && !facts.requires_targets_in_spell_text
             && !etb_trigger_has_valid_targets(ctx, &facts)
         {
-            -8.0
+            ctx.penalties().wasted_cast_penalty
         } else {
             0.0
         }
@@ -360,17 +360,17 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     // Beneficial creature-targeting spell but no own creatures to buff.
     if has_beneficial_creature_target && !has_own_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful creature-only spell (e.g. Murder) but no targetable opponent creatures.
     if has_harmful_creature_only_target && !has_targetable_opponent_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful bounce with no opposing legal targets will force a self-bounce line.
     if has_harmful_bounce && !has_opponent_bounce_target(ctx, &effects) {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     penalty += etb_whiff_penalty;
@@ -696,12 +696,12 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     {
         if object.tapped {
             score += if object.controller == ctx.ai_player {
-                8.0
+                ctx.penalties().untap_own_tapped_bonus
             } else {
-                -20.0
+                ctx.penalties().untap_opponent_tapped_penalty
             };
         } else {
-            score -= 6.0;
+            score += ctx.penalties().untap_untapped_penalty;
         }
     }
 
@@ -828,7 +828,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     .is_some_and(|(dmg, t)| dmg >= t - object.damage_marked as i32);
                 let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
                 if !is_lethal_burn && !is_destroy {
-                    score -= 5.0;
+                    score += ctx.penalties().tapped_removal_no_urgency_penalty;
                 }
             }
         }

@@ -94,7 +94,11 @@ fn new_policy_files_use_score_contract_helpers() {
 }
 
 fn band_helper_uses_numeric_literal(code: &str) -> bool {
-    ["nudge", "preference", "strong", "critical"]
+    // `score` is the lowercase dispatcher `PolicyVerdict::score(delta, reason)`;
+    // it must receive a computed (config-routed) delta, never a numeric literal —
+    // otherwise a raw magnitude evades the band-helper contract that the four
+    // banded helpers already enforce.
+    ["score", "nudge", "preference", "strong", "critical"]
         .iter()
         .any(|helper| {
             let needle = format!("PolicyVerdict::{helper}(");
@@ -103,6 +107,33 @@ fn band_helper_uses_numeric_literal(code: &str) -> bool {
                 rest.starts_with(|ch: char| ch.is_ascii_digit() || ch == '-' || ch == '.')
             })
         })
+}
+
+/// Guards the loophole this lint closes: a numeric-literal first argument to
+/// `PolicyVerdict::score(...)` must be flagged, while a computed first argument
+/// must not. Both the `-8.0` (leading `-`) and `8.0` (leading digit) shapes,
+/// plus a `.5`-style leading dot, are covered.
+#[test]
+fn score_dispatcher_literal_is_flagged() {
+    assert!(band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(-8.0, reason);"
+    ));
+    assert!(band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(8.0, reason);"
+    ));
+    assert!(band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(.5, reason)"
+    ));
+    // Computed / config-routed deltas must pass.
+    assert!(!band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(self.score(ctx).clamp(-15.0, 15.0), reason)"
+    ));
+    assert!(!band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(delta, reason);"
+    ));
+    assert!(!band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(ctx.penalties().mill_cast_bonus * urgency, reason)"
+    ));
 }
 
 fn legacy_score_literal_count(file_name: &str) -> usize {

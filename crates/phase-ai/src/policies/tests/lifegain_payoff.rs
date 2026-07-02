@@ -1,6 +1,6 @@
-//! Tests for `LifegainPayoffPolicy`. Live in a sibling test module (declared
-//! from `policies/tests/mod.rs`) so `policies/lifegain_payoff.rs` stays
-//! implementation-only and SOURCE-classified.
+//! Tests for the lifegain-payoff spec (`PayoffPolicy::new(&LIFEGAIN_PAYOFF)`).
+//! Live in a sibling test module (declared from `policies/tests/mod.rs`) so the
+//! generic `policies/payoff.rs` stays implementation-only and SOURCE-classified.
 
 use std::sync::Arc;
 
@@ -25,10 +25,16 @@ use crate::features::DeckFeatures;
 use crate::session::AiSession;
 
 use super::super::context::PolicyContext;
-use super::super::lifegain_payoff::LifegainPayoffPolicy;
-use super::super::registry::{DecisionKind, PolicyId, PolicyVerdict, TacticalPolicy};
+use super::super::payoff::{PayoffPolicy, LIFEGAIN_PAYOFF};
+use super::super::registry::{
+    DecisionKind, PolicyId, PolicyRegistry, PolicyVerdict, TacticalPolicy,
+};
 
 const AI: PlayerId = PlayerId(0);
+
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&LIFEGAIN_PAYOFF)
+}
 
 fn features(commitment: f32, payoff_count: u32) -> DeckFeatures {
     DeckFeatures {
@@ -96,10 +102,11 @@ fn delta_of(verdict: PolicyVerdict) -> (f64, String) {
 
 #[test]
 fn policy_identity() {
-    assert_eq!(LifegainPayoffPolicy.id(), PolicyId::LifegainPayoff);
-    assert!(LifegainPayoffPolicy
-        .decision_kinds()
-        .contains(&DecisionKind::CastSpell));
+    assert_eq!(policy().id(), PolicyId::LifegainPayoff);
+    assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&LIFEGAIN_PAYOFF))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::LifegainPayoff));
 }
 
 // ─── activation gate ─────────────────────────────────────────────────────────
@@ -109,28 +116,21 @@ fn opts_out_with_no_payoff_even_at_high_commitment() {
     // Payoff-gated: no payoff → inert even if commitment is high.
     let features = features(0.9, 0);
     let state = GameState::new_two_player(7);
-    assert!(LifegainPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_out_below_commitment_floor() {
     let features = features(0.1, 4);
     let state = GameState::new_two_player(7);
-    assert!(LifegainPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_in_with_payoff_above_floor() {
     let features = features(0.6, 4);
     let state = GameState::new_two_player(7);
-    assert_eq!(
-        LifegainPayoffPolicy.activation(&features, &state, AI),
-        Some(0.6)
-    );
+    assert_eq!(policy().activation(&features, &state, AI), Some(0.6));
 }
 
 // ─── verdict ─────────────────────────────────────────────────────────────────
@@ -159,9 +159,15 @@ fn lifelink_source_scored() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(LifegainPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "lifegain_source_for_payoff");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
+    // Value-identity: the generic must port the exact `lifegain_source_bonus`
+    // field the bespoke policy used — flips if a wrong field is wired.
+    assert!(
+        (delta - AiConfig::default().policy_penalties.lifegain_source_bonus).abs() < 1e-9,
+        "delta must equal the exact ported lifegain_source_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -191,7 +197,7 @@ fn gain_life_spell_scored() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(LifegainPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "lifegain_source_for_payoff");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
 }
@@ -228,7 +234,7 @@ fn trigger_borne_lifegain_source_scored() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(LifegainPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "lifegain_source_for_payoff");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
 }
@@ -251,7 +257,7 @@ fn non_source_spell_inert() {
         cast_facts: None,
     };
 
-    let (delta, kind) = delta_of(LifegainPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "lifegain_payoff_inert");
     assert_eq!(delta, 0.0);
 }

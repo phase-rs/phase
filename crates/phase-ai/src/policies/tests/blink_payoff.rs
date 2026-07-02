@@ -1,6 +1,6 @@
-//! Tests for `BlinkPayoffPolicy`. Live in a sibling test module (declared from
-//! `policies/tests/mod.rs`) so `policies/blink_payoff.rs` stays
-//! implementation-only and SOURCE-classified.
+//! Tests for the blink-payoff spec (`PayoffPolicy::new(&BLINK_PAYOFF)`). Live in
+//! a sibling test module (declared from `policies/tests/mod.rs`) so the generic
+//! `policies/payoff.rs` stays implementation-only and SOURCE-classified.
 
 use std::sync::Arc;
 
@@ -24,11 +24,17 @@ use crate::features::blink::BlinkFeature;
 use crate::features::DeckFeatures;
 use crate::session::AiSession;
 
-use super::super::blink_payoff::BlinkPayoffPolicy;
 use super::super::context::PolicyContext;
-use super::super::registry::{DecisionKind, PolicyId, PolicyVerdict, TacticalPolicy};
+use super::super::payoff::{PayoffPolicy, BLINK_PAYOFF};
+use super::super::registry::{
+    DecisionKind, PolicyId, PolicyRegistry, PolicyVerdict, TacticalPolicy,
+};
 
 const AI: PlayerId = PlayerId(0);
+
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&BLINK_PAYOFF)
+}
 
 fn features(commitment: f32, flicker_count: u32, etb_payoff_count: u32) -> DeckFeatures {
     DeckFeatures {
@@ -180,10 +186,11 @@ fn delta_of(verdict: PolicyVerdict) -> (f64, String) {
 
 #[test]
 fn policy_identity() {
-    assert_eq!(BlinkPayoffPolicy.id(), PolicyId::BlinkPayoff);
-    assert!(BlinkPayoffPolicy
-        .decision_kinds()
-        .contains(&DecisionKind::CastSpell));
+    assert_eq!(policy().id(), PolicyId::BlinkPayoff);
+    assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&BLINK_PAYOFF))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::BlinkPayoff));
 }
 
 // ─── activation gate ─────────────────────────────────────────────────────────
@@ -192,37 +199,28 @@ fn policy_identity() {
 fn opts_out_with_no_flicker() {
     let features = features(0.9, 0, 14);
     let state = GameState::new_two_player(7);
-    assert!(BlinkPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_out_with_no_payoff() {
     let features = features(0.9, 8, 0);
     let state = GameState::new_two_player(7);
-    assert!(BlinkPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_out_below_commitment_floor() {
     let features = features(0.1, 8, 14);
     let state = GameState::new_two_player(7);
-    assert!(BlinkPayoffPolicy
-        .activation(&features, &state, AI)
-        .is_none());
+    assert!(policy().activation(&features, &state, AI).is_none());
 }
 
 #[test]
 fn opts_in_with_flicker_and_payoff_above_floor() {
     let features = features(0.6, 8, 14);
     let state = GameState::new_two_player(7);
-    assert_eq!(
-        BlinkPayoffPolicy.activation(&features, &state, AI),
-        Some(0.6)
-    );
+    assert_eq!(policy().activation(&features, &state, AI), Some(0.6));
 }
 
 // ─── verdict ─────────────────────────────────────────────────────────────────
@@ -238,9 +236,19 @@ fn deploy_flicker_engine_scored() {
     let (context, config) = ai_context(0.8, 8, 14);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(BlinkPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "deploy_flicker_engine");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
+    // Value-identity: exact ported `deploy_flicker_engine_bonus` (tier 1).
+    assert!(
+        (delta
+            - AiConfig::default()
+                .policy_penalties
+                .deploy_flicker_engine_bonus)
+            .abs()
+            < 1e-9,
+        "delta must equal the exact ported deploy_flicker_engine_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -254,9 +262,14 @@ fn etb_payoff_cast_scored() {
     let (context, config) = ai_context(0.8, 8, 14);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(BlinkPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "etb_payoff_cast");
     assert!(delta > 0.0, "expected a positive delta, got {delta}");
+    // Value-identity: exact ported `etb_payoff_cast_bonus` (tier 2).
+    assert!(
+        (delta - AiConfig::default().policy_penalties.etb_payoff_cast_bonus).abs() < 1e-9,
+        "delta must equal the exact ported etb_payoff_cast_bonus; got {delta}"
+    );
 }
 
 #[test]
@@ -269,7 +282,7 @@ fn non_blink_spell_inert() {
     let (context, config) = ai_context(0.8, 8, 14);
     let ctx = ctx(&state, &candidate, &decision, &context, &config);
 
-    let (delta, kind) = delta_of(BlinkPayoffPolicy.verdict(&ctx));
+    let (delta, kind) = delta_of(policy().verdict(&ctx));
     assert_eq!(kind, "blink_payoff_inert");
     assert_eq!(delta, 0.0);
 }
