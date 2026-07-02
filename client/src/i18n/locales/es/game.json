@@ -1694,6 +1694,7 @@
       "numberRange": "Elige un número",
       "labeled": "Toma una decisión",
       "keyword": "Elige una habilidad",
+      "counterKind": "Elige un contador",
       "fallback": "Toma una decisión"
     },
     "searchSubtitle": "Escribe para buscar en todas las cartas",

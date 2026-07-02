@@ -3205,12 +3205,13 @@ pub(super) fn parse_choose_ast(
             return Some(ast);
         }
 
-        // CR 608.2d + CR 122.1: "choose a counter on it / that permanent /
-        // target permanent" — pick one of the distinct counter kinds on the
-        // referenced object (The Caves of Androzani; Ichormoon Gauntlet). Routes
-        // to the counter-kind choice seam. Runs before `is_choose_as_targeting`
-        // so the "target permanent" form still declares its target here.
-        if let Some(ast) = try_parse_choose_counter_kind(rest, rest_lower, ctx) {
+        // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
+        // pick one of the distinct counter kinds on the anaphoric object
+        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
+        // target form ("a counter on target permanent", Ichormoon Gauntlet)
+        // is not yet supported (its consumer "put one more or remove one" is
+        // also absent) and is left as an honest Unimplemented gap.
+        if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
             return Some(ast);
         }
 
@@ -3285,17 +3286,17 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
-/// CR 608.2d + CR 122.1: "a counter on <object>" — the counter-kind choice head.
-/// The object is either a single-object anaphor (`it` / `that permanent` /
-/// `that creature` → `ParentTarget`, The Caves of Androzani II/III) or a real
-/// declared target (`target permanent`, Ichormoon Gauntlet), parsed by
-/// `parse_target` and surfaced as the ability's target slot. Combinator-based:
-/// `tag("a counter on ")` then the object phrase, consuming the entire residual.
-fn try_parse_choose_counter_kind(
-    rest: &str,
-    rest_lower: &str,
-    _ctx: &mut ParseContext,
-) -> Option<ChooseImperativeAst> {
+/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
+/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
+/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
+/// counter on ")` then the anaphor phrase, consuming the entire residual.
+///
+/// The declared-target form ("a counter on target permanent", Ichormoon
+/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
+/// that kind on that permanent or remove one of those counters from it") is not
+/// yet implemented, so parsing only the head would create a partial and
+/// rules-incorrect parse. Left as an honest Unimplemented gap.
+fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
     let anaphor = |i| -> OracleResult<'_, ()> {
         let (i, _) = tag("a counter on ").parse(i)?;
         let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
@@ -3308,15 +3309,7 @@ fn try_parse_choose_counter_kind(
             target: TargetFilter::ParentTarget,
         });
     }
-    // Non-anaphoric object: "a counter on target permanent" (a declared target).
-    let (_, after_on) = nom_on_lower(rest, rest_lower, |i| {
-        value((), tag("a counter on ")).parse(i)
-    })?;
-    let (target, tail) = parse_target(after_on);
-    if matches!(target, TargetFilter::None) || !tail.trim_end_matches('.').trim().is_empty() {
-        return None;
-    }
-    Some(ChooseImperativeAst::CounterKind { target })
+    None
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
