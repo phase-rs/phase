@@ -1556,6 +1556,13 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "your opponents control [N] or more [type]" (Lashwhip Predator: "... if
+    // your opponents control three or more creatures") — the opponent-scoped
+    // sibling of the "you control N or more [type]" count gate.
+    if let Some(condition) = parse_opponents_control_count_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "it shares a color with the most common color among all permanents
     // [or a color tied for most common]" (Heroic Defiance)
     if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
@@ -2036,6 +2043,42 @@ fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, Sta
     }
     Ok((
         input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 611.3a: "your opponents control [N] or more [type]" → `ObjectCount(type
+/// controlled by an opponent) >= N` (Lashwhip Predator: "This spell costs {2}
+/// less to cast if your opponents control three or more creatures."). The
+/// opponent-scoped sibling of the "you control N or more [type]" count gate;
+/// injects `ControllerRef::Opponent` onto the counted filter, mirroring
+/// `parse_they_control_count_ge`'s `ScopedPlayer` injection.
+pub(crate) fn parse_opponents_control_count_condition(lower: &str) -> Option<StaticCondition> {
+    opponents_control_count_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn opponents_control_count_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = tag("your opponents control ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(input.trim());
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let filter = nom_condition::inject_controller(filter, ControllerRef::Opponent);
+    Ok((
+        remainder,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount { filter },

@@ -487,6 +487,58 @@ fn hour_of_revelation_cost_reduction_gated_on_battlefield_count() {
     );
 }
 
+/// CR 601.2f + CR 611.3a: A self-spell cost reduction gated on an opponent's
+/// board count — Lashwhip Predator: "This spell costs {2} less to cast if your
+/// opponents control three or more creatures." — must attach the count gate with
+/// the OPPONENT controller scope (not swallow it, and not read it as your own).
+#[test]
+fn lashwhip_predator_cost_reduction_gated_on_opponents_creature_count() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {2} less to cast if your opponents control three or more creatures.",
+        "Lashwhip Predator",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("expected a ModifyCost self-spell reduction");
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 3 },
+    }) = &def.condition
+    else {
+        panic!(
+            "cost reduction must be gated on ObjectCount(opponents' creatures) >= 3, got {:?}",
+            def.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed creature filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "gate filter must count creatures, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::Opponent),
+        "count must be scoped to opponents, got {:?}",
+        tf.controller
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the opponent board-state gate must attach, not be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
