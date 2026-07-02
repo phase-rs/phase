@@ -5114,13 +5114,16 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
     state.exile_play_permissions_used.insert(source_id);
 }
 
-/// CR 401.5 + CR 601.2a: Consume the per-turn slot when a `OncePerTurn`
-/// `TopOfLibraryCastPermission { play_mode: Play }` authorizes a land play from
-/// the library. Receives the pre-captured `(src_id, frequency)` that was resolved
-/// BEFORE the zone change — `top_of_library_permission_source` reads
-/// `library.front()`, which no longer points to the played land after the land
-/// is delivered to the battlefield. `Unlimited` permissions (Future Sight,
-/// Bolas's Citadel) do not spend a slot.
+/// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
+/// `OncePerTurn` `TopOfLibraryCastPermission { play_mode: Play }` authorizes a
+/// land play from the library. Playing a land is a special action (CR 305.1,
+/// CR 116.2a) — not a spell cast — so CR 601.2a does not apply here; CR 401.5
+/// governs top-of-library visibility during the special action. Receives the
+/// pre-captured `(src_id, frequency)` that was resolved BEFORE the zone change
+/// — `top_of_library_permission_source` reads `library.front()`, which no
+/// longer points to the played land after the land is delivered to the
+/// battlefield. `Unlimited` permissions (Future Sight, Bolas's Citadel) do not
+/// spend a slot.
 fn record_top_of_library_land_permission(
     state: &mut GameState,
     src_id: ObjectId,
@@ -5248,7 +5251,8 @@ fn handle_play_land(
     // point to the next card once the land is delivered to the battlefield.
     // Recording in the post-delivery epilogue would always see the wrong top
     // card and silently skip the once-per-turn slot, allowing a OncePerTurn
-    // permission to be reused indefinitely. CR 401.5 + CR 601.2a.
+    // permission to be reused indefinitely. CR 305.1 + CR 116.2a + CR 401.5:
+    // land play is a special action, not a spell cast (CR 601.2a does not apply).
     let library_permission_src: Option<(ObjectId, crate::types::statics::CastFrequency)> =
         super::casting::top_of_library_permission_source(
             state,
@@ -5510,9 +5514,11 @@ fn handle_play_land(
                     record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
-                    // CR 401.5 + CR 601.2a: consume the once-per-turn library
-                    // play slot using the pre-captured source (library.front()
-                    // now points to the next card, not the played land).
+                    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn
+                    // library play slot using the pre-captured source (land play is
+                    // a special action per CR 305.1/116.2a; CR 401.5 top-of-library
+                    // visibility closes after the action; library.front() now points
+                    // to the next card, not the played land).
                     if let Some((src_id, frequency)) = library_permission_src {
                         record_top_of_library_land_permission(state, src_id, frequency);
                     }
@@ -5544,9 +5550,11 @@ fn handle_play_land(
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
-            // CR 401.5 + CR 601.2a: consume the once-per-turn library play
-            // slot using the pre-captured source (library.front() now points
-            // to the next card, not the played land).
+            // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library
+            // play slot using the pre-captured source (land play is a special
+            // action per CR 305.1/116.2a; CR 401.5 top-of-library visibility
+            // closes after the action; library.front() now points to the next
+            // card, not the played land).
             if let Some((src_id, frequency)) = library_permission_src {
                 record_top_of_library_land_permission(state, src_id, frequency);
             }
@@ -5573,9 +5581,11 @@ fn handle_play_land(
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
-    // CR 401.5 + CR 601.2a: consume the once-per-turn library play slot
-    // using the pre-captured source (library.front() now points to the
-    // next card, not the played land — post-delivery re-lookup would fail).
+    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library play
+    // slot using the pre-captured source (land play is a special action per
+    // CR 305.1/116.2a; CR 401.5 top-of-library visibility closes after the
+    // action; library.front() now points to the next card, not the played
+    // land — post-delivery re-lookup would fail).
     if let Some((src_id, frequency)) = library_permission_src {
         record_top_of_library_land_permission(state, src_id, frequency);
     }

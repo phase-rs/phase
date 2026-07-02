@@ -7647,10 +7647,11 @@ fn reorder_hand_succeeds_while_opponent_holds_priority() {
     assert_eq!(state.priority_player, PlayerId(1));
 }
 
-/// CR 401.5 + CR 601.2a: A `OncePerTurn` `TopOfLibraryCastPermission`
+/// CR 305.1 + CR 116.2a + CR 401.5: A `OncePerTurn` `TopOfLibraryCastPermission`
 /// with `play_mode: Play` must consume its per-turn slot when a land is played
-/// from the library top, and a second `PlayLand` from the same permission source
-/// must be rejected.
+/// from the library top (land play is a special action per CR 305.1/CR 116.2a;
+/// CR 401.5 governs top-of-library visibility during the action), and a second
+/// `PlayLand` from the same permission source must be rejected.
 #[test]
 fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
     let mut state = setup_game_at_main_phase();
