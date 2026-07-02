@@ -172,12 +172,18 @@ pub fn unknown_hidden_pool(
     }
 
     // Decrement one per public-zone object and per pinned-known hidden object.
-    // `decrement` guards owner/token, so `known_ids` from any zone/player is
-    // safe to pass wholesale — only this player's non-token cards subtract.
+    // The owner/token guards below make `known_ids` from any zone/player safe
+    // to pass wholesale, and `seen` dedups the overlap: a one-shot-revealed
+    // card (`public_revealed_cards` never clears) that later reaches a public
+    // zone appears in BOTH iterators but must subtract only once.
+    let mut seen: HashSet<ObjectId> = HashSet::new();
     for object_id in public_account_object_ids(state, player)
         .into_iter()
         .chain(known_ids.iter().copied())
     {
+        if !seen.insert(object_id) {
+            continue;
+        }
         let Some(object) = state.objects.get(&object_id) else {
             continue;
         };
@@ -358,5 +364,35 @@ mod tests {
 
         let counts = known_remaining_deck_counts(&state, PlayerId(0));
         assert!(!counts.contains_key(&DeckCardKey::FaceName("Alpha".to_string())));
+    }
+
+    #[test]
+    fn pool_decrements_once_for_public_object_also_in_known_ids() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            current_main: std::sync::Arc::new(vec![deck_entry("Alpha", 2, None)]),
+            ..Default::default()
+        });
+
+        // A card revealed while hidden (one-shot reveals never clear) that has
+        // since moved to the public graveyard: present in BOTH the public
+        // account and `known_ids`. It must subtract exactly once, leaving one
+        // Alpha in the unknown pool.
+        let alpha = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Alpha".to_string(),
+            Zone::Graveyard,
+        );
+        let known: HashSet<ObjectId> = [alpha].into_iter().collect();
+
+        let pool = unknown_hidden_pool(&state, PlayerId(0), &known);
+        assert_eq!(
+            pool.iter().filter(|face| face.name == "Alpha").count(),
+            1,
+            "overlapping public + known object must decrement the pool once, not twice"
+        );
     }
 }
