@@ -1424,92 +1424,35 @@ mod tests {
 
     #[test]
     fn derive_views_surfaces_chosen_modal_modes_on_stack() {
-        use crate::game::casting_costs::finalize_cast;
-        use crate::game::stack::push_to_stack;
-        use crate::types::game_state::PendingCast;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::ManaColor;
 
-        let mut state = GameState::new_two_player(42);
-        let player = PlayerId(0);
-        let spell = create_object(
-            &mut state,
-            CardId(1),
-            player,
-            "Brotherhood's End".to_string(),
-            Zone::Hand,
-        );
-        if let Some(obj) = state.objects.get_mut(&spell) {
-            obj.modal = Some(crate::types::ability::ModalChoice {
-                min_choices: 1,
-                max_choices: 1,
-                mode_count: 2,
-                mode_descriptions: vec![
-                    "Brotherhood's End deals 3 damage to each creature and each planeswalker."
-                        .to_string(),
-                    "Destroy all artifacts with mana value 3 or less.".to_string(),
-                ],
-                ..Default::default()
-            });
-        }
-        let ability = ResolvedAbility::new(
-            Effect::Unimplemented {
-                name: "modal".to_string(),
-                description: None,
-            },
-            Vec::new(),
-            spell,
-            player,
-        );
-        let mut pending = PendingCast::new(spell, CardId(1), ability, ManaCost::NoCost);
-        pending.chosen_modes = vec![1];
-        state.pending_cast = Some(Box::new(pending));
+        const IZZET_CHARM_ORACLE: &str = "Choose one —\n\
+            • Counter target noncreature spell unless its controller pays {2}.\n\
+            • Izzet Charm deals 2 damage to target creature.\n\
+            • Draw two cards, then discard two cards.";
 
-        push_to_stack(
-            &mut state,
-            StackEntry {
-                id: spell,
-                source_id: spell,
-                controller: player,
-                kind: StackEntryKind::Spell {
-                    card_id: CardId(1),
-                    ability: None,
-                    casting_variant: CastingVariant::Normal,
-                    actual_mana_spent: 0,
-                },
-            },
-            &mut Vec::new(),
-        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Izzet Charm", true, IZZET_CHARM_ORACLE)
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        scenario.add_basic_land(P0, ManaColor::Red);
 
-        let ability = state
-            .pending_cast
-            .as_ref()
-            .expect("pending cast")
-            .ability
-            .clone();
-        let mut events = Vec::new();
-        finalize_cast(
-            &mut state,
-            player,
-            spell,
-            CardId(1),
-            ability,
-            &ManaCost::NoCost,
-            CastingVariant::Normal,
-            None,
-            Zone::Hand,
-            &mut events,
-        )
-        .expect("finalize_cast should succeed");
+        let mut runner = scenario.build();
+        runner.cast(spell).modes(&[2]).commit();
 
-        let views = derive_views(&state, None);
+        let views = derive_views(runner.state(), None);
         let details = views
             .stack_entry_details
             .get(&spell)
-            .expect("stack details include the spell");
+            .expect("stack details include the modal spell");
         assert!(details.paid.iter().any(|fact| {
             matches!(
                 fact,
                 StackPaidFactView::ChosenModes { labels }
-                    if labels == &["Destroy all artifacts with mana value 3 or less."]
+                    if labels == &["Draw two cards, then discard two cards.".to_string()]
             )
         }));
     }

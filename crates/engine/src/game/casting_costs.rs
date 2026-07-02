@@ -2852,6 +2852,9 @@ pub(super) fn finish_pending_cast_cost_or_pay(
 ) -> Result<WaitingFor, EngineError> {
     pending.ability = ability;
     pending.cost = cost;
+    // CR 700.2: Keep modal mode indices on the pending cast through payment
+    // and finalization so stack paid facts can surface chosen mode labels.
+    state.pending_cast = Some(Box::new(pending.clone()));
     // If an optional additional cost was already decided (paid or declined) in the
     // deferred-target-selection flow, skip re-detection — the player already made
     // their choice. Without this guard, check_additional_cost_or_pay_with_distribute
@@ -5407,6 +5410,15 @@ pub(super) fn pay_and_push(
     )
 }
 
+fn preserved_chosen_modes(state: &GameState, object_id: ObjectId) -> Vec<usize> {
+    state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)
+        .map(|pending| pending.chosen_modes.clone())
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push_adventure(
     state: &mut GameState,
@@ -5451,6 +5463,7 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.chosen_modes = preserved_chosen_modes(state, object_id);
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, convoke_mode, events);
     }
@@ -5467,6 +5480,7 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.chosen_modes = preserved_chosen_modes(state, object_id);
         pending.assist_state = AssistState::Offered;
         state.pending_cast = Some(Box::new(pending));
         return Ok(WaitingFor::AssistChoosePlayer {
@@ -5496,6 +5510,7 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.chosen_modes = preserved_chosen_modes(state, object_id);
         state.pending_cast = Some(Box::new(pending));
         return Ok(waiting);
     }
