@@ -39,7 +39,10 @@ export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryP
   if (entries.length === 0) return null;
 
   return (
-    <div className={`flex items-center ${size === "sm" ? "gap-0.5" : "gap-1"}`}>
+    <div
+      data-mana-pool-summary=""
+      className={`flex items-center ${size === "sm" ? "gap-0.5" : "gap-1"}`}
+    >
       {hasUnboundedMana && (
         <span
           aria-label={t("badges.unboundedManaPoolMarker")}

@@ -3867,6 +3867,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 508.1 + CR 603.4: source-scoped "if ~ attacked this turn" —
+            // the trigger resolves only if the ability's own source creature
+            // declared as an attacker this turn (Riders of the Mark, Taigam,
+            // Ojutai Master). Composed from the existing, already-evaluated
+            // `FilterProp::AttackedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn`) via `SourceMatchesFilter`,
+            // so no new `TriggerCondition` variant is needed. Distinct from the
+            // player-scoped `YouAttackedThisTurn` ("if you attacked this turn").
+            (
+                "if ~ attacked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+                    ),
+                },
+            ),
             // CR 603.4: past-turn life loss.
             (
                 "if an opponent lost life during their last turn",
