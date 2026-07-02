@@ -1647,17 +1647,25 @@ pub enum StaticMode {
     ///
     /// `spell_filter` is the leaf parameterization of the spell-class axis (same
     /// CR 609.4b section, so a field, not a sibling variant):
-    /// - `None` — board-wide (Chromatic Orrery / Joiner Adept): the concession
-    ///   applies to every cost the controller pays (spell casts, effect
-    ///   payments, activations).
+    /// - `spell_filter: None, activation_source_filter: None` — board-wide
+    ///   (Chromatic Orrery): the concession applies to every cost the controller
+    ///   pays (spell casts, effect payments, activations).
     /// - `Some(filter)` — scoped to spells the controller casts that match the
     ///   filter (Vizier of the Menagerie: "creature spells"). The concession is
     ///   re-derived against the spell object at spend time and never applies to
     ///   non-spell payments. Consulted by
     ///   `casting::player_can_spend_as_any_color_for_optional_spell`.
+    /// - `activation_source_filter: Some(filter)` — scoped to activated abilities
+    ///   whose source permanent matches the filter (Agatha's Soul Cauldron /
+    ///   Joiner Adept: "to activate abilities of creatures you control"). The
+    ///   concession is re-derived against the activating permanent at spend time
+    ///   and never applies to spell casts or effect payments. Consulted by
+    ///   `static_abilities::player_can_spend_as_any_color_for_activation_source`.
     SpendManaAsAnyColor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation_source_filter: Option<TargetFilter>,
     },
     /// CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than pay
     /// that mana." Player-scope payment substitution; the indicated color may
@@ -3704,7 +3712,10 @@ mod tests {
         use super::super::ability::{TargetFilter, TypedFilter};
 
         // (a) board-wide None: exact serialized form + round-trip.
-        let board_wide = StaticMode::SpendManaAsAnyColor { spell_filter: None };
+        let board_wide = StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        };
         let json = serde_json::to_string(&board_wide).unwrap();
         assert_eq!(
             json, r#"{"SpendManaAsAnyColor":{}}"#,
@@ -3717,6 +3728,7 @@ mod tests {
         // (b) spell-filtered Some(Typed(creature)): round-trip preserves the filter.
         let filtered = StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            activation_source_filter: None,
         };
         let json = serde_json::to_string(&filtered).unwrap();
         let back: StaticMode = serde_json::from_str(&json).unwrap();

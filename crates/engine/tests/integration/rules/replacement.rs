@@ -33,26 +33,17 @@ fn fast_land_replacement(description: &str) -> ReplacementDefinition {
 }
 
 fn replacement_choice_index(runner: &GameRunner, description: &str) -> usize {
-    let WaitingFor::ReplacementChoice {
-        candidate_descriptions,
-        ..
-    } = &runner.state().waiting_for
-    else {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
         panic!(
             "expected ReplacementChoice, got {:?}",
             runner.state().waiting_for
         );
     };
 
-    candidate_descriptions
+    candidates
         .iter()
-        .position(|candidate| candidate.contains(description))
-        .unwrap_or_else(|| {
-            panic!(
-                "replacement choice {description:?} not found in {:?}",
-                candidate_descriptions
-            )
-        })
+        .position(|candidate| candidate.description.contains(description))
+        .unwrap_or_else(|| panic!("replacement choice {description:?} not found in {candidates:?}"))
 }
 
 // ── Fast land integration tests ──

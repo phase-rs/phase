@@ -560,6 +560,19 @@ struct BasePtSetAxes {
 /// "base " on the second noun and the optional "and toughness" conjunct are each
 /// a single combinator.
 fn parse_base_pt_axes(input: &str) -> OracleResult<'_, BasePtSetAxes> {
+    // CR 208.1: "base toughness" alone (toughness-only, symmetric with the
+    // power-only axis) — Sentinel / Wall of Tombstones set base toughness without
+    // touching base power. Tried first; it cannot shadow the both-axes form,
+    // which always opens with "base power" ("base power and base toughness").
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("base toughness").parse(input) {
+        return Ok((
+            rest,
+            BasePtSetAxes {
+                set_power: false,
+                set_toughness: true,
+            },
+        ));
+    }
     let (input, _) = tag("base power").parse(input)?;
     let (input, toughness) =
         opt(alt((tag(" and base toughness"), tag(" and toughness")))).parse(input)?;
@@ -838,15 +851,18 @@ fn try_parse_subject_base_pt_set_clause_ast(
         } else {
             // Possessive: "<subject>'s base power [and toughness]" followed by the
             // copula (" to " for the transitive "change" frame, else "become[s] ").
+            // Anchor on "'s base " (not "'s base power") so the toughness-only
+            // axis ("~'s base toughness") reaches `parse_base_pt_axes`, which
+            // classifies the specific characteristic word.
             let (rest_lower, (subject_lower, axes)) = alt((
                 (
-                    take_until::<_, _, VE>("'s base power"),
+                    take_until::<_, _, VE>("'s base "),
                     tag("'s "),
                     parse_base_pt_axes,
                 )
                     .map(|(subject, _, axes)| (subject, axes)),
                 (
-                    take_until::<_, _, VE>("\u{2019}s base power"),
+                    take_until::<_, _, VE>("\u{2019}s base "),
                     tag("\u{2019}s "),
                     parse_base_pt_axes,
                 )
@@ -1710,7 +1726,38 @@ pub(super) fn parse_subject_application(
         // path of "target creature that player controls becomes …" (Gornog,
         // the Red Reaper) silently bound the target to the trigger
         // controller's own creatures.
-        let (filter, _) = parse_target_with_ctx(subject, ctx);
+        let (filter, rest) = parse_target_with_ctx(subject, ctx);
+        // CR 608.2c + CR 109.4: "target <filter>'s controller/owner <verb>s it"
+        // (Arcum Dagsson, Mercy Killing) — the ability TARGETS <filter>; its
+        // controller/owner performs the verb on it ("it" = that target). Preserve
+        // <filter> as the ability's object target while shifting the acting
+        // subject to the target's controller/owner, so the imperative lowering
+        // declares a `TargetOnly{<filter>}` slot (see `lower_subject_predicate_ast`)
+        // against which `ParentTarget`/`ParentTargetController` resolve. Only the
+        // exact possessive-controller/owner suffix (nothing else) qualifies.
+        if let Ok((_, actor)) = all_consuming(alt((
+            value(
+                TargetFilter::ParentTargetController,
+                alt((
+                    tag::<_, _, OracleError<'_>>("'s controller"),
+                    tag("\u{2019}s controller"),
+                )),
+            ),
+            value(
+                TargetFilter::ParentTargetOwner,
+                alt((tag("'s owner"), tag("\u{2019}s owner"))),
+            ),
+        )))
+        .parse(rest.trim())
+        {
+            return Some(SubjectApplication {
+                affected: actor,
+                target: Some(filter),
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
@@ -7455,6 +7502,29 @@ mod tests {
             )
             .is_none(),
             "non-base-P/T change clause must not match",
+        );
+    }
+
+    #[test]
+    fn change_base_toughness_only_to_dynamic() {
+        // CR 208.1: toughness-only axis (Wall of Tombstones) — "change ~'s base
+        // toughness to <dynamic>" sets ONLY base toughness, leaving base power
+        // untouched (symmetric with the power-only axis).
+        let (mods, _) = base_pt_set_mods(
+            "change ~'s base toughness to 1 plus the number of creature cards in your graveyard",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { .. })),
+            "expected SetToughnessDynamic, got {mods:?}",
+        );
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPower { .. }
+                    | ContinuousModification::SetPowerDynamic { .. }
+            )),
+            "toughness-only clause must not touch base power, got {mods:?}",
         );
     }
 

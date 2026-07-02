@@ -1463,6 +1463,32 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         }
     }
 
+    // CR 601.2 + CR 400.7: "<source> was cast this turn" gates on the source
+    // having been cast (WasCast) AND having entered this turn
+    // (SourceEnteredThisTurn) — a permanent that was cast and entered this turn
+    // was necessarily cast this turn, while one put onto the battlefield (not
+    // cast) or cast on an earlier turn fails one conjunct. Composed from the two
+    // existing leaf primitives rather than a new `SourceWasCastThisTurn` variant
+    // (compose-don't-proliferate). `parse_inner_condition` above recognizes the
+    // bare "<source> was cast" (→ `WasCast`) but not the "this turn" tightening,
+    // so the compound is handled here. Rock Jockey: "You can't play lands if this
+    // creature was cast this turn."
+    for self_ref in ["it ", "this creature ", "this permanent ", "~ "] {
+        let Some(after_ref) = nom_tag_lower(tp.lower, tp.lower, self_ref) else {
+            continue;
+        };
+        if nom_tag_lower(after_ref, after_ref, "was cast this turn")
+            .is_some_and(|remainder| remainder.trim().is_empty())
+        {
+            return Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::WasCast { zone: None },
+                    StaticCondition::SourceEnteredThisTurn,
+                ],
+            });
+        }
+    }
+
     // Compound " and " splitting: try splitting on " and ", parse both halves recursively.
     // Only succeeds if BOTH halves parse independently — avoids false splits on
     // noun phrases like "artifacts and creatures".
@@ -1513,6 +1539,20 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
 
     // "[N] or more [type] are on the battlefield" (Limited Resources)
     if let Some(condition) = parse_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "a[n] [type] is on the battlefield" (Wirecat: "... if an enchantment is on
+    // the battlefield") — singular existence gate = ObjectCount(type) >= 1.
+    if let Some(condition) = parse_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "there are [N] or more [type] on the battlefield" (Hour of Revelation:
+    // "... if there are ten or more nonland permanents on the battlefield") —
+    // the existential-phrasing counterpart of the "[N] or more [type] are on the
+    // battlefield" count form. Same ObjectCount(type) >= N shape.
+    if let Some(condition) = parse_there_are_count_on_battlefield_condition(tp.lower) {
         return Some(condition);
     }
 
@@ -1966,6 +2006,46 @@ pub(crate) fn parse_count_on_battlefield_condition(lower: &str) -> Option<Static
         .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
 }
 
+/// CR 611.3a: "there are [N] or more [type] on the battlefield" → the same count
+/// gate as `count_on_battlefield_condition` (`ObjectCount(type) >= N`) but in the
+/// existential "there are …" phrasing (Hour of Revelation: "This spell costs {3}
+/// less to cast if there are ten or more nonland permanents on the
+/// battlefield."). The count form anchors "are on the battlefield" after the
+/// type; this form fronts the "there are" existential and closes with a bare
+/// "on the battlefield".
+pub(crate) fn parse_there_are_count_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_are_count_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = tag("there are ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
@@ -1986,6 +2066,41 @@ fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticConditi
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 611.3a: "a[n] [type] is on the battlefield" → an existence gate, i.e.
+/// `ObjectCount(type) >= 1` (Wirecat: "This creature can't attack or block if an
+/// enchantment is on the battlefield."). Singular counterpart of
+/// `count_on_battlefield_condition` ("[N] or more [type] are on the
+/// battlefield"); it reuses the same `ObjectCount >= n` shape with `n = 1`. The
+/// type phrase must consume the whole subject, mirroring the count form's guard.
+pub(crate) fn parse_exists_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("an "), tag("a "))).parse(input)?;
+    let (input, type_text) = take_until(" is on the battlefield").parse(input)?;
+    let (input, _) = tag(" is on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }

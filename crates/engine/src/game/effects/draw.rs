@@ -1166,6 +1166,7 @@ mod tranche4_draw_pipeline_tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let def = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -1237,6 +1238,7 @@ mod tranche4_draw_pipeline_tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let def = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)

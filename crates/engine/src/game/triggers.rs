@@ -6968,11 +6968,11 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp,
-        KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
+        Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -7244,6 +7244,100 @@ pub mod tests {
         assert!(
             !run_case(PlayerId(1), false),
             "a discard with no recorded cause must NOT fire the trigger"
+        );
+    }
+
+    /// CR 113.6 / CR 113.6b + CR 603.10a: end-to-end proof that Teval, the
+    /// Balanced Scale's "Whenever one or more cards leave your graveyard, create a
+    /// token" trigger is battlefield-only — it must fire while Teval is on the
+    /// battlefield and must NOT fire while Teval itself is in the graveyard.
+    /// (issue #765)
+    ///
+    /// The trigger references *other* cards leaving the graveyard (subject "cards",
+    /// not `~`/SelfRef), so it is a permanent's triggered ability that functions
+    /// only on the battlefield (CR 113.6) — it does not state that it functions
+    /// from any other zone (CR 113.6b), and only a self-referential leaves trigger
+    /// gets the CR 603.10a graveyard/exile look-back. This discriminates the fix:
+    /// with the reverted blanket `trigger_zones = [Battlefield, Graveyard, Exile]`
+    /// the graveyard case wrongly fires (the observable bug).
+    ///
+    /// Installs the *parsed* production trigger (not a hand-built one) and varies
+    /// only Teval's own zone across the two cases.
+    #[test]
+    fn teval_leave_graveyard_trigger_is_battlefield_only() {
+        // Real production parser output for Teval's trigger.
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever one or more cards leave your graveyard, create a 2/2 black \
+             Zombie Druid creature token.",
+            "Teval, the Balanced Scale",
+        );
+        assert_eq!(parsed.mode, TriggerMode::ChangesZoneAll);
+        assert_eq!(parsed.origin, Some(Zone::Graveyard));
+        // The fix under test: this non-self trigger is battlefield-only.
+        assert_eq!(parsed.trigger_zones, vec![Zone::Battlefield]);
+
+        // Build fresh state with Teval carrying the parsed trigger in `teval_zone`,
+        // then fire a DIFFERENT P0-owned card leaving the graveyard. Returns whether
+        // Teval's trigger reached the stack (or pending target selection).
+        let run_case = |teval_zone: Zone| -> bool {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+
+            let teval = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Teval, the Balanced Scale".to_string(),
+                teval_zone,
+            );
+            {
+                let obj = state.objects.get_mut(&teval).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.trigger_definitions.push(parsed.clone());
+            }
+
+            // A different P0-owned card leaves the graveyard (the batched event).
+            let leaver = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Some Card".to_string(),
+                Zone::Hand,
+            );
+            let event = zone_changed_event(
+                leaver,
+                Zone::Graveyard,
+                Zone::Hand,
+                vec![CoreType::Creature],
+                vec![],
+            );
+
+            process_triggers(&mut state, &[event]);
+
+            let on_stack = state.stack.iter().any(|entry| {
+                entry.source_id == teval
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+            });
+            let pending = state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|p| p.source_id == teval);
+            on_stack || pending
+        };
+
+        // (a) Teval on the battlefield → the leave-graveyard trigger fires.
+        assert!(
+            run_case(Zone::Battlefield),
+            "Teval on the battlefield must fire its leave-graveyard trigger"
+        );
+
+        // (b) Teval in the graveyard → the trigger must NOT fire (CR 113.6b).
+        // Reverting the fix (blanket graveyard/exile trigger_zones) makes this
+        // wrongly fire — the observable bug in issue #765.
+        assert!(
+            !run_case(Zone::Graveyard),
+            "Teval in the graveyard must NOT fire its battlefield-only trigger"
         );
     }
 
@@ -10431,6 +10525,7 @@ pub mod tests {
                 .condition(AbilityCondition::ConditionInstead {
                     inner: Box::new(AbilityCondition::CastVariantPaid {
                         variant: CastVariantPaid::Emerge,
+                        subject: crate::types::ability::ObjectScope::Source,
                     }),
                 }),
             ),
@@ -11009,6 +11104,7 @@ pub mod tests {
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
                                 face_down_profile: None,
+                                enters_modified_if: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -11415,6 +11511,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -11522,6 +11619,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         execute.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
@@ -11721,6 +11819,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -11836,6 +11935,7 @@ pub mod tests {
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
                                 face_down_profile: None,
+                                enters_modified_if: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -11912,6 +12012,7 @@ pub mod tests {
                             enter_with_counters: vec![],
                             conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -11974,6 +12075,7 @@ pub mod tests {
                             enter_with_counters: vec![],
                             conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -12126,6 +12228,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -12285,6 +12388,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -12562,6 +12666,7 @@ pub mod tests {
                                     enter_with_counters: vec![],
                                     conditional_enter_with_counters: vec![],
                                     face_down_profile: None,
+                                    enters_modified_if: None,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -13612,7 +13717,7 @@ pub mod tests {
     /// event, not any creature dealt excess damage this turn.
     fn maarika_excess_condition() -> TriggerCondition {
         // CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "if that creature was dealt
-        // excess damage this turn" — DamageDealtThisTurn{excess_only,target=EventTarget} >= 1.
+        // excess damage this turn" — DamageDealtThisTurn{channel:Excess,target=EventTarget} >= 1.
         TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::DamageDealtThisTurn {
@@ -13621,7 +13726,7 @@ pub mod tests {
                     aggregate: AggregateFunction::Sum,
                     group_by: None,
                     damage_kind: DamageKindFilter::Any,
-                    excess_only: true,
+                    channel: DamageChannel::Excess,
                 },
             },
             comparator: Comparator::GE,
@@ -14977,6 +15082,7 @@ pub mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -15001,6 +15107,7 @@ pub mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -15082,6 +15189,7 @@ pub mod tests {
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -15113,6 +15221,7 @@ pub mod tests {
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -22462,6 +22571,7 @@ pub mod tests {
                 sacrifice_filter: crate::types::ability::TargetFilter::Typed(
                     crate::types::ability::TypedFilter::permanent(),
                 ),
+                total_power_cap: None,
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);
@@ -23043,6 +23153,7 @@ pub mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -23477,6 +23588,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -23605,6 +23717,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
