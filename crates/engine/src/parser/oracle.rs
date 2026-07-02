@@ -1053,6 +1053,7 @@ fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[Str
                 retarget_chosen_card_type_to_creature_type(filter);
             }
         }
+        retarget_creature_type_choice_dig_filters(result);
     }
 
     let Some(chosen_kind) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
@@ -1103,6 +1104,18 @@ fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
     }
 }
 
+fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
+    if let Effect::Dig { filter, .. } = &mut *def.effect {
+        retarget_chosen_card_type_to_creature_type(filter);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        retarget_creature_type_choice_dig_filters_in_ability(sub);
+    }
+}
+
+/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
+/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
+/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     if types.iter().any(|card_type| card_type == "Creature") {
         Some(ChosenSubtypeKind::CreatureType)
