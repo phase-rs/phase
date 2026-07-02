@@ -28120,6 +28120,50 @@ fn reveal_until_x_permanent_cards_choose_any_number_aurora() {
     assert_eq!(*rest_destination, Zone::Library);
 }
 
+/// CR 701.20a + CR 608.2c: Explosive Revelation has a transparent damage
+/// instruction between the RevealUntil and the rest-pile placement. The
+/// RevealUntil already owns "the rest on the bottom"; the parser must not emit
+/// a second PutAtLibraryPosition sibling for that same rest pile.
+#[test]
+fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
+    let def = parse_effect_chain(
+        "Choose any target. Reveal cards from the top of your library until you reveal a nonland card. \
+         Explosive Revelation deals damage equal to that card's mana value to that permanent or player. \
+         Put the nonland card into your hand and the rest on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+
+    let reveal = def
+        .sub_ability
+        .as_ref()
+        .expect("target-only head must chain into RevealUntil");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", reveal.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Library);
+
+    let damage = reveal
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into damage");
+    assert!(
+        matches!(&*damage.effect, Effect::DealDamage { .. }),
+        "expected damage sibling, got {:?}",
+        damage.effect
+    );
+    assert!(
+        damage.sub_ability.is_none(),
+        "rest-pile placement must be absorbed by RevealUntil, not emitted as {:?}",
+        damage.sub_ability
+    );
+}
+
 /// CR 701.20a: "reveal until you reveal X nonland cards, where X is the
 /// number of colors among permanents you control" (Sanar core). The
 /// per-color exile + cast-this-turn tail is intentionally NOT yet parsed; the
