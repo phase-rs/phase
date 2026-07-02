@@ -1252,11 +1252,10 @@ pub(super) fn parse_all_sacrifice<'a>(
 
 fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
     match filter {
-        TargetFilter::Typed(typed) => {
-            if !typed.properties.contains(&FilterProp::Another) {
-                typed.properties.push(FilterProp::Another);
-            }
+        TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
+            typed.properties.push(FilterProp::Another);
         }
+        TargetFilter::Typed(_) => {}
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for leg in filters {
                 add_another_to_sacrifice_filter(leg);
