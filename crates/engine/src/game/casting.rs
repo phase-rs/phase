@@ -2653,6 +2653,12 @@ fn graveyard_permission_sources(
     play_mode_filter: Option<CardPlayMode>,
 ) -> Vec<GraveyardPermissionSource<'_>> {
     let mut source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    source_ids.extend(state.command_zone.iter().copied().filter(|&id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
+    }));
     if let Some(player_data) = state.players.iter().find(|p| p.id == player) {
         source_ids.extend(player_data.graveyard.iter().copied());
     }
