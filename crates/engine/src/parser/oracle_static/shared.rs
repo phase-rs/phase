@@ -1630,6 +1630,15 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "there's a[n]/another [type] on the battlefield" (Shauku, Endbringer:
+    // "... can't attack if there's another creature on the battlefield.") — the
+    // singular existential of the "there are [N] or more" count form. Existence
+    // gate = ObjectCount(type) >= 1; the "another " article carries source
+    // exclusion through into the filter (Another prop).
+    if let Some(condition) = parse_there_is_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "it shares a color with the most common color among all permanents
     // [or a color tied for most common]" (Heroic Defiance)
     if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
@@ -2093,6 +2102,55 @@ pub(crate) fn parse_there_are_count_on_battlefield_condition(
     there_are_count_on_battlefield_condition(lower)
         .ok()
         .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+/// CR 611.3a: "there's a[n]/another [type] on the battlefield" → an existence
+/// gate `ObjectCount(type) >= 1` (Shauku, Endbringer: "Shauku can't attack if
+/// there's another creature on the battlefield."). The singular existential
+/// counterpart of `there_are_count_on_battlefield_condition` ("there are [N] or
+/// more [type] …"): it fronts the "there's"/"there is" existential and closes
+/// with a bare "on the battlefield" (no trailing "is"/"are", unlike
+/// `exists_on_battlefield_condition`, which anchors "is on the battlefield").
+///
+/// The indefinite article "a "/"an " is stripped, but "another " is preserved so
+/// `parse_type_phrase` attaches the source-exclusion `Another` prop — "another
+/// creature" must count creatures OTHER than the source (else the source itself
+/// would satisfy its own gate and the restriction would never lift).
+pub(crate) fn parse_there_is_exists_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_is_exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn there_is_exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (input, subject) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let subject = subject.trim();
+    // Strip the indefinite article but keep "another " (source exclusion).
+    let type_text = subject
+        .strip_prefix("an ")
+        .or_else(|| subject.strip_prefix("a "))
+        .unwrap_or(subject);
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
 }
 
 fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {

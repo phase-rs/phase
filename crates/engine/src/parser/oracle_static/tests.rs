@@ -376,6 +376,74 @@ fn wirecat_cant_attack_or_block_gated_on_enchantment_exists() {
     );
 }
 
+/// CR 508.1 + CR 611.3a: A trailing "if there's a[n]/another <type> on the
+/// battlefield" gate on a "can't attack" static (Shauku, Endbringer: "Shauku
+/// can't attack if there's another creature on the battlefield.") must attach as
+/// a condition, not be swallowed. "there's a[n]/another <type> on the
+/// battlefield" is the singular existential of the "there are N or more … on the
+/// battlefield" count form = ObjectCount(<type>) >= 1. The "another" article must
+/// carry source exclusion (Another prop) so the source's own presence never
+/// satisfies its own gate — otherwise Shauku could never attack. Regression for
+/// the dropped gate → the restriction previously applied unconditionally.
+#[test]
+fn shauku_cant_attack_gated_on_another_creature_exists() {
+    let defs = parse_static_line_multi(
+        "Shauku can't attack if there's another creature on the battlefield.",
+    );
+    let restr = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack static gated by the another-creature-exists condition");
+    let Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    }) = &restr.condition
+    else {
+        panic!(
+            "expected ObjectCount(another creature) >= 1 gate, got {:?}",
+            restr.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed creature filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "gate filter must be creatures, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "\"another\" must exclude the source itself, got {:?}",
+        tf.properties
+    );
+
+    // Full-card dispatch must attach the gate with no swallowed clause.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Shauku can't attack if there's another creature on the battlefield.",
+        "Shauku, Endbringer",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantAttack && d.condition == restr.condition),
+        "full dispatch must produce the gated CantAttack, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause should be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
 /// number of Islands you control can't block this creature." must lower to a
 /// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a
