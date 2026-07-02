@@ -416,6 +416,32 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
 }
 
 #[test]
+fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
+    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
+    // attacked-only intervening-if. Gates on the source creature having attacked
+    // OR blocked this turn, composed from the existing, already-evaluated
+    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
+    // `TriggerCondition` variant.
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+        ),
+    });
+
+    // Inferno Hellion — without the gate it would shuffle itself into its
+    // owner's library every end step, even on a turn it neither attacked nor
+    // blocked.
+    let hellion = parse_trigger_line(
+        "At the beginning of each end step, if Inferno Hellion attacked or blocked this turn, \
+         its owner shuffles it into their library.",
+        "Inferno Hellion",
+    );
+    assert_eq!(hellion.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(hellion.execute.is_some());
+}
+
+#[test]
 fn trigger_etb_self() {
     let def = parse_trigger_line(
         "When this creature enters, it deals 1 damage to each opponent.",

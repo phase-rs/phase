@@ -3883,6 +3883,25 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     ),
                 },
             ),
+            // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
+            // blocked this turn" — the sibling of the attacked-only arm above,
+            // gating on the source creature having attacked OR blocked this turn
+            // (Inferno Hellion). Reuses the existing, already-evaluated
+            // `FilterProp::AttackedOrBlockedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
+            // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is
+            // needed. The turn-scoped "this turn" form only; the "this combat"
+            // form (Clockwork cycle, Kjeldoran Home Guard) needs combat-scoped
+            // tracking the engine does not yet keep and is intentionally excluded.
+            (
+                "if ~ attacked or blocked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+                    ),
+                },
+            ),
             // CR 603.4: past-turn life loss.
             (
                 "if an opponent lost life during their last turn",
