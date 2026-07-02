@@ -52,7 +52,7 @@ else
     if command -v jq &>/dev/null; then
         mapfile -t CODES < <(jq -r '.data[]
             | select(.type | IN("core", "expansion", "draft_innovation", "masters", "masterpiece", "eternal", "funny"))
-            | .code' "$SET_LIST" 2>/dev/null)
+            | .code' "$SET_LIST" 2>/dev/null | tr -d '\r')
     else
         # Fallback (jq absent — local dev only): grep/sed can't filter by type,
         # so this downloads more than needed. `booster.play` is still the gate.

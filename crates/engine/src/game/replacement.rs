@@ -5679,8 +5679,9 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
-    let proposed_damage_target = match &proposed {
+    let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
+        ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
 
@@ -5775,7 +5776,7 @@ fn apply_single_replacement(
                         post,
                         rid.source,
                         proposed_damage_source,
-                        proposed_damage_target.clone(),
+                        proposed_event_target.clone(),
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {

@@ -2107,7 +2107,27 @@ fn detect_condition_if(
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
-    let stripped = strip_cr_implicit_if_phrases(cleaned);
+    let mut stripped = strip_cr_implicit_if_phrases(cleaned);
+    let has_replacement =
+        !parsed.replacements.is_empty() || any_ability_has_target_replacement(parsed);
+    if has_replacement {
+        // CR 614.1a: strip sentences containing " instead" because they are replacement effects.
+        // Their "if" clause is part of the replacement event description, not a conditional gate.
+        let mut out = String::with_capacity(stripped.len());
+        for sentence in stripped.split('.') {
+            let s = sentence.trim();
+            if s.is_empty() {
+                continue;
+            }
+            // allow-noncombinator: swallow detector phrase scan on cleaned sentence
+            if s.contains(" instead") {
+                continue;
+            }
+            out.push_str(sentence);
+            out.push('.');
+        }
+        stripped = out;
+    }
     let stripped =
         strip_represented_tiered_enters_with_additional_counter_if_pairs(&stripped, parsed);
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
