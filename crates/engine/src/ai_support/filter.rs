@@ -36,6 +36,7 @@ use std::sync::Arc;
 use crate::game::combat::AttackTarget;
 use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard};
 use crate::game::functioning_abilities::game_functioning_statics;
+use crate::game::{casting, keywords, turn_control};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, FilterProp, ParitySource,
     ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition,
@@ -45,7 +46,7 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -134,6 +135,9 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_priority_activation(state, &candidate.action) {
             return true;
         }
+        if structurally_valid_priority_cast(state, &candidate.action) {
+            return true;
+        }
         crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
@@ -165,6 +169,44 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // same priority activation just to enter target selection and discard the
     // clone.
     crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
+}
+
+fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::Priority { player },
+        GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    if !targets.is_empty()
+        || state.priority_player != turn_control::authorized_submitter_for_player(state, *player)
+    {
+        return false;
+    }
+
+    // CR 702.61a: While a spell with split second is on the stack, players
+    // can't cast spells. Keep this explicit so the fast path cannot bypass the
+    // reducer's split-second rejection.
+    if keywords::stack_has_split_second(state) {
+        return false;
+    }
+
+    let Some(obj) = state.objects.get(object_id) else {
+        return false;
+    };
+    if obj.card_id != *card_id || !casting::can_cast_object_now(state, *player, *object_id) {
+        return false;
+    }
+
+    casting::effective_spell_cost(state, *player, *object_id)
+        .is_some_and(|cost| casting::can_pay_cost_after_auto_tap(state, *player, *object_id, &cost))
 }
 
 /// A pipeline of filters run in the order they're registered. Candidates pass
@@ -1096,7 +1138,7 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::candidate_actions;
-    use crate::types::game_state::GameState;
+    use crate::types::game_state::{CastPaymentMode, CastingVariant, GameState, StackEntryKind};
 
     #[test]
     fn default_pipeline_registered_filters_ordered_by_cost() {
@@ -1167,7 +1209,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1191,10 +1235,159 @@ mod tests {
         }
     }
 
+    fn cand_with_actor(action: GameAction, actor: PlayerId) -> CandidateAction {
+        CandidateAction {
+            action,
+            metadata: ActionMetadata {
+                actor: Some(actor),
+                tactical_class: TacticalClass::Spell,
+            },
+        }
+    }
+
+    fn zero_cost_sorcery_priority_state() -> (GameState, ObjectId, CardId) {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let card_id = CardId(100);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Shortcut Sorcery".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::zero();
+        obj.base_mana_cost = obj.mana_cost.clone();
+        (state, spell, card_id)
+    }
+
     fn dynamic_ref() -> QuantityExpr {
         QuantityExpr::Ref {
             qty: QuantityRef::LifeAboveStarting,
         }
+    }
+
+    /// Priority Auto CastSpell with no targets is accepted structurally and
+    /// avoids the clone-and-apply fallback. Revert the shortcut call or helper
+    /// acceptance ⇒ `state_clone_for_legality == 1`.
+    #[test]
+    fn structurally_valid_priority_cast_short_circuits_auto_targetless_spell() {
+        let (state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(structurally_valid_priority_cast(&state, &action));
+
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_ok(),
+            "the structural shortcut must stay within the clone/apply oracle"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(&state, &cand_with_actor(action, PlayerId(1))));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 0,
+            "structural CastSpell fast path must avoid legality clones; got {clones}"
+        );
+    }
+
+    /// CR 702.61a hostile fixture: a split-second spell on the stack blocks the
+    /// structural cast shortcut, then the clone/apply oracle rejects the cast.
+    /// Revert the explicit split-second guard ⇒ helper accepts and clones stay 0.
+    #[test]
+    fn structurally_valid_priority_cast_rejects_split_second_and_falls_back() {
+        let (mut state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(
+            structurally_valid_priority_cast(&state, &action),
+            "fixture must reach the positive shortcut before split second is added"
+        );
+
+        let split_second_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Krosan Grip".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&split_second_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::SplitSecond);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: split_second_id,
+            source_id: split_second_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(101),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+
+        assert!(!structurally_valid_priority_cast(&state, &action));
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_err(),
+            "clone/apply oracle must also reject casting under split second"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(!SimulationFilter.accept(&state, &cand(action)));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 1,
+            "split-second rejection must fall through to exactly one legality clone; got {clones}"
+        );
+    }
+
+    /// Manual payment mode is outside the conservative shortcut subset. Revert
+    /// the payment-mode guard ⇒ helper accepts and clone count drops to 0.
+    #[test]
+    fn structurally_valid_priority_cast_manual_payment_uses_fallback() {
+        let (state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        };
+
+        assert!(!structurally_valid_priority_cast(&state, &action));
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_ok(),
+            "manual payment is unsupported by the shortcut, not illegal"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(&state, &cand(action)));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 1,
+            "manual CastSpell must use the clone/apply fallback; got {clones}"
+        );
     }
 
     /// #1: two content-identical sources share ONE legality clone (memo hit).
