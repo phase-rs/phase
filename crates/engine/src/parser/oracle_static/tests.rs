@@ -993,6 +993,127 @@ fn cant_be_sacrificed_static_splits_from_pump() {
     );
 }
 
+/// CR 613.4c: `parse_fixed_pt_in_text` accepts the copula ("has"/"have")
+/// alongside "gets"/"get" so equip/anthem lines phrased with "has +N/+M"
+/// resolve to the same additive P/T grant. The sign-required modifier and the
+/// counter-suffix guard keep the copula from mis-firing on keyword grants
+/// ("has protection from red") or counter-placement lines.
+#[test]
+fn parse_fixed_pt_in_text_accepts_copula() {
+    // Copula grants (the FIX 1 broadening):
+    assert_eq!(
+        parse_fixed_pt_in_text("has +2/+2 and has flying"),
+        Some((2, 2))
+    );
+    assert_eq!(parse_fixed_pt_in_text("have +0/+2"), Some((0, 2)));
+    // Positive control — the pre-existing "gets" path still works:
+    assert_eq!(parse_fixed_pt_in_text("gets +3/+3"), Some((3, 3)));
+}
+
+/// CR 613.4c + CR 122.1a: revert-failing negatives. "has protection from red"
+/// must NOT parse a P/T grant (sign-required modifier fails on "protection"),
+/// and a "-1/-1 counters" placement line must NOT misfire into an anthem (the
+/// counter-suffix guard is the load-bearing exclusion — Melira, Sylvok Outcast).
+#[test]
+fn parse_fixed_pt_in_text_rejects_keyword_and_counter() {
+    // Keyword grant, not a P/T grant:
+    assert_eq!(parse_fixed_pt_in_text("has protection from red"), None);
+    // Counter placement, not a static grant (Melira class):
+    assert_eq!(
+        parse_fixed_pt_in_text("creatures you control can't have -1/-1 counters put on them"),
+        None
+    );
+    // Singular "counter" suffix is also excluded:
+    assert_eq!(parse_fixed_pt_in_text("has +1/+1 counters on it"), None);
+}
+
+/// CR 613.4c + CR 702.16g/i: Tinfoil Helm — "Equipped creature has +2/+2 and has
+/// protection from aliens, birds, eldrazi, lizards, mutants, robots, yetis, and
+/// hybrid mana." must produce ONE Continuous `StaticDefinition` (affected =
+/// EquippedBy) carrying AddPower{2} + AddToughness{2} AND all eight Protection
+/// modifications. The copula pump (FIX 1) and the bare-comma-list protection
+/// expansion (FIX 2) both land on the same equipped-creature grant.
+#[test]
+fn tinfoil_helm_copula_pump_and_bare_list_protection() {
+    use crate::types::keywords::ProtectionTarget;
+
+    let defs = parse_static_line_multi(
+        "Equipped creature has +2/+2 and has protection from aliens, birds, eldrazi, lizards, mutants, robots, yetis, and hybrid mana.",
+    );
+    let continuous = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("expected a Continuous grant on the equipped creature");
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "expected +2 power (copula pump), got {:?}",
+        continuous.modifications
+    );
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "expected +2 toughness (copula pump), got {:?}",
+        continuous.modifications
+    );
+    let protection_count = continuous
+        .modifications
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_),
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        protection_count, 8,
+        "expected eight separate Protection modifications, got {:?}",
+        continuous.modifications
+    );
+    // Spot-check a subtype quality landed as a Protection entry (CardType
+    // fall-through — CR 702.16a) rather than being dropped.
+    assert!(
+        continuous.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Quality(q)),
+            } if q.contains("birds")
+        ) || matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType(q)),
+            } if q.contains("birds")
+        )),
+        "expected a 'birds' protection entry, got {:?}",
+        continuous.modifications
+    );
+}
+
+/// CR 122.1a + CR 613.4c: Melira, Sylvok Outcast — "Creatures you control can't
+/// have -1/-1 counters put on them." must NOT produce any AddPower/AddToughness
+/// modification. This is the revert-failing regression guard for the
+/// counter-suffix exclusion: without it the copula ("have") would greedily read
+/// "-1/-1" as a static P/T debuff anthem.
+#[test]
+fn melira_counter_prohibition_is_not_a_pump() {
+    let mods = parse_continuous_modifications(
+        "creatures you control can't have -1/-1 counters put on them",
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "counter-prohibition line must not yield a P/T grant, got {:?}",
+        mods
+    );
+}
+
 /// CR 701.21: A qualified "can't be sacrificed unless …" tail must not be
 /// mis-split into a plain `CantBeSacrificed` — the terminal guard declines.
 #[test]
