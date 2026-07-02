@@ -4067,7 +4067,7 @@ pub enum WaitingFor {
         /// `state.last_vote_ballots`. Append-only; the lifecycle matches
         /// `last_zone_changed_ids` (cleared at chain depth 0).
         #[serde(default)]
-        ballots: im::Vector<(PlayerId, u8)>,
+        ballots: im::Vector<(PlayerId, u32)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -6982,7 +6982,7 @@ pub struct GameState {
     /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
     /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
     #[serde(default)]
-    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+    pub last_vote_ballots: im::Vector<(PlayerId, u32)>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like

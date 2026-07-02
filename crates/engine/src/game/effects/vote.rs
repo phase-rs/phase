@@ -265,7 +265,7 @@ pub fn resolve_tally(
     options: &[String],
     per_choice_effect: &[Box<AbilityDefinition>],
     tallies: &[u32],
-    ballots: &crate::im::Vector<(PlayerId, u8)>,
+    ballots: &crate::im::Vector<(PlayerId, u32)>,
     tally_mode: VoteTally,
     candidate_objects: &[ObjectId],
     outcome_template: Option<&AbilityDefinition>,
@@ -461,7 +461,7 @@ pub fn resolve_tally(
             // Punishment), `scoped_player` is harmlessly set but never read.
             let choice_ballots: Vec<PlayerId> = ballots
                 .iter()
-                .filter(|(_, choice)| *choice == idx as u8)
+                .filter(|(_, choice)| *choice == idx as u32)
                 .map(|(voter, _)| *voter)
                 .collect();
             // CR 701.38d: Process per-ballot interactive bodies one at a time.
@@ -523,7 +523,7 @@ fn resolve_top_votes_tally(
     controller: PlayerId,
     per_choice_effect: &[Box<AbilityDefinition>],
     tallies: &[u32],
-    ballots: &crate::im::Vector<(PlayerId, u8)>,
+    ballots: &crate::im::Vector<(PlayerId, u32)>,
     tie: TieResolution,
     candidate_objects: &[ObjectId],
     outcome_template: Option<&AbilityDefinition>,
@@ -1100,7 +1100,7 @@ mod tests {
                 ))
             })
             .collect();
-        let mut ballots: crate::im::Vector<(PlayerId, u8)> = crate::im::Vector::new();
+        let mut ballots: crate::im::Vector<(PlayerId, u32)> = crate::im::Vector::new();
         ballots.push_back((p0, 0));
         ballots.push_back((p1, 1));
         let tallies = vec![1u32, 1];
@@ -1658,7 +1658,7 @@ mod tests {
             .push(CoreType::Land);
 
         // Build ballots: all three players voted "money" (index 1).
-        let ballots: crate::im::Vector<(PlayerId, u8)> =
+        let ballots: crate::im::Vector<(PlayerId, u32)> =
             crate::im::Vector::from(vec![(controller, 1), (opp1, 1), (opp2, 1)]);
         let tallies = vec![0u32, 3];
         let options = choices.clone();
@@ -2131,7 +2131,7 @@ mod tests {
             } => candidate_objects
                 .iter()
                 .position(|id| *id == opp_a)
-                .expect("opp_a is a candidate") as u8,
+                .expect("opp_a is a candidate") as u32,
             other => panic!("expected VoteChoice, got {other:?}"),
         };
 
@@ -2389,11 +2389,11 @@ mod tests {
                 candidate_objects
                     .iter()
                     .position(|id| *id == opp_a)
-                    .expect("opp_a is a candidate") as u8,
+                    .expect("opp_a is a candidate") as u32,
                 candidate_objects
                     .iter()
                     .position(|id| *id == opp_b)
-                    .expect("opp_b is a candidate") as u8,
+                    .expect("opp_b is a candidate") as u32,
             ),
             other => panic!("expected VoteChoice, got {other:?}"),
         };
@@ -2438,6 +2438,124 @@ mod tests {
         );
         assert_eq!(
             state.objects.get(&opp_c).map(|o| o.zone),
+            Some(Zone::Battlefield),
+            "an un-voted permanent must NOT be exiled"
+        );
+    }
+
+    /// WS-C regression — object-pool vote with >255 candidates.
+    ///
+    /// `SubmitVoteCandidate::candidate_index` was `u8`, causing index 255+ to
+    /// wrap and alias an earlier candidate on large boards. This test creates
+    /// 257 opponent permanents, votes unanimously for the LAST candidate
+    /// (index 256), and asserts that candidate — and only that candidate — is
+    /// exiled. Regression for the u32 widening of `candidate_index`.
+    #[test]
+    fn object_vote_last_candidate_above_u8_max_is_selectable() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let vote_def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+
+        // Source object (controller's) — excluded from candidate set.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Judge".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Create 257 opponent permanents — the last one (index 256) is the
+        // target. Before the u8 fix, candidate_index 256 wrapped to 0, making
+        // the last candidate unreachable.
+        let mut opp_ids = Vec::new();
+        for n in 0u64..257 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + n),
+                opp,
+                format!("Bear {n}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            opp_ids.push(id);
+        }
+        let last_bear = *opp_ids.last().unwrap();
+
+        let ability = resolved_from_def(&vote_def, source_id, controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Locate the last bear's candidate index (>= 255 guaranteed if
+        // candidate_objects preserves insertion order, but we look it up
+        // explicitly so the test is order-agnostic).
+        let last_idx = match &state.waiting_for {
+            WaitingFor::VoteChoice {
+                candidate_objects, ..
+            } => candidate_objects
+                .iter()
+                .position(|id| *id == last_bear)
+                .expect("last bear is a candidate") as u32,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+        assert!(
+            last_idx >= 255,
+            "sanity: last candidate index must be >= 255, got {last_idx}"
+        );
+
+        // Both players vote for the last bear.
+        let first = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            first,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: last_idx,
+            },
+        )
+        .unwrap();
+        let second = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            second,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: last_idx,
+            },
+        )
+        .unwrap();
+
+        assert!(!matches!(state.waiting_for, WaitingFor::VoteChoice { .. }));
+        assert_eq!(
+            state.objects.get(&last_bear).map(|o| o.zone),
+            Some(Zone::Exile),
+            "the most-voted candidate (index >255) must be exiled"
+        );
+        // Spot-check the first bear was NOT exiled (no votes).
+        let first_bear = opp_ids[0];
+        assert_eq!(
+            state.objects.get(&first_bear).map(|o| o.zone),
             Some(Zone::Battlefield),
             "an un-voted permanent must NOT be exiled"
         );

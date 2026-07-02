@@ -347,7 +347,7 @@ struct VoteRoundState {
     option_labels: Vec<String>,
     remaining_voters: Vec<(crate::types::player::PlayerId, u32)>,
     tallies: Vec<u32>,
-    ballots: crate::im::Vector<(crate::types::player::PlayerId, u8)>,
+    ballots: crate::im::Vector<(crate::types::player::PlayerId, u32)>,
     // Mirrors `WaitingFor::VoteChoice.per_choice_effect`'s boxed shape so this
     // round-state can be moved into it directly without re-boxing.
     #[allow(clippy::vec_box)]
@@ -378,7 +378,7 @@ struct VoteRoundState {
 fn append_vote_ballot_and_advance(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-    idx: u8,
+    idx: u32,
     round: VoteRoundState,
 ) -> ResolutionChoiceOutcome {
     let VoteRoundState {
@@ -1392,12 +1392,12 @@ pub(super) fn handle_resolution_choice(
                     choice, options
                 )));
             };
-            // CR 608.2c + CR 701.38: `idx` fits in `u8` because `parse_vote_block`
-            // rejects any vote AST with more than a few choices.
+            // CR 608.2c + CR 701.38: Named vote options are a small bounded set
+            // (parse_vote_block yields at most a few choices per Oracle text).
             append_vote_ballot_and_advance(
                 state,
                 events,
-                idx as u8,
+                idx as u32,
                 VoteRoundState {
                     player,
                     remaining_votes,

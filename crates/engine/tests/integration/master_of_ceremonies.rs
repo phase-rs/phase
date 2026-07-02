@@ -93,7 +93,7 @@ fn count_battlefield_objects_named(
 /// The compound-subject combinator inside the parser produces a 2-element
 /// chain whose halves carry `OriginalController` / `ScopedPlayer` recipients,
 /// so the per-voter iteration drives both halves correctly.
-fn parse_moc_reward_body(body_text: &str, choice_index: u8) -> Box<AbilityDefinition> {
+fn parse_moc_reward_body(body_text: &str, choice_index: u32) -> Box<AbilityDefinition> {
     let mut def = parse_effect_chain(body_text, AbilityKind::Spell);
     def.player_scope = Some(PlayerFilter::VotedFor { choice_index });
     Box::new(def)

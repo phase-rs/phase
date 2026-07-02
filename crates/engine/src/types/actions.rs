@@ -308,7 +308,7 @@ pub enum GameAction {
     /// continue to use `ChooseOption { choice }`; object votes reject the string
     /// path because their candidates are not canonical option words.
     SubmitVoteCandidate {
-        candidate_index: u8,
+        candidate_index: u32,
     },
     /// Alchemy spellbook draft: the player's chosen card name in response to
     /// `WaitingFor::SpellbookDraft`. The named card is conjured into the

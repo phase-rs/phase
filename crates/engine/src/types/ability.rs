@@ -4755,7 +4755,7 @@ pub enum QuantityRef {
     /// multiple ballots, so a single player can contribute more than one to
     /// the tally). Used by vote-tally effects ("for each X vote, do Y") whose
     /// per-choice count is bound to this ref during vote-block parsing.
-    VoteCount { choice_index: u8 },
+    VoteCount { choice_index: u32 },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -5013,9 +5013,10 @@ pub enum PlayerFilter {
     /// who chose that option.
     VotedFor {
         /// Index into the parent `Effect::Vote.choices` list (and parallel
-        /// `WaitingFor::VoteChoice.options`). The voter ledger encodes choices
-        /// as `u8` — vote sessions never exceed 255 choices in practice.
-        choice_index: u8,
+        /// `WaitingFor::VoteChoice.options`), or into `candidate_objects` for
+        /// object-pool votes. Widened to `u32` so boards with >255 object
+        /// candidates (token-heavy games) are addressable without aliasing.
+        choice_index: u32,
     },
     /// CR 109.4 + CR 608.2c: The controller of the first object target of
     /// the resolving ability ("reduce that opponent's speed" anaphoring the

@@ -227,7 +227,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             // effect with the wrong (placeholder) count.
             *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
                 qty: QuantityRef::VoteCount {
-                    choice_index: idx as u8,
+                    choice_index: idx as u32,
                 },
             }
             .scaled_by(multiplier);
@@ -247,11 +247,8 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             //   friend-or-foe; no explicit CR section) routes to every
             //   labeled player, re-binding the sub-effect controller to
             //   each labeled player so "they" / "their" refers correctly.
-            //
-            // u8 fits trivially: vote-choice cardinality is bounded by Magic
-            // card design (no card has ever exceeded ~5 choices).
             parsed.player_scope = Some(PlayerFilter::VotedFor {
-                choice_index: idx as u8,
+                choice_index: idx as u32,
             });
         }
         slots[idx] = Some(Box::new(parsed));
@@ -665,7 +662,7 @@ fn bind_vote_count_aggregate(parsed: &mut AbilityDefinition, idx: usize) -> Opti
     };
     *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
         qty: QuantityRef::VoteCount {
-            choice_index: idx as u8,
+            choice_index: idx as u32,
         },
     }
     .scaled_by(per_unit);

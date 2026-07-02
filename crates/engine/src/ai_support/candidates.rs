@@ -1294,7 +1294,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .map(|i| {
                         candidate(
                             GameAction::SubmitVoteCandidate {
-                                candidate_index: i as u8,
+                                candidate_index: i as u32,
                             },
                             TacticalClass::Selection,
                             Some(actor),
