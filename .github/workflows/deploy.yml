@@ -221,7 +221,12 @@ jobs:
           check() {
             local f="$1"
             local status
-            status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
+            status=$(curl -sS -I -o /dev/null -w "%{http_code}" \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --retry 3 \
+              --retry-all-errors \
+              "$BASE/$f" || true)
             if [ "$status" != "200" ]; then
               echo "::error::R2 upload verification failed: $BASE/$f returned $status"
               fail=1
@@ -234,7 +239,7 @@ jobs:
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON. The 200
           # checks above pass regardless of encoding; this is the real proof.
-          curl -s --compressed "$BASE/scryfall-sets.json" | jq empty \
+          curl -fsS --compressed --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$BASE/scryfall-sets.json" | jq empty \
             || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
 
