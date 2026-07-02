@@ -7106,6 +7106,39 @@ fn add_another_prop(filter: TargetFilter) -> TargetFilter {
     }
 }
 
+/// CR 700.2: Attach `FilterProp::Modal` to a spell filter parsed from a "modal
+/// [type] spell" qualifier, mirroring `add_another_prop`. Distributes into
+/// `Or`/`And` branches; wraps a non-`Typed` filter in an `And` so the modality
+/// constraint is preserved.
+fn add_modal_prop(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            mut properties,
+        }) => {
+            properties.push(FilterProp::Modal);
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller,
+                properties,
+            })
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(add_modal_prop).collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.into_iter().map(add_modal_prop).collect(),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Modal])),
+            ],
+        },
+    }
+}
+
 fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
     match filter {
         TargetFilter::Typed(TypedFilter {
@@ -11812,11 +11845,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         };
         def.spell_cast_origin = cast_origin;
 
+        // CR 700.2: Peel an optional leading "modal " qualifier off the payload
+        // BEFORE the type-phrase / spell-qualifier parsers run. "modal" is not a
+        // card type, so `parse_type_phrase("modal spell")` yields an empty filter
+        // and `parse_spell_qualifier_payload` treats "modal" as an unknown pre-
+        // spell word — either way the modality is silently dropped and
+        // `valid_card` is left `None`, over-triggering on every spell (issue
+        // #750, Riku, of Many Paths). Peeling here reduces the payload to the
+        // bare type phrase (e.g. "modal spell" → "spell", "modal instant spell"
+        // → "instant spell"); the modality is re-attached as `FilterProp::Modal`
+        // after the filter is built. Scoped to the type-phrase / spell-qualifier
+        // paths below — the color-disjunction `parse_spell_that_clause_filter`
+        // branch above (Questing Druid: "a spell that's white…") returns before
+        // reaching here and is not exercised by any "modal <color>" card.
+        let (payload, is_modal) = opt(value((), tag::<_, _, OracleError<'_>>("modal ")))
+            .parse(payload)
+            .map(|(rest, matched)| (rest, matched.is_some()))
+            .unwrap_or((payload, false));
+
         // First, try the post-spell-modifier-aware decomposition for shapes
         // that include "with {X} in its mana cost" etc.
         if let Some(filter) = parse_spell_qualifier_payload(payload) {
             let filter = if is_another {
                 add_another_prop(filter)
+            } else {
+                filter
+            };
+            let filter = if is_modal {
+                add_modal_prop(filter)
             } else {
                 filter
             };
@@ -11833,6 +11889,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let (filter, _rest) = parse_type_phrase(payload);
         let filter = if is_another {
             add_another_prop(filter)
+        } else {
+            filter
+        };
+        let filter = if is_modal {
+            add_modal_prop(filter)
         } else {
             filter
         };
@@ -14531,3 +14592,105 @@ mod controlled_chosen_type_enters_tests;
 #[cfg(test)]
 #[path = "oracle_trigger_enchanted_player_controls_tests.rs"]
 mod enchanted_player_controls_tests;
+
+/// Issue #750: "Whenever you cast a modal spell" (Riku, of Many Paths) must
+/// parse a `valid_card` carrying `FilterProp::Modal` (CR 700.2), not `None`.
+/// A `None` `valid_card` over-triggers on every spell the controller casts.
+#[cfg(test)]
+mod modal_spell_cast_trigger_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{FilterProp, TargetFilter, TypeFilter};
+    use crate::types::TriggerMode;
+
+    /// Collect the top-level `FilterProp`s of a `Typed` `valid_card`, or an empty
+    /// vec for any other shape (so assertions read `contains`).
+    fn valid_card_props(vc: Option<&TargetFilter>) -> Vec<FilterProp> {
+        match vc {
+            Some(TargetFilter::Typed(tf)) => tf.properties.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// PARSER (revert-failing): Riku's SpellCast trigger's `valid_card` must be
+    /// `Some(Typed{ properties contains FilterProp::Modal })`. Reverting the
+    /// peel/attach leaves `valid_card == None` (the over-trigger bug).
+    #[test]
+    fn riku_modal_spell_cast_trigger_attaches_modal_prop() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a modal spell, choose up to X, where X is the number of times you chose a mode for that spell —\n\u{2022} Exile the top card of your library. Until the end of your next turn, you may play it.\n\u{2022} Put a +1/+1 counter on Riku. It gains trample until end of turn.\n\u{2022} Create a 1/1 blue Bird creature token with flying.",
+            "Riku, of Many Paths",
+            &[],
+            &["Legendary".into(), "Creature".into()],
+            &["Human".into(), "Wizard".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("Riku must parse a SpellCast trigger");
+        // CR 700.2: the "modal" qualifier must survive as FilterProp::Modal.
+        assert!(
+            trigger.valid_card.is_some(),
+            "valid_card must NOT be None — a None filter over-triggers on every spell"
+        );
+        assert!(
+            valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
+            "valid_card must carry FilterProp::Modal, got {:?}",
+            trigger.valid_card
+        );
+    }
+
+    /// Class generality: "modal instant spell" keeps BOTH the Modal prop and the
+    /// Instant type constraint (the peel only removes the "modal " qualifier).
+    #[test]
+    fn modal_instant_spell_keeps_type_and_modal() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a modal instant spell, draw a card.",
+            "Test Modal Instant Watcher",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger");
+        let props = valid_card_props(trigger.valid_card.as_ref());
+        assert!(
+            props.contains(&FilterProp::Modal),
+            "must carry FilterProp::Modal, got {props:?}"
+        );
+        // The Instant type constraint must remain on the type_filters.
+        match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters.contains(&TypeFilter::Instant),
+                "modal instant must keep the Instant type filter, got {:?}",
+                tf.type_filters
+            ),
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        }
+    }
+
+    /// Negative (no over-attach): a plain "you cast a spell" trigger must NOT
+    /// gain a Modal prop — the optional peel matches nothing.
+    #[test]
+    fn plain_spell_cast_trigger_has_no_modal_prop() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a spell, draw a card.",
+            "Test Plain Spell Watcher",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger");
+        assert!(
+            !valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
+            "a plain 'you cast a spell' trigger must not gain FilterProp::Modal"
+        );
+    }
+}
