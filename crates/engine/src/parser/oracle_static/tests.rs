@@ -639,6 +639,30 @@ fn dual_gated_attached_subject_defers_from_self_ref_splitter() {
     }
 }
 
+/// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions must not be preempted
+/// by the dual-gate splitter — the leading pump/keyword grant defers to the
+/// established `and can't attack` / `and can't block` splitters.
+#[test]
+fn dual_gated_attached_grant_plus_restrictions_not_preempted() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't attack if there's another creature on the battlefield and can't block if an enchantment is on the battlefield.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "pump grant must not be dropped by the dual-gate splitter, got {:?}",
+        defs
+    );
+    assert_ne!(
+        defs
+            .iter()
+            .filter(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))
+            .count(),
+        2,
+        "grant+restriction line must not collapse to only dual-gated combat statics, got {:?}",
+        defs
+    );
+}
+
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
 /// number of Islands you control can't block this creature." must lower to a
 /// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a

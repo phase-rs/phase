@@ -1964,14 +1964,27 @@ fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Opti
     tp.original.get(start..start + lower_sub.len())
 }
 
-fn dual_gated_combat_affected(tp: &TextPair<'_>, subject_lower: &str) -> Option<TargetFilter> {
-    if let Some((filter, _)) = attached_subject_filter(tp) {
-        Some(filter)
-    } else if is_self_ref_combat_subject(subject_lower) {
-        Some(TargetFilter::SelfRef)
-    } else {
-        None
+fn is_attached_combat_subject(subject: &str) -> Option<TargetFilter> {
+    match subject.trim() {
+        "enchanted creature" => Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        )),
+        "enchanted permanent" => Some(TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+        )),
+        "enchanted land" => Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+        )),
+        "equipped creature" => Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+        )),
+        _ => None,
     }
+}
+
+fn dual_gated_combat_affected(subject_lower: &str) -> Option<TargetFilter> {
+    is_attached_combat_subject(subject_lower)
+        .or_else(|| is_self_ref_combat_subject(subject_lower).then_some(TargetFilter::SelfRef))
 }
 
 fn try_parse_dual_gated_cant_attack_and_cant_block(
@@ -1980,7 +1993,7 @@ fn try_parse_dual_gated_cant_attack_and_cant_block(
 ) -> Option<Vec<StaticDefinition>> {
     let (remainder, (subject_lower, attack_cond_lower, block_cond_lower)) =
         parse_dual_gated_cant_attack_block(tp.lower).ok()?;
-    let affected = dual_gated_combat_affected(tp, subject_lower)?;
+    let affected = dual_gated_combat_affected(subject_lower)?;
     if !remainder.trim().is_empty() || attack_cond_lower.is_empty() || block_cond_lower.is_empty() {
         return None;
     }
