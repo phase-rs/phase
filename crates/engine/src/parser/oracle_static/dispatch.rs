@@ -480,11 +480,6 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
 fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinition> {
     // allow-noncombinator: split on the fixed clause anchor, not parsing dispatch.
     let (filter_text, after) = text.split_once(" can't block ")?;
-    // The blocker subject must be power-qualified — a bare "creatures … can't
-    // block this creature" is a different (unconditional) shape handled elsewhere.
-    if !filter_text.to_lowercase().contains("with power") {
-        return None;
-    }
     // CR 509.1b: the restriction is on blocking the SOURCE ("this creature"/"~").
     let after = after.trim().trim_end_matches('.').trim().to_lowercase();
     if after != "this creature" && after != "~" {
@@ -493,7 +488,10 @@ fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinitio
     // Reuse the shared filter grammar so the power comparison + dynamic threshold
     // ("less than the number of Islands you control") lower through one authority.
     let (filter, remainder) = parse_target(filter_text.trim());
-    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !target_filter_has_power_comparison(&filter)
+    {
         return None;
     }
     Some(
@@ -501,6 +499,31 @@ fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinitio
             .affected(TargetFilter::SelfRef)
             .description(text.to_string()),
     )
+}
+
+fn target_filter_has_power_comparison(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_has_power_comparison),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_power_comparison)
+        }
+        TargetFilter::Not { filter } => target_filter_has_power_comparison(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            ..
+        } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_power_comparison),
+        _ => false,
+    }
 }
 
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
