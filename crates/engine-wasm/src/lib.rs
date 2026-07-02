@@ -587,12 +587,17 @@ pub fn initialize_game(
             state.debug_permitted.insert(PlayerId(i));
         }
     }
-    state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
     } else {
         MatchConfig::default()
     };
+    // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
+    // onto the runtime `loop_detection` gate via the single engine authority shared
+    // with the server path. The detector is player-count-agnostic, so it carries
+    // through for local 3-/4-player tables too.
+    state.set_match_config(match_config);
 
     // Load deck data if provided — resolve names via the loaded card database.
     //
@@ -999,7 +1004,8 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
 /// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         to_js(&LegalActionsResult {
@@ -1021,7 +1027,8 @@ pub fn get_legal_actions_js() -> JsValue {
 /// game logic into the transport adapter.
 #[wasm_bindgen]
 pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) =
             legal_actions_for_viewer(state, PlayerId(player_id as u8));
         let auto_pass = auto_pass_recommended(state, &actions);
@@ -1059,7 +1066,8 @@ struct ViewerSnapshot {
 
 #[wasm_bindgen]
 pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let (actions, spell_costs, legal_actions_by_object) =

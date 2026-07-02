@@ -1119,6 +1119,32 @@ impl GameObject {
                     }
                 }
             }
+            PerpetualModification::ModifyCost { mode, amount } => {
+                // CR 601.2f: realize the perpetual self-cost modifier as a
+                // synthetic self-spell `ModifyCost` static. The self-spell cost collector
+                // reads LIVE `static_definitions` (casting.rs `collect_self_spell_cost_modifiers`)
+                // and the hand-zone layer pass re-syncs only `keywords` from base
+                // (layers.rs) — so push to BOTH live and base, mirroring the GrantKeywords
+                // arm (keywords + base_keywords): the live copy makes it visible to a
+                // from-hand cast immediately; the base copy survives the battlefield layer
+                // reset (`static_definitions = base.clone()`). `apply_perpetual_modification`
+                // runs once per `ApplyPerpetual` resolution (single caller, effects/perpetual.rs)
+                // so there is no double-injection; multiple distinct grants intentionally stack.
+                use crate::types::ability::TargetFilter;
+                use crate::types::statics::StaticMode;
+                self.sync_missing_base_characteristics();
+                let synthetic =
+                    crate::types::ability::StaticDefinition::new(StaticMode::ModifyCost {
+                        mode: *mode,
+                        amount: amount.clone(),
+                        spell_filter: None,
+                        dynamic_count: None,
+                    })
+                    .affected(TargetFilter::SelfRef)
+                    .active_zones(crate::types::zones::self_spell_cost_mod_active_zones());
+                self.static_definitions.push(synthetic.clone());
+                Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
+            }
         }
         self.perpetual_mods.push(modification.clone());
     }
@@ -1732,6 +1758,22 @@ impl GameObject {
             ChosenAttribute::Keyword(k) => Some(k),
             _ => None,
         })
+    }
+
+    /// CR 608.2d: Look up ALL stored chosen keywords (Greymond, Avacyn's
+    /// Stalwart "choose two abilities from among first strike, vigilance, and
+    /// lifelink" persists two `ChosenAttribute::Keyword` entries). The plural
+    /// companion to `chosen_keyword`; read by
+    /// `ContinuousModification::AddChosenKeyword` at Layer 6 evaluation so a
+    /// multi-keyword choice grants every chosen ability, not just the first.
+    pub fn chosen_keywords(&self) -> Vec<&Keyword> {
+        self.chosen_attributes
+            .iter()
+            .filter_map(|a| match a {
+                ChosenAttribute::Keyword(k) => Some(k),
+                _ => None,
+            })
+            .collect()
     }
 
     /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen

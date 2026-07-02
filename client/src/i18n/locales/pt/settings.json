@@ -12,6 +12,13 @@
     "data": "Dados"
   },
   "gameplay": {
+    "collapseLands": "Recolher Lands",
+    "collapseSupport": "Recolher Support",
+    "collapseZoneOptions": {
+      "auto": "Automático",
+      "on": "Sempre ativado",
+      "off": "Sempre desativado"
+    },
     "title": "Jogabilidade",
     "language": "Idioma",
     "cardSize": "Tamanho da Carta",

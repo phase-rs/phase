@@ -202,6 +202,26 @@ pub(crate) fn handle_choice(
         CollectEvidenceResume::Casting { pending_cast } => {
             let mut pending = pending_cast.as_ref().clone();
             pending.ability.context.additional_cost_paid = true;
+            // CR 602.2b: An ACTIVATED ability paying collect evidence as its cost
+            // (Kylox's Voltstrider) goes on the stack via the activation
+            // authority, not the spell-cast path. The exile loop above already
+            // paid the interactive part; `push_activated_ability_to_stack` pays
+            // any remaining (non-interactive) cost — collect evidence is a no-op
+            // there — and pushes the ability. Detected by the activation index
+            // carried on the pending; spell casts (bestow Detective's Phoenix)
+            // have `None` and fall through to `pay_and_push`.
+            if let Some(ability_index) = pending.activation_ability_index {
+                return super::super::casting_costs::push_activated_ability_to_stack(
+                    state,
+                    player,
+                    pending.object_id,
+                    ability_index,
+                    pending.ability,
+                    pending.activation_cost.as_ref(),
+                    pending.activation_residual,
+                    events,
+                );
+            }
             let base_cost = pending.base_cost.clone();
             super::super::casting_costs::pay_and_push(
                 state,

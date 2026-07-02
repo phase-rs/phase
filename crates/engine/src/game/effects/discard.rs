@@ -532,7 +532,9 @@ mod tests {
                     CounterType::Plus1Plus1,
                     QuantityExpr::Fixed { value: 2 },
                 )],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         replacement
@@ -558,7 +560,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -649,7 +653,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -781,7 +787,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state

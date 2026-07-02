@@ -39,6 +39,21 @@ pub(crate) fn find_legal_targets_for_ability(
     )
 }
 
+pub(crate) fn has_legal_target_for_ability(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> bool {
+    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    has_legal_target_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
 pub(crate) fn find_legal_targets_for_ability_with_controller(
     state: &GameState,
     filter: &TargetFilter,
@@ -54,6 +69,34 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
         ability.source_id,
         &target_ctx,
     )
+}
+
+/// Enumerate object targets for per-opponent fanout where filter membership is
+/// bound to the opponent named by the effect (for example, "that player
+/// controls"), while CR 115.1 + CR 702.11b targeting restrictions are still
+/// checked against the actual spell or ability controller and source.
+///
+/// This intentionally does not solve player-filter controller binding:
+/// player-filter enumeration still uses `source_controller`. It is only for
+/// object/permanent fanout helpers.
+pub(crate) fn find_legal_object_targets_for_ability_with_filter_controller(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    filter_controller: PlayerId,
+) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_ability_with_controller(ability, filter_controller);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+    .into_iter()
+    .filter(|target| matches!(target, TargetRef::Object(_)))
+    .collect()
 }
 
 fn find_legal_targets_with_context(
@@ -135,13 +178,19 @@ fn find_legal_targets_with_context(
         return targets;
     }
 
-    // Typed filter with no type_filters targets players, not permanents.
-    // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
-    // The "any other target" shape (handled above as `is_any_other_target`) is
-    // the sole exception: it adds players above and falls through to the object
+    // Typed filter with no type_filters AND no properties targets players, not
+    // permanents. e.g. "target opponent" → Typed { type_filters: [], controller:
+    // Opponent }. A non-empty `properties` list (e.g. `FilterProp::Token` for
+    // "target token you control") describes an object characteristic that has
+    // no meaning for a player, so it must fall through to the object
+    // enumeration below instead of collapsing to players-only here (issue #2004
+    // — "target token you control" was wrongly resolving to the controller
+    // player instead of enumerating tokens). The "any other target" shape
+    // (handled above as `is_any_other_target`) is the sole property-bearing
+    // exception: it adds players above and falls through to the object
     // enumeration below instead of collapsing to players-only here.
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() && !is_any_other_target {
+        if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // Player-phasing exclusion (mirrors CR 702.26b for permanents).
@@ -309,6 +358,65 @@ fn find_legal_targets_with_context(
     }
 
     targets
+}
+
+fn has_legal_target_with_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> bool {
+    if matches!(
+        filter,
+        TargetFilter::SpecificObject { .. } | TargetFilter::ParentTarget
+    ) {
+        return false;
+    }
+
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().any(|branch| {
+            has_legal_target_with_context(state, branch, source_controller, source_id, target_ctx)
+        });
+    }
+
+    let explicit_zones = extract_explicit_zones(filter);
+    if !explicit_zones.is_empty() {
+        if explicit_zones.contains(&Zone::Battlefield) {
+            for &obj_id in &state.battlefield {
+                if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+                    let Some(obj) = state.objects.get(&obj_id) else {
+                        continue;
+                    };
+                    if can_target(obj, source_controller, source_id, state) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return !find_legal_targets_with_context(
+            state,
+            filter,
+            source_controller,
+            source_id,
+            target_ctx,
+        )
+        .is_empty();
+    }
+
+    for &obj_id in &state.battlefield {
+        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if can_target(obj, source_controller, source_id, state) {
+                return true;
+            }
+        }
+    }
+
+    !find_legal_targets_with_context(state, filter, source_controller, source_id, target_ctx)
+        .is_empty()
 }
 
 /// Recheck targets on resolution using typed filter, returns only still-legal targets.
@@ -538,6 +646,9 @@ pub fn resolved_targets(
     }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
+            return targets;
+        }
+        if let Some(targets) = parent_target_refs_from_spell_cast_event(state) {
             return targets;
         }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
@@ -948,6 +1059,22 @@ fn parent_target_refs_from_attack_trigger_context(state: &GameState) -> Option<V
     (!targets.is_empty()).then_some(targets)
 }
 
+/// CR 603.2c + CR 608.2c: "one of those permanents" on a spell-cast trigger
+/// (Orvar, the All-Form) inherits the triggering spell's committed object
+/// targets while the `SpellCast` event is still in scope.
+fn parent_target_refs_from_spell_cast_event(state: &GameState) -> Option<Vec<TargetRef>> {
+    let spell_id = match state.current_trigger_event.as_ref()? {
+        GameEvent::SpellCast { object_id, .. } => *object_id,
+        _ => return None,
+    };
+    let targets = super::restrictions::triggering_spell_targets(state, spell_id)?;
+    let object_targets: Vec<TargetRef> = targets
+        .into_iter()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .collect();
+    (!object_targets.is_empty()).then_some(object_targets)
+}
+
 fn blocked_attacker_from_event(
     event: &crate::types::events::GameEvent,
     source_id: ObjectId,
@@ -1043,6 +1170,20 @@ pub fn resolve_effect_player_ref(
             let index = filter.chosen_player_index().expect("checked by guard");
             ability.chosen_players.get(index as usize).copied()
         }
+        // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside an unless
+        // clause ("unless target opponent/target player pays") resolves to the
+        // player chosen at stack placement — read from `ability.targets`,
+        // identically to the anaphoric `Player` arm above. Uses the shared
+        // `payer_is_declared_target` authority (also gates slot creation in
+        // `ability_utils` and the `resolve_unless_payer` arm) so the declared-
+        // target shape has one definition. Ordered after the `ChosenPlayer` arm,
+        // which it never overlaps (declared-target payers carry no chosen index).
+        _ if crate::game::ability_utils::payer_is_declared_target(filter) => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),
@@ -1084,6 +1225,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
+        GameEvent::TurnedFaceDown { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
         GameEvent::CreatureSuspected { object_id } => Some(*object_id),
         GameEvent::CreatureNoLongerSuspected { object_id } => Some(*object_id),
@@ -1716,7 +1858,7 @@ fn can_target(
     let ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller)
             || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
-    // CR 702.11a: Hexproof prevents targeting by opponents.
+    // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
         && obj.controller != source_controller
@@ -4328,7 +4470,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![second.clone()],
             source,
@@ -4401,6 +4545,7 @@ mod tests {
         let event = crate::types::events::GameEvent::AbilityActivated {
             player_id: PlayerId(1),
             source_id: ObjectId(99),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

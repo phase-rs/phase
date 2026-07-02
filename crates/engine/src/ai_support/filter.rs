@@ -34,7 +34,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::game::combat::AttackTarget;
-use crate::game::engine::{apply_as_current_for_legality, SimulationProbeGuard};
+use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard};
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, FilterProp, ParitySource,
@@ -131,6 +131,9 @@ impl CandidateFilter for SimulationFilter {
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
+        if structurally_valid_priority_activation(state, &candidate.action) {
+            return true;
+        }
         crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
@@ -141,8 +144,27 @@ impl CandidateFilter for SimulationFilter {
         let _probe = SimulationProbeGuard::enter();
         // Legality-only probe (#4479): `sim` is discarded, so skip display derivation
         // (the O(N^2) mana-availability board sweep on go-wide token boards).
-        apply_as_current_for_legality(&mut sim, candidate.action.clone()).is_ok()
+        apply_as_current_for_simulation(&mut sim, candidate.action.clone()).is_ok()
     }
+}
+
+fn structurally_valid_priority_activation(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::Priority { player },
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // CR 602.2 + CR 602.5: `can_activate_ability_now` is the engine's
+    // structural authority for beginning an activation. Avoid re-simulating the
+    // same priority activation just to enter target selection and discard the
+    // clone.
+    crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
 }
 
 /// A pipeline of filters run in the order they're registered. Candidates pass
@@ -236,8 +258,8 @@ impl FilterPipeline {
 /// purpose of the expensive legality simulation: every field the conservative
 /// SAFE classifiers read is captured here, while pure identity/ordering fields
 /// (`id`, `incarnation`, `timestamp`) and display-derived fields (recomputed
-/// under `PublicFinalizeMode::DeferredDisplay`, which `apply_as_current_for_legality`
-/// uses) are excluded.
+/// under `PublicFinalizeMode::DeferredDisplay`, which the legality probe's
+/// `apply_as_current_for_simulation` uses) are excluded.
 ///
 /// CR 400.7: object identity (`id`/`incarnation`) is intentionally NOT part of
 /// the fingerprint — the whole point is to collapse distinct-id, content-identical

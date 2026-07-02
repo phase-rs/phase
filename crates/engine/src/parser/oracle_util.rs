@@ -1460,10 +1460,14 @@ const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
 /// narrow guard avoids touching every other card. The phrase is restored after
 /// normalization so the dispatcher sees the real keyword-action text.
 fn mask_card_name_keyword_action(text: &str, card_name: &str) -> Option<(String, Vec<String>)> {
-    // CR 701.40a / CR 701.58a / CR 701.62a: keyword actions whose phrasing can
-    // be an entire card name. These are full keyword-action verb phrases, not
-    // bare nouns, so an exact (case-insensitive) card-name match is unambiguous.
-    const KEYWORD_ACTIONS: &[&str] = &["manifest dread", "cloak", "manifest"];
+    // CR 701.19a / CR 701.40a / CR 701.58a / CR 701.62a: keyword actions whose
+    // phrasing can be an entire card name. These are full keyword-action verb
+    // phrases, not bare nouns, so an exact (case-insensitive) card-name match is
+    // unambiguous. "regenerate" (CR 701.19a) is the card Regenerate — without
+    // masking, the leading verb collapses to the self-reference `~` and the
+    // effect ("Regenerate target creature.") parses to a bare, verbless
+    // `~ target creature`.
+    const KEYWORD_ACTIONS: &[&str] = &["manifest dread", "cloak", "manifest", "regenerate"];
     let name_lower = card_name.trim().to_ascii_lowercase();
     // allow-noncombinator: Iterator::find over the keyword-action table (slice
     // selection), not string-dispatch parsing.
@@ -1810,6 +1814,15 @@ pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
             return Some((Comparator::LT, n as i32));
         }
     }
+    // "exactly N" — CR 608.2c post-effect equality condition ("if its power is
+    // exactly 20"). Uses a nom `tag` combinator (parser-combinator gate scopes
+    // src/parser/ and rejects new string-literal strip_prefix dispatch).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(text) {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::EQ, n as i32));
+        }
+    }
     None
 }
 
@@ -1850,6 +1863,28 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_keyword_action_card_name_regenerate() {
+        // CR 701.19a: the card Regenerate's own name IS the keyword-action verb.
+        // `mask_card_name_keyword_action` must protect the leading verb from `~`
+        // normalization; otherwise "Regenerate target creature." collapses to the
+        // verbless self-reference "~ target creature" and fails to parse.
+        assert_eq!(
+            normalize_card_name_refs("Regenerate target creature.", "Regenerate"),
+            "Regenerate target creature."
+        );
+        // Longer words containing the keyword phrase are not masked (guard
+        // against over-masking): only free-standing "regenerate" occurrences are
+        // spared.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Regenerate target creature. When it's regenerated, tap it.",
+                "Regenerate"
+            ),
+            "Regenerate target creature. When it's regenerated, tap it."
         );
     }
 

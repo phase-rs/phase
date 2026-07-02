@@ -538,6 +538,12 @@ function SearchPartitionModal({
   const tappedText = data.primary_enter_tapped
     ? t("cardChoice.searchPartition.tapped")
     : "";
+  const primaryText = t(
+    `cardChoice.searchPartition.zones.${data.primary_destination}`,
+  );
+  const restText = t(
+    `cardChoice.searchPartition.zones.${data.rest_destination}`,
+  );
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -575,6 +581,8 @@ function SearchPartitionModal({
       subtitle={t("cardChoice.searchPartition.subtitle", {
         count: data.primary_count,
         tapped: tappedText,
+        primary: primaryText,
+        rest: restText,
       })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
@@ -941,9 +949,11 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
+  const isAttachChoice = data.effect_kind === "Attach";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
+    !isAttachChoice &&
     !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
@@ -977,6 +987,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     ? data.effect_kind === "Untap"
       ? "Untap"
       : "Tap"
+    : isAttachChoice
+      ? "Attach"
     : isSacrifice
       ? "Sacrifice"
       : isTopdeck

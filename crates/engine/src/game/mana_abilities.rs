@@ -6125,7 +6125,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(lions)],
             pit,
@@ -6280,6 +6282,7 @@ mod tests {
         let ev = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

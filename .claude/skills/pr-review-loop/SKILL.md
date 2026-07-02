@@ -48,7 +48,7 @@ python3 scripts/pr_review.py compact
    - `hard_stop` / `request_changes` — surface the precise blocker; do not enqueue.
    - `blocked` — current head already has blocking maintainer feedback; wait for a new head or author follow-up.
    - `defer` — record the deferral event; do not approve, label, enqueue, or merge.
-   - `hold_ci` — record a non-terminal hold and wait for exact-head CI to finish.
+   - `hold_ci` — record a non-terminal hold only when the packet is incomplete or an external condition prevents review. CI being pending, unknown, or red is not itself a review/enqueue blocker; merge-when-ready will wait for required checks.
    - `dequeue_stale_for_handler` / `update_branch_for_handler` / `approve_ready_for_handler` — advisory only; delegate execution to `pr-contribution-handler` in authorized mode.
    - `review` — fetch an `inspect --mode full` packet, then run `review-impl` against the current head and GitHub API/local diff evidence.
 4. Record every material outcome with `record`; regenerate summaries with `compact` when useful.
@@ -64,7 +64,7 @@ The CLI models freshness using:
 - author follow-ups;
 - substantive vs merge-only commits;
 - review decision;
-- CI status;
+- CI status as evidence only, not as a pre-review or merge-when-ready gate;
 - labels and merge-queue membership.
 
 ## Review Bar
@@ -89,4 +89,4 @@ Do not perform GitHub mutations from this skill except ordinary review/comment a
 
 ## Drift Rule
 
-`.agents/skills/pr-review-loop/SKILL.md` is the canonical Codex-facing copy. Keep `.claude/skills/pr-review-loop/SKILL.md` byte-for-byte synchronized.
+`.agents/skills` is a symlink to `.claude/skills`, so `.claude/skills/pr-review-loop/SKILL.md` is the single physical copy for both Claude Code and Codex. Do not create a separate file under `.agents/`; if the symlink is ever replaced with a real directory, restore it rather than maintaining two copies.

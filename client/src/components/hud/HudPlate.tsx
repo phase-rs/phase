@@ -34,6 +34,11 @@ interface HudPlateProps {
    *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
    *  participates in debug highlighting. */
   playerId?: PlayerId;
+  /** Decision authority (orthogonal to `active`/turn): this seat is the one the
+   *  game is currently waiting on to make a choice. Renders a small pulsing
+   *  corner marker so "we're waiting on this player" is legible independently
+   *  of whose turn it is. Decorative — narration lives in `TurnStatusLine`. */
+  hasPendingDecision?: boolean;
   density?: "default" | "compact";
 }
 
@@ -75,6 +80,7 @@ export function HudPlate({
   underAttack = false,
   avatarUrl,
   playerId,
+  hasPendingDecision = false,
   density = "default",
 }: HudPlateProps) {
   const { t } = useTranslation("game");
@@ -102,6 +108,7 @@ export function HudPlate({
     <Component
       type={onClick ? "button" : undefined}
       onClick={onClick}
+      data-hud-plate=""
       className={`group relative inline-flex max-w-full items-center border backdrop-blur-xl transition-all duration-200 ${plateChrome} ${TONE_CLASSES[tone]}${activeRing} ${
         onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
       }`}
@@ -136,6 +143,12 @@ export function HudPlate({
           className="pointer-events-none absolute -inset-1 z-30 rounded-2xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
         />
       )}
+      {hasPendingDecision && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -right-1 -top-1 z-30 h-2.5 w-2.5 rounded-full bg-amber-300 ring-2 ring-amber-200/50 shadow-[0_0_8px_2px_rgba(251,191,36,0.7)] animate-pulse"
+        />
+      )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
       {avatarUrl ? (
         <HudAvatar
@@ -166,7 +179,7 @@ export function HudPlate({
         </div>
       </div>
       {trailing ? (
-        <div className={trailingClass}>
+        <div className={trailingClass} data-hud-plate-trailing="">
           {trailing}
         </div>
       ) : null}

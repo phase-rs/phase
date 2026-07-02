@@ -700,9 +700,12 @@ fn pay_ability_cost_inner(
                     owner_library: false,
                     track_exiled_by_source: true,
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: true,
+                    enters_modified_if: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,

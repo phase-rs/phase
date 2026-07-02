@@ -28,6 +28,12 @@
     "updateIssue": "problema di aggiornamento",
     "updated": "aggiornato"
   },
+  "comboDetector": {
+    "label": "Rilevatore di combo",
+    "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
+    "on": "Attivo",
+    "off": "Disattivato"
+  },
   "gameMenu": {
     "menu": "Menu di gioco",
     "sandboxTools": "Strumenti Sandbox",

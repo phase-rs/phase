@@ -403,11 +403,12 @@ pub fn apply_debug_action(
         DebugAction::SetInfiniteMana { player_id, enabled } => {
             validate_player(state, player_id)?;
             if enabled {
-                state.debug_infinite_mana.insert(player_id);
+                // Delegate to the single write authority; record the six Mana axes.
+                state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
                 // Seed immediately so the pool reads full before the next probe.
                 super::mana_payment::refill_infinite_mana(state);
             } else {
-                state.debug_infinite_mana.remove(&player_id);
+                state.clear_unbounded_loop(player_id);
             }
         }
 
@@ -485,17 +486,25 @@ pub fn apply_debug_action(
                 count: 1,
                 applied: HashSet::new(),
             };
-            let first_created_id = state.next_object_id;
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     super::effects::token::apply_create_token_after_replacement(
                         state, event, events,
                     );
+                    // CR 111.4 + CR 707.2a: Preset spawns must install catalog
+                    // `rules_text` abilities (SOS Pest attack-life trigger, etc.)
+                    // after linking the preset image ref. The apply path runs
+                    // `inject_catalog_token_abilities` during creation when
+                    // `token_image_ref` is already set; debug preset creation
+                    // deferred the ref until here, so inject + reindex now.
                     if let Some(image_ref) = preset_image_ref {
-                        for (id, obj) in state.objects.iter_mut() {
-                            if id.0 >= first_created_id {
+                        let created_ids = state.last_created_token_ids.clone();
+                        for token_id in created_ids {
+                            if let Some(obj) = state.objects.get_mut(&token_id) {
                                 obj.token_image_ref = Some(image_ref.clone());
                             }
+                            super::effects::token::inject_catalog_token_abilities(state, token_id);
+                            super::trigger_index::reindex_object_triggers(state, token_id);
                         }
                     }
                     // "Run ETB effects" unchecked: the token is still created
@@ -854,6 +863,56 @@ mod tests {
     /// `+1/+1` counters in `enter_with_counters` enters as a 2/2 because
     /// the counters apply during the same ETB replacement window that
     /// engine-driven token creation uses. CR 704.5f does not kill it.
+    /// CR 111.4 + CR 603.6a: Debug preset spawns must install catalog
+    /// `rules_text` triggers and register them in the trigger index — same as
+    /// engine-driven token creation (issue #853).
+    #[test]
+    fn debug_create_preset_token_installs_catalog_triggers() {
+        let mut state = sandbox_state();
+        let sos_pest_preset_id = "00a0801d-0212-5890-8957-3cde30f382f9";
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: sos_pest_preset_id.to_string(),
+                owner: PlayerId(0),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("debug CreateToken preset should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+
+        let obj = state
+            .objects
+            .get(&token_id)
+            .expect("pest token should exist on battlefield");
+        assert_eq!(
+            obj.trigger_definitions.len(),
+            1,
+            "SOS Pest preset must install its attack-life trigger"
+        );
+        assert_eq!(
+            obj.trigger_definitions[0].mode,
+            crate::types::triggers::TriggerMode::Attacks
+        );
+        assert!(
+            state
+                .trigger_index
+                .by_key
+                .values()
+                .any(|bucket| bucket.contains(&token_id)),
+            "catalog trigger must be registered in the trigger index"
+        );
+    }
+
     #[test]
     fn debug_create_token_enters_with_counters_survives_sba() {
         let mut state = sandbox_state();

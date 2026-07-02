@@ -198,7 +198,7 @@ git diff --stat origin/main...HEAD
 - Diff touches generated registries (`known-tokens.toml`), stray gitlinks/submodules (`new file mode 160000`), or subsystems unrelated to the stated scope → handle via the Security/Sanity auto-fix classes (strip/revert); if the contamination is load-bearing to the PR's logic, reduce the PR to its real change before review.
 - A PR body claiming "Scope Expansion: None" whose diff is large and cross-cutting is a contradiction to verify, not to trust.
 
-## Prioritize (multi-PR runs and Standard-tier quality gauge)
+## Prioritize (multi-PR runs and gate quality gauge)
 
 When given multiple PRs, fetch each PR body before checkout and read its `Tier:` line:
 
@@ -214,9 +214,9 @@ gh pr view <N> --json body --jq '.body' | grep -E '^Tier: (Frontier|Standard)'
 
 **The gauge below is a triage signal, not a kill switch.** This skill exists to merge PRs, not close them. Existing PRs predate the §0.1 policy and will not have `## Gate A` or `## Anchored on` sections — that is not their fault and not grounds for closure. Use the gauge to decide *how much scrutiny* and *how much inline cleanup* a PR needs, not whether to engage with it at all.
 
-### Standard-tier quality gauge (informs scrutiny level)
+### Gate quality gauge (informs scrutiny level)
 
-Per `AI-CONTRIBUTOR.md` §0.1.2, a Standard PR opened under the new policy should include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations).
+Per `AI-CONTRIBUTOR.md` §0.1.2, the Gate A / Gate B requirements are universal: every PR opened under the current policy — Frontier or Standard — should include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations). PRs predating the universal-gate policy will lack them on Frontier submissions; treat absence as "older PR", not a violation.
 
 **Gate A check.** If `## Gate A` is present and shows violations from `./scripts/check-parser-combinators.sh`, run the script yourself on the diff and treat the violations as a required fix inline (manual string manipulation in parser dispatch must be converted to nom combinators before merge). If the section is absent (older PR or contributor unaware), run the script yourself silently and address violations during normal Architecture Review.
 
@@ -322,7 +322,7 @@ Apply the relevant lenses from `review-impl.md`, especially:
 - class of cases vs one-off special case
 - sibling coverage
 - building-block reuse
-- **test discrimination** — would each assertion FAIL if the fix were reverted? (this replaces vague "test adequacy" — a green test that pins nothing is coverage theater)
+- **test discrimination** — would each assertion FAIL if the fix were reverted? (this replaces vague "test adequacy" — a green test that pins nothing is coverage theater). Check negative assertions specifically: an upstream short-circuit (e.g. `check_swallowed_clauses` early-returning on `Effect::Unimplemented`) makes `!detector(...)` assertions pass vacuously — require a paired positive reach-guard in the same test. This is the single most frequent finding across contributor PRs.
 - **behavioral trace** — hand-trace the logic for target + 2–3 sibling cases + edge cases (multiplayer, zero/empty, interaction); confirm rules-correct *output*, not just CLAUDE.md conformance
 - **new machinery earns its keep** — card-class size vs complexity; reuse vs duplication; sibling-cluster smell
 - **regression blast-radius** — every caller of any shared/hot path the change touches
@@ -342,6 +342,8 @@ Make inline changes when the fix is local, well-understood, and does not require
 - straightforward use of an existing helper
 - local bug fix in one resolver, component, or adapter
 - cleanup of a reviewer-requested nit that does not alter design
+
+**Pipeline-evidence check (runs before the inline-vs-cycle decision).** For any PR that adds new engine or parser *surface* — a new `Effect`/`Keyword`/`TriggerCondition`/`WaitingFor`/`GameAction` variant, a new parser grammar family, a new resolver module — check the PR body and description for evidence the engine-implementer pipeline ran (plan/review sections, the `/engine-implementer` checkbox, `## Anchored on` citations). A new-surface PR with no pipeline evidence gets elevated scrutiny and defaults to routing through the full engine cycle rather than inline patching — precedent: #3816 (Heist) shipped a new mechanic with the pipeline checkbox unchecked, broke an exhaustive match across existing consumers, and took 4 review rounds. Absence of evidence is a scrutiny signal, not an auto-BLOCK: small-surface PRs that clearly followed the architecture may still be handled inline.
 
 Use `$engine-implementer` and the full plan -> implement -> review cycle when the PR needs architectural redesign or new engine primitives. Typical triggers:
 

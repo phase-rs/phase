@@ -813,6 +813,18 @@ pub enum StaticMode {
     CantSearchLibrary {
         cause: ProhibitionScope,
     },
+    /// CR 701.23f + CR 614.1a: "If an opponent would search a library, that
+    /// player searches the top N cards of that library instead." (Aven
+    /// Mindcensor). Replaces searching a library with searching the top
+    /// `count` cards. `who` scopes which SEARCHER is restricted
+    /// (controller-relative; Aven = Opponents). Runtime enforcement lives in
+    /// game/effects/search_library.rs (library_search_top_limit), consulted
+    /// inline in resolve(); search-triggers and per-turn tracking still fire
+    /// and the whole library still shuffles (CR 701.23f).
+    RestrictLibrarySearchToTop {
+        who: ProhibitionScope,
+        count: u32,
+    },
     /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
     /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
     /// abilities you control can't cause you to sacrifice or exile creature
@@ -1635,17 +1647,25 @@ pub enum StaticMode {
     ///
     /// `spell_filter` is the leaf parameterization of the spell-class axis (same
     /// CR 609.4b section, so a field, not a sibling variant):
-    /// - `None` — board-wide (Chromatic Orrery / Joiner Adept): the concession
-    ///   applies to every cost the controller pays (spell casts, effect
-    ///   payments, activations).
+    /// - `spell_filter: None, activation_source_filter: None` — board-wide
+    ///   (Chromatic Orrery): the concession applies to every cost the controller
+    ///   pays (spell casts, effect payments, activations).
     /// - `Some(filter)` — scoped to spells the controller casts that match the
     ///   filter (Vizier of the Menagerie: "creature spells"). The concession is
     ///   re-derived against the spell object at spend time and never applies to
     ///   non-spell payments. Consulted by
     ///   `casting::player_can_spend_as_any_color_for_optional_spell`.
+    /// - `activation_source_filter: Some(filter)` — scoped to activated abilities
+    ///   whose source permanent matches the filter (Agatha's Soul Cauldron /
+    ///   Joiner Adept: "to activate abilities of creatures you control"). The
+    ///   concession is re-derived against the activating permanent at spend time
+    ///   and never applies to spell casts or effect payments. Consulted by
+    ///   `static_abilities::player_can_spend_as_any_color_for_activation_source`.
     SpendManaAsAnyColor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation_source_filter: Option<TargetFilter>,
     },
     /// CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than pay
     /// that mana." Player-scope payment substitution; the indicated color may
@@ -1918,6 +1938,13 @@ impl Hash for StaticMode {
             StaticMode::AlternativeKeywordCost { keyword, .. } => {
                 keyword.hash(state);
             }
+            // CR 701.23f: Parameterized by scope + count — hash both so distinct
+            // top-N search restrictions (Opponents/top-4 vs AllPlayers/top-2)
+            // don't collide.
+            StaticMode::RestrictLibrarySearchToTop { who, count } => {
+                who.hash(state);
+                count.hash(state);
+            }
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
@@ -1974,6 +2001,7 @@ impl StaticMode {
             | StaticMode::CantBeCast { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::RestrictLibrarySearchToTop { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
@@ -2095,6 +2123,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::RestrictLibrarySearchToTop { who, count } => {
+                write!(f, "RestrictLibrarySearchToTop({who},{count})")
+            }
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
             }
@@ -2926,6 +2957,20 @@ impl FromStr for StaticMode {
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
+                    .strip_prefix("RestrictLibrarySearchToTop(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 701.23f + CR 614.1a: Round-trip of scope + count.
+                    if let Some((who_str, count_str)) = inner.split_once(',') {
+                        if let (Ok(who), Ok(count)) = (
+                            ProhibitionScope::from_str(who_str),
+                            count_str.parse::<u32>(),
+                        ) {
+                            return Ok(StaticMode::RestrictLibrarySearchToTop { who, count });
+                        }
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
                     .strip_prefix("CantCauseSacrificeOrExile(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
@@ -3667,7 +3712,10 @@ mod tests {
         use super::super::ability::{TargetFilter, TypedFilter};
 
         // (a) board-wide None: exact serialized form + round-trip.
-        let board_wide = StaticMode::SpendManaAsAnyColor { spell_filter: None };
+        let board_wide = StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        };
         let json = serde_json::to_string(&board_wide).unwrap();
         assert_eq!(
             json, r#"{"SpendManaAsAnyColor":{}}"#,
@@ -3680,6 +3728,7 @@ mod tests {
         // (b) spell-filtered Some(Typed(creature)): round-trip preserves the filter.
         let filtered = StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            activation_source_filter: None,
         };
         let json = serde_json::to_string(&filtered).unwrap();
         let back: StaticMode = serde_json::from_str(&json).unwrap();
@@ -3777,6 +3826,18 @@ mod tests {
             cause: ProhibitionScope::Opponents,
         };
         assert_eq!(mode.to_string(), "CantSearchLibrary(opponents)");
+
+        // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop display + FromStr
+        // round-trip carries both the searcher scope and the count.
+        let mode = StaticMode::RestrictLibrarySearchToTop {
+            who: ProhibitionScope::Opponents,
+            count: 4,
+        };
+        assert_eq!(mode.to_string(), "RestrictLibrarySearchToTop(opponents,4)");
+        assert_eq!(
+            StaticMode::from_str("RestrictLibrarySearchToTop(opponents,4)").unwrap(),
+            mode
+        );
 
         // CR 603.2g: SuppressTriggers display enumerates the event set.
         let mode = StaticMode::SuppressTriggers {

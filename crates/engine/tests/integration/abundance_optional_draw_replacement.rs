@@ -227,19 +227,17 @@ fn abundance_decline_falls_through_to_normal_draw() {
     issue_single_draw(&mut runner);
 
     // Find the Decline option among the candidates.
-    let WaitingFor::ReplacementChoice {
-        candidate_descriptions,
-        ..
-    } = runner.state().waiting_for.clone()
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
     else {
         panic!(
             "expected ReplacementChoice, got {:?}",
             runner.state().waiting_for
         );
     };
+    let descriptions: Vec<&str> = candidates.iter().map(|c| c.description.as_str()).collect();
     assert_eq!(
-        candidate_descriptions,
-        vec!["Accept".to_string(), "Decline".to_string()],
+        descriptions,
+        vec!["Accept", "Decline"],
         "Abundance optional replacement must surface exactly Accept/Decline"
     );
     let decline_idx = 1;
