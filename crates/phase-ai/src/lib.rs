@@ -11,6 +11,7 @@ pub mod damage_reflection;
 pub mod decision_kind;
 pub mod deck_knowledge;
 pub mod deck_profile;
+pub mod determinize;
 pub mod draft_eval;
 pub mod duel_suite;
 pub mod eval;

@@ -478,6 +478,33 @@ impl<'a> PlannerServices<'a> {
         policies: &'a PolicyRegistry,
         context: crate::context::AiContext,
     ) -> Self {
+        Self::with_deadline(ai_player, config, policies, context, None)
+    }
+
+    /// Like [`PlannerServices::new`] but lets the caller supply a shared
+    /// wall-clock ceiling (`deadline_override`) instead of deriving a fresh one
+    /// from `config.search.time_budget_ms`. The determinized ensemble
+    /// (`score_candidates_with_session`) uses this so all K per-sample searches
+    /// share ONE `Deadline::after(time_budget_ms)` — aggregate latency stays
+    /// bounded at ~budget rather than K x budget.
+    ///
+    /// Measurement mode ALWAYS wins: the override is ignored and the deadline is
+    /// `Deadline::none()` (bounded solely by node/depth budgets), matching
+    /// `new`'s measurement semantics so `cargo ai-gate` / duel-suite runs stay
+    /// byte-deterministic regardless of K. `None` reproduces `new` exactly.
+    ///
+    /// The chosen deadline is mirrored onto BOTH `self.deadline` (hot-path
+    /// rollout/eval bail-out) AND `self.context.deadline` (so policies gating on
+    /// `AiContext`, e.g. the `velocity_score` opponent-turn projection, see the
+    /// same ceiling). Missing the context mirror would let per-sample projections
+    /// run unbounded, reintroducing K x latency.
+    pub fn with_deadline(
+        ai_player: PlayerId,
+        config: &'a AiConfig,
+        policies: &'a PolicyRegistry,
+        context: crate::context::AiContext,
+        deadline_override: Option<engine::util::Deadline>,
+    ) -> Self {
         let utility_reducer: Box<dyn UtilityReducer + 'a> = match config.search.opponent_model {
             OpponentModel::DeterministicBestReply if config.player_count <= 2 => {
                 Box::new(DuelUtilityReducer)
@@ -488,12 +515,18 @@ impl<'a> PlannerServices<'a> {
             OpponentModel::SampledReply => Box::new(SampledReplyUtilityReducer),
         };
 
-        let deadline = match (
-            config.execution_mode.is_measurement(),
-            config.search.time_budget_ms,
-        ) {
-            (false, Some(ms)) => engine::util::Deadline::after(ms),
-            _ => engine::util::Deadline::none(),
+        let deadline = if config.execution_mode.is_measurement() {
+            // Measurement mode is bounded by node/depth only — never wall clock,
+            // even under an override (keeps ai-gate deterministic across K).
+            engine::util::Deadline::none()
+        } else {
+            match deadline_override {
+                Some(shared) => shared,
+                None => match config.search.time_budget_ms {
+                    Some(ms) => engine::util::Deadline::after(ms),
+                    None => engine::util::Deadline::none(),
+                },
+            }
         };
         // Mirror the same deadline onto AiContext so policies (which only see
         // PolicyContext → AiContext) can gate expensive work — specifically
@@ -1211,6 +1244,53 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn with_deadline_mirrors_override_onto_context() {
+        // N1: the shared ensemble deadline must reach BOTH `self.deadline` AND
+        // `context.deadline`. Use a non-measurement config whose own
+        // `time_budget_ms` is None so, absent the override, BOTH deadlines would
+        // be `none()` (remaining() == None). Supplying the override then proves
+        // the mirror specifically: if the code set only `self.deadline`,
+        // `context.deadline` would remain `none()` and this test would fail.
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.time_budget_ms = None; // no config-derived deadline
+        let policies = crate::policies::PolicyRegistry::shared();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            policies,
+            context,
+            Some(engine::util::Deadline::after(60_000)),
+        );
+        assert!(
+            services.deadline.remaining().is_some(),
+            "override must reach self.deadline"
+        );
+        assert!(
+            services.context.deadline.remaining().is_some(),
+            "override must be MIRRORED onto context.deadline (N1)"
+        );
+    }
+
+    #[test]
+    fn with_deadline_measurement_ignores_override() {
+        // Measurement mode is bounded by node/depth only: the override must be
+        // dropped so `cargo ai-gate` stays byte-deterministic across K samples.
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        let policies = crate::policies::PolicyRegistry::shared();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            policies,
+            context,
+            Some(engine::util::Deadline::after(60_000)),
+        );
+        assert!(services.deadline.remaining().is_none());
+        assert!(services.context.deadline.remaining().is_none());
     }
 
     #[test]

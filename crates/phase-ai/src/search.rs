@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::{Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::build_decision_context;
 use engine::types::ability::{
@@ -1481,11 +1482,132 @@ pub fn score_candidates(
     score_candidates_with_session(state, ai_player, config, &session)
 }
 
+/// Canonical serialization key for aggregating action scores across
+/// determinized samples. `GameAction` derives `Serialize` (but not `Eq`/`Hash`),
+/// so we key by `serde_json::to_string`, mirroring the frontend `mergeScores`
+/// `JSON.stringify(action)` contract exactly.
+type GameActionKey = String;
+
+fn game_action_key(action: &GameAction) -> GameActionKey {
+    serde_json::to_string(action).unwrap_or_default()
+}
+
+/// Sum each sample's per-action score into `acc` (first-seen order preserved).
+/// `positions` maps a key to its index in `acc`; `counts` records how many
+/// samples observed each action (the pin-invariant expects this to reach K for
+/// every action — see `finalize_mean`).
+fn merge_into(
+    acc: &mut Vec<(GameAction, f64)>,
+    positions: &mut std::collections::HashMap<GameActionKey, usize>,
+    counts: &mut std::collections::HashMap<GameActionKey, usize>,
+    scored: Vec<(GameAction, f64)>,
+) {
+    for (action, score) in scored {
+        let key = game_action_key(&action);
+        match positions.get(&key) {
+            Some(&pos) => {
+                acc[pos].1 += score;
+                *counts.get_mut(&key).expect("counted") += 1;
+            }
+            None => {
+                let pos = acc.len();
+                acc.push((action, score));
+                positions.insert(key.clone(), pos);
+                counts.insert(key, 1);
+            }
+        }
+    }
+}
+
+/// Divide each accumulated sum by the number of samples that observed it,
+/// yielding the ensemble mean (matches the frontend `mergeScores` averaging).
+/// The pin-invariant guarantees a constant candidate support across samples, so
+/// every action should be observed exactly `k` times; the `debug_assert` fires
+/// loudly if a future change lets the support drift (strategy fusion over a
+/// non-constant support). Release degrades to per-action-observed-count mean —
+/// `counts` is always >= 1 for any accumulated action, so never a divide-by-zero.
+fn finalize_mean(
+    mut acc: Vec<(GameAction, f64)>,
+    counts: std::collections::HashMap<GameActionKey, usize>,
+    k: usize,
+) -> Vec<(GameAction, f64)> {
+    for (action, score) in acc.iter_mut() {
+        let observed = counts
+            .get(&game_action_key(action))
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        debug_assert_eq!(
+            observed, k,
+            "determinization aggregation: action observed in {observed}/{k} samples (support drift)"
+        );
+        *score /= observed as f64;
+    }
+    acc
+}
+
+/// Ensemble entry point (native + WASM inherit it). With
+/// `determinization_samples == 0` this is byte-identical to the pre-feature
+/// single search. With `K > 0` it runs the untouched search against K
+/// determinized opponent-hidden-zone samples and means the per-action scores.
 pub fn score_candidates_with_session(
     state: &GameState,
     ai_player: PlayerId,
     config: &AiConfig,
     session: &Arc<AiSession>,
+) -> Vec<(GameAction, f64)> {
+    let k = config.search.determinization_samples;
+    if k == 0 {
+        // Unchanged path: no determinization, no shared-deadline override.
+        return score_candidates_core(state, ai_player, config, session, None);
+    }
+
+    // ONE shared wall-clock ceiling across all K sequential samples (bounds
+    // AGGREGATE latency ~time_budget_ms, not K x budget). Measurement mode is
+    // bounded by node cap only — mirrors `PlannerServices::with_deadline`, so
+    // `cargo ai-gate` stays deterministic and K-bounded solely by nodes.
+    let deadline = if config.execution_mode.is_measurement() {
+        engine::util::Deadline::none()
+    } else {
+        match config.search.time_budget_ms {
+            Some(ms) => engine::util::Deadline::after(ms),
+            None => engine::util::Deadline::none(),
+        }
+    };
+
+    // Seed: fixed across K for a given (position, game, worker); per-sample split
+    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
+    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
+    // via the per-worker `state.rng` re-seed.
+    let base_seed = crate::planner::quick_state_hash(state)
+        .wrapping_add(state.rng_seed)
+        .wrapping_add(state.rng.clone().next_u64());
+
+    let mut acc: Vec<(GameAction, f64)> = Vec::new();
+    let mut positions: std::collections::HashMap<GameActionKey, usize> =
+        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<GameActionKey, usize> =
+        std::collections::HashMap::new();
+    for i in 0..k {
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(state, ai_player, &mut rng);
+        let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
+        merge_into(&mut acc, &mut positions, &mut counts, scored);
+    }
+    finalize_mean(acc, counts, k as usize)
+}
+
+/// Core scoring for a single (possibly determinized) state. Byte-identical to
+/// the pre-feature `score_candidates_with_session` except it threads a shared
+/// `deadline_override` into `PlannerServices` — `None` reproduces the old
+/// behavior exactly.
+fn score_candidates_core(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+    deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
     if let Some(action) = fast_priority_action(state, ai_player) {
         return vec![(action, 1.0)];
@@ -1515,7 +1637,8 @@ pub fn score_candidates_with_session(
         }
     }
 
-    let mut services = PlannerServices::new(ai_player, config, policies, context);
+    let mut services =
+        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let gated = gate_candidates(
         state,
@@ -2738,6 +2861,265 @@ mod tests {
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
         }
+    }
+
+    fn set_opp_deck(state: &mut GameState, names: &[&str]) {
+        let entries = names
+            .iter()
+            .map(|n| engine::game::deck_loading::DeckEntry {
+                card: engine::types::card::CardFace {
+                    name: n.to_string(),
+                    mana_cost: engine::types::mana::ManaCost::zero(),
+                    ..Default::default()
+                },
+                count: 1,
+            })
+            .collect();
+        state
+            .deck_pools
+            .push(engine::types::game_state::PlayerDeckPool {
+                player: PlayerId(1),
+                current_main: Arc::new(entries),
+                ..Default::default()
+            });
+    }
+
+    fn add_opp_hidden(state: &mut GameState, name: &str, zone: Zone) -> ObjectId {
+        create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(1),
+            name.to_string(),
+            zone,
+        )
+    }
+
+    #[test]
+    fn determinization_k0_equals_core_baseline() {
+        // B1: `determinization_samples == 0` returns the core path unchanged.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        config.search.determinization_samples = 0;
+        let session = AiSession::arc_from_game(&state);
+        let via_wrapper = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let via_core = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert_eq!(via_wrapper, via_core);
+    }
+
+    #[test]
+    fn determinization_candidate_set_stable_over_resampled_opponent_hand() {
+        // B2 + N4(b): the AI's ObjectId-keyed candidate set is invariant to
+        // opponent hidden-hand resampling — the pin-invariant. To actually
+        // EXERCISE the pin, a candidate must key off an opponent object's id:
+        // the AI is choosing a target for a removal-style effect and the sole
+        // legal target is the opponent's PUBLIC creature. Determinization only
+        // resamples opponent HIDDEN-zone cards (hand/library), so the public
+        // creature's ObjectId is stable and the emitted `ChooseTarget` candidate
+        // set is identical across K=0 and K=3 even as the opponent's hidden hand
+        // resamples. (The pre-fix fixture used own-action-only candidates, so no
+        // candidate referenced an opponent object and the invariant was vacuous.)
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        // Opponent's public permanent — the object the AI's candidate targets.
+        let opp_creature = add_creature(&mut state, PlayerId(1), 2, 2);
+        // AI mid-resolution choosing a target; the single legal target is the
+        // opponent's public creature, so the `ChooseTarget` candidate keys off
+        // `opp_creature`'s ObjectId.
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(opp_creature)],
+                optional: false,
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: vec![TargetRef::Object(opp_creature)],
+            },
+            source_id: None,
+            description: None,
+        };
+        // Opponent decklist + hidden hand so determinization actually resamples.
+        set_opp_deck(&mut state, &["Alpha", "Beta", "Gamma", "Delta"]);
+        for i in 0..3 {
+            add_opp_hidden(&mut state, &format!("Hidden{i}"), Zone::Hand);
+        }
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        k0.search.determinization_samples = 0;
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        let base = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        let ensemble = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+
+        // Reach-guard A: a candidate genuinely keys off the opponent permanent's
+        // ObjectId (otherwise the pin-invariant is vacuously satisfied).
+        assert!(
+            base.iter().any(|(a, _)| matches!(
+                a,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                } if *id == opp_creature
+            )),
+            "reach-guard: a candidate keys off the opponent permanent's ObjectId"
+        );
+
+        // Reach-guard B: determinization is non-vacuous — reproduce the wrapper's
+        // sample-0 seed and confirm the opponent's hidden hand really resamples,
+        // while the targeted PUBLIC permanent's identity stays pinned.
+        let base_seed = crate::planner::quick_state_hash(&state)
+            .wrapping_add(state.rng_seed)
+            .wrapping_add(state.rng.clone().next_u64());
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);
+        assert!(
+            state.players[1]
+                .hand
+                .iter()
+                .any(|id| sampled.objects[id].name != state.objects[id].name),
+            "reach-guard: at least one opponent hidden-hand card must resample"
+        );
+        assert_eq!(
+            sampled.objects[&opp_creature].name, state.objects[&opp_creature].name,
+            "the targeted public permanent's identity is stable across resampling"
+        );
+
+        let base_keys: std::collections::BTreeSet<_> =
+            base.iter().map(|(a, _)| game_action_key(a)).collect();
+        let ensemble_keys: std::collections::BTreeSet<_> =
+            ensemble.iter().map(|(a, _)| game_action_key(a)).collect();
+        assert_eq!(
+            base_keys, ensemble_keys,
+            "candidate set must stay constant across determinized samples"
+        );
+    }
+
+    #[test]
+    fn determinization_aggregation_means_per_action_scores() {
+        // B3: `finalize_mean` divides each summed score by the observed count and
+        // preserves first-seen order.
+        let mut acc = Vec::new();
+        let mut pos = std::collections::HashMap::new();
+        let mut counts = std::collections::HashMap::new();
+        merge_into(
+            &mut acc,
+            &mut pos,
+            &mut counts,
+            vec![
+                (GameAction::PassPriority, 2.0),
+                (GameAction::CancelCast, 6.0),
+            ],
+        );
+        merge_into(
+            &mut acc,
+            &mut pos,
+            &mut counts,
+            vec![
+                (GameAction::PassPriority, 4.0),
+                (GameAction::CancelCast, 10.0),
+            ],
+        );
+        let out = finalize_mean(acc, counts, 2);
+        assert_eq!(out[0], (GameAction::PassPriority, 3.0)); // (2+4)/2
+        assert_eq!(out[1], (GameAction::CancelCast, 8.0)); // (6+10)/2
+    }
+
+    #[test]
+    fn determinization_tiny_shared_deadline_returns_nonempty_floor() {
+        // B4: an already-expired shared deadline (interactive, budget 0) returns
+        // the tactical floor across K samples — never empty, never a panic.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        set_opp_deck(&mut state, &["Alpha", "Beta"]);
+        add_opp_hidden(&mut state, "Hidden", Zone::Hand);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.time_budget_ms = Some(0); // pre-expired shared deadline
+        config.search.determinization_samples = 3;
+        let session = AiSession::arc_from_game(&state);
+        let out = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        assert!(
+            !out.is_empty(),
+            "K-sample ensemble must return a floor, never empty"
+        );
+    }
+
+    #[test]
+    fn determinized_search_ignores_real_opponent_hand() {
+        // D (the crux): the opponent's REAL hand holds Negate — "Counter target
+        // noncreature spell." — whose castability the perfect-information eval
+        // reads through `zone_bonus` (opponent hand quality). Under
+        // determinization the AI scores a RESAMPLED opponent hand (all cheap,
+        // castable) instead, so the K>0 scores differ from the K=0 (real-hand)
+        // scores. Paired reach-guard: the real Negate is swapped out of the world
+        // the wrapper's search actually sees.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        // Opponent decklist is all cheap (mana value 0, castable at 0 mana).
+        set_opp_deck(&mut state, &["Cheap", "Cheap", "Cheap", "Cheap", "Cheap"]);
+        // Real hand = Negate (mana value 2), uncastable because the opponent has
+        // no mana — so it contributes NO castable bonus in the real world.
+        let negate = add_opp_hidden(&mut state, "Negate", Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&negate).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = engine::types::mana::ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 2,
+            };
+        }
+
+        // Exercise the production wrapper at K=2: it must run the determinized
+        // ensemble without collapsing/crashing.
+        let session = AiSession::arc_from_game(&state);
+        let mut k2 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(3);
+        k2.search.determinization_samples = 2;
+        let determinized_scores = score_candidates_with_session(&state, PlayerId(0), &k2, &session);
+        assert!(!determinized_scores.is_empty());
+
+        // Reach-guard: reproduce the wrapper's sample-0 seed and confirm the real
+        // Negate is resampled OUT of the world the per-sample search evaluates.
+        let base_seed = crate::planner::quick_state_hash(&state)
+            .wrapping_add(state.rng_seed)
+            .wrapping_add(state.rng.clone().next_u64());
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);
+        assert_ne!(
+            sampled.objects[&negate].name, "Negate",
+            "reach-guard: the real Negate must be resampled out of the search's world"
+        );
+
+        // Revert-failing crux assertion. `evaluate_state` is exactly the leaf
+        // evaluator the beam search runs at every node (via
+        // `evaluate_state_quiesced` -> `evaluate_with_strategy` -> `zone_bonus`,
+        // which reads the OPPONENT's hidden-hand card mana values — the perfect-
+        // information cheat channel). With the real hand the opponent holds
+        // uncastable Negate; in the determinized world it holds castable Cheap, so
+        // the leaf value the search sees differs. If `determinize_opponents` were
+        // reverted to a no-op, `sampled` would equal `state` and these two evals
+        // would be identical -> this assertion flips.
+        let policies = crate::policies::PolicyRegistry::shared();
+        let services = PlannerServices::new_default(PlayerId(0), &k2, policies);
+        let real_eval = services.evaluate_state(&state);
+        let determinized_eval = services.evaluate_state(&sampled);
+        assert_ne!(
+            real_eval, determinized_eval,
+            "the search's leaf eval must change once the real opponent hand is resampled away"
+        );
     }
 
     #[test]

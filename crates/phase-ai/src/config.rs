@@ -127,6 +127,16 @@ pub struct SearchConfig {
     /// runs still allow projections because they have no wall-clock deadline.
     /// Set to 0 to always run projections.
     pub projection_min_budget_ms: u128,
+    /// Number of determinized opponent-hidden-zone samples to average the
+    /// `score_candidates` ensemble over. `0` disables determinization entirely
+    /// (perfect-information search, byte-identical to the pre-feature path) — the
+    /// disabled sentinel, matching the `max_nodes`/`rollout_samples` numeric-knob
+    /// convention rather than a bool flag. `K > 0` replaces the opponent's real
+    /// hidden hand/library with K resampled plausible worlds and means the
+    /// per-action scores across them (§7 of the determinization plan). Higher
+    /// tiers set larger K; Medium keeps `0` to preserve the default-tier strength
+    /// floor.
+    pub determinization_samples: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +199,7 @@ impl Default for SearchConfig {
             time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
             threat_awareness: ThreatAwareness::None,
             projection_min_budget_ms: 2000,
+            determinization_samples: 0,
         }
     }
 }
@@ -740,6 +751,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Easy => (
@@ -763,6 +775,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Medium => (
@@ -786,6 +799,9 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
                 projection_min_budget_ms: 2000,
+                // Medium keeps perfect-information search (K=0): the default
+                // tier's strength floor (§7c/F1) — determinization is Hard+.
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Hard => (
@@ -809,6 +825,9 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=2: halves single-sample variance at 2x base cost; node cap
+                // 48 keeps each search short. Exercised by the quick ai-gate.
+                determinization_samples: 2,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -832,6 +851,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=3: materially de-biases without runaway cost; node cap 64.
+                determinization_samples: 3,
             },
         ),
         AiDifficulty::CEDH => (
@@ -857,6 +878,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
                 // before nodes consume the budget
                 projection_min_budget_ms: 1500,
+                // K=3: same as VeryHard; multiplayer + node cap 96 dominates cost.
+                determinization_samples: 3,
             },
         ),
     };
@@ -886,6 +909,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
         config.search.rollout_depth = config.search.rollout_depth.min(2);
+        // The frontend worker pool already provides cross-sample root
+        // parallelism (ai-worker-pool.ts merges N workers), so cap per-worker K
+        // at 2 — effective samples = N_workers x K without per-worker latency
+        // blow-up (§7c).
+        config.search.determinization_samples = config.search.determinization_samples.min(2);
     }
 
     config
@@ -926,6 +954,10 @@ pub fn create_config_for_players(
                 config.search.max_nodes = config.search.max_nodes * 2 / 3;
                 config.search.max_branching = config.search.max_branching.min(4);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
+                // Determinizing 3+ opponents per sample multiplies pool work;
+                // keep K modest beyond 2 players (§7c). cEDH keeps its tier K.
+                config.search.determinization_samples =
+                    config.search.determinization_samples.min(1);
             }
         }
         _ => {
@@ -937,6 +969,10 @@ pub fn create_config_for_players(
                 config.search.max_nodes /= 3;
                 config.search.max_branching = config.search.max_branching.min(3);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
+                // 5-6+ players: one determinized sample at most (pool work scales
+                // with opponent count).
+                config.search.determinization_samples =
+                    config.search.determinization_samples.min(1);
             }
         }
     }
@@ -976,6 +1012,9 @@ mod tests {
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
         assert_eq!(config.search.rollout_depth, 1);
+        // Medium stays at perfect-information search (K=0) — the default-tier
+        // strength floor (§7c/F1).
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -986,6 +1025,9 @@ mod tests {
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
         assert_eq!(config.search.rollout_depth, 2);
+        // Hard is the first tier to determinize opponent hidden zones (K=2) —
+        // the tier the quick ai-gate exercises (§7c/§11).
+        assert_eq!(config.search.determinization_samples, 2);
     }
 
     #[test]
@@ -997,6 +1039,7 @@ mod tests {
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 5);
         assert_eq!(config.search.rollout_samples, 2);
+        assert_eq!(config.search.determinization_samples, 3);
     }
 
     #[test]
@@ -1007,6 +1050,28 @@ mod tests {
         assert!(wasm.search.max_depth <= 2);
         assert!(wasm.search.max_nodes < native.search.max_nodes);
         assert!(wasm.search.rollout_depth <= native.search.rollout_depth);
+        // WASM caps per-worker K at 2 (Hard native K=2 -> still 2 here).
+        assert!(wasm.search.determinization_samples <= 2);
+        assert_eq!(wasm.search.determinization_samples, 2);
+    }
+
+    #[test]
+    fn wasm_caps_determinization_samples_at_two() {
+        // VeryHard native K=3 must be capped to 2 on WASM (§7c min(2,tier)).
+        let native = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let wasm = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        assert_eq!(native.search.determinization_samples, 3);
+        assert_eq!(wasm.search.determinization_samples, 2);
+    }
+
+    #[test]
+    fn multiplayer_caps_determinization_samples() {
+        // Hard at 4 players: paranoid scaling caps K at 1 (§7c).
+        let four = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
+        assert_eq!(four.search.determinization_samples, 1);
+        // cEDH skips paranoid scaling entirely, so it keeps its tier K=3 at 4p.
+        let cedh4 = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 4);
+        assert_eq!(cedh4.search.determinization_samples, 3);
     }
 
     #[test]
@@ -1168,6 +1233,7 @@ mod tests {
         ));
         assert_eq!(config.search.projection_min_budget_ms, 1500);
         assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
+        assert_eq!(config.search.determinization_samples, 3);
     }
 
     #[test]
