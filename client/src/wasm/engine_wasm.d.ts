@@ -385,9 +385,9 @@ export interface InitOutput {
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
+    readonly clear_game_state: () => void;
     readonly list_token_presets_js: () => any;
     readonly create_initial_state: () => any;
-    readonly clear_game_state: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -971,6 +971,73 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(len(model["contributors"]), 1)
         self.assertEqual(model["contributors"][0]["quality_signals"], {})
 
+    def test_praise_signals_credit_score_and_skip_recurrence(self) -> None:
+        # Same praise on five distinct PRs in-window: credit is capped, and praise
+        # never reaches recurrence, top_signals, or scrutiny elevation.
+        events = [
+            self._signal_event(
+                pr, "gooddev", ["right-seam", "discriminating-runtime-test"], days_ago=pr
+            )
+            for pr in range(1, 6)
+        ]
+
+        summary = self._summary_for(events, "gooddev", current_pr=99)
+        self.assertEqual(summary["recurrence"], [])
+        self.assertEqual(summary["scrutiny"], "normal")
+
+        model = pr_review.build_analytics_model(
+            events, days=None, author=None, min_prs=1, include_open=True
+        )
+        row = next(r for r in model["contributors"] if r["login"] == "gooddev")
+        self.assertEqual(row["score_components"]["praise_credit"], pr_review.PRAISE_CREDIT_CAP)
+        self.assertEqual(row["top_signals"], [])
+        self.assertEqual(
+            row["praise_signals"],
+            {"discriminating-runtime-test": 5, "right-seam": 5},
+        )
+
+    def test_legacy_signal_aliases_normalize_and_strays_are_audited(self) -> None:
+        # The two pre-validation stray events: aliasable tokens become canonical
+        # praise; unintelligible tokens are dropped from metrics but audited.
+        events = [
+            self._signal_event(
+                1,
+                "ntindle",
+                ["runtime-test-present", "gemini-case-finding-refuted", "strive-static-bypass"],
+                days_ago=1,
+            )
+        ]
+
+        model = pr_review.build_analytics_model(
+            events, days=None, author=None, min_prs=1, include_open=True
+        )
+        row = next(r for r in model["contributors"] if r["login"] == "ntindle")
+        self.assertEqual(
+            row["praise_signals"],
+            {"discriminating-runtime-test": 1, "evidence-backed-pushback": 1},
+        )
+        self.assertEqual(model["unknown_signals"], {"strive-static-bypass": 1})
+
+        summary = self._summary_for(events, "ntindle", current_pr=2)
+        self.assertEqual(summary["recurrence"], [])
+        self.assertEqual(summary["praise_signals"]["evidence-backed-pushback"], 1)
+
+    def test_record_accepts_praise_vocabulary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            event_path = state_dir / "praise.json"
+            event_path.write_text(
+                json.dumps(
+                    {"event_type": "review", "pr": 8, "head_sha": "h", "signals": ["right-seam"]}
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = pr_review.command_record(self._record_args(state_dir, event_path))
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output.getvalue())["inserted"])
+
     def test_make_packet_without_summary_has_null_contributor(self) -> None:
         policy = pr_review.Policy({})
         pr = {
