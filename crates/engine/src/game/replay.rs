@@ -378,12 +378,16 @@ mod tests {
         apply(
             &mut live,
             PlayerId(0),
-            GameAction::RevokeDebugPermission { player_id: PlayerId(1) },
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
         )
         .expect("host revoking P1 permission must be accepted in a sandbox game");
         log.push_action(
             PlayerId(0),
-            GameAction::RevokeDebugPermission { player_id: PlayerId(1) },
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
         );
         assert!(
             live.debug_permitted.contains(&PlayerId(0)),
