@@ -4678,6 +4678,73 @@ mod tests {
     }
 
     #[test]
+    fn countered_trigger_valid_card_gates_own_spell() {
+        // CR 701.6a + CR 108.4: Multani's Presence -- "Whenever a spell you've
+        // cast is countered". The trigger gates the COUNTERED spell via
+        // `valid_card = Controller(You)`, so it fires only when the countered
+        // spell's controller matches the trigger source's controller. Prove
+        // the chosen `You` filter is honored: an own countered spell fires,
+        // an opponent's countered spell does not.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Multani's Presence".to_string(),
+            Zone::Battlefield,
+        );
+        // A spell you control (owner/controller P0 == source controller).
+        let own_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Your Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        // A spell an opponent controls (controller P1 != source controller).
+        let opponent_spell = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent's Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        let countering_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Some Counterspell".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Countered);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+
+        // Your spell is countered -> trigger fires (regardless of who countered it).
+        let own_event = GameEvent::SpellCountered {
+            object_id: own_spell,
+            countered_by: countering_source,
+            countered_by_controller: PlayerId(1),
+        };
+        assert!(
+            match_countered(&own_event, &trigger, source, &state),
+            "your own countered spell must satisfy the trigger"
+        );
+
+        // An opponent's spell is countered -> trigger does NOT fire.
+        let opponent_event = GameEvent::SpellCountered {
+            object_id: opponent_spell,
+            countered_by: countering_source,
+            countered_by_controller: PlayerId(0),
+        };
+        assert!(
+            !match_countered(&opponent_event, &trigger, source, &state),
+            "an opponent's countered spell must not satisfy the trigger"
+        );
+    }
+
+    #[test]
     fn discarded_valid_target_controller_rejects_opponent_discard() {
         let mut state = setup();
         let source = create_object(
