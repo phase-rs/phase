@@ -159,6 +159,7 @@ pub(crate) use shared::{
     is_tiered_enters_with_additional_counters_static,
     parse_tiered_enters_with_additional_counters_pattern,
 };
+pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
     parse_every_creature_type_static_prefix,
