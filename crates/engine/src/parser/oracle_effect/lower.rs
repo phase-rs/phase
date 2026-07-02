@@ -31,8 +31,7 @@ use crate::types::ability::{
     ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
     QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
     StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetFilter,
-    TypeFilter, TypedFilter,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
