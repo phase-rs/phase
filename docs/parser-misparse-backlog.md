@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 33
-- **Distinct cards implicated:** 4824
-- **Total card appearances across root causes:** 4858 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4819
+- **Total card appearances across root causes:** 4853 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -44,7 +44,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 7 | manual triage |
 | 32 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
-| 33 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
+| 33 | Static pay/action-to-ignore-effect clause dropped | 1 | add-static-ability / add-interactive-effect — model "ignore this effect until end of turn" exceptions |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5254,19 +5254,14 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 33. 'Unless'-payment / escape-cost clause dropped  (6 cards)
+### 33. Static pay/action-to-ignore-effect clause dropped  (1 card)
 
-**Signature.** An 'unless its controller pays/sacrifices/discards' alternative is modeled unconditionally; the unless_pay cost or sacrifice-alternative branch is absent.
+**Signature.** A static restriction or lock effect is modeled, but a player-facing payment or action that lets that player ignore "this effect" until end of turn is absent.
 
-**Fix hint.** oracle parser — attach unless_pay cost / alternative-action branch to the gated effect
+**Fix hint.** add-static-ability / add-interactive-effect — represent temporary ignore-effect exceptions for static restrictions
 
 <details><summary>Cards</summary>
 
-- Lava Blister
-- Lethargy Trap
-- Lim-Dûl's Hex
 - Lost in Thought
-- Read the Runes
-- Trapped in the Tower
 
 </details>
