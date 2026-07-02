@@ -288,3 +288,38 @@ fn bloodthorn_flail_from_card_db_equip_accepts_discard_without_mana() {
         "card-db Bloodthorn Flail must equip after discarding a card"
     );
 }
+
+#[test]
+fn bloodthorn_flail_from_card_db_equip_is_legal_action_without_mana() {
+    use engine::ai_support::legal_actions;
+    use engine::game::casting::can_activate_ability_now;
+
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let flail = scenario.add_real_card(P0, "Bloodthorn Flail", Zone::Battlefield, db);
+    let _discard_card = scenario.add_card_to_hand(P0, "Hand Card");
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let state = runner.state();
+
+    assert!(
+        can_activate_ability_now(state, P0, flail, 0),
+        "card-db Bloodthorn Flail equip must be legal when discard is affordable"
+    );
+    assert!(
+        legal_actions(state).iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            } if *source_id == flail
+        )),
+        "legal actions must offer card-db Bloodthorn Flail equip when discard is affordable"
+    );
+}

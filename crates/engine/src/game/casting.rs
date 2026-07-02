@@ -12433,6 +12433,19 @@ fn activation_cost_passes_early_affordability_gate(
     }
 }
 
+/// CR 118.12a: Normalize legacy card-data equip disjunctions before affordability
+/// checks so `EffectCost(ChooseOneOf)` exports match oracle-parsed `OneOf`.
+fn activation_cost_for_affordability(
+    cost: AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+) -> AbilityCost {
+    if ability_tag == Some(AbilityTag::Equip) {
+        normalize_activation_cost(cost)
+    } else {
+        cost
+    }
+}
+
 /// CR 118.12a: Normalize legacy `EffectCost(ChooseOneOf{PayCost|Discard,...})`
 /// equip costs from card-data export into `AbilityCost::OneOf`.
 fn normalize_activation_cost(cost: AbilityCost) -> AbilityCost {
@@ -12934,14 +12947,24 @@ pub fn can_activate_ability_now(
     }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
     apply_cost_reduction(state, &mut ability_def, player, source_id);
-    if ability_def.cost.as_ref().is_some_and(|cost| {
-        !can_pay_ability_cost_now(state, player, source_id, cost, ability_def.ability_tag)
+    let affordability_cost = ability_def
+        .cost
+        .clone()
+        .map(|cost| activation_cost_for_affordability(cost, ability_def.ability_tag));
+    if affordability_cost.as_ref().is_some_and(|cost| {
+        !activation_cost_passes_early_affordability_gate(
+            state,
+            player,
+            source_id,
+            cost,
+            ability_def.ability_tag,
+        )
     }) {
         return false;
     }
 
     if let Some(ref modal) = ability_def.modal {
-        if ability_def.cost.as_ref().is_some_and(requires_untapped) && obj.tapped {
+        if affordability_cost.as_ref().is_some_and(requires_untapped) && obj.tapped {
             return false;
         }
         return modal.mode_count > 0;
@@ -13164,13 +13187,10 @@ pub fn handle_activate_ability(
     // CR 118.12a: Normalize legacy card-data equip disjunctions before any
     // affordability or detour checks so EffectCost(ChooseOneOf) exports match
     // oracle-parsed OneOf at runtime.
-    let activation_cost = ability_def.cost.clone().map(|cost| {
-        if ability_def.ability_tag == Some(AbilityTag::Equip) {
-            normalize_activation_cost(cost)
-        } else {
-            cost
-        }
-    });
+    let activation_cost = ability_def
+        .cost
+        .clone()
+        .map(|cost| activation_cost_for_affordability(cost, ability_def.ability_tag));
 
     // CR 601.2b: If the activation cost requires a choice of object and no
     // legal object exists, the ability can't be activated.
