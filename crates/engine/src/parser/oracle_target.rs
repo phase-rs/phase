@@ -5093,6 +5093,15 @@ pub(crate) fn parse_shared_quality(
         value(SharedQuality::CreatureType, tag("creature type")),
         value(SharedQuality::CardType, tag("card types")),
         value(SharedQuality::CardType, tag("card type")),
+        // CR 110.4: the six permanent types (artifact, battle, creature,
+        // enchantment, land, planeswalker) are only a SUBSET of the card types.
+        // "share a permanent type" must NOT map to SharedQuality::CardType,
+        // because CR 205.2a card types also include non-permanent types like
+        // Kindred/Tribal: two permanents sharing only Kindred would wrongly
+        // satisfy "share a permanent type". Map to the narrower
+        // SharedQuality::PermanentType instead (Role Reversal, Cloudstone Curio).
+        value(SharedQuality::PermanentType, tag("permanent types")),
+        value(SharedQuality::PermanentType, tag("permanent type")),
         value(SharedQuality::LandType, tag("land types")),
         value(SharedQuality::LandType, tag("land type")),
         value(SharedQuality::Color, tag("colors")),
@@ -11876,6 +11885,43 @@ mod tests {
                 reference: Some(reference),
                 relation: SharedQualityRelation::Shares,
             } if matches!(reference.as_ref(), TargetFilter::TrackedSet { id } if *id == TrackedSetId(0))
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn parse_shared_quality_permanent_type_maps_to_permanent_type() {
+        // CR 110.4: "permanent type" names only the six permanent types, a
+        // strict subset of the card types (CR 205.2a). The recognizer maps
+        // both the singular and plural forms to SharedQuality::PermanentType
+        // (NOT CardType), so a shared non-permanent card type like Kindred
+        // cannot satisfy "share a permanent type" (Role Reversal wording).
+        let (rest, q) = parse_shared_quality("permanent type").expect("singular");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+        let (rest, q) = parse_shared_quality("permanent types").expect("plural");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_shares_permanent_type_with_it_consumed() {
+        // Cloudstone Curio: "... permanent you control that shares a permanent
+        // type with it ...". The relative clause must be consumed and lowered
+        // to a SharesQuality{PermanentType} constraint (CR 110.4 narrowing:
+        // NOT CardType, so a shared Kindred-only pairing does not match;
+        // previously the clause was silently dropped).
+        let (filter, rest) = parse_type_phrase("permanent that shares a permanent type with it");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::PermanentType,
+                relation: SharedQualityRelation::Shares,
+                ..
+            }
         )));
         assert!(rest.trim().is_empty(), "remainder: {rest:?}");
     }
