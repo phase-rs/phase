@@ -825,6 +825,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::PermanentType => "permanent type",
                     SharedQuality::LandType => "land type",
                 };
                 let prefix = match relation {
@@ -873,6 +874,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
+            FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));

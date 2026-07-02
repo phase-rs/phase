@@ -5483,6 +5483,18 @@ pub(super) fn parse_followup_continuation_ast(
                 reorder_all: false,
             })
         }
+        // CR 701.20a + CR 608.2c: A reveal-until rest-pile clause may be
+        // separated from the RevealUntil by a transparent intervening effect
+        // ("~ deals damage equal to that card's mana value. Put that card into
+        // your hand and the rest ..."). Recognize the rest-pile clause here;
+        // apply_continuation_ast searches backward to patch the earlier
+        // RevealUntil, so no standalone PutAtLibraryPosition is emitted.
+        Effect::DealDamage { .. } if is_reveal_until_rest_pile_clause_after_intervening_effect(&lower) => {
+            Some(ContinuationAst::PutRest {
+                destination: parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library),
+                reorder_all: false,
+            })
+        }
         // CR 701.20a + CR 608.2c: "Put any number of those [filter] cards onto the
         // battlefield, then put the rest … on the bottom … in a random order"
         // (Aurora Awakener). This is the multi-match disposition over the *set* of
@@ -5932,6 +5944,13 @@ pub(super) fn parse_followup_continuation_ast(
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
     }
+}
+
+fn is_reveal_until_rest_pile_clause_after_intervening_effect(lower: &str) -> bool {
+    parse_reveal_until_rest_zone(lower).is_some()
+        && (nom_primitives::scan_contains(lower, "that card")
+            || nom_primitives::scan_contains(lower, "nonland card")
+            || nom_primitives::scan_contains(lower, "revealed this way"))
 }
 
 fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationAst> {

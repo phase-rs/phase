@@ -4855,32 +4855,14 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 
     let mut result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     for _ in 0..6 {
-        if matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+        if state.players[0].graveyard.contains(&hill_giant) {
             break;
+        }
+        if matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+            panic!("Disciple should auto-sacrifice the only other creature");
         }
         result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     }
-    match result.waiting_for {
-        WaitingFor::EffectZoneChoice {
-            player,
-            cards,
-            effect_kind,
-            ..
-        } => {
-            assert_eq!(player, PlayerId(0));
-            assert_eq!(effect_kind, EffectKind::Sacrifice);
-            assert!(cards.contains(&hill_giant));
-        }
-        other => panic!("expected Disciple sacrifice choice, got {other:?}"),
-    }
-
-    apply_as_current(
-        &mut state,
-        GameAction::SelectCards {
-            cards: vec![hill_giant],
-        },
-    )
-    .unwrap();
 
     assert_eq!(state.players[0].life, 23);
     assert_eq!(state.players[0].hand.len(), 3);

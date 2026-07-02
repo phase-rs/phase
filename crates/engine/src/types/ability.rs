@@ -2813,6 +2813,11 @@ pub enum SharedQuality {
     CardType,
     /// CR 205.3i + CR 305.6: land subtypes, including the five basic land types.
     LandType,
+    /// CR 110.4: the six permanent types only — artifact, battle, creature,
+    /// enchantment, land, planeswalker. Distinct from `CardType` (CR 205.2a),
+    /// which also includes non-permanent types such as Kindred/Tribal; two
+    /// permanents sharing only Kindred do NOT share a permanent type.
+    PermanentType,
 }
 
 /// Relationship required by `FilterProp::SharesQuality`.
@@ -3145,6 +3150,11 @@ pub enum FilterProp {
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
+    /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
+    /// text offers two or more options in a bulleted list). Evaluated against the
+    /// stack object's static printed modality (`obj.modal.is_some()`), a printed
+    /// characteristic present from object creation.
+    Modal,
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {

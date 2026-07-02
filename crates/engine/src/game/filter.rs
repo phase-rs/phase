@@ -192,6 +192,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality reads the object's own printed characteristic, not
+        // the board population.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -406,6 +409,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality is candidate-local (the object's own printed
+        // characteristic), so a board entry cannot perturb it.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -2890,6 +2896,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // Approach of the Second Sun's "you've cast another spell named
         // {LITERAL} this game" relies on this against the game-scope history.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
+        // SpellCastRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        FilterProp::Modal => false,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -3888,6 +3897,10 @@ fn matches_filter_prop(
         // CR 115.7: Stack entry has exactly one target — permissive at filter level,
         // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
+        // CR 700.2: The object is modal iff its printed modality is present. Read
+        // from the static printed characteristic populated at object creation,
+        // available at SpellCast-trigger match time (Riku, of Many Paths).
+        FilterProp::Modal => obj.modal.is_some(),
         // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
         // per-object level, validated by trigger matchers and retarget effects against the
         // stack entry's actual targets.
@@ -4323,6 +4336,9 @@ fn zone_change_record_matches_property(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        | FilterProp::Modal
         | FilterProp::Suspected
         | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +
@@ -4513,6 +4529,15 @@ fn shared_quality_values(
         SharedQuality::CardType => source
             .core_types
             .iter()
+            .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
+            .collect(),
+        // CR 110.4: only the six permanent types count; Kindred/Tribal and
+        // other non-permanent card types (CR 205.2a) are excluded, so two
+        // permanents sharing only Kindred do NOT share a permanent type.
+        SharedQuality::PermanentType => source
+            .core_types
+            .iter()
+            .filter(|card_type| card_type.is_permanent_type())
             .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
             .collect(),
         SharedQuality::LandType => source
@@ -5941,6 +5966,89 @@ mod tests {
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         let filter = TargetFilter::Typed(TypedFilter::permanent());
         assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    /// CR 110.4 narrowing regression (maintainer CR on PR #4839): two objects
+    /// that share ONLY a non-permanent card type (Kindred) must NOT be treated
+    /// as sharing a permanent type. The value sets under
+    /// `SharedQuality::PermanentType` are disjoint (Kindred filtered out),
+    /// while under the old `SharedQuality::CardType` mapping they would overlap
+    /// on "kindred" — proving why "share a permanent type" cannot lower to
+    /// `CardType`.
+    #[test]
+    fn shared_permanent_type_excludes_kindred() {
+        let mut state = setup();
+
+        // Object A: Kindred Enchantment. Object B: Kindred Artifact.
+        // They share the Kindred card type but NO permanent type.
+        let a_card = CardId(state.next_object_id);
+        let a = create_object(
+            &mut state,
+            a_card,
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&a).unwrap();
+            obj.card_types.core_types = vec![CoreType::Kindred, CoreType::Enchantment];
+        }
+        let b_card = CardId(state.next_object_id);
+        let b = create_object(
+            &mut state,
+            b_card,
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&b).unwrap();
+            obj.card_types.core_types = vec![CoreType::Kindred, CoreType::Artifact];
+        }
+
+        let obj_a = state.objects.get(&a).unwrap();
+        let obj_b = state.objects.get(&b).unwrap();
+        let creature_types: &[String] = &[];
+
+        // Under PermanentType, Kindred is excluded: the value sets are the
+        // singletons {"enchantment"} and {"artifact"} and share nothing.
+        let perm_a = super::object_shared_quality_values_public(
+            obj_a,
+            &SharedQuality::PermanentType,
+            creature_types,
+        );
+        let perm_b = super::object_shared_quality_values_public(
+            obj_b,
+            &SharedQuality::PermanentType,
+            creature_types,
+        );
+        assert_eq!(perm_a, HashSet::from(["enchantment".to_string()]));
+        assert_eq!(perm_b, HashSet::from(["artifact".to_string()]));
+        assert!(
+            perm_a.is_disjoint(&perm_b),
+            "two permanents sharing only Kindred must NOT share a permanent type: {perm_a:?} vs {perm_b:?}"
+        );
+
+        // Sanity: under CardType (the old, wrong mapping) they DO overlap on
+        // "kindred", which is exactly the false positive CR 110.4 forbids.
+        let card_a = super::object_shared_quality_values_public(
+            obj_a,
+            &SharedQuality::CardType,
+            creature_types,
+        );
+        let card_b = super::object_shared_quality_values_public(
+            obj_b,
+            &SharedQuality::CardType,
+            creature_types,
+        );
+        assert!(
+            card_a.contains("kindred") && card_b.contains("kindred"),
+            "CardType mapping would (wrongly) let a shared Kindred satisfy the constraint: {card_a:?} vs {card_b:?}"
+        );
+        assert!(
+            !card_a.is_disjoint(&card_b),
+            "sanity: CardType sets overlap on kindred, proving the old mapping was over-broad"
+        );
     }
 
     #[test]

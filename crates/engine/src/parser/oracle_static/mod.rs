@@ -140,6 +140,7 @@ pub(crate) use cost_mod::{
     parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
 pub(crate) use evasion::{classify_block_exception, is_extra_blockers_static_candidate};
+pub(crate) use grammar::map_keyword;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
@@ -158,6 +159,7 @@ pub(crate) use shared::{
     is_tiered_enters_with_additional_counters_static,
     parse_tiered_enters_with_additional_counters_pattern,
 };
+pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
     parse_every_creature_type_static_prefix,

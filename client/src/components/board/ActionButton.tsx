@@ -258,13 +258,13 @@ export function ActionButton() {
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
-  const primaryButtonClass = "min-w-[10.5rem] lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
-  const secondaryButtonClass = "min-w-[8rem] [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:w-full max-lg:max-w-none max-lg:flex-col max-lg:flex-nowrap max-lg:gap-1 max-lg:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
+  const primaryButtonClass = "min-w-[10.5rem] max-lg:w-full max-lg:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+  const secondaryButtonClass = "min-w-[8rem] max-lg:w-full max-lg:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
   return (
     <>
-      <div className={panelClassName}>
+      <div className={panelClassName} data-action-button-panel>
         {mode === "combat-attackers" && !isEndingTurn && (
           <>
             <button

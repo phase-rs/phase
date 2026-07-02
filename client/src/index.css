@@ -500,6 +500,102 @@ select.select-dark option {
   }
 }
 
+/* Mobile: lift the fanned hand above the fixed bottom action rail. Row height
+   is unchanged — cards still peek off the bottom edge. Desktop (lg+) untouched. */
+@media (max-width: 1023px) {
+  :root {
+    --game-mobile-hand-lift: 1rem;
+    --game-mobile-pile-lift: 16rem;
+    --game-mobile-command-lift: 0.5rem;
+    --game-mobile-player-hud-lift: 0.5rem;
+    --game-mobile-player-hud-shift-x: 1.125rem;
+  }
+
+  [data-flex-zone="player-row"] {
+    height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px) !important;
+  }
+
+  [data-flex-zone="playerHandRow"] {
+    transform: translateY(calc(-1 * var(--game-mobile-hand-lift)));
+  }
+
+  [data-flex-zone="playerPiles"] {
+    bottom: var(--game-mobile-pile-lift) !important;
+  }
+
+  [data-command-dock="player"] {
+    transform: translateY(calc(-1 * var(--game-mobile-command-lift)));
+  }
+
+  [data-player-hud-anchor] {
+    transform: translate(
+        calc(-50% + var(--game-mobile-player-hud-shift-x, 0px)),
+        calc(-100% - var(--game-mobile-player-hud-lift))
+      )
+      !important;
+  }
+
+  [data-mobile-action-left] [data-combat-phase-indicator] {
+    align-self: flex-start;
+    margin-bottom: 0;
+    gap: 0.125rem;
+    padding: 0.125rem 0.375rem;
+  }
+
+  [data-mobile-action-left] [data-combat-phase-indicator] button {
+    height: 1.375rem;
+    width: 1.375rem;
+    min-height: 1.375rem;
+    min-width: 1.375rem;
+  }
+
+  [data-mobile-action-left] [data-combat-phase-indicator] button svg {
+    height: 0.625rem;
+    width: 0.625rem;
+  }
+
+  [data-mobile-action-left] [data-combat-phase-indicator] button > span {
+    transform: scale(0.85);
+  }
+
+  [data-flex-zone="actionRail"] {
+    right: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    flex-direction: row !important;
+    align-items: flex-end !important;
+    justify-content: space-between !important;
+    padding-left: calc(env(safe-area-inset-left) + var(--game-edge-right, 0.75rem));
+    padding-right: calc(env(safe-area-inset-right) + var(--game-edge-right, 0.75rem));
+    transform-origin: bottom center !important;
+  }
+
+  [data-mobile-action-left],
+  [data-mobile-action-right] {
+    width: min(calc((100vw - 3rem) / 2), 9.5rem);
+  }
+}
+
+@media (max-width: 1023px) and (max-aspect-ratio: 10/11) {
+  :root {
+    --game-mobile-hand-lift: 3.25rem;
+    --game-mobile-pile-lift: 18.5rem;
+    --game-mobile-command-lift: 0.75rem;
+    --game-mobile-player-hud-lift: 1.25rem;
+    --game-mobile-player-hud-shift-x: 1.5rem;
+  }
+}
+
+@media (max-width: 1023px) and (max-height: 500px) {
+  :root {
+    --game-mobile-hand-lift: 0.75rem;
+    --game-mobile-pile-lift: 12.5rem;
+    --game-mobile-command-lift: 0.25rem;
+    --game-mobile-player-hud-lift: 0.25rem;
+    --game-mobile-player-hud-shift-x: 0.75rem;
+  }
+}
+
 /* Compact modal styles for landscape phones / short viewports.
    Desktop sizes require BOTH min-height: 500px AND min-width: 768px.
    This ensures landscape phones (e.g. 833×390) stay compact. */

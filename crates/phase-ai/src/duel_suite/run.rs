@@ -300,27 +300,36 @@ fn run_matchups_parallel(
     let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..n_workers)
             .map(|_| {
-                scope.spawn(|| {
-                    let mut local: Vec<(usize, MatchupResult)> = Vec::new();
-                    loop {
-                        let pos = cursor.fetch_add(1, Ordering::Relaxed);
-                        if pos >= run_total {
-                            break;
+                // The plan-mandated `cargo ai-gate --difficulty hard` runs in a
+                // debug + measurement build with no wall-clock bail, so the
+                // determinized Hard+ search recurses deep — bounded, but deeper
+                // than the default ~2MB scoped-thread stack, which overflows.
+                // Give each worker a roomy 32 MiB stack. Test-harness only; zero
+                // production impact.
+                std::thread::Builder::new()
+                    .stack_size(32 << 20)
+                    .spawn_scoped(scope, || {
+                        let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                        loop {
+                            let pos = cursor.fetch_add(1, Ordering::Relaxed);
+                            if pos >= run_total {
+                                break;
+                            }
+                            let (idx, spec) = selected[pos];
+                            let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
+                            let result = run_single_matchup(db, spec, options, matchup_seed);
+                            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            eprintln!(
+                                "[{completed:>2}/{run_total}] {id}  done (games: {games})",
+                                id = spec.id,
+                                games = options.games_per_matchup,
+                            );
+                            print_matchup_row(&result);
+                            local.push((pos, result));
                         }
-                        let (idx, spec) = selected[pos];
-                        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-                        let result = run_single_matchup(db, spec, options, matchup_seed);
-                        let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!(
-                            "[{completed:>2}/{run_total}] {id}  done (games: {games})",
-                            id = spec.id,
-                            games = options.games_per_matchup,
-                        );
-                        print_matchup_row(&result);
-                        local.push((pos, result));
-                    }
-                    local
-                })
+                        local
+                    })
+                    .expect("failed to spawn suite worker thread")
             })
             .collect();
         handles

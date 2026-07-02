@@ -25,10 +25,19 @@ use std::sync::Arc;
 pub fn grant_emblem(
     state: &mut GameState,
     owner: PlayerId,
-    statics: Vec<StaticDefinition>,
+    mut statics: Vec<StaticDefinition>,
     triggers: Vec<TriggerDefinition>,
     abilities: Vec<AbilityDefinition>,
 ) -> ObjectId {
+    // CR 114.4 + CR 113.6b: static abilities on emblems function from the
+    // command zone; stamp the zone explicitly so permission readers that gate
+    // on `active_zones` (graveyard play/cast permissions) see the static.
+    for static_def in &mut statics {
+        if !static_def.active_zones.contains(&Zone::Command) {
+            static_def.active_zones.push(Zone::Command);
+        }
+    }
+
     // CR 114.1: Create emblem in command zone owned by `owner`.
     let emblem_id = create_object(state, CardId(0), owner, "Emblem".to_string(), Zone::Command);
     let obj = state.objects.get_mut(&emblem_id).unwrap();
@@ -137,6 +146,37 @@ mod tests {
             description: None,
             attack_defended: None,
         }
+    }
+
+    #[test]
+    fn create_emblem_stamps_command_zone_on_graveyard_permission_statics() {
+        let graveyard_play = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: crate::types::ability::CardPlayMode::Play,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(
+            crate::types::ability::TypeFilter::Land,
+        )));
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![graveyard_play],
+                triggers: Vec::new(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let emblem_id = state.command_zone[0];
+        let static_def = &state.objects[&emblem_id].static_definitions[0];
+        assert!(
+            static_def.active_zones.contains(&Zone::Command),
+            "emblem graveyard permissions must function from the command zone"
+        );
     }
 
     #[test]

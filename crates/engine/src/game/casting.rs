@@ -1,11 +1,11 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission, ChoiceType,
-    ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
-    Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
-    PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
-    TapCreaturesRequirement, TargetFilter, TargetRef,
+    AbilityKind, AbilityTag, AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission,
+    ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
+    CounterCostSelection, Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition,
+    ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
+    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -2653,6 +2653,12 @@ fn graveyard_permission_sources(
     play_mode_filter: Option<CardPlayMode>,
 ) -> Vec<GraveyardPermissionSource<'_>> {
     let mut source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    source_ids.extend(state.command_zone.iter().copied().filter(|&id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
+    }));
     if let Some(player_data) = state.players.iter().find(|p| p.id == player) {
         source_ids.extend(player_data.graveyard.iter().copied());
     }
@@ -4581,14 +4587,17 @@ fn prepare_spell_cast_with_variant_override_inner(
     let exile_alt_cost_free = alt_cost_from_exile
         .as_ref()
         .is_some_and(ManaCost::is_without_paying_mana);
-    // CR 702.94a: Miracle alternative cost — pulled from `Keyword::Miracle(cost)`
-    // on the hand object. Only honored when the caller explicitly opted into the
+    // CR 702.94a: Miracle alternative cost — consult `effective_spell_keywords`
+    // so hand-granted miracle (Molecule Man) is honored at cast time, not only
+    // at offer enqueue. Only honored when the caller explicitly opted into the
     // Miracle variant via the reveal prompt.
     let miracle_cost = if casting_variant == CastingVariant::Miracle {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
+                _ => None,
+            })
     } else {
         None
     };
@@ -8089,11 +8098,11 @@ pub fn handle_cast_spell_as_miracle_with_payment_mode(
     }
     // CR 702.94a: The keyword must still be present — it can have been removed
     // by layers / replacement effects between offer time and accept time.
-    let has_miracle = obj
-        .keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Miracle(_)));
-    if !has_miracle {
+    if !super::keywords::object_has_effective_keyword_kind(
+        state,
+        object_id,
+        crate::types::keywords::KeywordKind::Miracle,
+    ) {
         return Err(EngineError::ActionNotAllowed(
             "Card no longer has miracle".to_string(),
         ));
@@ -12385,6 +12394,54 @@ fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     }
 }
 
+/// CR 118.12a: Normalize legacy `EffectCost(ChooseOneOf{PayCost|Discard,...})`
+/// equip costs from card-data export into `AbilityCost::OneOf`.
+fn normalize_activation_cost(cost: AbilityCost) -> AbilityCost {
+    match cost {
+        AbilityCost::EffectCost { effect } => {
+            disjunctive_effect_cost_as_one_of(&effect).unwrap_or(AbilityCost::EffectCost { effect })
+        }
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs.into_iter().map(normalize_activation_cost).collect(),
+        },
+        other => other,
+    }
+}
+
+fn disjunctive_effect_cost_as_one_of(effect: &Effect) -> Option<AbilityCost> {
+    let Effect::ChooseOneOf { branches, .. } = effect else {
+        return None;
+    };
+    if branches.len() < 2 {
+        return None;
+    }
+    let costs: Vec<AbilityCost> = branches
+        .iter()
+        .filter_map(|branch| effect_branch_as_activation_cost(branch.effect.as_ref()))
+        .collect();
+    (costs.len() == branches.len()).then_some(AbilityCost::OneOf { costs })
+}
+
+fn effect_branch_as_activation_cost(effect: &Effect) -> Option<AbilityCost> {
+    match effect {
+        Effect::PayCost {
+            cost, scale: None, ..
+        } => Some(cost.clone()),
+        Effect::Discard {
+            count,
+            target: TargetFilter::Controller | TargetFilter::Player,
+            selection,
+            ..
+        } => Some(AbilityCost::Discard {
+            count: count.clone(),
+            filter: None,
+            selection: *selection,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        }),
+        _ => None,
+    }
+}
+
 pub(super) fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
@@ -13184,7 +13241,14 @@ pub fn handle_activate_ability(
 
     // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
     // before any cost payment, regardless of whether targets were auto-selected.
-    if let Some(ref cost) = ability_def.cost {
+    let activation_cost = ability_def.cost.clone().map(|cost| {
+        if ability_def.ability_tag == Some(AbilityTag::Equip) {
+            normalize_activation_cost(cost)
+        } else {
+            cost
+        }
+    });
+    if let Some(ref cost) = activation_cost {
         // CR 606.3: `can_activate_ability_now` gates legal-action generation,
         // but direct `GameAction::ActivateAbility` submissions must be rejected
         // here before the chosen-X detour can announce/pay a `[−X]` loyalty cost.

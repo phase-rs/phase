@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 34
-- **Distinct cards implicated:** 4832
-- **Total card appearances across root causes:** 4866 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 32
+- **Distinct cards implicated:** 4814
+- **Total card appearances across root causes:** 4848 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -13,9 +13,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 754 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 605 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 606 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 4 | Conjoined / chained second effect clause dropped | 388 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 333 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 248 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 211 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
@@ -36,16 +36,14 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
 | 23 | Effect modeled with structurally wrong variant / ability class | 51 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
-| 25 | Wrong / dropped effect duration | 30 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 25 | Wrong / dropped effect duration | 32 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 21 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 20 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 29 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
 | 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
-| 31 | 'another'/'other' self-exclusion FilterProp dropped | 10 | oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed |
-| 32 | Other / uncategorized misparse | 7 | manual triage |
-| 33 | Duplicate / spurious effect or modification emitted | 7 | oracle parser — dedupe search-result continuations and guard against phantom effect nodes |
-| 34 | 'Unless'-payment / escape-cost clause dropped | 6 | oracle parser — attach unless_pay cost / alternative-action branch to the gated effect |
+| 31 | Other / uncategorized misparse | 7 | manual triage |
+| 32 | Static pay/action-to-ignore-effect clause dropped | 1 | add-static-ability / add-interactive-effect — model "ignore this effect until end of turn" exceptions |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -816,7 +814,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (605 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (606 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1380,6 +1378,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Uthros Psionicist
 - Vadrik, Astral Archmage
 - Valakut Exploration
+- Valiant Emberkin
 - Vampire Scrivener
 - Vampire Socialite
 - Vantress Paladin
@@ -1847,7 +1846,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (387 cards)
+### 4. Conjoined / chained second effect clause dropped  (388 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -2033,6 +2032,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lynde, Cheerful Tormentor
 - Magmaquake
 - Magmasaur
+- Magus of the Jar
 - March from Velis Vel
 - Marcus, Mutant Mayor
 - Mardu Siegebreaker
@@ -5024,7 +5024,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 25. Wrong / dropped effect duration  (30 cards)
+### 25. Wrong / dropped effect duration  (32 cards)
 
 **Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
 
@@ -5042,6 +5042,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ferris Wheel
 - Firja's Retribution
 - Fraying Sanity
+- Furious Rise
 - Glorious End
 - Golden Guardian
 - Jinx
@@ -5061,6 +5062,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Plant a Sapling
 - Superior Foes of Spider-Man
 - Trickery Charm
+- Unstable Amulet
 - War of the Last Alliance
 
 </details>
@@ -5217,28 +5219,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. 'another'/'other' self-exclusion FilterProp dropped  (10 cards)
-
-**Signature.** Target/sacrifice filter omits FilterProp::Another; the 'another'/'other' qualifier excluding the source object is not propagated.
-
-**Fix hint.** oracle_target.rs — re-inject FilterProp::Another after 'another'/'other' is consumed
-
-<details><summary>Cards</summary>
-
-- Furious Rise
-- Haze Frog
-- High-Society Hunter
-- Hotel of Fears
-- Incremental Blight
-- Incremental Growth
-- Morkrut Necropod
-- Mukotai Soulripper
-- Redcap Gutter-Dweller
-- Unstable Amulet
-
-</details>
-
-### 32. Other / uncategorized misparse  (7 cards)
+### 31. Other / uncategorized misparse  (4 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5246,47 +5227,21 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Bound by Moonsilver
-- Bound in Gold
 - Flaccify
 - Merfolk Falconer
 - Rush of Dread
-- Sorcerous Sight
 - The Goose Mother
 
 </details>
 
-### 33. Duplicate / spurious effect or modification emitted  (7 cards)
+### 32. Static pay/action-to-ignore-effect clause dropped  (1 card)
 
-**Signature.** A single Oracle instruction is lowered to two effects (double ChangeZone after search, duplicate modification) or a phantom node with no Oracle basis is injected.
+**Signature.** A static restriction or lock effect is modeled, but a player-facing payment or action that lets that player ignore "this effect" until end of turn is absent.
 
-**Fix hint.** oracle parser — dedupe search-result continuations and guard against phantom effect nodes
-
-<details><summary>Cards</summary>
-
-- Exhumer Thrull
-- Explosive Revelation
-- Graven Dominator
-- Lumen-Class Frigate
-- Magus of the Jar
-- Mana Severance
-- Valiant Emberkin
-
-</details>
-
-### 34. 'Unless'-payment / escape-cost clause dropped  (6 cards)
-
-**Signature.** An 'unless its controller pays/sacrifices/discards' alternative is modeled unconditionally; the unless_pay cost or sacrifice-alternative branch is absent.
-
-**Fix hint.** oracle parser — attach unless_pay cost / alternative-action branch to the gated effect
+**Fix hint.** add-static-ability / add-interactive-effect — represent temporary ignore-effect exceptions for static restrictions
 
 <details><summary>Cards</summary>
 
-- Lava Blister
-- Lethargy Trap
-- Lim-Dûl's Hex
 - Lost in Thought
-- Read the Runes
-- Trapped in the Tower
 
 </details>
