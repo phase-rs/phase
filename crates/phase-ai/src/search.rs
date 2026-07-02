@@ -1480,7 +1480,7 @@ pub fn score_candidates(
     score_candidates_with_session(state, ai_player, config, &session)
 }
 
-fn score_candidates_with_session(
+pub fn score_candidates_with_session(
     state: &GameState,
     ai_player: PlayerId,
     config: &AiConfig,
@@ -2598,6 +2598,7 @@ mod tests {
 
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
+    use crate::session::SessionCache;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -3402,6 +3403,111 @@ mod tests {
         assert!(
             has_cast || scored.is_empty(),
             "CastSpell should be a candidate when creature is castable"
+        );
+    }
+
+    /// Scoring is RNG-free, so a session pulled from `SessionCache` must produce
+    /// byte-identical scores to a freshly built session. Guards the WASM
+    /// session-cache reuse: if `get_or_build` ever returned a session that
+    /// differed from `arc_from_game`, `assert_eq` on the full score vector flips.
+    #[test]
+    fn score_candidates_with_session_matches_fresh_session() {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        let session_fresh = AiSession::arc_from_game(&state);
+        let mut cache = SessionCache::new_empty();
+        let session_cached = cache.get_or_build(&state);
+
+        let scored_fresh =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_fresh);
+        let scored_cached =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_cached);
+
+        // HARD reach-guard (no `|| is_empty()` escape): production input must
+        // reach the CastSpell enumeration arm, else the assert_eq is vacuous.
+        assert!(
+            scored_cached
+                .iter()
+                .any(|(a, _)| matches!(a, GameAction::CastSpell { .. })),
+            "castable creature + pool mana must enumerate a CastSpell candidate"
+        );
+        assert_eq!(
+            scored_cached, scored_fresh,
+            "cached and fresh sessions must produce identical scores (RNG-free scoring path)"
+        );
+    }
+
+    /// The pool-worker discriminator: a board-only mutation (hand + mana pool,
+    /// `deck_pools` untouched) must NOT invalidate the deck-keyed session, and
+    /// the reused session must still score the mutated board identically to a
+    /// fresh session. If board state leaked into the fingerprint, `ptr_eq`
+    /// flips; if a stale session mis-scored the new board, `assert_eq` flips.
+    #[test]
+    fn session_cache_reused_across_board_mutation_stays_correct() {
+        let mut state = make_state();
+        let mut cache = SessionCache::new_empty();
+        let s1 = cache.get_or_build(&state);
+
+        // Mutate the board only — hand object, mana pool, and state.objects.
+        state.lands_played_this_turn = 1;
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+
+        let s2 = cache.get_or_build(&state);
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "board-only mutation must NOT invalidate the deck-keyed session"
+        );
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let scored_reused = score_candidates_with_session(&state, PlayerId(0), &config, &s2);
+        assert!(
+            scored_reused
+                .iter()
+                .any(|(a, _)| matches!(a, GameAction::CastSpell { .. })),
+            "reused session must still enumerate the now-castable creature"
+        );
+
+        let session_fresh = AiSession::arc_from_game(&state);
+        let scored_fresh =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_fresh);
+        assert_eq!(
+            scored_reused, scored_fresh,
+            "reused (board-stale) session must score the mutated board identically to a fresh one"
         );
     }
 
