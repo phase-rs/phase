@@ -239,6 +239,8 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
     return data.options.filter((option) => option.toLowerCase().includes(lower));
   }, [showFilter, query, data.options]);
 
+  const isFiltering = showFilter && query.trim() !== "";
+
   return (
     <ChoiceOverlay
       title={title}
@@ -289,9 +291,13 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
                   ? "border-emerald-400 bg-emerald-500/30 text-white"
                   : "border-gray-600 bg-gray-800/80 text-gray-300 hover:border-gray-400 hover:text-white"
               }`}
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
+              initial={isFiltering ? false : { opacity: 0, y: 20, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
+              transition={
+                isFiltering
+                  ? { duration: 0 }
+                  : { delay: Math.min(0.05 + index * 0.03, 0.3), duration: 0.25 }
+              }
               whileHover={{ scale: 1.05 }}
               onClick={onClick}
             >
