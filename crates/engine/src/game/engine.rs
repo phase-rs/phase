@@ -666,13 +666,19 @@ fn active_until_stack_empty_requester(state: &GameState) -> Option<PlayerId> {
 }
 
 fn priority_player_has_meaningful_action(state: &GameState) -> bool {
-    let mut probe = state.clone();
-    probe.auto_pass.clear();
+    let mut probe_state = state.clone();
+    probe_state.auto_pass.clear();
+    super::layers::flush_layers(&mut probe_state);
+    let player = match probe_state.waiting_for {
+        WaitingFor::Priority { player } => player,
+        _ => probe_state.priority_player,
+    };
+    let probe = super::casting::PriorityCastProbe::from_flushed_state(probe_state, player);
     // The probe always has `waiting_for == Priority` at both call sites, so the
     // flat priority-action path is byte-identical to what `legal_actions` yielded
     // — it drops only the unused spell-cost object-walk and grouped-map build.
-    let actions = crate::ai_support::flat_priority_actions(&probe);
-    crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+    let actions = crate::ai_support::flat_priority_actions_with_probe(probe.state(), Some(&probe));
+    crate::ai_support::has_meaningful_priority_action(probe.state(), &actions)
 }
 
 /// CR 732.5: no player can be forced to keep looping if ANY of them could take an
@@ -688,12 +694,15 @@ fn priority_player_has_meaningful_action(state: &GameState) -> bool {
 /// fail-safe toward the status quo, never a wrong win.
 fn no_living_player_has_meaningful_priority_action(state: &GameState) -> bool {
     state.players.iter().filter(|p| !p.is_eliminated).all(|p| {
-        let mut probe = state.clone();
-        probe.auto_pass.clear();
-        probe.priority_player = p.id;
-        probe.waiting_for = WaitingFor::Priority { player: p.id };
-        let actions = crate::ai_support::legal_actions(&probe);
-        !crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+        let mut probe_state = state.clone();
+        probe_state.auto_pass.clear();
+        probe_state.priority_player = p.id;
+        probe_state.waiting_for = WaitingFor::Priority { player: p.id };
+        super::layers::flush_layers(&mut probe_state);
+        let probe = super::casting::PriorityCastProbe::from_flushed_state(probe_state, p.id);
+        let actions =
+            crate::ai_support::flat_priority_actions_with_probe(probe.state(), Some(&probe));
+        !crate::ai_support::has_meaningful_priority_action(probe.state(), &actions)
     })
 }
 

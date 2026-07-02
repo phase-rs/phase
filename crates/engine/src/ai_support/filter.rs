@@ -80,6 +80,15 @@ pub trait CandidateFilter {
 
     /// Return `true` to accept the candidate, `false` to reject.
     fn accept(&self, state: &GameState, candidate: &CandidateAction) -> bool;
+
+    fn accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        _probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        self.accept(state, candidate)
+    }
 }
 
 /// Structural legality check wrapping [`super::cheap_reject_candidate`].
@@ -138,6 +147,30 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_priority_cast(state, &candidate.action) {
             return true;
         }
+        self.fallback_simulation(state, candidate)
+    }
+
+    fn accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
+            return true;
+        }
+        if structurally_valid_priority_activation(state, &candidate.action) {
+            return true;
+        }
+        if structurally_valid_priority_cast_with_probe(state, &candidate.action, probe) {
+            return true;
+        }
+        self.fallback_simulation(state, candidate)
+    }
+}
+
+impl SimulationFilter {
+    fn fallback_simulation(&self, state: &GameState, candidate: &CandidateAction) -> bool {
         crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
@@ -176,6 +209,14 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
 // structural authorities for the cast — this fast path only avoids
 // re-simulating the full cast to discard the clone.
 fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> bool {
+    structurally_valid_priority_cast_with_probe(state, action, None)
+}
+
+fn structurally_valid_priority_cast_with_probe(
+    state: &GameState,
+    action: &GameAction,
+    probe: Option<&casting::PriorityCastProbe>,
+) -> bool {
     let (
         WaitingFor::Priority { player },
         GameAction::CastSpell {
@@ -205,12 +246,15 @@ fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> b
     let Some(obj) = state.objects.get(object_id) else {
         return false;
     };
-    if obj.card_id != *card_id || !casting::can_cast_object_now(state, *player, *object_id) {
+    if obj.card_id != *card_id
+        || !casting::can_cast_object_now_with_probe(state, *player, *object_id, probe)
+    {
         return false;
     }
 
-    casting::effective_spell_cost(state, *player, *object_id)
-        .is_some_and(|cost| casting::can_pay_cost_after_auto_tap(state, *player, *object_id, &cost))
+    casting::effective_spell_cost(state, *player, *object_id).is_some_and(|cost| {
+        casting::can_pay_cost_after_auto_tap_with_probe(state, *player, *object_id, &cost, probe)
+    })
 }
 
 /// A pipeline of filters run in the order they're registered. Candidates pass
@@ -240,6 +284,17 @@ impl FilterPipeline {
         self.filters.iter().all(|f| f.accept(state, candidate))
     }
 
+    pub fn accepts_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        self.filters
+            .iter()
+            .all(|f| f.accept_with_probe(state, candidate, probe))
+    }
+
     /// Apply the pipeline to an iterator of candidates.
     ///
     /// Equivalence-class legality memoization: the cheap filters run unchanged
@@ -257,20 +312,32 @@ impl FilterPipeline {
     where
         I: IntoIterator<Item = CandidateAction>,
     {
+        self.apply_with_probe(state, candidates, None)
+    }
+
+    pub fn apply_with_probe<I>(
+        &self,
+        state: &GameState,
+        candidates: I,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> Vec<CandidateAction>
+    where
+        I: IntoIterator<Item = CandidateAction>,
+    {
         let poison = LegalityPoisonGates::compute(state);
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
         candidates
             .into_iter()
             .filter(|c| {
-                if !self.cheap_filters_accept(state, c) {
+                if !self.cheap_filters_accept_with_probe(state, c, probe) {
                     return false;
                 }
                 match legality_equivalence_key(state, &c.action, &poison, &mut interner) {
                     Some(key) => *memo
                         .entry(key)
-                        .or_insert_with(|| self.expensive_verdict(state, c)),
-                    None => self.expensive_verdict(state, c),
+                        .or_insert_with(|| self.expensive_verdict_with_probe(state, c, probe)),
+                    None => self.expensive_verdict_with_probe(state, c, probe),
                 }
             })
             .collect()
@@ -278,20 +345,30 @@ impl FilterPipeline {
 
     /// Run every non-`Expensive` filter (the cheap, per-candidate checks).
     /// First rejection wins, mirroring `accepts()`.
-    fn cheap_filters_accept(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+    fn cheap_filters_accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
         self.filters
             .iter()
             .filter(|f| f.cost() != FilterCost::Expensive)
-            .all(|f| f.accept(state, candidate))
+            .all(|f| f.accept_with_probe(state, candidate, probe))
     }
 
     /// The memoizable verdict: the AND of every `Expensive` filter. For the
     /// default pipeline this is exactly `SimulationFilter::accept`.
-    fn expensive_verdict(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+    fn expensive_verdict_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
         self.filters
             .iter()
             .filter(|f| f.cost() == FilterCost::Expensive)
-            .all(|f| f.accept(state, candidate))
+            .all(|f| f.accept_with_probe(state, candidate, probe))
     }
 }
 
