@@ -134,7 +134,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
-        | GameEvent::Foretold { .. } => LogCategory::Zone,
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -157,6 +158,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
         | GameEvent::CreatureNoLongerSuspected { .. }
@@ -289,6 +291,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" activates ability: "),
@@ -721,6 +724,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
+        }
+
+        GameEvent::TurnedFaceDown { object_id } => {
+            vec![card_seg(state, *object_id), text(" is turned face down")]
         }
 
         GameEvent::Regenerated { object_id } => {
@@ -1216,6 +1223,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" foretold "),
             card_seg(state, *object_id),
         ],
+        // CR 702.143d: an effect made an exiled card foretold (no foretelling
+        // player — the card itself became foretold).
+        GameEvent::BecameForetold { object_id } => {
+            vec![card_seg(state, *object_id), text(" becomes foretold")]
+        }
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
@@ -1328,6 +1340,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

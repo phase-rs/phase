@@ -79,9 +79,15 @@ pub mod meld;
 // Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
 // so `meld.rs` stays implementation-only).
 #[cfg(test)]
+#[path = "marksman_tests.rs"]
+mod marksman_tests;
+#[cfg(test)]
 #[path = "meld_tests.rs"]
 mod meld_tests;
 pub mod merge;
+#[cfg(test)]
+#[path = "omnath_tests.rs"]
+mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;

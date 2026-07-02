@@ -143,16 +143,11 @@ pub(crate) fn resolve_connive_effect(
             else {
                 return;
             };
-            let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-                return;
-            };
-
-            let cards_to_draw: Vec<_> = player
-                .library
-                .iter()
-                .take(draw_count as usize)
-                .copied()
-                .collect();
+            // CR 121.1 + CR 613.11: route card selection through the single
+            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
+            // honored on the connive draw too.
+            let cards_to_draw =
+                super::draw::select_cards_to_draw(state, player_id, draw_count as usize);
 
             if draw_count > 0 && cards_to_draw.len() < draw_count as usize {
                 if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {

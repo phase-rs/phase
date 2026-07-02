@@ -221,6 +221,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             colors: vec![],
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
+            tapped: false,
         },
     );
     set_etb_event(&mut state, dead_id);

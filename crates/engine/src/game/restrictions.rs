@@ -1155,6 +1155,17 @@ pub(crate) fn evaluate_condition(
             }) == 0
         }
         ParsedCondition::YouAttackedThisTurn => state.players_attacked_this_turn.contains(&player),
+        // CR 508.6 + CR 508.5 + CR 109.5: "you attacked [the source's controller]
+        // or a planeswalker they control this turn". `has_attacked` reads
+        // `attacked_defenders_this_turn`, whose entries are the CR-508.5-collapsed
+        // defending player (planeswalker/battle → controller), so both disjuncts
+        // resolve to one membership check. The defender is the SOURCE controller
+        // (CR 109.5 "you" on the static), resolved from `source_id` — never a
+        // hardcoded player. Sandswirl Wanderglyph.
+        ParsedCondition::YouAttackedSourceControllerThisTurn => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|src| state.has_attacked(player, src.controller)),
         // CR 508.1a: "you attacked with N+ [filter] this turn". Unfiltered uses
         // the fast per-player count; filtered scans declaration-time snapshots so
         // attackers that have left the battlefield still count.
@@ -1455,6 +1466,15 @@ fn spell_cast_targets(
                 })
         })
         .filter(|targets| !targets.is_empty())
+}
+
+/// CR 603.2c + CR 608.2c: Committed targets of a spell still on the stack (or
+/// re-read from the stack while a `SpellCast` trigger event is in scope).
+pub(crate) fn triggering_spell_targets(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+) -> Option<Vec<crate::types::ability::TargetRef>> {
+    spell_cast_targets(state, spell_id)
 }
 
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
@@ -1890,7 +1910,10 @@ fn graveyard_has_subtype_card(
 }
 
 /// CR 508.1k: A chosen creature becomes an attacking creature until removed from combat.
-fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_attacking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state.combat.as_ref().is_some_and(|combat| {
         combat
             .attackers
@@ -1900,7 +1923,10 @@ fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: O
 }
 
 /// CR 509.1g: A chosen creature becomes a blocking creature until removed from combat.
-fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()
@@ -1908,7 +1934,10 @@ fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: Ob
 }
 
 /// CR 509.1h: An attacking creature with blockers declared for it becomes a blocked creature.
-fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocked(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()

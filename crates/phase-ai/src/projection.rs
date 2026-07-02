@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use engine::ai_support::legal_actions;
 use engine::game::combat::AttackTarget;
-use engine::game::engine::{apply, EngineError};
+use engine::game::engine::{apply_for_simulation, EngineError};
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
@@ -162,7 +162,7 @@ pub fn project_to(
             choice_count += 1;
         }
 
-        apply(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
+        apply_for_simulation(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
 
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return Err(BailReason::GameOverDuringProjection);

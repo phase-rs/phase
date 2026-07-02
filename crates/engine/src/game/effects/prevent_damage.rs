@@ -33,7 +33,7 @@ fn resolve_and_prune_stack_spell_legs(
 /// CR 614.1a: Resolve a damage source filter, replacing dynamic references
 /// (e.g., `IsChosenColor`, `ParentTargetSlot`) with concrete values from the
 /// source object's state and the ability's chosen targets.
-fn resolve_source_filter(
+pub(crate) fn resolve_source_filter(
     filter: &TargetFilter,
     state: &GameState,
     source_id: ObjectId,
@@ -54,13 +54,24 @@ fn resolve_source_filter(
         TargetFilter::ChosenDamageSource => state
             .last_chosen_damage_source
             .as_ref()
-            .map(|choice| TargetFilter::And {
-                filters: vec![
-                    TargetFilter::SpecificObject {
-                        id: choice.source_id,
-                    },
-                    resolve_source_filter(&choice.source_filter, state, source_id, ability_targets),
-                ],
+            .map(|choice| {
+                let identity = TargetFilter::SpecificObject {
+                    id: choice.source_id,
+                };
+                match &choice.source_filter {
+                    TargetFilter::ChosenDamageSource | TargetFilter::Any => identity,
+                    other => {
+                        let recheck =
+                            resolve_source_filter(other, state, source_id, ability_targets);
+                        if matches!(recheck, TargetFilter::Any) {
+                            identity
+                        } else {
+                            TargetFilter::And {
+                                filters: vec![identity, recheck],
+                            }
+                        }
+                    }
+                }
             })
             .unwrap_or(TargetFilter::None),
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
@@ -370,6 +381,11 @@ pub fn resolve(
         } else {
             // Source is on the Stack (instant/sorcery mid-resolution) or already left —
             // store in game-state-level registry so it persists until end of turn.
+            // CR 109.4 + CR 614.1a: Anchor the installing controller so a
+            // controller-relative `damage_source_filter` matches under the sentinel host.
+            if shield.source_controller.is_none() {
+                shield.source_controller = Some(ability.controller);
+            }
             state.pending_damage_replacements.push(shield);
         }
     }

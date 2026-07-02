@@ -343,9 +343,12 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            enters_modified_if: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));

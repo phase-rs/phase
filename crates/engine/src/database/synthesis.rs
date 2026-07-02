@@ -13,12 +13,12 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
     CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
-    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
 };
@@ -666,7 +666,9 @@ pub fn synthesize_craft(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -1758,7 +1760,9 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1840,7 +1844,9 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1934,7 +1940,9 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
@@ -2838,7 +2846,9 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         face.replacements.push(replacement);
@@ -2907,7 +2917,9 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
@@ -4224,7 +4236,9 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     // CR 603.5 + CR 702.46a "you may": optionality lives on the execute ability
@@ -6039,7 +6053,9 @@ fn build_recover_self_change_zone(destination: Zone) -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }
 
@@ -6336,7 +6352,9 @@ fn build_dies_return_with_counter_trigger(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
@@ -6420,6 +6438,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // resolves, not via a lingering permission — this arms the
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
         },
     )
     .optional();
@@ -6539,6 +6558,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
     .condition(AbilityCondition::PreviousEffectAmount {
         comparator: Comparator::EQ,
         rhs: QuantityExpr::Fixed { value: 0 },
+        channel: crate::types::ability::DamageChannel::Total,
     });
     let remove_one = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -6634,6 +6654,7 @@ fn is_fading_upkeep_trigger(t: &TriggerDefinition) -> bool {
                     Some(AbilityCondition::PreviousEffectAmount {
                         comparator: Comparator::EQ,
                         rhs: QuantityExpr::Fixed { value: 0 },
+                        ..
                     })
                 ) && matches!(
                     &*sub.effect,
@@ -7624,7 +7645,9 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description(format!("Exile another {type_str} you control"));
@@ -7681,7 +7704,9 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description("Return the exiled card to the battlefield under its owner's control".to_string());
@@ -8071,7 +8096,7 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
         },
     }
@@ -8632,15 +8657,19 @@ pub fn synthesize_suspend(face: &mut CardFace) {
 /// Printed text (CR 702.170a): "Plot [cost]" means "Any time you have priority
 /// during your main phase while the stack is empty, you may exile this card
 /// from your hand and pay [cost]. It becomes a plotted card." Plotting is a
-/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack; we
-/// approximate it as an activated ability with `activation_zone = Hand`, the
-/// `.sorcery_speed()` single-authority builder, and a composite cost
-/// `(pay [cost], exile self from hand)`. This is the same controlled
-/// approximation Suspend uses (see `synthesize_suspend`); no card today
-/// interacts with the "doesn't use the stack" distinction.
+/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack. It is
+/// modeled as a sorcery-speed activated-ability *shape* (`activation_zone =
+/// Hand`, the `.sorcery_speed()` single-authority builder, and a composite cost
+/// `(pay [cost], exile self from hand)`) so the timing/cost machinery is reused,
+/// but the "doesn't use the stack" semantics are honored at runtime:
+/// `handle_activate_ability` intercepts plot via `is_plot_special_action` after
+/// cost payment and applies the grant IMMEDIATELY (no stack entry, no
+/// `AbilityActivated` event), rather than pushing the grant to the stack.
 ///
-/// On resolution the activation grants `CastingPermission::Plotted { turn_plotted: 0 }`
-/// to the now-exiled card (SelfRef). `grant_permission::resolve` stamps the
+/// As part of taking the special action (NOT on a later stack resolution) the
+/// activation grants `CastingPermission::Plotted { turn_plotted: 0 }` to the
+/// now-exiled card (SelfRef). `grant_permission::resolve` — called directly by
+/// the intercept, the same single authority the stack path used — stamps the
 /// real `state.turn_number` into `turn_plotted` (mirroring how it resolves
 /// `PlayFromExile { granted_to }` for the ability controller). The cast side
 /// is detected by `prepare_spell_cast` via `is_plot_cast` — exile-zone source
@@ -8656,7 +8685,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
 /// same face). Build-for-the-class: every Plot card flows through this single
 /// synthesizer regardless of card type.
 pub fn synthesize_plot(face: &mut CardFace) {
-    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+    use crate::types::ability::{ActivationRestriction, CastingPermission};
 
     // CR 702.170a: Find the first Plot keyword. Cards do not print multiple Plots.
     let Some(plot_cost) = face.keywords.iter().find_map(|k| match k {
@@ -8683,41 +8712,74 @@ pub fn synthesize_plot(face: &mut CardFace) {
             )
     });
     if !already_has_plot_activation {
-        let composite_cost = AbilityCost::Composite {
-            costs: vec![
-                AbilityCost::Mana {
-                    cost: plot_cost.clone(),
-                },
-                // CR 702.170a: "exile this card from your hand" — self-targeted
-                // exile from hand. Mirrors Suspend's self-exile cost component.
-                AbilityCost::Exile {
-                    count: 1,
-                    zone: Some(Zone::Hand),
-                    filter: Some(TargetFilter::SelfRef),
-                },
-            ],
-        };
-        let mut def = AbilityDefinition::new(
-            AbilityKind::Activated,
-            // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission
-            // to the exiled card. `turn_plotted: 0` is a placeholder stamped
-            // by `grant_permission::resolve` to `state.turn_number` at
-            // resolution. Grantee is the default `AbilityController` — the
-            // plot owner — which is the player allowed to cast it later.
-            Effect::GrantCastingPermission {
-                permission: CastingPermission::Plotted { turn_plotted: 0 },
-                target: TargetFilter::SelfRef,
-                grantee: PermissionGrantee::AbilityController,
-            },
-        )
-        .cost(composite_cost)
-        // CR 702.170a: "Any time you have priority during your main phase while
-        // the stack is empty" — i.e. sorcery-speed timing. `.sorcery_speed()`
-        // is the single-authority builder (see `AbilityDefinition::sorcery_speed`).
-        .sorcery_speed();
-        def.activation_zone = Some(Zone::Hand);
-        face.abilities.push(def);
+        // CR 702.170a: printed Plot functions from hand — activation and exile
+        // both occur in the Hand zone. `build_plot_activation` is the single
+        // authority for the cost/effect shape (shared with effect-granted plot
+        // from other zones per CR 702.170f).
+        face.abilities
+            .push(build_plot_activation(plot_cost, Zone::Hand, Zone::Hand));
     }
+}
+
+/// CR 702.170a + CR 702.170f: single-authority builder for the plot special
+/// action. It builds a sorcery-speed activated-ability *shape* to reuse the
+/// timing/cost machinery, but plot is a special action that doesn't use the
+/// stack (CR 702.170b): `handle_activate_ability` intercepts this shape via
+/// `is_plot_special_action` and applies the grant immediately (see that intercept
+/// and `synthesize_plot`). Parameterized over the two zone seams so it serves
+/// both the printed default (hand-Plot: `activation_zone` = `exile_zone` =
+/// `Hand`) and an effect-granted plot whose ability functions in another zone
+/// (CR 702.170f — "the card is exiled from the zone it is in"; e.g. Fblthp's
+/// plot-from-library, both = `Library`).
+///
+/// Cost = `Composite[Mana(plot_cost), Exile{ self, from exile_zone }]`; effect =
+/// grant `CastingPermission::Plotted` (the real turn is stamped when the special
+/// action is taken by `grant_permission::resolve`) to the now-exiled SelfRef for
+/// the ability controller. `.sorcery_speed()` is the single-authority timing
+/// builder (CR 702.170a: main phase + empty stack + active player). The Exile
+/// cost `zone` and `def.activation_zone` are the only parameterized seams —
+/// everything downstream of "exiled card carrying Plotted" is zone-of-origin
+/// agnostic.
+pub(crate) fn build_plot_activation(
+    plot_cost: ManaCost,
+    activation_zone: Zone,
+    exile_zone: Zone,
+) -> AbilityDefinition {
+    use crate::types::ability::{CastingPermission, PermissionGrantee};
+
+    let composite_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana { cost: plot_cost },
+            // CR 702.170a / CR 702.170f: "exile this card from <zone>" — self-
+            // targeted exile from the zone the card is in. Mirrors Suspend's
+            // self-exile cost component.
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(exile_zone),
+                filter: Some(TargetFilter::SelfRef),
+            },
+        ],
+    };
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission to
+        // the exiled card. `turn_plotted: 0` is a placeholder stamped by
+        // `grant_permission::resolve` to `state.turn_number` at resolution.
+        // Grantee is the default `AbilityController` — the plot owner — which is
+        // the player allowed to cast it later.
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::Plotted { turn_plotted: 0 },
+            target: TargetFilter::SelfRef,
+            grantee: PermissionGrantee::AbilityController,
+        },
+    )
+    .cost(composite_cost)
+    // CR 702.170a: "Any time you have priority during your main phase while the
+    // stack is empty" — sorcery-speed timing. `.sorcery_speed()` is the
+    // single-authority builder (see `AbilityDefinition::sorcery_speed`).
+    .sorcery_speed();
+    def.activation_zone = Some(activation_zone);
+    def
 }
 
 /// CR 702.155a-b + CR 714.3b: Read Ahead — a Saga with read ahead lets its
@@ -9377,7 +9439,9 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .sub_ability(shuffle);
@@ -9494,6 +9558,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // router already routed this shape through during-resolution;
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
             },
         )
         .optional();
@@ -9510,7 +9575,9 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         .sub_ability(cast_sub);
@@ -23081,6 +23148,7 @@ mod fading_vanishing_tests {
             Some(AbilityCondition::PreviousEffectAmount {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
+                ..
             })
         ));
         assert!(matches!(

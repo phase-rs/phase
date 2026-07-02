@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -12,7 +13,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
@@ -20,6 +21,7 @@ export function PlayerHud() {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
+  const { waitingSeatId } = useTurnStatus();
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
   const radCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Rad ?? 0);
@@ -93,6 +95,7 @@ export function PlayerHud() {
         underAttack={isUnderAttack}
         avatarUrl={avatarUrl}
         playerId={playerId}
+        hasPendingDecision={waitingSeatId === playerId}
         density={compact ? "compact" : "default"}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
@@ -130,6 +133,11 @@ export function PlayerHud() {
                 condition={condition}
               />
             ))}
+            {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map(
+              (family) => (
+                <UnboundedBadge key={family} family={family} />
+              ),
+            )}
           </>
         }
       >

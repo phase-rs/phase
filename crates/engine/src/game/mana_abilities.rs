@@ -710,6 +710,29 @@ pub(crate) fn mana_choice_prompt(
                 None
             }
         }
+        // CR 106.1 + CR 202.2c: Omnath, Locus of All — each of the produced mana
+        // is freely chosen among the scoped object's colors (dynamic, mirrors
+        // AnyCombination but with a runtime-resolved option set). Surface the
+        // AnyCombination prompt only when the object has more than one color; 0 or
+        // 1 color needs no prompt (CR 106.5 empty → no mana; single auto-picks).
+        ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
+            let options = super::effects::mana::object_colors_for_scope(state, ability, *scope)
+                .iter()
+                .map(mana_color_to_type)
+                .collect::<Vec<_>>();
+            if options.len() <= 1 {
+                return None;
+            }
+            let ability = ability?;
+            let count =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                    .len();
+            if count > 0 {
+                Some(ManaChoicePrompt::AnyCombination { count, options })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -3429,6 +3452,7 @@ mod tests {
                 condition: DelayedTriggerCondition::WhenNextEvent {
                     trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
@@ -3489,6 +3513,7 @@ mod tests {
                         trigger
                     }),
                     or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 effect: Box::new(copy_effect),
                 uses_tracked_set: false,
@@ -3715,6 +3740,90 @@ mod tests {
         );
         assert_eq!(state.players[0].mana_pool.total(), 1);
         assert!(state.objects.get(&source).unwrap().tapped);
+    }
+
+    /// CR 305.2a + CR 608.2c + CR 605.1a + CR 605.3b: River of Tears, built end-
+    /// to-end from its Oracle text via `parse_oracle_text`, swaps {U}→{B} at
+    /// resolution exactly when the controller has played a land this turn. This
+    /// exercises both branches of `apply_condition_instead_mana_swap` against the
+    /// *parsed* AST (parser + runtime integration proof).
+    #[test]
+    fn river_of_tears_mana_swaps_blue_to_black_after_land_played() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{T}: Add {U}. If you played a land this turn, add {B} instead.",
+            "River of Tears",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "single mana ability");
+        let ability = parsed.abilities[0].clone();
+
+        let mut state = GameState::new_two_player(42);
+
+        // No land played this turn (lands_played_this_turn == 0): base {U}.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "River of Tears".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability.clone());
+        assert_eq!(state.players[0].lands_played_this_turn, 0);
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert!(state.objects.get(&source).unwrap().tapped);
+
+        // A land has now been played this turn: the {U}→{B} instead-swap fires.
+        state.players[0].mana_pool.clear();
+        state.players[0].lands_played_this_turn = 1;
+        let source2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "River of Tears".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&source2).unwrap().abilities)
+            .push(ability.clone());
+
+        let mut events2 = Vec::new();
+        activate_mana_ability(
+            &mut state,
+            source2,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events2,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert!(state.objects.get(&source2).unwrap().tapped);
     }
 
     #[test]
@@ -6016,7 +6125,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(lions)],
             pit,
@@ -6171,6 +6282,7 @@ mod tests {
         let ev = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

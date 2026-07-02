@@ -198,9 +198,52 @@ pub(crate) fn bind_named_choice(
     source_id: Option<ObjectId>,
 ) {
     if let Some(obj_id) = source_id {
-        if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), choice) {
+        // CR 608.2d: A multi-keyword choice (`ChoiceType::Keyword { count > 1 }`,
+        // e.g. Greymond's "choose two abilities from among ...") arrives as one
+        // comma-joined answer ("First Strike, Vigilance"). Split it on ',' and
+        // trim each token (tolerating "A, B" / "A,B" / "A ,B" whitespace
+        // variants) and persist one `ChosenAttribute::Keyword` per token so each
+        // chosen ability is independently readable by the `AddChosenKeyword`
+        // plural grant. The single-keyword path (count == 1, and every other
+        // choice type) produces a single attribute, byte-identical to before.
+        let attrs: Vec<ChosenAttribute> = match choice_type {
+            ChoiceType::Keyword { options, count } if *count > 1 => choice
+                .split(',')
+                .filter_map(|token| {
+                    ChosenAttribute::from_choice(
+                        ChoiceType::Keyword {
+                            options: options.clone(),
+                            count: 1,
+                        },
+                        token.trim(),
+                    )
+                })
+                .collect(),
+            _ => ChosenAttribute::from_choice(choice_type.clone(), choice)
+                .into_iter()
+                .collect(),
+        };
+        if !attrs.is_empty() {
             if let Some(obj) = state.objects.get_mut(&obj_id) {
-                obj.chosen_attributes.push(attr);
+                // CR 608.2d: A keyword choice represents the CURRENT answer set,
+                // not an accumulation. A source that makes a fresh keyword choice
+                // each time its effect resolves (Angelic Skirmisher — "At the
+                // beginning of combat on your turn, choose first strike, vigilance,
+                // or lifelink. Creatures you control gain that ability until end of
+                // turn") must REPLACE its prior keyword answer, otherwise the
+                // `AddChosenKeyword` plural read would grant every historical
+                // choice. Clear only `ChosenAttribute::Keyword` (Greymond's single
+                // as-enters bind clears nothing, so its behavior is unchanged);
+                // every other chosen-attribute kind (Color, Subtype, CardName,
+                // Label, …) is untouched so RemoveChosenKeyword/Urborg and the
+                // anchor-word/Morophon cards keep accumulating per their own rules.
+                if matches!(choice_type, ChoiceType::Keyword { .. }) {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
+                }
+                for attr in attrs {
+                    obj.chosen_attributes.push(attr);
+                }
                 // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card name,
                 // creature type, card type, color, etc.) can gate
                 // source-dependent continuous or rule effects. Layer evaluation
@@ -376,8 +419,17 @@ fn compute_options(
         // CR 608.2d: "Choose an ability the target has, then remove it" —
         // option labels come from the typed `Keyword` list emitted by the
         // converter. Empty option lists are legal (the choice resolves with
-        // no options, and the dependent effect is a no-op).
-        ChoiceType::Keyword { options } => options.iter().map(|kw| kw.to_string()).collect(),
+        // no options, and the dependent effect is a no-op). For `count > 1`
+        // (Greymond's "choose two abilities from among ...") each option is a
+        // comma-joined unordered count-combination of the keyword names, so the
+        // player makes a single selection of the whole group.
+        ChoiceType::Keyword { options, count } => {
+            if *count > 1 {
+                keyword_choice_options(options, *count)
+            } else {
+                options.iter().map(|kw| kw.to_string()).collect()
+            }
+        }
     }
 }
 
@@ -409,6 +461,57 @@ fn two_color_options() -> Vec<String> {
         }
     }
     options
+}
+
+/// CR 608.2d: Generate every comma-joined unordered `count`-combination of the
+/// keyword option list (Greymond's "choose two abilities from among first
+/// strike, vigilance, and lifelink" → `["First Strike, Vigilance", "First
+/// Strike, Lifelink", "Vigilance, Lifelink"]`). Mirrors `two_color_options`:
+/// order within a combination doesn't matter, so combinations use ascending
+/// index tuples (no permutations). The resulting comma-joined string is one
+/// selectable option; `bind_named_choice` splits it back into individual
+/// `ChosenAttribute::Keyword` entries at resolution.
+///
+/// INVARIANT: this `", "`-join / split round-trip is only safe because every
+/// keyword admitted by the parser (`parse_keyword_from_oracle`) has a
+/// comma-free `Display` string. A future "choose N abilities" list that admits
+/// a Debug-fallback keyword whose `Display` contains a comma would mis-tokenize
+/// — keep the parser's keyword allowlist comma-free, or persist structured
+/// tokens instead of a joined string.
+fn keyword_choice_options(
+    options: &[crate::types::keywords::Keyword],
+    count: usize,
+) -> Vec<String> {
+    let names: Vec<String> = options.iter().map(|kw| kw.to_string()).collect();
+    let mut result = Vec::new();
+    let mut indices: Vec<usize> = (0..count).collect();
+    if count == 0 || count > names.len() {
+        return result;
+    }
+    loop {
+        result.push(
+            indices
+                .iter()
+                .map(|&i| names[i].clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        // Advance the combination indices (lexicographic next-combination).
+        let mut i = count;
+        loop {
+            if i == 0 {
+                return result;
+            }
+            i -= 1;
+            if indices[i] != i + names.len() - count {
+                break;
+            }
+        }
+        indices[i] += 1;
+        for j in (i + 1)..count {
+            indices[j] = indices[j - 1] + 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -777,7 +880,10 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        let ability = make_choose_ability(ChoiceType::Keyword { options: vec![] });
+        let ability = make_choose_ability(ChoiceType::Keyword {
+            options: vec![],
+            count: 1,
+        });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(
@@ -829,6 +935,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = make_choose_ability(ChoiceType::Keyword {
             options: vec![Keyword::FirstStrike, Keyword::Landwalk("Swamp".to_string())],
+            count: 1,
         });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -886,5 +993,129 @@ mod tests {
             &mut ability,
             &mut events
         ));
+    }
+
+    /// V10 (matthewevans regression for PR #4638) — CR 608.2d + CR 613.1f: A
+    /// source that makes a REPEATED single-keyword choice over time (Angelic
+    /// Skirmisher: "At the beginning of each combat, choose first strike,
+    /// vigilance, or lifelink. Creatures you control gain that ability until end
+    /// of turn") must REPLACE its stored keyword answer each time it chooses, not
+    /// accumulate. This drives the PRODUCTION `ChooseOption` / `bind_named_choice`
+    /// path (no manual `chosen_attributes` seed): the real parsed choose+grant
+    /// chain, re-hosted as an activated ability, is fired twice.
+    ///
+    /// Choose First Strike (grant applies), then on a later activation choose
+    /// Lifelink, and assert the granted set is the CURRENT choice ONLY — Lifelink
+    /// granted, First Strike NO LONGER granted. Without the keyword-clear in
+    /// `bind_named_choice`, both historical `ChosenAttribute::Keyword` entries
+    /// survive and the `AddChosenKeyword` plural read grants First Strike AND
+    /// Lifelink — exactly the regression this guards (revert the `.retain(..)` in
+    /// `bind_named_choice` and the final `!has_kw(FirstStrike)` assert fails).
+    #[test]
+    fn repeated_keyword_choice_replaces_prior_answer() {
+        use crate::game::keywords::has_keyword;
+        use crate::game::layers::evaluate_layers;
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+
+        /// Re-evaluate layers and report whether `id` currently has `keyword`.
+        fn has_kw(runner: &mut GameRunner, id: ObjectId, keyword: &Keyword) -> bool {
+            runner.state_mut().layers_dirty.mark_full();
+            evaluate_layers(runner.state_mut());
+            has_keyword(&runner.state().objects[&id], keyword)
+        }
+
+        /// Activate `source`'s keyword-choice ability through the REAL pipeline and
+        /// answer the surfaced `NamedChoice` with `keyword` via the production
+        /// `GameAction::ChooseOption` handler (no manual `chosen_attributes` seed).
+        fn drive_keyword_choice(runner: &mut GameRunner, source: ObjectId, keyword: &str) {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .expect("activate the keyword-choice ability");
+            runner.advance_until_stack_empty();
+
+            let WaitingFor::NamedChoice { options, .. } = runner.state().waiting_for.clone() else {
+                panic!(
+                    "must pause on the keyword NamedChoice, got {}",
+                    runner.waiting_for_kind()
+                );
+            };
+            let choice = options
+                .into_iter()
+                .find(|o| o == keyword)
+                .unwrap_or_else(|| panic!("expected a {keyword:?} keyword option"));
+
+            runner
+                .act(GameAction::ChooseOption { choice })
+                .expect("answer the keyword choice");
+            runner.advance_until_stack_empty();
+        }
+
+        // Parse Angelic Skirmisher's real "choose a keyword; creatures you control
+        // gain that ability" chain, then re-host it as an ACTIVATED ability so the
+        // test can drive the same choose+grant twice on demand without staging two
+        // full combat phases. The choose/bind path exercised is identical.
+        let trigger = parse_trigger_line(
+            "At the beginning of each combat, choose first strike, vigilance, or \
+             lifelink. Creatures you control gain that ability until end of turn.",
+            "Angelic Skirmisher",
+        );
+        let mut activated = *trigger
+            .execute
+            .expect("Angelic Skirmisher trigger must have an execute chain");
+        activated.kind = AbilityKind::Activated;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let skirmisher = {
+            let mut b = scenario.add_creature(P0, "Angelic Skirmisher", 4, 4);
+            b.with_subtypes(vec!["Angel"]);
+            b.with_ability_definition(activated);
+            b.id()
+        };
+        let ally = scenario.add_creature(P0, "Footsoldier", 2, 2).id();
+
+        let mut runner = scenario.build();
+
+        // --- First activation: choose First Strike ---
+        drive_keyword_choice(&mut runner, skirmisher, "First Strike");
+        assert!(
+            has_kw(&mut runner, ally, &Keyword::FirstStrike),
+            "after choosing First Strike, the ally must have it"
+        );
+        assert!(
+            !has_kw(&mut runner, ally, &Keyword::Lifelink),
+            "Lifelink was never chosen yet"
+        );
+
+        // --- Second activation (a later combat): choose Lifelink ---
+        drive_keyword_choice(&mut runner, skirmisher, "Lifelink");
+
+        // The stored answer set must now be the CURRENT choice ONLY.
+        let chosen = runner.state().objects[&skirmisher].chosen_keywords();
+        assert_eq!(
+            chosen,
+            vec![&Keyword::Lifelink],
+            "the second choice must REPLACE the first — only Lifelink stored, got {chosen:?}"
+        );
+        assert!(
+            has_kw(&mut runner, ally, &Keyword::Lifelink),
+            "after choosing Lifelink, the ally must have it"
+        );
+        assert!(
+            !has_kw(&mut runner, ally, &Keyword::FirstStrike),
+            "the FIRST choice (First Strike) must NO LONGER be granted — a keyword \
+             choice represents the current answer set, not an accumulation"
+        );
     }
 }

@@ -23,6 +23,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::ability::ActivationRestriction;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -50,7 +52,7 @@ const MANA_INDEX: [ManaType; 6] = [
 /// creature is a different unbounded resource than loyalty on a planeswalker).
 ///
 /// Typed rather than stringly so the win-classifier can `match` exhaustively.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ObjectClass {
     /// CR 302: a creature on the battlefield.
     Creature,
@@ -74,7 +76,7 @@ pub enum ObjectClass {
 /// map would be a far larger, non-additive change. Instead this module owns a
 /// small `Ord` classification of the counter dimensions the corpus cares about
 /// (CR 122.1: +1/+1, loyalty, poison, …) and folds the long tail into `Other`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CounterClass {
     /// CR 122.1a: a +1/+1 counter.
     Plus1Plus1,
@@ -94,7 +96,7 @@ pub enum CounterClass {
 
 impl CounterClass {
     /// Map an engine [`CounterType`] to its analysis classification.
-    fn from_counter_type(ct: &CounterType) -> CounterClass {
+    pub(crate) fn from_counter_type(ct: &CounterType) -> CounterClass {
         match ct {
             CounterType::Plus1Plus1 => CounterClass::Plus1Plus1,
             CounterType::Minus1Minus1 => CounterClass::Minus1Minus1,
@@ -114,7 +116,7 @@ impl CounterClass {
 /// not stored totals — so [`ResourceVector::snapshot`] always leaves
 /// [`ResourceVector::generic_triggers`] empty and the simulation harness (PR-1)
 /// feeds them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TriggerKind {
     /// CR 701.34: proliferate (the keyword action a loop can pump mana-neutrally).
     Proliferate,
@@ -241,6 +243,18 @@ impl ResourceVector {
             v.library_delta
                 .insert(player.id, player.library.len() as i64);
             // CR 122.1 + CR 704.5c: poison counters live in a dedicated field.
+            //
+            // GAP-5 (multiplayer prerequisite): the poison axis is AGGREGATE-keyed —
+            // `(CounterClass::Poison, ObjectClass::Player)` carries NO victim `PlayerId`,
+            // so a poison delta is summed across the whole table, not attributed to the
+            // afflicted player. `live_mandatory_loop_winner` reads this summed pair
+            // conservatively (loop_check.rs ~239), and `derive_views`' `attribution_player`
+            // routes any poison ∞ to the loop's controller (see the note at
+            // derived_views.rs). That is correct ONLY because no live producer emits a
+            // poison axis today; before any future live poison/infect loop producer is
+            // enabled this key MUST be re-keyed by victim `PlayerId` (CR 704.5c: the
+            // afflicted player owns the loss), or a multiplayer poison ∞ would attribute
+            // to the wrong seat. Inert documentation — no behavior change here.
             if player.poison_counters > 0 {
                 v.counters.insert(
                     (CounterClass::Poison, ObjectClass::Player),
@@ -465,6 +479,59 @@ impl ResourceVector {
         }
         out
     }
+
+    /// CR 732.2a: **controller-scoped** net-progress — the single authority shared
+    /// by Engine A ([`crate::analysis::detect_loop`]) and Engine B
+    /// ([`crate::analysis::candidate_cycles`]). Returns true iff the cycle makes
+    /// unbounded progress on ≥1 axis without leaving the loop's controller with an
+    /// unsustainable net deficit on a *consumed* axis (their own life or mana).
+    ///
+    /// Distinct from [`Self::is_net_progress`] (PR-0) only in *who* the
+    /// consumed-axis constraint applies to: the controller's life going negative
+    /// is unsustainable (false), but an *opponent's* life/library going negative
+    /// is the drain/mill win (progress). Engine B layers an `unbounded_production`
+    /// override on top of this base check for dynamic production (HIGH-1).
+    pub(crate) fn net_progress_for(&self, controller: PlayerId) -> bool {
+        // CR 106.1: a loop that net-spends mana across the whole pool is not
+        // sustainable. Mana is not attributed per player in the summed `mana`
+        // array, so any net-negative color is a controller-side deficit.
+        if self.mana.iter().any(|&n| n < 0) {
+            return false;
+        }
+        // CR 119: the controller losing life across the cycle is unsustainable.
+        for (pid, &n) in &self.life {
+            if *pid == controller && n < 0 {
+                return false;
+            }
+        }
+        !self.unbounded_axes_for(controller).is_empty()
+    }
+
+    /// CR 732.2a + CR 704.5a: the unbounded axes of this delta with the
+    /// opponent-vs-controller sign rules a win classifier needs. Builds on
+    /// [`Self::unbounded_components`] (every strictly-positive axis plus any
+    /// nonzero library) and additionally surfaces an **opponent's life loss**
+    /// (negative life on a non-controller) as the drain win axis —
+    /// `unbounded_components` only reports positive life (lifegain), so a pure
+    /// drain loop would otherwise name no axis. Single authority shared by Engine
+    /// A and Engine B.
+    pub(crate) fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        let mut out: Vec<ResourceAxis> = self
+            .unbounded_components()
+            .into_iter()
+            .map(|(axis, _)| axis)
+            .collect();
+        // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
+        for (pid, &n) in &self.life {
+            if n < 0 && *pid != controller {
+                let axis = ResourceAxis::Life(*pid);
+                if !out.contains(&axis) {
+                    out.push(axis);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Whether a resource axis is *consumed* (spendable inside a loop) or purely
@@ -478,7 +545,7 @@ enum Component {
 
 /// A tagged, named resource axis — the typed identity of one unbounded resource,
 /// used by the (PR-2) `WinKind` classifier to describe a loop certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ResourceAxis {
     Mana(ManaType),
     Life(PlayerId),

@@ -25,14 +25,32 @@
 //!   measurement into a [`LoopCertificate`] (the unbounded axes + a [`WinKind`]),
 //!   the offline classification the corpus harness asserts against. Still
 //!   **zero gameplay change** — never called from the reducer.
+//! - [`ability_graph`] — Engine B: [`candidate_cycles`] is the static, offline
+//!   candidate generator. From a list of `CardFace` ASTs it builds an
+//!   ability/resource graph, finds SCCs, and emits over-approximate
+//!   [`CandidateCycle`]s for Engine A to confirm. Like the rest of this module it
+//!   is **purely additive** — it never drives the reducer and never touches a
+//!   `GameState`.
 
+pub mod ability_graph;
 pub mod loop_check;
 pub mod resource;
 pub mod sim;
 
+// The combo corpus + bespoke driver toolkit, shared by the `#[cfg(test)]`
+// acceptance suite and the `combo-verify` CLI. Gated so it is excluded from the
+// shipped lib / WASM surface (no game behavior change).
+#[cfg(any(test, feature = "combo-verify"))]
+pub mod corpus;
+
 #[cfg(test)]
 mod corpus_tests;
 
+pub use ability_graph::{candidate_cycles, AbilityGraph, CandidateCycle};
+#[cfg(any(test, feature = "combo-verify"))]
+pub use corpus::{
+    corpus_len, drive_row, row, ComboRow, DeferralBucket, ResourceFamily, RowReport, RowStatus,
+};
 pub use loop_check::{detect_loop, LoopCertificate, WinKind};
 pub use resource::{
     loop_states_equal_modulo_resources, CounterClass, ObjectClass, ResourceAxis, ResourceVector,

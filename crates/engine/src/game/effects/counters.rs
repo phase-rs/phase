@@ -391,6 +391,28 @@ fn apply_pending_counter_post_action(
             crate::game::layers::mark_layers_entered(state, object_id);
             crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
+            // CR 603.6a: finalize the deferred ZoneChanged here, once the
+            // token's counters have actually settled, so ETB trigger
+            // observers (Altar of the Brood, Soul Warden, etc.) see the
+            // Incubator's final counter count rather than firing early on a
+            // pre-replacement-choice snapshot (issue #4238).
+            if let Some(zone_change_record) = state.objects.get(&object_id).map(|obj| {
+                obj.snapshot_for_zone_change(
+                    object_id,
+                    None,
+                    crate::types::zones::Zone::Battlefield,
+                )
+            }) {
+                state
+                    .zone_changes_this_turn
+                    .push(zone_change_record.clone());
+                events.push(GameEvent::ZoneChanged {
+                    object_id,
+                    from: None,
+                    to: crate::types::zones::Zone::Battlefield,
+                    record: Box::new(zone_change_record),
+                });
+            }
             true
         }
         PendingCounterPostAction::FinalizeTokenEntry {
@@ -3144,6 +3166,7 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: lki_counters,
+                tapped: false,
             },
         );
 

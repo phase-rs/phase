@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::game::layers;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::{AbilityKind, CounterCostSelection};
@@ -306,6 +307,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 ..
             },
             GameAction::DiscoverChoice { .. },
+        )
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            },
+            GameAction::GraveyardPaidCastChoice { .. },
         )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
@@ -771,10 +779,31 @@ fn has_feasibly_castable_spell(state: &GameState, player: PlayerId) -> bool {
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
 pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool {
+    let flushed;
+    let state = if state.layers_dirty.is_dirty() {
+        flushed = {
+            let mut state = state.clone();
+            layers::flush_layers(&mut state);
+            state
+        };
+        &flushed
+    } else {
+        state
+    };
+
     let player = match &state.waiting_for {
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+
+    // CR 117.1d (issue #4388): On an opponent's turn the priority player may
+    // activate their own mana abilities (Gaea's Cradle, Itlimoc, basic lands).
+    // Those actions live only in `legal_actions_by_object`, not the flat list
+    // consumed here — without this guard auto-pass fires through the window
+    // before the frontend can offer a tap.
+    if state.active_player != player && !activatable_object_mana_actions(state).is_empty() {
+        return false;
+    }
 
     if auto_passes_initial_priority_by_default(state) {
         return true;
@@ -891,6 +920,18 @@ pub fn flat_priority_actions(state: &GameState) -> Vec<GameAction> {
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    let flushed;
+    let state = if state.layers_dirty.is_dirty() {
+        flushed = {
+            let mut state = state.clone();
+            layers::flush_layers(&mut state);
+            state
+        };
+        &flushed
+    } else {
+        state
+    };
+
     let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
         .unwrap_or_else(|| flat_priority_actions(state));
 
@@ -1084,6 +1125,7 @@ pub(super) fn activatable_object_mana_actions_for_player(
     // every land in this board-global sweep, so compute it once instead of
     // re-scanning the whole battlefield per land inside `land_mana_options`.
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
+    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -1095,11 +1137,12 @@ pub(super) fn activatable_object_mana_actions_for_player(
 
         let mut handled_indices = HashSet::new();
         if obj.card_types.core_types.contains(&CoreType::Land) {
-            let options = mana_sources::activatable_land_mana_options_indexed(
+            let options = mana_sources::activatable_land_mana_options_indexed_gated(
                 state,
                 obj_id,
                 player,
                 &aura_sources,
+                &mana_activation_gates,
             );
             if options.len() == 1
                 && options
@@ -1143,8 +1186,13 @@ pub(super) fn activatable_object_mana_actions_for_player(
             }
             // CR 605.3b: Activation restrictions still apply to mana abilities.
             if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now(
-                    state, player, obj_id, idx, ability,
+                && mana_abilities::can_activate_mana_ability_now_gated(
+                    state,
+                    player,
+                    obj_id,
+                    idx,
+                    ability,
+                    &mana_activation_gates,
                 )
             {
                 actions.push(GameAction::ActivateAbility {
@@ -2106,7 +2154,7 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: Vec::new(),
+            candidates: Vec::new(),
         };
 
         assert!(cheap_reject_candidate(
@@ -2456,6 +2504,73 @@ mod tests {
             !super::auto_pass_recommended(&state, &flat),
             "Issue #544: auto-pass must not fire from flat legal_actions alone \
              when grouped sacrifice-for-mana is available"
+        );
+    }
+
+    /// Issue #4388: Gaea's Cradle / Itlimoc / basic-land mana on an opponent's
+    /// turn must not be skipped by auto-pass (CR 117.1d).
+    #[test]
+    fn auto_pass_holds_priority_for_grouped_mana_on_opponents_turn() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let flat = super::flat_priority_actions(&state);
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "auto-pass must hold priority on opponent's turn when grouped mana is available"
+        );
+
+        // Control: on the active player's own turn, standalone mana still auto-passes.
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "auto-pass should still fire on your turn when only mana is available"
         );
     }
 

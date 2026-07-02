@@ -141,7 +141,9 @@ fn transform_effect_in_place(effect: &mut Effect) {
             enters_attacking: _, // dropped: hidden-zone exile, combat irrelevant
             up_to: _,         // dropped: ChangeZoneAll has no count semantics
             enter_with_counters: _, // dropped: hidden-zone exile, no counters
+            conditional_enter_with_counters: _, // dropped: hidden-zone exile, no counters
             face_down_profile: _, // dropped: overload corpus is hidden-zone exile, never face-down entry
+            enters_modified_if: _, // dropped: hidden-zone exile, moved-object enter gate has no semantics (CR 614.12)
         } => Effect::ChangeZoneAll {
             origin,
             destination,
@@ -300,7 +302,9 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         });
         transform_ability_def(&mut def);
         match *def.effect {

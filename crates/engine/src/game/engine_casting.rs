@@ -280,6 +280,37 @@ pub(super) fn handle_exile_for_cost(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_aggregate_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    zone: crate::types::zones::Zone,
+    function: crate::types::ability::AggregateFunction,
+    property: crate::types::ability::ObjectProperty,
+    comparator: crate::types::ability::Comparator,
+    value: i32,
+    filter: &TargetFilter,
+    pending_cast: PendingCast,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_aggregate_for_cost(
+        state,
+        player,
+        zone,
+        function,
+        property,
+        comparator,
+        value,
+        filter,
+        pending_cast,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_exile_permanent_for_cost(
     state: &mut GameState,
     player: PlayerId,

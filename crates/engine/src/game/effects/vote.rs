@@ -293,6 +293,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
+                dig_found_nothing_for_parent_target: false,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
@@ -350,6 +351,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
+                dig_found_nothing_for_parent_target: false,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else {
@@ -517,6 +519,7 @@ fn resolved_from_def(
         // abilities through (None for vote sub-effects).
         modal: def.modal.clone(),
         mode_abilities: def.mode_abilities.clone(),
+        dig_found_nothing_for_parent_target: false,
     }
 }
 
@@ -726,6 +729,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         };
 
         let mut events = Vec::new();
@@ -822,6 +826,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
@@ -1119,6 +1124,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1272,6 +1278,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");
@@ -1657,6 +1664,124 @@ mod tests {
                 }
             )),
             "threshold tally must still emit EffectResolved(Vote)"
+        );
+    }
+
+    /// CR 701.38 + CR 608.2d + CR 120.1 + CR 608.2c: End-to-end resolution of the
+    /// hoisted-Choose / suffix-aggregate-vote / SourceChosenPlayer-damage composition.
+    /// Uses a public-vote opener ("each player votes for truth or consequences") to
+    /// exercise the same `Choose{Random} → Vote → [Draw, DealDamage{SourceChosenPlayer}]`
+    /// chain as Truth or Consequences without requiring the unsupported secret-ballot
+    /// engine seam. Asserts: (a) the random Choose resolves WITHOUT parking on a
+    /// NamedChoice (Strax precedent — `resolve_random_in_chain`); (b) the truth tally
+    /// drives the controller's draw count; (c) `3 × consequences-tally` damage lands on
+    /// the chosen opponent via the persisted `ChosenAttribute::Player`.
+    #[test]
+    fn hoisted_choose_vote_suffix_aggregate_resolves_chosen_player_damage() {
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::identifiers::CardId;
+
+        // Public-vote equivalent of Truth or Consequences. The secret-ballot
+        // opener "each player secretly votes for" is intentionally not used here
+        // because secret votes are unsupported until a proper hidden-ballot engine
+        // seam is added. This text exercises the identical Choose → Vote →
+        // SourceChosenPlayer runtime machinery via a public vote opener.
+        let normalized = "Each player votes for truth or consequences. \
+                          You draw cards equal to the number of truth votes. \
+                          Then choose an opponent at random. \
+                          ~ deals 3 damage to that player for each consequences vote.";
+        let def = parse_vote_block(normalized, AbilityKind::Spell)
+            .expect("hoisted-choose + suffix-aggregate vote parses");
+        let choose_effect = (*def.effect).clone();
+        let vote_effect = (*def.sub_ability.as_ref().expect("Choose wraps Vote").effect).clone();
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+        let ctrl_life_before = state.players[0].life;
+        let opp_life_before = state.players[1].life;
+
+        // Source spell object — persist + SourceChosenPlayer read from it.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Test Vote Card".to_string(),
+            Zone::Battlefield,
+        );
+        // Cards in the controller's library so the truth-tally draw succeeds.
+        create_object(
+            &mut state,
+            CardId(2),
+            controller,
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            controller,
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        let hand_before = state.players[0].hand.len();
+
+        let inner = ResolvedAbility::new(vote_effect, vec![], source_id, controller);
+        let ability =
+            ResolvedAbility::new(choose_effect, vec![], source_id, controller).sub_ability(inner);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Choose → Vote chain initiates");
+
+        // (a) Random Choose must NOT park interactively; the chain advances to
+        // the Vote ballot, and the lone opponent is chosen + persisted.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random Choose must resolve inline, not park on NamedChoice"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::VoteChoice { .. }),
+            "chain must park on the Vote ballot, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            crate::game::game_object::source_chosen_player(&state, source_id),
+            Some(opp),
+            "random Choose must persist the lone opponent"
+        );
+
+        // Submit ballots in APNAP order from the controller: controller → truth
+        // (index 0), opponent → consequences (index 1).
+        for choice in ["truth", "consequences"] {
+            let snapshot = state.waiting_for.clone();
+            crate::game::engine_resolution_choices::handle_resolution_choice(
+                &mut state,
+                snapshot,
+                crate::types::GameAction::ChooseOption {
+                    choice: choice.to_string(),
+                },
+                &mut events,
+            )
+            .unwrap_or_else(|err| panic!("ballot {choice} submits: {err:?}"));
+        }
+
+        // (b) truth tally = 1 → controller drew exactly one card.
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before + 1,
+            "controller draws (truth tally) cards"
+        );
+        // (c) consequences tally = 1 → 3 damage to the chosen opponent only.
+        assert_eq!(
+            state.players[1].life,
+            opp_life_before - 3,
+            "chosen opponent takes 3 × consequences-tally damage"
+        );
+        assert_eq!(
+            state.players[0].life, ctrl_life_before,
+            "controller is not the damage recipient"
         );
     }
 }

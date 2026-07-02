@@ -5,6 +5,83 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
+/// CR 702.11b + CR 702.21a: Parse the "[subject] can be the targets of spells
+/// and abilities as though they didn't have hexproof[. Ward abilities of those
+/// creatures don't trigger]" static pair (Nowhere to Run).
+///
+/// Sentence 1 → `StaticMode::IgnoreHexproof` scoped to `<subject>` via the
+/// definition's `affected` filter (CR 702.11b — the bypass lets the matched
+/// permanents be targeted as though they had no hexproof). Optional sentence 2
+/// → `StaticMode::SuppressTriggers { source_filter: <same subject>, events:
+/// [BecomesTargeted] }` (CR 702.21a — "those creatures" anaphors sentence 1's
+/// subject, so the parsed filter is reused rather than re-derived).
+///
+/// Parsed as one unit (before generic sentence splitting) so the anaphoric
+/// "those creatures" keeps its antecedent. When the ward sentence is present but
+/// unrecognized trailing prose follows, the whole line is deferred (`None`)
+/// rather than silently dropping a clause.
+pub(crate) fn parse_ignore_hexproof_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // Sentence 1: subject up to the hexproof-bypass clause.
+    let (after_subject, subject) = take_until::<_, _, OracleError<'_>>(" can be the target")
+        .parse(tp.lower)
+        .ok()?;
+    let bypass: OracleResult<'_, ()> = (|| {
+        let (i, _) = tag::<_, _, OracleError<'_>>(" can be the target").parse(after_subject)?;
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(i)?;
+        let (i, _) =
+            tag::<_, _, OracleError<'_>>(" of spells and abilities as though ").parse(i)?;
+        // CR 702.11b: plural ("they") or singular ("it") subject pronoun.
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("they didn't"),
+            tag::<_, _, OracleError<'_>>("it didn't"),
+        ))
+        .parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" have hexproof").parse(i)?;
+        Ok((i, ()))
+    })();
+    let (rest, ()) = bypass.ok()?;
+
+    // Map the subject phrase to a typed filter; require it to fully consume so a
+    // partial parse never silently scopes the bypass wider than written.
+    let (filter, filter_remainder) = parse_type_phrase(subject.trim());
+    if !filter_remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+
+    let mut defs = vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
+        .affected(filter.clone())
+        .description(text.to_string())];
+
+    // Optional sentence 2: ward suppression for the same subject.
+    let after_bypass = rest.trim_start_matches('.').trim_start();
+    if !after_bypass.is_empty() {
+        let ward: OracleResult<'_, ()> = (|| {
+            let (i, _) =
+                tag::<_, _, OracleError<'_>>("ward abilities of those creatures don't trigger")
+                    .parse(after_bypass)?;
+            let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i.trim())?;
+            Ok((i, ()))
+        })();
+        let (ward_rest, ()) = ward.ok()?;
+        // Any unconsumed prose means this isn't a clean hexproof+ward line.
+        if !ward_rest.trim().is_empty() {
+            return None;
+        }
+        defs.push(
+            StaticDefinition::new(StaticMode::SuppressTriggers {
+                source_filter: filter,
+                events: vec![SuppressedTriggerEvent::BecomesTargeted],
+            })
+            .description(text.to_string()),
+        );
+    }
+
+    Some(defs)
+}
+
 /// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
 /// of an "only during X turn(s)" prohibition.
 ///
@@ -605,6 +682,67 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
     None
 }
 
+/// CR 602.5: Parses the activation-prohibition tail of compound static text.
+fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag(", and "),
+            opt(alt((tag("its "), tag("their ")))),
+            alt((
+                tag("activated abilities can't be activated"),
+                tag("activated abilities can\u{2019}t be activated"),
+            )),
+            opt((tag(" unless they're "), tag("mana abilities"))),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+fn rule_static_predicate_to_activation_compound_mode(
+    predicate: RuleStaticPredicate,
+) -> Option<StaticMode> {
+    match predicate {
+        RuleStaticPredicate::CantAttack => Some(StaticMode::CantAttack),
+        RuleStaticPredicate::CantBlock => Some(StaticMode::CantBlock),
+        RuleStaticPredicate::CantAttackOrBlock => Some(StaticMode::CantAttackOrBlock),
+        RuleStaticPredicate::CantCrew => Some(StaticMode::CantCrew),
+        RuleStaticPredicate::CantUntap
+        | RuleStaticPredicate::CantBeActivated
+        | RuleStaticPredicate::CantBeSacrificed
+        | RuleStaticPredicate::MustAttack
+        | RuleStaticPredicate::MustBlock
+        | RuleStaticPredicate::MustBeBlocked
+        | RuleStaticPredicate::Goaded
+        | RuleStaticPredicate::BlockOnlyCreaturesWithFlying
+        | RuleStaticPredicate::Shroud
+        | RuleStaticPredicate::Hexproof
+        | RuleStaticPredicate::MayLookAtTopOfLibrary
+        | RuleStaticPredicate::LoseAllAbilities
+        | RuleStaticPredicate::NoMaximumHandSize
+        | RuleStaticPredicate::MayPlayAdditionalLand => None,
+    }
+}
+
+fn parse_activation_compound_restriction_modes(predicate_lower: &str) -> Option<Vec<StaticMode>> {
+    let (rest, restriction_text) = terminated(take_until(", and "), parse_activation_compound_tail)
+        .parse(predicate_lower)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let restriction_text = restriction_text.trim();
+    if let Ok((_, (predicate, None))) =
+        all_consuming(parse_combat_rule_static_predicate_with_defended_nom).parse(restriction_text)
+    {
+        return rule_static_predicate_to_activation_compound_mode(predicate).map(|mode| vec![mode]);
+    }
+
+    parse_restriction_modes(restriction_text)
+}
+
 /// Like `parse_static_line`, but returns all `StaticDefinition`s produced by a line.
 ///
 /// Most lines produce zero or one static. Compound forms like
@@ -667,6 +805,15 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
     for segment in &segments {
         let segment_defs = parse_static_line_multi_inner(segment);
         if segment_defs.is_empty() {
+            // CR 602.5b + CR 602.5c: An "activate ... only once each turn" rider
+            // carries no standalone static — it folds a once-per-turn use-restriction
+            // cap into the immediately-preceding `GrantAllActivatedAbilitiesOf`
+            // (Locus of Enlightenment, and any future "<grant abilities>. activate
+            // those only once each turn." card). This is the shared grant-rider
+            // primitive, composed with the standard grant parse — not a card hook.
+            if fold_grant_cap_rider(segment, &mut defs) {
+                continue;
+            }
             // A non-static sentence (or one the static pipeline can't classify)
             // means this isn't a pure sibling-static line — defer the whole
             // line to the single-sentence fallback rather than emitting a
@@ -890,6 +1037,16 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 702.11b + CR 702.21a: "Creatures your opponents control can be the
+    // targets of spells and abilities as though they didn't have hexproof. Ward
+    // abilities of those creatures don't trigger." (Nowhere to Run). The ward
+    // sentence's "those creatures" anaphors the first sentence's subject, so the
+    // pair is parsed as one unit before generic sentence splitting would treat
+    // them as independent statics (which would strand the anaphor).
+    if let Some(defs) = parse_ignore_hexproof_static(&tp, &stripped) {
+        return defs;
+    }
+
     // CR 611.3 + CR 613.1: A static ability whose Oracle text is several
     // independent sentences (each a self-contained continuous effect) defines
     // each sentence as its own continuous effect with its own affected set.
@@ -1010,34 +1167,53 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
-    // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
+    let tp = TextPair::new(&stripped, &lower);
+    let attached_activation_compound_modes =
+        attached_subject_filter(&tp).and_then(|(_, predicate)| {
+            let predicate_lower = predicate.to_lowercase();
+            parse_activation_compound_restriction_modes(&predicate_lower)
+        });
+
+    // CR 508.1c / CR 509.1b / CR 702.122c + CR 602.5: compound attack,
+    // block, crew, and activation prohibitions produce parallel static definitions.
     if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
-        && (nom_primitives::scan_contains(&lower, "can't attack")
+        && (attached_activation_compound_modes.is_some()
+            || nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))
     {
+        // Faith's Fetters / Arrest-class Aura lines lead with "enchanted
+        // permanent/creature …"; the combat lock and activation prohibition apply
+        // to the host, not the Aura source.
+        let affected = attached_subject_filter(&tp)
+            .map(|(filter, _)| filter)
+            .unwrap_or(TargetFilter::SelfRef);
+        let source_filter = affected.clone();
         let mut defs = Vec::new();
-        let combat_mode = if nom_primitives::scan_contains(&lower, "can't attack or block") {
-            StaticMode::CantAttackOrBlock
-        } else if nom_primitives::scan_contains(&lower, "can't attack") {
-            StaticMode::CantAttack
-        } else {
-            StaticMode::CantBlock
-        };
+        let combat_modes = attached_activation_compound_modes.unwrap_or_else(|| {
+            vec![
+                if nom_primitives::scan_contains(&lower, "can't attack or block") {
+                    StaticMode::CantAttackOrBlock
+                } else if nom_primitives::scan_contains(&lower, "can't attack") {
+                    StaticMode::CantAttack
+                } else {
+                    StaticMode::CantBlock
+                },
+            ]
+        });
+        for combat_mode in combat_modes {
+            defs.push(
+                StaticDefinition::new(combat_mode)
+                    .affected(affected.clone())
+                    .description(stripped.to_string()),
+            );
+        }
         defs.push(
-            StaticDefinition::new(combat_mode)
-                .affected(TargetFilter::SelfRef)
-                .description(stripped.to_string()),
-        );
-        defs.push(
-            // CR 602.5 + CR 603.2a: Self-reference case — the affected permanent's
-            // own activated abilities can't be activated by anyone.
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
-                source_filter: TargetFilter::SelfRef,
+                source_filter,
                 exemption: parse_cant_be_activated_exemption_in_text(&lower),
             })
-            .affected(TargetFilter::SelfRef)
+            .affected(affected)
             .description(stripped.to_string()),
         );
         return defs;
@@ -1361,6 +1537,32 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         }
     }
 
+    // CR 601.2 + CR 400.7: "<source> was cast this turn" gates on the source
+    // having been cast (WasCast) AND having entered this turn
+    // (SourceEnteredThisTurn) — a permanent that was cast and entered this turn
+    // was necessarily cast this turn, while one put onto the battlefield (not
+    // cast) or cast on an earlier turn fails one conjunct. Composed from the two
+    // existing leaf primitives rather than a new `SourceWasCastThisTurn` variant
+    // (compose-don't-proliferate). `parse_inner_condition` above recognizes the
+    // bare "<source> was cast" (→ `WasCast`) but not the "this turn" tightening,
+    // so the compound is handled here. Rock Jockey: "You can't play lands if this
+    // creature was cast this turn."
+    for self_ref in ["it ", "this creature ", "this permanent ", "~ "] {
+        let Some(after_ref) = nom_tag_lower(tp.lower, tp.lower, self_ref) else {
+            continue;
+        };
+        if nom_tag_lower(after_ref, after_ref, "was cast this turn")
+            .is_some_and(|remainder| remainder.trim().is_empty())
+        {
+            return Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::WasCast { zone: None },
+                    StaticCondition::SourceEnteredThisTurn,
+                ],
+            });
+        }
+    }
+
     // Compound " and " splitting: try splitting on " and ", parse both halves recursively.
     // Only succeeds if BOTH halves parse independently — avoids false splits on
     // noun phrases like "artifacts and creatures".
@@ -1411,6 +1613,26 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
 
     // "[N] or more [type] are on the battlefield" (Limited Resources)
     if let Some(condition) = parse_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "a[n] [type] is on the battlefield" (Wirecat: "... if an enchantment is on
+    // the battlefield") — singular existence gate = ObjectCount(type) >= 1.
+    if let Some(condition) = parse_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "there are [N] or more [type] on the battlefield" (Hour of Revelation:
+    // "... if there are ten or more nonland permanents on the battlefield") —
+    // the existential-phrasing counterpart of the "[N] or more [type] are on the
+    // battlefield" count form. Same ObjectCount(type) >= N shape.
+    if let Some(condition) = parse_there_are_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "it shares a color with the most common color among all permanents
+    // [or a color tied for most common]" (Heroic Defiance)
+    if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
         return Some(condition);
     }
 
@@ -1639,6 +1861,15 @@ pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticC
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
         return Some(condition);
     }
+    // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when
+    // <condition> is false — fall back to the shared static-condition parser and
+    // negate, so a recognized inner condition (e.g. Heroic Defiance's most-common-
+    // color check) gates the grant instead of being swallowed as Unrecognized.
+    if let Some(condition) = parse_static_condition(original) {
+        return Some(StaticCondition::Not {
+            condition: Box::new(condition),
+        });
+    }
     // Preserve the Oracle unless rider in the AST so swallow/coverage see a
     // `condition` slot even when the inner clause is not yet decomposed.
     Some(StaticCondition::Not {
@@ -1817,6 +2048,28 @@ pub(crate) fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::Man
     None
 }
 
+/// CR 105.2 + CR 611.3a: "it shares a color with the most common color among all
+/// permanents[ or a color tied for most common]" (Heroic Defiance) →
+/// `SharesColorWithMostCommonColorAmongPermanents`. The optional "or a color tied
+/// for most common" tail is redundant — the runtime predicate already treats
+/// every color at the maximum count as most-common — so both phrasings map to the
+/// same condition.
+pub(crate) fn parse_shares_most_common_color_condition(lower: &str) -> Option<StaticCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "it shares a color with the most common color among all permanents",
+    )
+    .parse(lower)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(
+        " or a color tied for most common",
+    ))
+    .parse(rest)
+    .ok()?;
+    rest.trim()
+        .is_empty()
+        .then_some(StaticCondition::SharesColorWithMostCommonColorAmongPermanents)
+}
+
 /// CR 611.3a: "[N] or more [type] are on the battlefield" → a count
 /// `QuantityComparison` (Limited Resources: "ten or more lands are on the
 /// battlefield"). Modeled as `ObjectCount(type) >= N`; the gate is then attached
@@ -1825,6 +2078,46 @@ pub(crate) fn parse_count_on_battlefield_condition(lower: &str) -> Option<Static
     count_on_battlefield_condition(lower)
         .ok()
         .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+/// CR 611.3a: "there are [N] or more [type] on the battlefield" → the same count
+/// gate as `count_on_battlefield_condition` (`ObjectCount(type) >= N`) but in the
+/// existential "there are …" phrasing (Hour of Revelation: "This spell costs {3}
+/// less to cast if there are ten or more nonland permanents on the
+/// battlefield."). The count form anchors "are on the battlefield" after the
+/// type; this form fronts the "there are" existential and closes with a bare
+/// "on the battlefield".
+pub(crate) fn parse_there_are_count_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_are_count_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = tag("there are ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -1847,6 +2140,41 @@ fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticConditi
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 611.3a: "a[n] [type] is on the battlefield" → an existence gate, i.e.
+/// `ObjectCount(type) >= 1` (Wirecat: "This creature can't attack or block if an
+/// enchantment is on the battlefield."). Singular counterpart of
+/// `count_on_battlefield_condition` ("[N] or more [type] are on the
+/// battlefield"); it reuses the same `ObjectCount >= n` shape with `n = 1`. The
+/// type phrase must consume the whole subject, mirroring the count form's guard.
+pub(crate) fn parse_exists_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("an "), tag("a "))).parse(input)?;
+    let (input, type_text) = take_until(" is on the battlefield").parse(input)?;
+    let (input, _) = tag(" is on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }

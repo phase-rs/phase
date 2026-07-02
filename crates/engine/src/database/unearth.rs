@@ -102,7 +102,9 @@ fn return_to_battlefield_effect() -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }
 
@@ -188,6 +190,8 @@ fn exile_self_from_battlefield_effect() -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }

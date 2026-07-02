@@ -34,7 +34,13 @@ pub(super) fn handle_optional_effect_choice(
     state.cost_payment_failed_flag = false;
     set_active_priority(state);
 
-    if let Some(ability) = state.pending_optional_effect.take() {
+    // CR 603.12a: a repeated-optional-payment process (Hawkeye, Master Marksman)
+    // drives its own per-iteration payment + once-after-loop reflexive modal,
+    // distinct from the generic single up-front optional effect below.
+    if state.pending_repeated_optional_payment.is_some() {
+        effects::resolve_repeated_optional_payment_choice(state, accept, events)
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+    } else if let Some(ability) = state.pending_optional_effect.take() {
         let choice = if accept {
             AutoMayChoice::Accept
         } else {
@@ -1030,6 +1036,9 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Exile { .. }
             | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
+            // CR 118.12: `ExileWithAggregate` has no unless-payment dialog; an
+            // unpayable unless cost falls through to the effect (rules-correct).
+            | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
             // CR 122.6 + CR 118.12: `RemoveCounter { target: Some(_) }`
             // (e.g., Chisei "a permanent you control") requires an
@@ -2914,7 +2923,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
         let library_repl =
@@ -2931,7 +2942,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
 

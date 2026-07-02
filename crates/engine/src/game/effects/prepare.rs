@@ -270,8 +270,9 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
-            exile_instead_of_graveyard_on_resolve: false,
+            graveyard_replacement: None,
             enters_with_counter: None,
+            mana_spend_permission: None,
         });
     state.objects.insert(copy_id, copy_obj);
 
@@ -1011,8 +1012,9 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
                     enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
