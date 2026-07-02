@@ -648,16 +648,16 @@ fn dual_gated_attached_grant_plus_restrictions_not_preempted() {
         "Enchanted creature gets +2/+2 and can't attack if there's another creature on the battlefield and can't block if an enchantment is on the battlefield.",
     );
     assert!(
-        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
         "pump grant must not be dropped by the dual-gate splitter, got {:?}",
         defs
     );
-    assert_ne!(
-        defs
-            .iter()
-            .filter(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))
-            .count(),
-        2,
+    assert!(
+        !(defs.len() == 2
+            && defs
+                .iter()
+                .all(|d| matches!(d.mode, StaticMode::CantAttack | StaticMode::CantBlock))),
         "grant+restriction line must not collapse to only dual-gated combat statics, got {:?}",
         defs
     );
