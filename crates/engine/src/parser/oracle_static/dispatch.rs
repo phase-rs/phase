@@ -2915,13 +2915,8 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // CR 309.4c: Hama Pashar — "Room abilities of dungeons you own trigger
-    // an additional time."
-    if nom_tag_tp(
-        &tp,
-        "room abilities of dungeons you own trigger an additional time",
-    )
-    .is_some()
-    {
+    // an additional time." Parsed with composed nom tags (not scan_contains).
+    if parse_room_ability_doubling_phrase(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::DoubleTriggers {
                 cause: TriggerCause::RoomEntered,
@@ -2997,6 +2992,19 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."
+fn parse_room_ability_doubling_phrase(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("room abilities of "),
+        tag("dungeons you own "),
+        alt((tag("trigger "), tag("triggers "))),
+        tag("an additional time"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 /// CR 614.1c + CR 122.1: Parse a continuous "enters with an additional counter"
