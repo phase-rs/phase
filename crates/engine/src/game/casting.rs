@@ -12952,13 +12952,7 @@ pub fn can_activate_ability_now(
         .clone()
         .map(|cost| activation_cost_for_affordability(cost, ability_def.ability_tag));
     if affordability_cost.as_ref().is_some_and(|cost| {
-        !activation_cost_passes_early_affordability_gate(
-            state,
-            player,
-            source_id,
-            cost,
-            ability_def.ability_tag,
-        )
+        !can_pay_ability_cost_now(state, player, source_id, cost, ability_def.ability_tag)
     }) {
         return false;
     }
