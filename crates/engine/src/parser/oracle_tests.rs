@@ -17309,3 +17309,68 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
         } if name == "fellowship"
     ));
 }
+
+/// CR 107.1 + CR 400.7 + CR 608.2b: Ultimecia, Time Sorceress — "you may pay
+/// {4}{U}{U}{B}{B} and exile eight cards from your graveyard. If you do,
+/// transform Ultimecia." The `exile eight cards from your graveyard` recipient
+/// previously fell through `QUANTIFIED_PREFIXES` (which stopped at "six") to a
+/// bare `TargetFilter::Any` with the count phrase left unconsumed — a
+/// target-fallback gap. With "seven".."ten" added, the recipient now strips its
+/// count and parses to the same graveyard-card zone filter as the already
+/// supported five-card siblings (Kroxa and Kunoros, Young Necromancer), so the
+/// whole card is gap-free and the exile is not silently retargeted to "any".
+/// (Emeritus of Ideation — "exile eight cards from your graveyard. If you do,
+/// this creature becomes prepared." — is unlocked by the same seam.)
+#[test]
+fn ultimecia_exile_eight_from_graveyard_recipient_not_dropped() {
+    use crate::types::ability::{ControllerRef, Effect, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
+    let face = oracle_face_for(
+        "Ultimecia, Time Sorceress",
+        "At the beginning of your end step, you may pay {4}{U}{U}{B}{B} and exile eight cards from your graveyard. If you do, transform Ultimecia.",
+        &["Legendary", "Creature"],
+        &[],
+    );
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert!(
+        gaps.is_empty(),
+        "Ultimecia must be fully supported, gaps: {gaps:?}"
+    );
+    let expected_recipient = TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]),
+    );
+    // Find the exile ChangeZone anywhere in the end-step trigger effect tree
+    // (top effect is a PayCost whose sub-ability is the graveyard exile).
+    let exec = face
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("end-step trigger must carry an effect");
+    let mut node: Option<&crate::types::ability::AbilityDefinition> = Some(exec.as_ref());
+    let mut recipient = None;
+    while let Some(a) = node {
+        if let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = &*a.effect
+        {
+            if *origin == Some(Zone::Graveyard) && *destination == Zone::Exile {
+                recipient = Some(target.clone());
+                break;
+            }
+        }
+        node = a.sub_ability.as_deref();
+    }
+    assert_eq!(
+        recipient,
+        Some(expected_recipient),
+        "the \"exile eight cards from your graveyard\" recipient must be the \
+         graveyard-card zone filter, not a dropped `Any`"
+    );
+}

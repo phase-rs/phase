@@ -479,6 +479,29 @@ pub fn parse_target_with_syntax<'a>(
         return parse_target_with_syntax(original_rest, ctx);
     }
 
+    // CR 107.1 + CR 400.7: A fixed spelled-out count before the generic
+    // "card"/"cards" noun (Ultimecia, Time Sorceress and Emeritus of Ideation:
+    // "exile eight cards from your graveyard"). The `QUANTIFIED_PREFIXES` list
+    // below only enumerates bare counts through "six", and it is deliberately NOT
+    // extended for higher counts: a bare "seven "/"ten " prefix would also strip
+    // the leading word of a number-named card used as a copy/target source ("a
+    // copy of Seven Dwarves" -> the Dwarf subtype, "Ten Wizards Mountain"), a
+    // silent mis-parse. Anchoring the strip to the generic card noun keeps the
+    // count discard scoped to genuine "N cards" quantities: the count is dropped
+    // here (callers that need it read it separately) and the recursion parses the
+    // "card[s] from <zone>" remainder as the underlying zone filter, matching the
+    // already-supported five-card siblings (Kroxa and Kunoros, Young Necromancer).
+    if let Ok((rest, _)) = (
+        nom_primitives::parse_number,
+        space1,
+        peek(alt((tag::<_, _, OracleError<'_>>("cards"), tag("card")))),
+    )
+        .parse(lower.as_str())
+    {
+        let original_rest = &text[lower.len() - rest.len()..];
+        return parse_target_with_syntax(original_rest, ctx);
+    }
+
     // Quantified target phrases routed here from callers that only need the filter,
     // not the target-count metadata.
     static QUANTIFIED_PREFIXES: &[&str] = &[
@@ -7470,6 +7493,46 @@ mod tests {
             )
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 107.1 + CR 400.7: A spelled-out count before the generic "card"/"cards"
+    /// noun is stripped so the underlying zone filter parses; the count itself is
+    /// discarded here (callers that need it read it separately). The bare-number
+    /// `QUANTIFIED_PREFIXES` list stops at "six", so before the anchored
+    /// number+card recognizer a fixed count of seven or more fell through to
+    /// `TargetFilter::Any` with the phrase left unconsumed — Emeritus of Ideation
+    /// and Ultimecia, Time Sorceress both "exile eight cards from your graveyard"
+    /// were left as target-fallback gaps.
+    #[test]
+    fn quantified_count_before_card_noun_parses_as_zone_filter() {
+        let expected = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        );
+        for word in ["seven", "eight", "nine", "ten", "eleven", "twelve"] {
+            let phrase = format!("{word} cards from your graveyard");
+            let (f, rest) = parse_target(&phrase);
+            assert_eq!(f, expected, "filter mismatch for {phrase:?}");
+            assert_eq!(rest, "", "count prefix not stripped for {phrase:?}");
+        }
+        // Collision guard (CR 201.2): the count strip is anchored to the generic
+        // "card(s)" noun, so a number-named card used as a copy/target source is
+        // NOT mis-stripped into its trailing subtype. "Seven Dwarves" must be left
+        // whole for name resolution (Princess Snowfall: "a copy of Seven Dwarves"),
+        // not consumed as a Dwarf-subtype target.
+        let (f, rest) = parse_target("Seven Dwarves");
+        assert_eq!(
+            f,
+            TargetFilter::Any,
+            "\"Seven Dwarves\" must not be stripped into a Dwarf-subtype filter"
+        );
+        assert_eq!(
+            rest, "Seven Dwarves",
+            "\"Seven Dwarves\" must be left unconsumed"
+        );
     }
 
     #[test]
