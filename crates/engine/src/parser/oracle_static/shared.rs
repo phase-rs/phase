@@ -2391,8 +2391,8 @@ fn another_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondi
             nom::error::ErrorKind::Fail,
         )));
     };
-    // CR 613.7: "another <type>" excludes the ability source — reuse
-    // FilterProp::Another rather than approximating with ObjectCount(type) >= 2.
+    // "another <type>" excludes the ability source at runtime via
+    // FilterProp::Another — not ObjectCount(type) >= 2.
     if !tf
         .properties
         .iter()
