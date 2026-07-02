@@ -235,9 +235,8 @@ export default defineConfig(({ mode }) => ({
             // R2 serves `max-age=60, must-revalidate` with ETags, so the
             // StaleWhileRevalidate background refresh is a 304 revalidation,
             // not a re-download — the cached copy serves instantly and
-            // offline, mirroring the card-locale-sidecars reasoning. Without
-            // this rule the image-URL lookup layer (scryfall-data.json) is
-            // unavailable offline even when the images themselves are cached.
+            // offline, mirroring the card-locale-sidecars reasoning. This keeps
+            // the image-URL lookup layer (scryfall-data.json) available offline.
             urlPattern:
               /\/(scryfall-data|scryfall-printings|scryfall-token-images|scryfall-sets|card-names|card-data-meta|set-list|decks|draft-pools|coverage-data|coverage-summary)\.json$/,
             handler: "StaleWhileRevalidate",
@@ -257,27 +256,19 @@ export default defineConfig(({ mode }) => ({
               expiration: { maxEntries: 16 },
             },
           },
-          {
-            // Card imagery from Scryfall's CDNs. Image URLs are content-stable
-            // (upstream serves `max-age=31556952`), so CacheFirst is correct.
-            // `<img>` elements issue no-cors requests whose opaque responses
-            // Chrome pads to ~7MB each against origin quota; `fetchOptions`
-            // upgrades the SW-side fetch to CORS (Scryfall sends
-            // `access-control-allow-origin: *`), so cached entries count at
-            // true size. This cache is also the offline card-image store that
-            // an explicit "download deck for offline" prefetch warms.
-            urlPattern: /^https:\/\/(cards|backs|svgs)\.scryfall\.io\//,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "scryfall-images",
-              fetchOptions: { mode: "cors" },
-              expiration: {
-                maxEntries: 4000,
-                maxAgeSeconds: 31536000,
-                purgeOnQuotaError: true,
-              },
-            },
-          },
+          // NOTE: Scryfall card imagery (cards/backs/svgs.scryfall.io) is
+          // intentionally NOT runtime-cached here. A CacheFirst rule forces the
+          // SW to re-fetch <img> requests in CORS mode (needed to avoid opaque-
+          // response quota padding), and that broke every mana pip and card
+          // back in production: edge-cached Scryfall variants (svgs/backs are
+          // served from the Cloudflare edge with `vary: Origin`) get handed to
+          // the SW's cors fetch without an `access-control-allow-origin` header,
+          // failing the CORS check. Plain no-cors <img> loading (opaque, no CORS
+          // check) is the long-standing, working behavior. Re-introducing an
+          // offline image cache requires first giving EVERY Scryfall <img> a
+          // consistent crossOrigin="anonymous" so page and SW never create
+          // colliding cache variants. See the #4822 (introduced) / #4855
+          // (credentials patch) incident before re-adding.
           {
             // Same-origin static imagery from public/ (battlefield art, nav
             // icons, logos). Not in the precache manifest — the default glob

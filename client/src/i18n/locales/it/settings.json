@@ -12,6 +12,13 @@
     "data": "Dati"
   },
   "gameplay": {
+    "collapseLands": "Comprimi Lands",
+    "collapseSupport": "Comprimi Support",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Sempre attivo",
+      "off": "Sempre disattivato"
+    },
     "title": "Giocabilità",
     "language": "Lingua",
     "cardSize": "Dimensione carte",

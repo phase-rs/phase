@@ -62,4 +62,12 @@ describe("clearPromptOverlayState", () => {
 
     expect(useUiStore.getState().manualManaOverride).toBe(false);
   });
+
+  it("resets the ephemeral hand hide-filter so it can't leak across games", () => {
+    useUiStore.setState({ handFilter: "playable" });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().handFilter).toBe("none");
+  });
 });

@@ -1,17 +1,19 @@
 import { memo, useState, useCallback, useMemo, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
 import type { MotionValue, PanInfo } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveSingleActionDispatch,
@@ -22,10 +24,18 @@ import {
   computeHandInsertionMarker,
   computeFlankDisplacement,
   computeGapPx,
+  computeReorderedHand,
   flankingHandIndices,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
+import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
+import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
+import { PopoverMenu } from "../menu/PopoverMenu.tsx";
+
+// Stable empty lookup so an undefined `objects` (pre-game) never busts the
+// organizer's filter memo with a fresh `{}` each render.
+const EMPTY_OBJECTS: Record<string, GameObject> = {};
 
 // Horizontal overlap between adjacent hand cards. Negative margin pulls each
 // card leftward over the previous one. Tightens continuously as the hand grows
@@ -97,6 +107,7 @@ const DROP_ARROW_PX = 28;
 const ARROW_TIP_FRAC = 20 / 24;
 
 export function PlayerHand() {
+  const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
   const player = useGameStore((s) => s.gameState?.players[playerId]);
@@ -129,6 +140,28 @@ export function PlayerHand() {
   const playableObjectIds = useMemo(() => {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
+
+  // Display-only organizing of the player's own hand: persisted sort + ephemeral
+  // hide-filter, sharing the discard grid's mechanism. This NEVER reorders
+  // `player.hand` or touches the engine — it only permutes/hides what is shown.
+  // While a sort or filter is active the displayed order diverges from
+  // `player.hand`, so drag-to-reorder (ReorderHand) is suppressed below.
+  const handSort = usePreferencesStore((s) => s.handSort);
+  const setHandSort = usePreferencesStore((s) => s.setHandSort);
+  const handFilter = useUiStore((s) => s.handFilter);
+  const setHandFilter = useUiStore((s) => s.setHandFilter);
+  const handCardIds = useMemo(
+    () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
+    [player?.hand, objects, pendingObjectId],
+  );
+  const organizer = useCardOrganizer({
+    cards: handCardIds,
+    objects: objects ?? EMPTY_OBJECTS,
+    playableIds: playableObjectIds,
+    sort: { value: handSort, onChange: setHandSort },
+    filter: { value: handFilter, onChange: setHandFilter },
+  });
+  const organizeActive = handSort !== "none" || handFilter !== "none";
 
   // Castable graveyard/exile cards, rendered as colored "wings" continuing the
   // hand fan (engine authority — see useCastableZoneObjects). These are NOT
@@ -265,6 +298,7 @@ export function PlayerHand() {
       const show =
         !isMobile &&
         pendingObjectId == null &&
+        !organizeActive &&
         marker != null &&
         insideHand &&
         info.offset.y >= DRAG_PLAY_THRESHOLD &&
@@ -283,7 +317,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
+    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -310,18 +344,21 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        // Reorder is disabled while a cast is in progress: handObjects filters
-        // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
-        // has N entries. The slot index from `computeHandInsertionSlot` would
-        // map to the wrong position in the unfiltered hand.
-        if (pendingObjectId != null) return false;
-        if (targetSlot == null || !player) return false;
-        const currentOrder = player.hand.slice();
-        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
-        if (fromIdx === -1 || fromIdx === targetSlot) return false;
-        const [moved] = currentOrder.splice(fromIdx, 1);
-        currentOrder.splice(targetSlot, 0, moved);
-        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        if (!player) return false;
+        // Reorder is suppressed while a cast is in progress (`pendingObjectId`)
+        // OR while the hand is sorted/filtered (`organizeActive`): in both cases
+        // the displayed slot index doesn't map 1:1 onto `player.hand`, so
+        // dispatching from a displayed slot would scramble the hand. The pure
+        // helper returns null in those states (and for no-op moves).
+        const nextOrder = computeReorderedHand(
+          player.hand,
+          objectId as ObjectId,
+          targetSlot,
+          pendingObjectId != null || organizeActive,
+        );
+        if (nextOrder) {
+          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
+        }
         return false;
       }
 
@@ -331,7 +368,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, player, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
@@ -420,9 +457,13 @@ export function PlayerHand() {
 
   if (!player || !objects) return null;
 
-  const handObjects = player.hand
+  // Displayed hand = the organizer's sorted/filtered order (already excludes the
+  // pending cast card via `handCardIds`). A hide-filter shrinks this list, so
+  // `handSize` and the fan geometry below resize to the visible cards. The
+  // underlying `player.hand` is never touched — organizing is display-only.
+  const handObjects = organizer.ordered
     .map((id) => objects[id])
-    .filter((obj) => obj && obj.id !== pendingObjectId);
+    .filter((obj): obj is GameObject => obj != null);
 
   // The hand and its exile (left) / graveyard (right) castable wings render as
   // ONE fan sized by the total card count, so many wings tuck in tightly instead
@@ -447,6 +488,37 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
+      {/* Hand organizer (desktop): a compact popover to sort / hide-filter the
+          player's own hand for DISPLAY only. Gated on the TRUE hand count
+          (`handCardIds`, not the post-filter `handObjects`) so a filter that
+          hides every card can still be cleared. Hidden on mobile, where the
+          drawer carries the same controls. The wrapper stops click propagation
+          so opening it never toggles the hand-lift. */}
+      {!isMobile && handCardIds.length > 0 && (
+        <div className="absolute right-2 top-0 z-50" onClick={(e) => e.stopPropagation()}>
+          <PopoverMenu ariaLabel={t("hand.organizeLabel")} menuWidthPx={220}>
+            {() => (
+              <div className="flex flex-col gap-2 px-3 py-2">
+                <CardOrganizerToolbar
+                  className="flex flex-col gap-2 text-xs text-slate-300"
+                  sort={handSort}
+                  onSortChange={setHandSort}
+                  filter={handFilter}
+                  onFilterChange={setHandFilter}
+                  showSort
+                  showFilter
+                  disabled={pendingObjectId != null}
+                />
+                {organizeActive && (
+                  <p className="text-[11px] leading-snug text-amber-300/80">
+                    {t("hand.reorderPausedHint")}
+                  </p>
+                )}
+              </div>
+            )}
+          </PopoverMenu>
+        </div>
+      )}
       {/* The whole hand lifts as one unit on hover. Keeping this uniform -50px
           lift on a container — rather than baking `expanded` into each card's
           animate target — lets the memoized HandCards skip re-rendering when the

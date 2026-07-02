@@ -21368,6 +21368,42 @@ fn strip_each_player_subject_controls_permanent_clause() {
     }
 }
 
+/// CR 122.1f + CR 109.5: "who has N or more poison counters" must lower to
+/// `PlayerFilter::PlayerAttribute`, not be dropped (Ixhel, Scion of Atraxa).
+#[test]
+fn strip_each_player_subject_poison_counter_clause() {
+    use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+    use crate::types::player::PlayerCounterKind;
+
+    let (scope, result) = strip_each_player_subject(
+        "each opponent who has three or more poison counters exiles the top card of their library face down",
+    );
+    assert_eq!(
+        result, "exile the top card of their library face down",
+        "predicate must deconjugate after the attr clause is stripped"
+    );
+    match scope {
+        Some(PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        }) => {
+            assert_eq!(relation, PlayerRelation::Opponent);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(
+                *attr,
+                QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }
+            );
+        }
+        other => panic!("expected PlayerAttribute(poison), got {other:?}"),
+    }
+}
+
 /// Issue #2016 (Bonder's Ornament): "{4}, {T}: Each player who controls a
 /// permanent named Bonder's Ornament draws a card." The "who controls a
 /// permanent named X" relative clause must be captured into
@@ -21722,6 +21758,49 @@ fn effect_exchange_control_quantified_two_target_creatures() {
                 matches!(target_a, TargetFilter::Typed(ref tf)
                         if tf.type_filters == vec![crate::types::ability::TypeFilter::Creature]),
                 "target_a should be a creature filter, got {target_a:?}"
+            );
+        }
+        other => panic!("Expected ExchangeControl, got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_exchange_control_two_permanents_share_permanent_type() {
+    // Role Reversal: "Exchange control of two target permanents that share a
+    // permanent type." Quantified two-target shape whose shared-quality
+    // suffix uses "permanent type" instead of "card type" (Shifting
+    // Loyalties). CR 110.4: permanent types are only a SUBSET of the card
+    // types, so the constraint lowers to the narrower
+    // SharedQuality::PermanentType on both identical slots (NOT CardType).
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TypeFilter};
+    let e = parse_effect("exchange control of two target permanents that share a permanent type");
+    match e {
+        Effect::ExchangeControl { target_a, target_b } => {
+            assert_eq!(
+                target_a, target_b,
+                "quantified shape: both slot filters identical"
+            );
+            let TargetFilter::Typed(ref tf) = target_a else {
+                panic!("target_a should be Typed, got {target_a:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Permanent)),
+                "expected a Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::PermanentType,
+                        relation: SharedQualityRelation::Shares,
+                        ..
+                    }
+                )),
+                "expected a shared-permanent-type constraint, got {:?}",
+                tf.properties
             );
         }
         other => panic!("Expected ExchangeControl, got {other:?}"),
@@ -26401,6 +26480,78 @@ fn effect_for_each_opponent_up_to_one_gain_control_has_optional_fanout_slots() {
     }
 }
 
+/// CR 508.6 + CR 122.1a: Jabari's Influence — "Gain control of target
+/// nonartifact, nonblack creature that attacked you this turn and put a -1/-0
+/// counter on it." Revert-failing on BOTH coupled defects:
+///   (1) the target restriction — the GainControl filter must carry the
+///       defender-scoped `AttackedThisTurn { Some(You) }` (plus nonartifact /
+///       nonblack). Without the parser arm, "that attacked you this turn" is
+///       dropped and the property is absent.
+///   (2) the counter clause — making parse_target consume "that attacked you
+///       this turn" repositions the " and " boundary so the existing
+///       `try_split_targeted_compound` auto-chains the `PutCounter(-1/-0)` as a
+///       `sub_ability` targeting `ParentTarget`. Without defect (1) fixed, the
+///       remainder is malformed and the sub-ability never attaches.
+#[test]
+fn jabari_influence_scopes_target_and_chains_minus_one_zero_counter() {
+    let def = parse_effect_chain(
+        "Gain control of target nonartifact, nonblack creature that attacked you this turn and put a -1/-0 counter on it.",
+        AbilityKind::Spell,
+    );
+
+    // Defect 1: GainControl target carries the defender-scoped attack filter.
+    match &*def.effect {
+        Effect::GainControl {
+            target: TargetFilter::Typed(tf),
+        } => {
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Creature)),
+                "expected creature type filter, got {tf:?}"
+            );
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::AttackedThisTurn {
+                        defender: Some(ControllerRef::You)
+                    }
+                )),
+                "expected defender-scoped AttackedThisTurn(Some(You)) on GainControl target, got {tf:?}"
+            );
+            // nonblack restriction survives (nonartifact is a negated type filter).
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::NotColor {
+                        color: ManaColor::Black
+                    }
+                )),
+                "expected nonblack (NotColor Black) restriction, got {tf:?}"
+            );
+        }
+        other => panic!("expected GainControl, got {other:?}"),
+    }
+
+    // Defect 2: the coupled " and put a -1/-0 counter on it" auto-chains as a
+    // PutCounter sub-ability targeting the parent (gained-control) creature.
+    match def.sub_ability.as_ref().map(|sub| &*sub.effect) {
+        Some(Effect::PutCounter {
+            counter_type: CounterType::PowerToughness { power, toughness },
+            target,
+            ..
+        }) => {
+            assert_eq!((*power, *toughness), (-1, 0), "expected -1/-0 counter");
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "counter must land on the gained-control creature (ParentTarget)"
+            );
+        }
+        other => panic!("expected PutCounter(-1/-0, ParentTarget) sub-ability, got {other:?}"),
+    }
+}
+
 #[test]
 fn effect_for_each_opponent_draw_stays_repeat_for_count() {
     let def = parse_effect_chain("For each opponent, you draw a card.", AbilityKind::Spell);
@@ -26773,6 +26924,27 @@ fn effect_switch_pt_self() {
             }
         ),
         "expected SwitchPT with SelfRef, got: {e:?}"
+    );
+}
+
+/// CR 613.4d: pronoun surface form ("switch its power and toughness") —
+/// `parse_target` does not treat a bare "its" as a target, so this form is
+/// handled by a dedicated branch that resolves the "its" anaphor via
+/// `resolve_it_pronoun`. In a bare effect context (no trigger subject) that
+/// resolves to `SelfRef` (Valakut Fireboar's self-attack trigger); a typed
+/// trigger subject resolves it to `TriggeringSource` (Mangled Soulrager's
+/// granted boon).
+#[test]
+fn effect_switch_pt_pronoun_its() {
+    let e = parse_effect("switch its power and toughness until end of turn");
+    assert!(
+        matches!(
+            e,
+            Effect::SwitchPT {
+                target: TargetFilter::SelfRef
+            }
+        ),
+        "expected SwitchPT with SelfRef for the pronoun form, got: {e:?}"
     );
 }
 
@@ -28075,6 +28247,50 @@ fn reveal_until_x_permanent_cards_choose_any_number_aurora() {
     );
     assert_eq!(*kept_destination, Zone::Battlefield);
     assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// CR 701.20a + CR 608.2c: Explosive Revelation has a transparent damage
+/// instruction between the RevealUntil and the rest-pile placement. The
+/// RevealUntil already owns "the rest on the bottom"; the parser must not emit
+/// a second PutAtLibraryPosition sibling for that same rest pile.
+#[test]
+fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
+    let def = parse_effect_chain(
+        "Choose any target. Reveal cards from the top of your library until you reveal a nonland card. \
+         Explosive Revelation deals damage equal to that card's mana value to that permanent or player. \
+         Put the nonland card into your hand and the rest on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+
+    let reveal = def
+        .sub_ability
+        .as_ref()
+        .expect("target-only head must chain into RevealUntil");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", reveal.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Library);
+
+    let damage = reveal
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into damage");
+    assert!(
+        matches!(&*damage.effect, Effect::DealDamage { .. }),
+        "expected damage sibling, got {:?}",
+        damage.effect
+    );
+    assert!(
+        damage.sub_ability.is_none(),
+        "rest-pile placement must be absorbed by RevealUntil, not emitted as {:?}",
+        damage.sub_ability
+    );
 }
 
 /// CR 701.20a: "reveal until you reveal X nonland cards, where X is the
@@ -30468,6 +30684,90 @@ fn skip_next_untap_step_parses_as_step_skip() {
     assert_eq!(
         count,
         &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+    );
+}
+
+/// CR 614.10 + CR 614.10a + CR 502.3: "Skip the untap step of that turn" (the
+/// second sentence of Savor the Moment / Time Bends to My Will, following an
+/// extra-turn effect) is the current-turn-anaphor sibling of "skip your next
+/// untap step". "That turn" is the extra turn just created — the controller's
+/// next turn — so the clause lowers to the same `SkipNextStep` with
+/// `NextOccurrence` scope, `Controller` target, and a `Untap` step. Fail-before:
+/// without the recognizer this clause falls through to `Effect::Unimplemented`.
+#[test]
+fn skip_the_untap_step_of_that_turn_parses_as_step_skip() {
+    let def = parse_effect_chain("Skip the untap step of that turn.", AbilityKind::Spell);
+    let Effect::SkipNextStep {
+        target,
+        step,
+        count,
+        scope,
+    } = &*def.effect
+    else {
+        panic!("expected SkipNextStep, got {:?}", def.effect);
+    };
+    assert_eq!(scope, &SkipScope::NextOccurrence);
+    assert_eq!(target, &TargetFilter::Controller);
+    assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
+    assert_eq!(
+        count,
+        &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+    );
+}
+
+/// CR 614.10a: Full-card regression for Savor the Moment. The extra-turn spell
+/// must parse to an `ExtraTurn` primary effect with a chained `SkipNextStep`
+/// sub-ability for "Skip the untap step of that turn." — and NO `Unimplemented`
+/// clause anywhere in the chain. Fail-before: the skip clause is `Unimplemented`
+/// and the card is unsupported in coverage.
+#[test]
+fn savor_the_moment_full_card_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Take an extra turn after this one. Skip the untap step of that turn.",
+        "Savor the Moment",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    fn walk<'a>(ad: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ad.effect);
+        if let Some(sub) = ad.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(alt) = ad.else_ability.as_deref() {
+            walk(alt, out);
+        }
+    }
+
+    let mut effects = Vec::new();
+    for a in &parsed.abilities {
+        walk(a, &mut effects);
+    }
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Savor the Moment must have no Unimplemented clause; effects = {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ExtraTurn { .. })),
+        "expected an ExtraTurn effect; effects = {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step: StepSkipTarget::Step(Phase::Untap),
+                scope: SkipScope::NextOccurrence,
+                ..
+            }
+        )),
+        "expected a controller untap-step SkipNextStep; effects = {effects:?}"
     );
 }
 

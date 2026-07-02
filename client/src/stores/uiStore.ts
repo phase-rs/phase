@@ -6,6 +6,7 @@ import type {
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
+import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
 
 /**
  * A dice-roll / coin-flip moment to animate, surfaced from engine-authored
@@ -142,6 +143,11 @@ interface UiStoreState {
    *  dialog. See DialogHost.tsx:113-122 for the contract. */
   enchantmentsDialogPlayer: number | null;
   mobileHandOpen: boolean;
+  /** Ephemeral hide-filter for the player's own hand (display-only). Lives here
+   *  rather than in `preferencesStore` so it resets each game (cleared by
+   *  `clearPromptOverlayState`) — a per-game focus aid, not a durable
+   *  preference. The companion sort lives in `preferencesStore.handSort`. */
+  handFilter: FilterKey;
   debugPanelOpen: boolean;
   /** Which top-level tab the debug panel shows. Lifted out of DebugPanel's
    *  local state so entry points (Sandbox Tools nudge/button) can open the
@@ -217,6 +223,7 @@ interface UiStoreActions {
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setMobileHandOpen: (open: boolean) => void;
+  setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
@@ -268,6 +275,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
   mobileHandOpen: false,
+  handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
   debugInteractionMode: false,
@@ -516,6 +524,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
+  setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
   openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),

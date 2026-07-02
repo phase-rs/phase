@@ -189,7 +189,17 @@ fn prompt_resolution_attachment_choice(
     let bounds = attachment_choice_bounds(state, ability, eligible.len())?;
 
     match (eligible.len(), bounds.min, bounds.max) {
-        (_, 0, 0) | (0, 0, _) => Ok(true),
+        // CR 608.2d: a player can't choose an illegal or impossible option. With
+        // no eligible attachment there is nothing to choose, so the "attach an
+        // Equipment you control" selection can't be made and the effect does
+        // nothing. An empty candidate list paired with `min_count >= 1` would
+        // otherwise build an unsatisfiable `EffectZoneChoice` and deadlock the
+        // game — Nahiri, the Lithomancer's "You may attach an Equipment you
+        // control to it" when the controller has no Equipment: the "may" gate is
+        // accepted, clearing the optional flag, so `attachment_choice_bounds`
+        // defaults to {min:1, max:1} against zero candidates. Subsumes the prior
+        // `(0, 0, _)` no-op arm.
+        (0, _, _) | (_, 0, 0) => Ok(true),
         (1, 1, 1) => Ok(false),
         _ => {
             // Replace any stale continuation (e.g. a deferred optional sub stashed
@@ -1513,6 +1523,55 @@ mod tests {
                 }
             )),
             "no-op optional Attach must not emit an attachment event"
+        );
+        assert!(state.objects.get(&host).unwrap().attachments.is_empty());
+    }
+
+    /// Regression: Nahiri, the Lithomancer +2 ("Create a Kor Soldier token. You
+    /// may attach an Equipment you control to it") when the controller has NO
+    /// Equipment. The "may" gate is accepted upstream, clearing `optional` and
+    /// leaving no `multi_target`, so `attachment_choice_bounds` defaults to
+    /// {min:1, max:1}. With zero eligible Equipment the pre-fix match catch-all
+    /// built an `EffectZoneChoice { cards: [], min_count: 1 }` — an unsatisfiable
+    /// prompt with no legal actions that froze the game (turn-26 stuck report).
+    /// CR 608.2d: with no eligible Equipment the choice can't be made, so the
+    /// effect does nothing.
+    #[test]
+    fn mandatory_attach_with_no_eligible_equipment_does_not_deadlock() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Kor Soldier");
+        state.last_created_token_ids = vec![host];
+
+        // Post-"may"-gate Nahiri shape: optional flag already consumed, no
+        // multi_target, so bounds resolve to {min:1, max:1}. No Equipment exists.
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::LastCreated,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(2),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "empty-eligible attach must not build an unsatisfiable choice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_continuation.is_none(),
+            "no continuation should be stashed for a no-op attach"
         );
         assert!(state.objects.get(&host).unwrap().attachments.is_empty());
     }

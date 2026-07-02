@@ -350,21 +350,24 @@ pub(crate) fn record_first_draw_and_enqueue_miracle(
     if !is_first {
         return;
     }
-    // CR 702.94a: Static ability functions from hand — check the drawn object's
-    // keywords. Reads the concrete `Keyword::Miracle(ManaCost)` payload; if
-    // layers remove miracle before draw resolution the offer simply never
-    // queues. `obj.keywords` is the printed+granted keyword set visible on the
-    // object while it's in the owner's hand.
     let Some(obj) = state.objects.get(&object_id) else {
         return;
     };
     if obj.owner != player {
         return;
     }
-    let miracle_cost = obj.keywords.iter().find_map(|k| match k {
-        crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
-        _ => None,
-    });
+    // CR 702.94a: Static ability functions from hand — check the drawn object's
+    // effective keywords (printed + continuous grants like Molecule Man's hand
+    // miracle). `effective_off_zone_keywords` is the object-scoped authority for
+    // non-battlefield zones; if layers remove miracle before draw resolution the
+    // offer simply never queues.
+    let miracle_cost =
+        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+            .into_iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
+                _ => None,
+            });
     let Some(cost) = miracle_cost else {
         return;
     };
@@ -872,6 +875,70 @@ mod tests {
         let offer = &state.pending_miracle_offers[0];
         assert_eq!(offer.player, PlayerId(0));
         assert_eq!(offer.object_id, first);
+    }
+
+    /// CR 702.94a: Miracle granted by a continuous hand static (Molecule Man)
+    /// must queue an offer even when the drawn card has no printed miracle.
+    #[test]
+    fn miracle_granted_by_hand_static_queues_offer_on_first_draw() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(42);
+        let grant_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Miracle(ManaCost::NoCost),
+            }]);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Molecule Man".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.card_types.core_types.push(CoreType::Creature);
+            src.base_card_types = src.card_types.clone();
+            src.static_definitions.push(grant_static.clone());
+            src.base_static_definitions = Arc::new(vec![grant_static]);
+        }
+
+        let drawn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nonland Spell".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&drawn).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        evaluate_layers(&mut state);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &make_ability(1), &mut events).unwrap();
+
+        assert_eq!(state.pending_miracle_offers.len(), 1);
+        assert_eq!(state.pending_miracle_offers[0].object_id, drawn);
+        assert!(state.pending_miracle_offers[0]
+            .cost
+            .is_without_paying_mana());
     }
 
     /// CR 702.94a: A card without Miracle as the first-drawn card does NOT

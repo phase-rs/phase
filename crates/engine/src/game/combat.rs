@@ -6945,6 +6945,80 @@ mod tests {
         );
     }
 
+    /// CR 508.1 + CR 509.1b + CR 611.3a: Runtime combat regression for Wirecat's
+    /// gated "can't attack or block if an enchantment is on the battlefield". The
+    /// parsed `CantAttackOrBlock` carries an `ObjectCount(enchantment) >= 1`
+    /// condition, so the restriction must be inert while no enchantment exists
+    /// (attacking and blocking both succeed) and functioning once one does (both
+    /// fail). Drives the layer/legality seams (`evaluate_layers` →
+    /// `validate_attackers` / `can_block_pair`), not just the parsed shape.
+    #[test]
+    fn wirecat_cant_attack_or_block_gate_honored_at_runtime() {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_static::parse_static_line_multi;
+
+        let mut state = setup();
+
+        // Wirecat controlled by the active player (P0) so it may attack.
+        let wirecat = create_creature(&mut state, PlayerId(0), "Wirecat", 2, 2);
+        for def in parse_static_line_multi(
+            "This creature can't attack or block if an enchantment is on the battlefield.",
+        ) {
+            let obj = state.objects.get_mut(&wirecat).unwrap();
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        // An opponent's attacker for the block-legality seam.
+        let opp_attacker = create_creature(&mut state, PlayerId(1), "Opp Bear", 2, 2);
+
+        evaluate_layers(&mut state);
+
+        // No enchantment on the battlefield → the gate is false → the restriction
+        // is inert: Wirecat may attack and may block.
+        assert!(
+            validate_attackers(&state, &[wirecat]).is_ok(),
+            "Wirecat must be able to attack with no enchantment on the battlefield"
+        );
+        assert!(
+            can_block_pair(&state, wirecat, opp_attacker),
+            "Wirecat must be able to block with no enchantment on the battlefield"
+        );
+
+        // Put an enchantment on the battlefield → the gate is true → the
+        // restriction functions: Wirecat can neither attack nor block.
+        let enchantment_card_id = CardId(state.next_object_id);
+        let enchantment = create_object(
+            &mut state,
+            enchantment_card_id,
+            PlayerId(1),
+            "Some Aura".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        // Set BOTH the live and base card types: `evaluate_layers` reseeds live
+        // `card_types` from `base_card_types` (see
+        // `seed_live_characteristics_from_base` in layers.rs), so the enchantment
+        // type must be present in the base to survive the second layer pass and
+        // actually satisfy the `ObjectCount(enchantment) >= 1` gate.
+        let ench_obj = state.objects.get_mut(&enchantment).unwrap();
+        ench_obj.card_types.core_types.push(CoreType::Enchantment);
+        ench_obj
+            .base_card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            validate_attackers(&state, &[wirecat]).is_err(),
+            "Wirecat must not be able to attack while an enchantment is on the battlefield"
+        );
+        assert!(
+            !can_block_pair(&state, wirecat, opp_attacker),
+            "Wirecat must not be able to block while an enchantment is on the battlefield"
+        );
+    }
+
     #[test]
     fn max_blockers_each_combat_counts_previous_defending_players() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);

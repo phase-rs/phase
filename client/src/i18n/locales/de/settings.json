@@ -12,6 +12,13 @@
     "data": "Daten"
   },
   "gameplay": {
+    "collapseLands": "Lands einklappen",
+    "collapseSupport": "Support einklappen",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Immer an",
+      "off": "Immer aus"
+    },
     "title": "Spielablauf",
     "language": "Sprache",
     "cardSize": "Kartengröße",

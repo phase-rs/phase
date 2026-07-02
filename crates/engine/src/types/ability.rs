@@ -2813,6 +2813,11 @@ pub enum SharedQuality {
     CardType,
     /// CR 205.3i + CR 305.6: land subtypes, including the five basic land types.
     LandType,
+    /// CR 110.4: the six permanent types only — artifact, battle, creature,
+    /// enchantment, land, planeswalker. Distinct from `CardType` (CR 205.2a),
+    /// which also includes non-permanent types such as Kindred/Tribal; two
+    /// permanents sharing only Kindred do NOT share a permanent type.
+    PermanentType,
 }
 
 /// Relationship required by `FilterProp::SharesQuality`.
@@ -3145,6 +3150,11 @@ pub enum FilterProp {
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
+    /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
+    /// text offers two or more options in a bulleted list). Evaluated against the
+    /// stack object's static printed modality (`obj.modal.is_some()`), a printed
+    /// characteristic present from object creation.
+    Modal,
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
@@ -3251,8 +3261,16 @@ pub enum FilterProp {
         to: Option<Zone>,
     },
     /// CR 508.1a: Creature was declared as an attacker this turn.
-    /// Checks `creatures_attacked_this_turn` tracking set on GameState.
-    AttackedThisTurn,
+    /// `None` matches a board-wide declaration (any defender), checked against
+    /// the `creatures_attacked_this_turn` tracking set on GameState.
+    /// CR 508.6 + CR 508.1b: `Some(defender)` scopes to creatures that attacked a
+    /// specific player, checked against the per-defender
+    /// `creature_attacked_defenders_this_turn` ledger. Mirrors
+    /// `FilterProp::Attacking { defender }`.
+    AttackedThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defender: Option<ControllerRef>,
+    },
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
@@ -5643,10 +5661,14 @@ pub enum AttackersDeclaredCountSubject {
         filter: Option<TargetFilter>,
     },
     /// Count attackers whose announced attack target matches a scoped player,
-    /// planeswalker, battle, or combined attack-target class.
+    /// planeswalker, battle, or combined attack-target class. `filter` is the
+    /// optional condition-level type axis (CR 508.1): when `Some(f)`, only
+    /// attackers matching `f` that attack the scoped target are counted.
     AttackTarget {
         controller: ControllerRef,
         attacked: crate::types::triggers::AttackTargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
 }
 
@@ -19571,6 +19593,13 @@ mod tests {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::Opponent),
             },
+            FilterProp::AttackedThisTurn { defender: None },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::Opponent),
+            },
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
@@ -19632,6 +19661,34 @@ mod tests {
         let json = serde_json::to_string(&props).unwrap();
         let deserialized: Vec<FilterProp> = serde_json::from_str(&json).unwrap();
         assert_eq!(props, deserialized);
+    }
+
+    /// CR 508.6: `AttackedThisTurn` parameterization is backward-compatible with
+    /// the old unit variant. `FilterProp` is internally-tagged (`tag = "type"`),
+    /// so `defender: None` serializes to exactly `{"type":"AttackedThisTurn"}` —
+    /// byte-identical to the old unit shape — and that legacy payload still
+    /// deserializes into `{ defender: None }`. `Some(_)` emits and round-trips.
+    /// Mirrors the sibling `Attacking { defender }` serde contract.
+    #[test]
+    fn attacked_this_turn_defender_serde_shape() {
+        // None omits the defender field entirely (skip_serializing_if).
+        let none = FilterProp::AttackedThisTurn { defender: None };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(
+            json, r#"{"type":"AttackedThisTurn"}"#,
+            "None must serialize to the legacy unit shape"
+        );
+        let back_none: FilterProp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back_none, none);
+
+        // Some(_) emits the defender field and round-trips.
+        let some = FilterProp::AttackedThisTurn {
+            defender: Some(ControllerRef::You),
+        };
+        let some_json = serde_json::to_string(&some).unwrap();
+        assert!(some_json.contains("defender"), "Some must emit the field");
+        let back: FilterProp = serde_json::from_str(&some_json).unwrap();
+        assert_eq!(back, some);
     }
 
     #[test]

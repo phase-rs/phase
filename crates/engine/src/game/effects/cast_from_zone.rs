@@ -4,7 +4,7 @@ use crate::types::ability::{
     SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
@@ -333,6 +333,9 @@ pub fn resolve(
     }
 
     if driver_free_cast || immediate_graveyard_free_cast {
+        if is_stack_spell_copy(state, target_ids[0]) {
+            return cast_stack_spell_copy_during_resolution(state, ability, target_ids[0], events);
+        }
         return cast_single_target_during_resolution(
             state,
             ability,
@@ -425,6 +428,72 @@ fn effective_cast_from_zone_constraint(
             None
         }
     })
+}
+
+/// CR 707.10 + CR 608.2g: A `CopySpell` that put a spell copy onto the stack
+/// (Isochron Scepter / Spellbinder) is not yet cast. A chained `CastFromZone {
+/// ParentTarget, DuringResolution }` completes that cast without moving zones.
+fn is_stack_spell_copy(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Stack && state.stack.iter().any(|entry| entry.id == object_id)
+    })
+}
+
+/// CR 707.10 + CR 118.9: Finish casting a spell copy that `CopySpell` already
+/// placed on the stack — emit `SpellCast`, open CR 707.10c retarget selection
+/// when needed, and do not route through `initiate_cast_during_resolution`
+/// (Stack is not a castable origin zone).
+fn cast_stack_spell_copy_during_resolution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    copy_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+    });
+
+    let Some(obj) = state.objects.get(&copy_id).cloned() else {
+        return Err(EffectError::InvalidParam(format!(
+            "stack spell copy {copy_id:?} not found"
+        )));
+    };
+    if obj.zone != Zone::Stack {
+        return Err(EffectError::InvalidParam(format!(
+            "ParentTarget {copy_id:?} is not a stack spell copy"
+        )));
+    }
+
+    let origin = obj.cast_from_zone.unwrap_or(Zone::Exile);
+    events.push(GameEvent::SpellCast {
+        card_id: obj.card_id,
+        controller: ability.controller,
+        object_id: copy_id,
+    });
+    crate::game::restrictions::record_spell_cast_from_zone(
+        state,
+        ability.controller,
+        &obj,
+        origin,
+        CastingVariant::Normal,
+    );
+
+    if crate::game::effects::prepare::open_copy_target_selection(
+        state,
+        copy_id,
+        ability.controller,
+        None,
+    )
+    .map_err(EffectError::InvalidParam)?
+    {
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::Priority {
+        player: ability.controller,
+    };
+    Ok(())
 }
 
 /// CR 608.2g + CR 601.2a–i: Cast a single targeted card DURING the resolution of
@@ -1008,6 +1077,138 @@ mod tests {
         assert!(
             state.players.iter().all(|p| p.mana_pool.total() == 0),
             "the free cast must not require or consume mana"
+        );
+    }
+
+    /// CR 707.10 + CR 608.2g (issue #4792): Isochron Scepter copies an imprinted
+    /// instant onto the stack, then a chained `CastFromZone { ParentTarget,
+    /// DuringResolution }` completes the free cast. The copy must not be routed
+    /// through `initiate_cast_during_resolution` — Stack is not a castable zone.
+    #[test]
+    fn stack_spell_copy_parent_target_casts_without_zone_move() {
+        use std::sync::Arc;
+
+        use crate::game::effects::copy_spell;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CopyRetargetPermission, QuantityExpr,
+        };
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = make_test_state();
+        let scepter_id = ObjectId(5);
+        let target_creature = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let imprint_spell = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        );
+        let imprint_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&imprint_id).unwrap().abilities = Arc::new(vec![imprint_spell]);
+        state
+            .tracked_object_sets
+            .insert(crate::types::identifiers::TrackedSetId(0), vec![imprint_id]);
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            scepter_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        copy_spell::resolve(&mut state, &copy_ability, &mut events).unwrap();
+        let copy_id = state.stack.back().expect("copy on stack").id;
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(copy_id)],
+            scepter_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &cast_ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&imprint_id).map(|o| o.zone),
+            Some(Zone::Exile),
+            "imprinted card stays in exile"
+        );
+        assert_eq!(
+            state.objects.get(&copy_id).map(|o| o.zone),
+            Some(Zone::Stack),
+            "copy remains on the stack"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == copy_id)
+            }),
+            "CastFromZone must complete the copy cast with SpellCast"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CopyRetarget { copy_id: cid, .. } if cid == copy_id
+            ),
+            "targeted copy must open retarget selection, got {:?}",
+            state.waiting_for
+        );
+
+        // Choose a target and finalize the cast.
+        let _ = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_creature)),
+            },
+        )
+        .expect("choose shock target");
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    entry,
+                    StackEntry {
+                        id,
+                        kind: StackEntryKind::Spell { .. },
+                        ..
+                    } if *id == copy_id
+                )
+            }),
+            "copy spell must remain on the stack after targeting"
         );
     }
 

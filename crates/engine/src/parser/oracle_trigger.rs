@@ -18,7 +18,9 @@ use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
-use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
+use super::oracle_nom::filter::{
+    parse_color_property, parse_enters_origin_zone, parse_with_property,
+};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -1214,6 +1216,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
+    }
+    if let Some(ability) = execute.as_deref_mut() {
+        rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+            &def,
+            ability,
+            &modifiers.effect_lower,
+        );
     }
 
     def.execute = execute;
@@ -3858,6 +3867,42 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 508.1 + CR 603.4: source-scoped "if ~ attacked this turn" —
+            // the trigger resolves only if the ability's own source creature
+            // declared as an attacker this turn (Riders of the Mark, Taigam,
+            // Ojutai Master). Composed from the existing, already-evaluated
+            // `FilterProp::AttackedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn`) via `SourceMatchesFilter`,
+            // so no new `TriggerCondition` variant is needed. Distinct from the
+            // player-scoped `YouAttackedThisTurn` ("if you attacked this turn").
+            (
+                "if ~ attacked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+                    ),
+                },
+            ),
+            // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
+            // blocked this turn" — the sibling of the attacked-only arm above,
+            // gating on the source creature having attacked OR blocked this turn
+            // (Inferno Hellion). Reuses the existing, already-evaluated
+            // `FilterProp::AttackedOrBlockedThisTurn` (checked against
+            // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
+            // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is
+            // needed. The turn-scoped "this turn" form only; the "this combat"
+            // form (Clockwork cycle, Kjeldoran Home Guard) needs combat-scoped
+            // tracking the engine does not yet keep and is intentionally excluded.
+            (
+                "if ~ attacked or blocked this turn",
+                TriggerCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+                    ),
+                },
+            ),
             // CR 603.4: past-turn life loss.
             (
                 "if an opponent lost life during their last turn",
@@ -3899,6 +3944,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     subject: AttackersDeclaredCountSubject::AttackTarget {
                         controller: ControllerRef::You,
                         attacked: AttackTargetFilter::Player,
+                        filter: None,
                     },
                     comparator: Comparator::EQ,
                     count: 0,
@@ -4563,6 +4609,7 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: minimum,
@@ -5857,6 +5904,12 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("discard"),
     ));
     let play_cast_create_actions = alt((
+        // CR 121.2: Player draw events in disjunctive trigger lists (Trouble in
+        // Pairs: "draws their second card each turn, or casts...").
+        parse_event_phrase("draws "),
+        parse_event_word("draws"),
+        parse_event_phrase("draw "),
+        parse_event_word("draw"),
         // CR 305.1 + CR 601.2: Player-action verbs for Rocco-class
         // "a player plays a land from exile or casts a spell from exile".
         parse_event_phrase("plays "),
@@ -5921,6 +5974,11 @@ fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("play"),
         parse_event_word("casts"),
         parse_event_word("cast"),
+        // CR 121.2: Player draw events in disjunctive trigger lists.
+        parse_event_phrase("draws "),
+        parse_event_word("draws"),
+        parse_event_phrase("draw "),
+        parse_event_word("draw"),
         // CR 702.29c: "cycle" as bare event verb for shared-object propagation.
         parse_event_word("cycle"),
     ))
@@ -5939,6 +5997,9 @@ fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("play "),
         parse_event_phrase("casts "),
         parse_event_phrase("cast "),
+        // CR 121.2: Player draw events in disjunctive trigger lists.
+        parse_event_phrase("draws "),
+        parse_event_phrase("draw "),
         // CR 702.29c: "cycle" as shared-object verb head.
         parse_event_phrase("cycle "),
     ))
@@ -7057,6 +7118,39 @@ fn add_another_prop(filter: TargetFilter) -> TargetFilter {
             filters: vec![
                 other,
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+            ],
+        },
+    }
+}
+
+/// CR 700.2: Attach `FilterProp::Modal` to a spell filter parsed from a "modal
+/// [type] spell" qualifier, mirroring `add_another_prop`. Distributes into
+/// `Or`/`And` branches; wraps a non-`Typed` filter in an `And` so the modality
+/// constraint is preserved.
+fn add_modal_prop(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            mut properties,
+        }) => {
+            properties.push(FilterProp::Modal);
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller,
+                properties,
+            })
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(add_modal_prop).collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.into_iter().map(add_modal_prop).collect(),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Modal])),
             ],
         },
     }
@@ -10276,9 +10370,19 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     .ok()?;
     let (after_actor, actor): (&str, ControllerRef) = actor_parse;
 
+    // CR 508.3e: "attacks you with N or more creatures" — player-level attack
+    // trigger where the defending player is the controller (Trouble in Pairs).
+    let (after_target, attacks_you) = if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>(" you")).parse(after_actor)
+    {
+        (rest, true)
+    } else {
+        (after_actor, false)
+    };
+
     // Required " with " separator.
     let (after_with, ()) = value((), tag::<_, _, OracleError<'_>>(" with "))
-        .parse(after_actor)
+        .parse(after_target)
         .ok()?;
 
     // Parse the count word/digit. `parse_number` already maps "one"→1 as well as
@@ -10328,6 +10432,9 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         TriggerMode::YouAttack
     };
     def.mode = mode.clone();
+    if attacks_you {
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+    }
     if n == 1 {
         // CR 508.1 + CR 603.2c: the matcher's "at least one attacker matching
         // valid_card" gate is the whole "one or more" condition.
@@ -10343,9 +10450,17 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     }
     let count_filter = narrows.then_some(filter);
     def.condition = Some(TriggerCondition::AttackersDeclaredCount {
-        subject: AttackersDeclaredCountSubject::Controller {
-            scope: actor,
-            filter: count_filter,
+        subject: if attacks_you {
+            AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: count_filter,
+            }
+        } else {
+            AttackersDeclaredCountSubject::Controller {
+                scope: actor,
+                filter: count_filter,
+            }
         },
         comparator: Comparator::GE,
         count: n,
@@ -11665,6 +11780,42 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    // CR 701.6a + CR 603.2 + CR 108.4: "Whenever a spell you've cast is
+    // countered" is the *passive* dual of the countering-side arm above -- it
+    // fires when a spell whose controller is you leaves the stack via a
+    // counter. `TriggerMode::Countered` matches on `SpellCountered` events;
+    // `valid_card` gates the *countered* spell (the event's `object_id`), so a
+    // `You` controller filter restricts the trigger to your own countered
+    // spells, exactly as `valid_card_matches` evaluates it inside
+    // `match_countered`. This differs from the arm above, which gates the
+    // *countering* source via `valid_source`. A spell's controller is
+    // "you've cast"/"you control" both (CR 108.4), so both possessive forms
+    // route to the single `ControllerRef::You` filter.
+    fn parse_own_spell_countered_line(i: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            all_consuming(preceded(
+                alt((tag("whenever "), tag("when "))),
+                preceded(
+                    tag("a spell "),
+                    terminated(
+                        alt((tag("you've cast"), tag("you control"))),
+                        tag(" is countered"),
+                    ),
+                ),
+            )),
+        )
+        .parse(i)
+    }
+    if parse_own_spell_countered_line(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Countered;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        return Some((TriggerMode::Countered, def));
+    }
+
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
@@ -11732,11 +11883,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         };
         def.spell_cast_origin = cast_origin;
 
+        // CR 700.2: Peel an optional leading "modal " qualifier off the payload
+        // BEFORE the type-phrase / spell-qualifier parsers run. "modal" is not a
+        // card type, so `parse_type_phrase("modal spell")` yields an empty filter
+        // and `parse_spell_qualifier_payload` treats "modal" as an unknown pre-
+        // spell word — either way the modality is silently dropped and
+        // `valid_card` is left `None`, over-triggering on every spell (issue
+        // #750, Riku, of Many Paths). Peeling here reduces the payload to the
+        // bare type phrase (e.g. "modal spell" → "spell", "modal instant spell"
+        // → "instant spell"); the modality is re-attached as `FilterProp::Modal`
+        // after the filter is built. Scoped to the type-phrase / spell-qualifier
+        // paths below — the color-disjunction `parse_spell_that_clause_filter`
+        // branch above (Questing Druid: "a spell that's white…") returns before
+        // reaching here and is not exercised by any "modal <color>" card.
+        let (payload, is_modal) = opt(value((), tag::<_, _, OracleError<'_>>("modal ")))
+            .parse(payload)
+            .map(|(rest, matched)| (rest, matched.is_some()))
+            .unwrap_or((payload, false));
+
         // First, try the post-spell-modifier-aware decomposition for shapes
         // that include "with {X} in its mana cost" etc.
         if let Some(filter) = parse_spell_qualifier_payload(payload) {
             let filter = if is_another {
                 add_another_prop(filter)
+            } else {
+                filter
+            };
+            let filter = if is_modal {
+                add_modal_prop(filter)
             } else {
                 filter
             };
@@ -11753,6 +11927,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let (filter, _rest) = parse_type_phrase(payload);
         let filter = if is_another {
             add_another_prop(filter)
+        } else {
+            filter
+        };
+        let filter = if is_modal {
+            add_modal_prop(filter)
         } else {
             filter
         };
@@ -12523,12 +12702,45 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
 /// Returns `None` if `parse_type_phrase` reports `TargetFilter::Any` or leaves
 /// residual text — both indicate the phrase was not a pure type qualifier.
 fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
+    // CR 105.2b: bare color-quality qualifiers ("multicolored", "monocolored",
+    // "colorless") are color-count properties, not type phrases.
+    if let Ok((remainder, prop)) = parse_color_property(qualifier) {
+        if remainder.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![prop]),
+            ));
+        }
+    }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)
     } else {
         None
     }
+}
+
+/// CR 102.1 + CR 603.2c: On "whenever a player casts..." triggers, "each other
+/// player" excludes the caster (the triggering player), not the source's
+/// controller. The effect-chain stripper maps bare "each other player" to
+/// `Opponent` (controller-relative); rewrite here once the trigger subject is
+/// known to be any player.
+fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
+    trigger_def: &TriggerDefinition,
+    ability: &mut AbilityDefinition,
+    effect_lower: &str,
+) {
+    if trigger_def.mode != TriggerMode::SpellCast || trigger_def.valid_target.is_some() {
+        return;
+    }
+    if !scan_contains(effect_lower, "each other player") {
+        return;
+    }
+    if ability.player_scope != Some(PlayerFilter::Opponent) {
+        return;
+    }
+    ability.player_scope = Some(PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::TriggeringPlayer),
+    });
 }
 
 /// Parse a post-spell modifier phrase (text between "spell" and the timing tail).
@@ -14418,3 +14630,105 @@ mod controlled_chosen_type_enters_tests;
 #[cfg(test)]
 #[path = "oracle_trigger_enchanted_player_controls_tests.rs"]
 mod enchanted_player_controls_tests;
+
+/// Issue #750: "Whenever you cast a modal spell" (Riku, of Many Paths) must
+/// parse a `valid_card` carrying `FilterProp::Modal` (CR 700.2), not `None`.
+/// A `None` `valid_card` over-triggers on every spell the controller casts.
+#[cfg(test)]
+mod modal_spell_cast_trigger_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{FilterProp, TargetFilter, TypeFilter};
+    use crate::types::TriggerMode;
+
+    /// Collect the top-level `FilterProp`s of a `Typed` `valid_card`, or an empty
+    /// vec for any other shape (so assertions read `contains`).
+    fn valid_card_props(vc: Option<&TargetFilter>) -> Vec<FilterProp> {
+        match vc {
+            Some(TargetFilter::Typed(tf)) => tf.properties.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// PARSER (revert-failing): Riku's SpellCast trigger's `valid_card` must be
+    /// `Some(Typed{ properties contains FilterProp::Modal })`. Reverting the
+    /// peel/attach leaves `valid_card == None` (the over-trigger bug).
+    #[test]
+    fn riku_modal_spell_cast_trigger_attaches_modal_prop() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a modal spell, choose up to X, where X is the number of times you chose a mode for that spell —\n\u{2022} Exile the top card of your library. Until the end of your next turn, you may play it.\n\u{2022} Put a +1/+1 counter on Riku. It gains trample until end of turn.\n\u{2022} Create a 1/1 blue Bird creature token with flying.",
+            "Riku, of Many Paths",
+            &[],
+            &["Legendary".into(), "Creature".into()],
+            &["Human".into(), "Wizard".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("Riku must parse a SpellCast trigger");
+        // CR 700.2: the "modal" qualifier must survive as FilterProp::Modal.
+        assert!(
+            trigger.valid_card.is_some(),
+            "valid_card must NOT be None — a None filter over-triggers on every spell"
+        );
+        assert!(
+            valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
+            "valid_card must carry FilterProp::Modal, got {:?}",
+            trigger.valid_card
+        );
+    }
+
+    /// Class generality: "modal instant spell" keeps BOTH the Modal prop and the
+    /// Instant type constraint (the peel only removes the "modal " qualifier).
+    #[test]
+    fn modal_instant_spell_keeps_type_and_modal() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a modal instant spell, draw a card.",
+            "Test Modal Instant Watcher",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger");
+        let props = valid_card_props(trigger.valid_card.as_ref());
+        assert!(
+            props.contains(&FilterProp::Modal),
+            "must carry FilterProp::Modal, got {props:?}"
+        );
+        // The Instant type constraint must remain on the type_filters.
+        match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters.contains(&TypeFilter::Instant),
+                "modal instant must keep the Instant type filter, got {:?}",
+                tf.type_filters
+            ),
+            other => panic!("expected Typed valid_card, got {other:?}"),
+        }
+    }
+
+    /// Negative (no over-attach): a plain "you cast a spell" trigger must NOT
+    /// gain a Modal prop — the optional peel matches nothing.
+    #[test]
+    fn plain_spell_cast_trigger_has_no_modal_prop() {
+        let parsed = parse_oracle_text(
+            "Whenever you cast a spell, draw a card.",
+            "Test Plain Spell Watcher",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("must parse a SpellCast trigger");
+        assert!(
+            !valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
+            "a plain 'you cast a spell' trigger must not gain FilterProp::Modal"
+        );
+    }
+}

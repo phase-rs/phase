@@ -50,9 +50,27 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
                 costs: vec![left, right],
             };
         }
+        // CR 118.12a: "Pay {3} or discard a card" — disjunctive verb costs where
+        // only the mana branch carries `{` symbols (Bloodthorn Flail equip).
+        let left = parse_oracle_cost_no_or(left_text);
+        let right = parse_oracle_cost_no_or(right_text);
+        if is_disjunctive_alt_cost(&left) && is_disjunctive_alt_cost(&right) {
+            return AbilityCost::OneOf {
+                costs: vec![left, right],
+            };
+        }
     }
 
     parse_oracle_cost_no_or(text)
+}
+
+/// True when a top-level ` or ` branch parsed to a concrete activation cost
+/// rather than falling through to `Unimplemented` / `EffectCost`.
+fn is_disjunctive_alt_cost(cost: &AbilityCost) -> bool {
+    !matches!(
+        cost,
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. }
+    )
 }
 
 /// Inner cost parser that handles comma-splitting but NOT top-level `or`.
@@ -1652,7 +1670,8 @@ fn parse_mana_cost_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ControllerRef, ObjectScope, SharedQuality, TypeFilter, TypedFilter,
+        ControllerRef, DiscardSelfScope, ObjectScope, QuantityExpr, SharedQuality, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -2103,6 +2122,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn equip_pay_mana_or_discard_parses_as_one_of() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+
+        assert_eq!(
+            parse_oracle_cost("Pay {3} or discard a card"),
+            AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 3,
+                            shards: vec![],
+                        },
+                    },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                ],
+            }
+        );
+    }
     #[test]
     fn cost_pay_life_equal_to_commanders_color_identity() {
         // CR 903.4: War Room — "Pay life equal to the number of colors in your
@@ -2875,6 +2918,31 @@ mod tests {
                 assert_eq!(costs.len(), 2);
                 assert_eq!(costs[0], AbilityCost::Tap);
                 assert!(matches!(&costs[1], AbilityCost::Mana { .. }));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
+    /// CR 118.12a: Bloodthorn Flail — "Pay {3} or discard a card".
+    #[test]
+    fn cost_pay_mana_or_discard_card() {
+        match parse_oracle_cost("Pay {3} or discard a card") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 3, .. }
+                    }
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        self_scope: DiscardSelfScope::FromHand,
+                        ..
+                    }
+                ));
             }
             other => panic!("Expected OneOf, got {:?}", other),
         }

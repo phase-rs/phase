@@ -12,6 +12,13 @@
     "data": "Datos"
   },
   "gameplay": {
+    "collapseLands": "Contraer Lands",
+    "collapseSupport": "Contraer Support",
+    "collapseZoneOptions": {
+      "auto": "Automático",
+      "on": "Siempre activado",
+      "off": "Siempre desactivado"
+    },
     "title": "Jugabilidad",
     "language": "Idioma",
     "cardSize": "Tamaño de las cartas",

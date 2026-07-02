@@ -466,6 +466,66 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
     .and_then(|(_, condition)| condition)
 }
 
+/// CR 509.1b: "Creatures with power <comparison> <quantity> can't
+/// block this creature." — a can't-be-blocked-by restriction whose blocker
+/// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
+/// "Creatures with power less than the number of Islands you control can't block
+/// this creature."). Sibling of `parse_source_power_block_restriction` (which
+/// fixes the threshold to `~'s power` and targets `creatures you control`); this
+/// arm accepts any `parse_target` power-comparison filter — including a dynamic
+/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// subject-first "creatures with power … can't block this creature" wording
+/// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
+/// is the inverse of the intended restriction.
+fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinition> {
+    // allow-noncombinator: split on the fixed clause anchor, not parsing dispatch.
+    let (filter_text, after) = text.split_once(" can't block ")?;
+    // CR 509.1b: the restriction is on blocking the SOURCE ("this creature"/"~").
+    let after = after.trim().trim_end_matches('.').trim().to_lowercase();
+    if after != "this creature" && after != "~" {
+        return None;
+    }
+    // Reuse the shared filter grammar so the power comparison + dynamic threshold
+    // ("less than the number of Islands you control") lower through one authority.
+    let (filter, remainder) = parse_target(filter_text.trim());
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !target_filter_has_power_comparison(&filter)
+    {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
+fn target_filter_has_power_comparison(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_has_power_comparison),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_power_comparison)
+        }
+        TargetFilter::Not { filter } => target_filter_has_power_comparison(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            ..
+        } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_power_comparison),
+        _ => false,
+    }
+}
+
 /// CR 611.3a: A static restriction may carry a trailing gate introduced by
 /// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
 /// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
@@ -490,6 +550,7 @@ pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
 ) -> Option<StaticDefinition> {
+    let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
@@ -1923,6 +1984,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_power_threshold_block_restriction(&text) {
+        return Some(def);
+    }
+
     // CR 506.5 + CR 508.1c: "~ can only attack alone" — CombatAlone(Attack, MustBeSole).
     // The creature may attack only if it is the sole attacker (Master of Cruelties).
     // Must precede the generic "can't attack" arm to avoid mis-dispatch.
@@ -2346,7 +2411,7 @@ pub(crate) fn parse_static_line_inner(
     // e.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
     // Excludes lines handled by PerTurnCastLimit ("can't cast more than"),
     // CantCastDuring ("can't cast spells during"), and CantCastFrom ("can't cast spells from").
-    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text) {
+    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text, &raw_lower) {
         return Some(def);
     }
 
@@ -2849,7 +2914,18 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // CR 603.2d: Trigger doubling — "triggers an additional time".
+    // CR 309.4c: Hama Pashar — "Room abilities of dungeons you own trigger
+    // an additional time." Parsed with composed nom tags (not scan_contains).
+    if parse_room_ability_doubling_phrase(tp.lower) {
+        return Some(
+            StaticDefinition::new(StaticMode::DoubleTriggers {
+                cause: TriggerCause::RoomEntered,
+            })
+            .description(text.to_string()),
+        );
+    }
+
+    // CR 603.2d: Trigger doubling — "triggers/trigger an additional time".
     //
     // Cause classification by phrasing:
     // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
@@ -2863,7 +2939,9 @@ pub(crate) fn parse_static_line_inner(
     //   additional time" — Roaming Throne, Strionic Resonator copies) use the
     //   unrestricted `Any` cause; the doubler's `affected` filter narrows
     //   which source's triggers qualify.
-    if nom_primitives::scan_contains(tp.lower, "triggers an additional time") {
+    if nom_primitives::scan_contains(tp.lower, "triggers an additional time")
+        || nom_primitives::scan_contains(tp.lower, "trigger an additional time")
+    {
         let cause = if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
@@ -2914,6 +2992,19 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."
+fn parse_room_ability_doubling_phrase(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("room abilities of "),
+        tag("dungeons you own "),
+        alt((tag("trigger "), tag("triggers "))),
+        tag("an additional time"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
 }
 
 /// CR 614.1c + CR 122.1: Parse a continuous "enters with an additional counter"

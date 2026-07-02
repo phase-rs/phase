@@ -16,11 +16,20 @@ pub struct PerfCounterSnapshot {
     pub stack_inert_noop_batches: u64,
     pub stack_inert_noop_entries: u64,
     pub legal_actions_spell_cost_sweeps: u64,
+    pub priority_cast_probe_builds: u64,
+    pub auto_tap_source_cache_builds: u64,
+    pub cached_auto_tap_source_reuses: u64,
+    pub cached_auto_tap_source_rejects: u64,
     pub mana_aura_trigger_scans: u64,
     pub crew_eligibility_scans: u64,
     pub attackable_player_sweeps: u64,
     pub combat_shadow_block_scans: u64,
     pub granted_ability_provider_scans: u64,
+    pub restriction_static_exact_scans: u64,
+    pub restriction_static_mode_gate_scans: u64,
+    pub legend_rule_mode_gate_scans: u64,
+    pub sba_battlefield_snapshot_builds: u64,
+    pub sba_empty_battlefield_short_circuits: u64,
 }
 
 thread_local! {
@@ -50,11 +59,20 @@ thread_local! {
         stack_inert_noop_batches: 0,
         stack_inert_noop_entries: 0,
         legal_actions_spell_cost_sweeps: 0,
+        priority_cast_probe_builds: 0,
+        auto_tap_source_cache_builds: 0,
+        cached_auto_tap_source_reuses: 0,
+        cached_auto_tap_source_rejects: 0,
         mana_aura_trigger_scans: 0,
         crew_eligibility_scans: 0,
         attackable_player_sweeps: 0,
         combat_shadow_block_scans: 0,
         granted_ability_provider_scans: 0,
+        restriction_static_exact_scans: 0,
+        restriction_static_mode_gate_scans: 0,
+        legend_rule_mode_gate_scans: 0,
+        sba_battlefield_snapshot_builds: 0,
+        sba_empty_battlefield_short_circuits: 0,
     }) };
 }
 
@@ -94,6 +112,38 @@ pub fn record_combat_shadow_block_scan() {
 /// O(controllers×objects).
 pub fn record_granted_ability_provider_scan() {
     with_mut(|s| s.granted_ability_provider_scans += 1);
+}
+
+/// Counts the two exact restriction scans that walk
+/// `battlefield_active_statics`: activation-limit modifiers and
+/// activate-as-instant permissions. Their callers gate by mode first, so absent
+/// modes should leave this at zero.
+pub fn record_restriction_static_exact_scan() {
+    with_mut(|s| s.restriction_static_exact_scans += 1);
+}
+
+/// Counts once-computed activation-restriction mode gates. Board-wide legal
+/// action production should compute this once and thread it through every
+/// candidate; direct activation legality computes it locally for the one call.
+pub fn record_restriction_static_mode_gate_scan() {
+    with_mut(|s| s.restriction_static_mode_gate_scans += 1);
+}
+
+/// Counts legend-rule mode gate computations. The SBA legend-rule pass should
+/// compute this once before testing every legendary permanent.
+pub fn record_legend_rule_mode_gate_scan() {
+    with_mut(|s| s.legend_rule_mode_gate_scans += 1);
+}
+
+/// Counts one shared battlefield snapshot built for each SBA fixpoint iteration.
+pub fn record_sba_battlefield_snapshot_build() {
+    with_mut(|s| s.sba_battlefield_snapshot_builds += 1);
+}
+
+/// Counts SBA fixpoint iterations where an empty battlefield lets battlefield-only
+/// SBAs short-circuit while nonbattlefield SBAs still run.
+pub fn record_sba_empty_battlefield_short_circuit() {
+    with_mut(|s| s.sba_empty_battlefield_short_circuits += 1);
 }
 
 pub fn record_layers_full_eval() {
@@ -140,6 +190,22 @@ pub fn record_stack_inert_noop_batch(entries: u32) {
 
 pub fn record_legal_actions_spell_cost_sweep() {
     with_mut(|s| s.legal_actions_spell_cost_sweeps += 1);
+}
+
+pub fn record_priority_cast_probe_build() {
+    with_mut(|s| s.priority_cast_probe_builds += 1);
+}
+
+pub fn record_auto_tap_source_cache_build() {
+    with_mut(|s| s.auto_tap_source_cache_builds += 1);
+}
+
+pub fn record_cached_auto_tap_source_reuse() {
+    with_mut(|s| s.cached_auto_tap_source_reuses += 1);
+}
+
+pub fn record_cached_auto_tap_source_reject() {
+    with_mut(|s| s.cached_auto_tap_source_rejects += 1);
 }
 
 pub fn record_mana_aura_trigger_scan() {
