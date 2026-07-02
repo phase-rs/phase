@@ -171,6 +171,10 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
 }
 
+// CR 117.1a + CR 601.2: a player may cast a spell when they have priority;
+// `can_cast_object_now` / `effective_spell_cost` below are the engine's
+// structural authorities for the cast — this fast path only avoids
+// re-simulating the full cast to discard the clone.
 fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> bool {
     let (
         WaitingFor::Priority { player },
