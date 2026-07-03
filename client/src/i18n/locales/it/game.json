@@ -77,7 +77,8 @@
     "priorityTooltip": "Passa la priorità. Se la pila è vuota, questo avanza attraverso la finestra di priorità corrente. Scorciatoia: Spazio.",
     "pass": "Passa",
     "passToEndTooltip": "Passa automaticamente fino al passo finale a meno che una scelta, uno stop o il Controllo totale non interrompa. Scorciatoia: Invio.",
-    "autoPassing": "Passaggio automatico fino al passo finale..."
+    "autoPassing": "Passaggio automatico fino al passo finale...",
+    "resolvingStack": "Risoluzione della pila..."
   },
   "board": {
     "regroupCreatures": "Raggruppa i gruppi di creature duplicate",

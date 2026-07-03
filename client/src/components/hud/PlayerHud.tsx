@@ -10,6 +10,8 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
+import { ManualManaToggle } from "../board/ManualManaToggle.tsx";
+import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
@@ -147,6 +149,16 @@ export function PlayerHud() {
         </div>
       </HudPlate>
       <PhaseIndicatorRight />
+      {/* Manual mana + undo ride the HUD (drag offsets and the mobile portrait
+          shift included) instead of overlaying the land column, where they
+          collided with land stacks and the zone piles. Absolutely positioned
+          off the right edge so the plate keeps its centered anchor. The
+          pointer-events split keeps the column's empty bounding-box regions
+          (chip gap, short-chip gutter) tappable through to fanned hand cards. */}
+      <div className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto">
+        <ManualManaToggle />
+        <UndoButton />
+      </div>
     </div>
   );
 }
