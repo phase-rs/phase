@@ -7,8 +7,8 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
  * Thin pill that forces Manual mana payment for the current game only. Toggles
  * the ephemeral `manualManaOverride` in uiStore (reset on every game boundary by
  * `clearPromptOverlayState`) — it never touches the persisted `spellPaymentMode`
- * preference. Pure display + dispatch leaf; rendered in the local player's land
- * column beside the undo button.
+ * preference. Pure display + dispatch leaf; rendered attached to the local
+ * player's HUD beside the undo button.
  */
 export function ManualManaToggle() {
   const { t } = useTranslation("game");

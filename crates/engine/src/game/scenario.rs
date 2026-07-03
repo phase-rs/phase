@@ -3818,6 +3818,51 @@ mod tests {
     }
 
     #[test]
+    fn from_oracle_text_ixhel_carries_poison_scoped_trigger() {
+        use crate::types::ability::{Effect, PlayerFilter, PlayerRelation};
+
+        const IXHEL: &str = "Flying, vigilance, toxic 2\nCorrupted — At the beginning of your end step, each opponent who has three or more poison counters exiles the top card of their library face down. You may look at and play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.";
+
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_from_oracle(P0, "Ixhel, Scion of Atraxa", 4, 4, IXHEL)
+            .id();
+        let runner = scenario.build();
+        let trigger = runner.state().objects[&id]
+            .trigger_definitions
+            .iter_all()
+            .find(|t| {
+                t.description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("poison counters"))
+            })
+            .expect("ixhel end-step trigger");
+        let execute = trigger.execute.as_ref().expect("execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ExileTop {
+                    face_down: true,
+                    ..
+                }
+            ),
+            "scenario oracle path must lower to face-down ExileTop, got {:?}",
+            execute.effect
+        );
+        assert!(
+            matches!(
+                execute.player_scope,
+                Some(PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    ..
+                })
+            ),
+            "scenario oracle path must preserve poison player scope, got {:?}",
+            execute.player_scope
+        );
+    }
+
+    #[test]
     fn from_oracle_text_trigger() {
         let mut scenario = GameScenario::new();
         let id = scenario

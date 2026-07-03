@@ -1630,6 +1630,15 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "there's a[n]/another [type] on the battlefield" (Shauku, Endbringer:
+    // "... can't attack if there's another creature on the battlefield.") — the
+    // singular existential of the "there are [N] or more" count form. Existence
+    // gate = ObjectCount(type) >= 1; the "another " article carries source
+    // exclusion through into the filter (Another prop).
+    if let Some(condition) = parse_there_is_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
     // "it shares a color with the most common color among all permanents
     // [or a color tied for most common]" (Heroic Defiance)
     if let Some(condition) = parse_shares_most_common_color_condition(tp.lower) {
@@ -1889,6 +1898,31 @@ pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondi
     parse_static_condition(if_text.original)
 }
 
+/// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
+/// combat-restriction static ("~ can't attack or block as long as it has a stun
+/// counter on it" — Seer of the Bright Side). "As long as" and "if" both express
+/// a continuous game-state gate on a static ability (CR 611.3a), so this mirrors
+/// [`parse_if_static_condition`] exactly, delegating the condition body to
+/// `parse_static_condition` → `parse_inner_condition` (the single authority for
+/// game-state conditions). Restriction arms peel "unless"/"if" but historically
+/// dropped the "as long as" rider on their SelfRef restriction, enforcing it
+/// unconditionally; this closes that keyword gap without touching the shared
+/// condition grammar.
+pub(crate) fn parse_as_long_as_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+    // CR 611.3a vs duration seam: "for as long as" is effect-duration/provenance
+    // text (`Duration::ForAsLongAs` — Promise of Loyalty: "... can't attack you
+    // or planeswalkers you control for as long as it has a vow counter on it"),
+    // NOT a trailing static-restriction gate. Only a bare "as long as" introduces
+    // a continuous game-state gate here; reject the "for as long as" form so it
+    // stays with the duration/effect pipeline rather than being mis-attached as a
+    // static condition.
+    if tp.split_around(" for as long as ").is_some() {
+        return None;
+    }
+    let (_, as_long_as_text) = tp.split_around(" as long as ")?;
+    parse_static_condition(as_long_as_text.original)
+}
+
 /// Result of the combat-tax nom parse.
 pub(crate) struct CombatTaxParse {
     pub(super) mode: StaticMode,
@@ -2093,6 +2127,53 @@ pub(crate) fn parse_there_are_count_on_battlefield_condition(
     there_are_count_on_battlefield_condition(lower)
         .ok()
         .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+/// CR 611.3a: "there's a[n]/another [type] on the battlefield" → an existence
+/// gate `ObjectCount(type) >= 1` (Shauku, Endbringer: "Shauku can't attack if
+/// there's another creature on the battlefield."). The singular existential
+/// counterpart of `there_are_count_on_battlefield_condition` ("there are [N] or
+/// more [type] …"): it fronts the "there's"/"there is" existential and closes
+/// with a bare "on the battlefield" (no trailing "is"/"are", unlike
+/// `exists_on_battlefield_condition`, which anchors "is on the battlefield").
+///
+/// The indefinite article "a "/"an " is stripped, but "another " is preserved so
+/// `parse_type_phrase` attaches the source-exclusion `Another` prop — "another
+/// creature" must count creatures OTHER than the source (else the source itself
+/// would satisfy its own gate and the restriction would never lift).
+pub(crate) fn parse_there_is_exists_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_is_exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn there_is_exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (input, subject) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let subject = subject.trim();
+    // Strip the indefinite article ("a"/"an") but keep "another " — parse_article's
+    // trailing-space word boundary leaves "another <type>" (source exclusion) intact.
+    let (type_text, _) = opt(nom_primitives::parse_article).parse(subject)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
 }
 
 fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {

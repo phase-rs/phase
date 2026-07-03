@@ -179,6 +179,10 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Choisir",
+    "fanConfirm": "Confirmer ({{count}})",
+    "viewAttachments_one": "Voir la carte attachée",
+    "viewAttachments_other": "Voir {{count}} cartes attachées",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {

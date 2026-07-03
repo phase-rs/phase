@@ -389,7 +389,8 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
     // Distinct from the player-scoped `YouAttackedThisTurn`.
     let expected = Some(TriggerCondition::SourceMatchesFilter {
         filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         ),
     });
 

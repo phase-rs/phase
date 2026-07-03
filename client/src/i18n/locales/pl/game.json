@@ -179,6 +179,10 @@
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wybierz",
+    "fanConfirm": "Potwierdź ({{count}})",
+    "viewAttachments_one": "Pokaż dołączoną kartę",
+    "viewAttachments_other": "Pokaż dołączone karty ({{count}})",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {

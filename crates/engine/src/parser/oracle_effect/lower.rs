@@ -13,7 +13,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_quantity_ref,
+    parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -3668,6 +3668,16 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(controls_scope), deconjugated);
     }
 
+    // CR 122.1 + CR 122.2: "who has/have N or more <kind> counters" restricts
+    // the player set to those whose per-candidate counter total meets the
+    // threshold (Ixhel, Scion of Atraxa: "each opponent who has three or more
+    // poison counters exiles …"; Glissa's Retriever quantity path shares the
+    // same attr-clause grammar via `parse_player_attribute_attr_clause`).
+    if let Some((attr_scope, after_clause)) = strip_player_attribute_clause(&scope, rest) {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(attr_scope), deconjugated);
+    }
+
     // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
@@ -4185,6 +4195,39 @@ fn strip_controls_permanent_clause(
             filter,
             comparator,
             count: Box::new(count),
+        },
+        verb_phrase.to_string(),
+    ))
+}
+
+/// CR 122.1 + CR 122.2 + CR 402.1 + CR 403.3: Strip a "who has/have N or more
+/// <attribute>" relative clause after an "each opponent"/"each player" subject.
+/// Covers counters, hand size, cards drawn, and battlefield-entry predicates via
+/// `parse_player_attribute_attr_clause`. Returns `PlayerFilter::PlayerAttribute`
+/// and the verb-phrase remainder.
+fn strip_player_attribute_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::PlayerRelation;
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        _ => return None,
+    };
+    let lower = rest.to_lowercase();
+    let ((attr, count), remainder) =
+        nom_on_lower(rest, &lower, parse_player_attribute_attr_clause)?;
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: count }),
         },
         verb_phrase.to_string(),
     ))
@@ -8544,6 +8587,58 @@ mod tests {
             residual, "create a token that's a copy of it.",
             "residual must be the deconjugated imperative with the exclusion stripped"
         );
+    }
+
+    // CR 122.1 + CR 402.1: "each opponent who has N or more poison counters"
+    // and sibling hand-size / cards-drawn attr clauses share the quantity-path
+    // attribute grammar via `parse_player_attribute_attr_clause`.
+    #[test]
+    fn each_opponent_who_has_poison_counters_strips_player_attribute_scope() {
+        use crate::types::ability::{
+            Comparator, CountScope, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        };
+        use crate::types::player::PlayerCounterKind;
+        let (scope, residual) = super::strip_each_player_subject(
+            "each opponent who has three or more poison counters exiles the top card of their library",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 3 }),
+            })
+        );
+        assert_eq!(
+            residual, "exile the top card of their library",
+            "residual must be the deconjugated imperative after the attr clause"
+        );
+    }
+
+    #[test]
+    fn each_opponent_with_cards_in_hand_strips_hand_size_attribute_scope() {
+        use crate::types::ability::{
+            Comparator, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
+        };
+        let (scope, residual) = super::strip_each_player_subject(
+            "each opponent with two or more cards in hand discards a card",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 2 }),
+            })
+        );
+        assert_eq!(residual, "discard a card");
     }
 
     // CR 406.2 + CR 610.3: "the owner of each card exiled with ~ " strips to the
