@@ -28,6 +28,7 @@ use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::replacements::ReplacementEvent;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -1126,6 +1127,14 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+    /// moved object's type, carried across a replacement-ordering / as-enters
+    /// pause so a paused-then-resumed gated move (Summoner's Grimoire) still
+    /// applies the riders only to a matching object on resume. `None` = apply
+    /// unconditionally. Mirrors the `enter_tapped`/`face_down_profile`
+    /// carry-through pattern on this same struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_modified_if: Option<crate::types::ability::TargetFilter>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -2476,6 +2485,22 @@ pub struct PendingTriggerSummary {
     pub description: String,
 }
 
+/// CR 616.1 / CR 614: Display payload for one replacement-effect option — either
+/// one candidate in a CR 616.1 ordering prompt, or one branch (accept/decline)
+/// of an optional "you may" replacement. Engine-derived so the filtered state
+/// snapshot (multiplayer) and the frontend `ReplacementModal` never re-derive
+/// the source object/description from `state.objects`, exactly as
+/// [`PendingTriggerSummary`] does for CR 603.3b trigger ordering. For the
+/// optional case both branches carry the same `source_id` (one object, two
+/// outcomes); rule-based virtual replacements (shield counter, Umbra armor,
+/// Compleated, combat skip) still point at the object they act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementCandidateSummary {
+    pub source_id: ObjectId,
+    pub source_name: String,
+    pub description: String,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -2839,6 +2864,31 @@ pub enum CastOfferKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
     },
+    /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
+    /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
+    /// target X card from a graveyard, and mana of any type can be spent to cast
+    /// that spell"). Unlike Cascade/Discover/Ripple this is not a free cast — on
+    /// accept the caster pays the card's real printed cost with the any-type
+    /// concession applied; on decline the card stays in the graveyard.
+    GraveyardPaidCast {
+        /// CR 601.2a: The graveyard card being offered for casting.
+        hit_card: ObjectId,
+        /// CR 609.4b: "mana of any type can be spent to cast that spell" —
+        /// forwarded onto the granted permission so off-color mana pays the cost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+        /// CR 614.1a + CR 608.2n: Optional graveyard-redirect rider on the cast
+        /// (e.g. "if that spell would be put into a graveyard, exile it instead").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        /// CR 712.14a: Whether the spell is cast transformed. Rare for this
+        /// class; carried for parity with the free during-resolution casts.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cast_transformed: bool,
+        /// CR 601.2b: Optional cast-time predicate gating the cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    },
 }
 
 /// CR 701.56a: Which half of a time-travel choice is currently being
@@ -3051,7 +3101,7 @@ pub enum WaitingFor {
         player: PlayerId,
         candidate_count: usize,
         #[serde(default)]
-        candidate_descriptions: Vec<String>,
+        candidates: Vec<ReplacementCandidateSummary>,
     },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
@@ -3403,6 +3453,13 @@ pub enum WaitingFor {
         /// handling for exile-link tracking (push_exiled_with_source_this_turn).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_cost_payment: bool,
+        /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+        /// chosen object's type, carried across the `EffectZoneChoice` round-trip
+        /// so the gate is evaluated per chosen object at resume (Summoner's
+        /// Grimoire). `None` = apply the riders unconditionally (every non-Grimoire
+        /// use). Mirrors the `enter_tapped` / `enters_attacking` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_modified_if: Option<crate::types::ability::TargetFilter>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -4258,6 +4315,34 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
+    /// CR 107.1c + CR 701.21a (Slaughter the Strong): `player` keeps any number of
+    /// `target_player`'s `eligible` creatures whose combined power is at most
+    /// `cap`, then the rest are sacrificed. Entered only when keeping all eligible
+    /// creatures would exceed the cap (otherwise the keep-all case auto-resolves).
+    KeepWithinTotalPowerChoice {
+        player: PlayerId,
+        target_player: PlayerId,
+        /// The chooser's creatures eligible to be kept (battlefield objects).
+        eligible: Vec<ObjectId>,
+        /// CR 208.3: maximum combined power of the kept subset.
+        cap: i32,
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        source_id: ObjectId,
+        #[serde(default)]
+        source_controller: PlayerId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// Creatures kept by previous players — protected from the sacrifice sweep.
+        all_kept: Vec<ObjectId>,
+        /// APNAP-ordered set of players within the effect's `player_scope`.
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+    },
     /// CR 707.10c: When a spell is copied, the controller may choose new targets.
     /// Each slot shows the current target and legal alternatives.
     CopyRetarget {
@@ -4593,6 +4678,7 @@ impl WaitingFor {
             WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
@@ -4719,6 +4805,7 @@ impl WaitingFor {
             | WaitingFor::AssistChoosePlayer { player, .. }
             | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::AssignBlockerDamage { player, .. }
@@ -5645,6 +5732,41 @@ pub struct TriggerIndex {
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementIndexEntry {
+    pub id: ReplacementId,
+    pub ordinal: usize,
+}
+
+/// CR 614.1: Derived candidate pre-filter for replacement effects. The index is
+/// an optional acceleration over the legacy active-replacement scan: it stores
+/// only `ReplacementId`s plus their legacy scan ordinal, never replacement
+/// definitions, so consults re-read live object state and preserve CR 616 order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplacementIndex {
+    pub initialized: bool,
+    pub dirty: bool,
+    pub pipeline_active: bool,
+    pub by_event: im::HashMap<ReplacementEvent, im::Vector<ReplacementIndexEntry>>,
+}
+
+impl Default for ReplacementIndex {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            dirty: true,
+            pipeline_active: false,
+            by_event: im::HashMap::new(),
+        }
+    }
+}
+
+impl Clone for ReplacementIndex {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 /// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
 /// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
 /// `layers_dirty`-covered source categories: battlefield permanents with a
@@ -5889,6 +6011,13 @@ pub struct GameState {
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
     pub trigger_index: TriggerIndex,
+    /// CR 614.1: Derived replacement-effect candidate index. Rebuilt from the
+    /// legacy `active_replacements(state)` order before replacement pipeline
+    /// entry, invalidated after every applied replacement, and ignored whenever
+    /// dirty/uninitialized. `#[serde(skip, default)]` because it is pure derived
+    /// acceleration and must not affect equality or serialized state.
+    #[serde(skip, default)]
+    pub replacement_index: ReplacementIndex,
     /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
     /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
     /// reconstructed from `state.battlefield` + `state.command_zone` +
@@ -6976,6 +7105,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
+    /// CR 120.10: Resolution-local twin of `last_effect_amount` carrying the
+    /// *excess* damage dealt by the preceding effect (damage beyond lethal), as
+    /// distinct from the total (CR 120.6). Stamped alongside `last_effect_amount`
+    /// after a damage-dealing effect resolves and read by
+    /// `AbilityCondition::PreviousEffectAmount { channel: DamageChannel::Excess }`
+    /// for the "if excess damage was dealt … this way" class. Resolution-scoped:
+    /// reset to `None` at depth-0. Follows the `last_effect_amount`
+    /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
+    /// (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_effect_excess_amount: Option<i32>,
+
     /// CR 706.2 + CR 706.4: The actual scalar result available to the current
     /// ability resolution. During a results-table roll, `roll_die::resolve`
     /// stamps each individual die result before resolving that die's branch
@@ -7377,10 +7518,10 @@ pub struct PendingReplacement {
 /// and addressed by the replacement pipeline via `ReplacementId { source:
 /// ObjectId(0), index }`.
 ///
-/// `description` is the player-facing string surfaced in `WaitingFor::
-/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
-/// the same emptying event and CR 616.1 requires the affected player to choose
-/// ordering.
+/// `description` (paired with `source`) is surfaced as a
+/// `ReplacementCandidateSummary` in `WaitingFor::ReplacementChoice::candidates`
+/// when multiple handlers apply to the same emptying event and CR 616.1
+/// requires the affected player to choose ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepEndManaScanEntry {
     pub source: ObjectId,
@@ -7745,6 +7886,7 @@ impl GameState {
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
+            replacement_index: ReplacementIndex::default(),
             static_source_index: StaticSourceIndex::default(),
             loop_detect_ring: std::collections::VecDeque::new(),
             next_timestamp: 1,
@@ -7903,6 +8045,7 @@ impl GameState {
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            last_effect_excess_amount: None,
             die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
@@ -9038,7 +9181,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: vec![],
+            candidates: vec![],
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),
@@ -9274,6 +9417,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -9532,6 +9676,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -9589,6 +9734,7 @@ mod tests {
             }),
             library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.
@@ -9638,6 +9784,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

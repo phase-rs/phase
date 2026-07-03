@@ -78,6 +78,29 @@ pub(super) fn run_post_action_pipeline_from(
     // Gate on `Priority`: `process_triggers` may have paused on `OrderTriggers`
     // or a resolution-choice handler may already own `waiting_for` — running SBAs
     // in those states would clobber the open prompt (same failure mode as #2420).
+    //
+    // CR 704.4 + CR 616.1: this gate also covers the replacement-order-choice
+    // case — a `WaitingFor::ReplacementChoice` is not `Priority`, so the loop
+    // never runs SBAs while resolution is paused on one. That matters because a
+    // `ReplacementChoice` is a mid-resolution pause: the triggering event (e.g. a
+    // permanent's "enters with X +1/+1 counters" ETB placement, doubled/incremented
+    // by two or more order-material replacements like Branching Evolution + Ozolith,
+    // so CR 616.1 makes the application order the controller's choice) has not
+    // finished happening — the counters are not on the object yet. CR 704.4
+    // ("state-based actions pay no attention to what happens during the resolution
+    // of a spell or ability") means checking SBAs now would wrongly send a
+    // still-entering 0/0 to the graveyard (CR 704.5f) before its counters land. The
+    // loop runs on the next pipeline pass, once the choice is answered and
+    // resolution settles back to Priority.
+    //
+    // Player-loss SBAs remain covered mid-choice by `reconcile_terminal_result`
+    // (engine.rs), which deliberately runs the SBA loop even while paused on a
+    // replacement choice so the engine never waits on a player who has already
+    // lost (#962). That path is safe against the 0/0-destruction described above
+    // because `check_state_based_actions` itself honors the same CR 704.4
+    // exemption: it returns before the object-destroying SBAs whenever
+    // `pending_replacement` is set, so the mid-choice player-loss net processes
+    // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
         sba::check_state_based_actions(state, events);

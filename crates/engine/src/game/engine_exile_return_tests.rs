@@ -124,6 +124,7 @@ fn exile_until_host_leaves_returns_card_through_full_pipeline() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![TargetRef::Object(victim_id)],
         source_id,

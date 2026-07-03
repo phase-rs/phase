@@ -19,17 +19,17 @@
 
 <!-- coverage-badges:start -->
 <p align="center">
-  <img alt="Card Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fcoverage.json">
-  <img alt="Keywords" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fkeywords.json">
-  <img alt="Cards" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fcards.json">
+  <img alt="Card Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fcoverage.json">
+  <img alt="Keywords" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fkeywords.json">
+  <img alt="Cards" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fcards.json">
   <br/>
-  <img alt="Pauper" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-pauper.json">
-  <img alt="Pioneer" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-pioneer.json">
-  <img alt="Modern" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-modern.json">
-  <img alt="Standard" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-standard.json">
-  <img alt="Legacy" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-legacy.json">
-  <img alt="Vintage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-vintage.json">
-  <img alt="Commander" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-commander.json">
+  <img alt="Pauper" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-pauper.json">
+  <img alt="Pioneer" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-pioneer.json">
+  <img alt="Modern" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-modern.json">
+  <img alt="Standard" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-standard.json">
+  <img alt="Legacy" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-legacy.json">
+  <img alt="Vintage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-vintage.json">
+  <img alt="Commander" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-commander.json">
 </p>
 <!-- coverage-badges:end -->
 

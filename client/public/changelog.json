@@ -1,6 +1,34 @@
 {
   "entries": [
     {
+      "id": 159,
+      "date": "2026-07-02",
+      "title": "Split attackers across multiple defenders",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Regenerate now works — the card named after its own keyword action correctly regenerates its target\n• Role Reversal exchanges control of two permanents that share a permanent type\n• Coastal Wizard (and Lady Sun) can now return themselves plus another target creature to hand\n• Bound in Gold now shuts off the enchanted permanent's activated abilities and stops it attacking or blocking\n• Tinfoil Helm now grants +2/+2 along with its full protection-from list\n\n🛠️ Cards That Now Work Right\n• Hama Pashar no longer doubles dungeon-room triggers\n• Eidolon of Countless Battles now scales both its power and toughness from the same count\n• Valakut Fireboar switches its power and toughness when it attacks\n• Multani's Presence now triggers when you counter your own spell\n• Molecule Man's miracle now works on your first draw of the turn\n• Wrenn and Realmbreaker's emblem now lets you play lands and cast permanent spells from your graveyard\n• Orvar now copies the permanent you targeted instead of copying itself\n• Isochron Scepter can now cast the copy of its imprinted spell\n• Zenith Chronicler now draws on your first multicolored spell each turn\n• Intimidation Tactics now exiles the chosen card from the target's hand\n• Mindskinner now mills the right amount when its combat damage is prevented\n• For the Ancestors now digs for cards of the chosen creature type\n• Kraken of the Straits now stops low-power creatures from blocking it\n• Savor the Moment now correctly skips your untap step that turn\n• Bloodthorn Flail's either-or equip cost now works\n• Nahiri, the Lithomancer no longer freezes the game when you have no Equipment to attach\n• A batch of conditional-restriction and cost-reduction parser fixes (Rock Jockey, Wirecat, Hour of Revelation, Lashwhip Predator, and more)\n\n⚔️ Combat & Gameplay\n• You can now split your attackers across multiple defenders — attack several planeswalkers, battles, or players at once\n\n🖥️ Interface\n• New hand organizing controls — sort and filter your hand\n• Board HUD polish — the priority indicator now sits on the Hand row with a per-reason glyph (attack / block / target / pay …) tinted to the waiting player's seat color, plus new lands/support collapse controls on the board and in Preferences\n• Consolidated the mobile action dock so bottom controls no longer overlap your hand and piles\n• Mana symbols and card backs now load reliably again after a service-worker caching regression\n• More game data is now cached for offline play\n\n🤖 AI\n• Faster AI turns from a search-performance overhaul — per-game session caching, a transposition table with iterative deepening, and determinized sampling (play is unchanged, just quicker)",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522275112370311288"
+    },
+    {
+      "id": 158,
+      "date": "2026-07-01",
+      "title": "Make mana on an opponent's turn",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• 11 new Standard-set cards across 7 mechanics — including Torch the Witness, Orbital Plunge, Full Bore, Throw from the Saddle, Kylox's Voltstrider, Quistis Trepe, Tinybones the Pickpocket, and Summoner's Grimoire\n• Identity Crisis now exiles a target player's entire hand and graveyard at once\n• Alchemy \"perpetually gains\" effects now stick — permanently granting keywords or setting base power/toughness for the rest of the game\n\n🛠️ Cards That Now Work Right\n• Slaughter the Strong now lets each player keep creatures with total power 4 or less and sacrifices only the rest (previously it sacrificed everything)\n• Effects that set a creature's base power or toughness now resolve, including toughness-only and \"change … to\" wordings (Riptide Mangler, Arni Brokenbrow, Shape Stealer, Eldrazi Mimic, Wall of Tombstones)\n• Amalia Benavides Aguirre now wipes the board only when her power reaches 20, not on every life gain\n• Twilight Prophet's caster now gains life equal to the revealed card's mana value\n• Boros Battleshaper now applies both of its combat effects, not just the \"can't attack or block\" half\n• \"Target permanent's controller sacrifices it\" abilities now target and sacrifice correctly (Arcum Dagsson)\n• Dread Summons now creates a Zombie only for each creature card milled, not every card\n• Scarblade's Malice's delayed dies trigger now makes its token\n• Agatha now lets you spend mana as any color for the abilities it powers\n• Season of the Burrow now enforces its pawprint budget across modes\n• \"Can't cast until your next turn\" restrictions now last their full duration (Sphinx's Decree, Azor, the Lawbringer)\n• Divided damage and counters no longer freeze spells that also have other targets (Magma Opus)\n• Final Parting now shows the correct destination zones, and Bribery correctly takes control\n• \"Reveal the card\" wording now reveals as intended\n\n⚔️ Combat & Gameplay\n• You can now hold priority to make mana during an opponent's turn\n• Paying {X} to attack is no longer capped at the number of attackers\n• Combat roles are now cleared when a creature leaves the battlefield, so a returning creature can't inherit stale attacking/blocking status\n\n🤖 AI\n• Fixed AI-vs-AI games stalling (\"game won't advance\") on large multiplayer boards\n\n🖥️ Interface\n• You can now back out of a modal activated ability's \"Choose one\" prompt after clicking the permanent, instead of being locked in\n• Replacement-effect prompts now show which card or rule is offering each option\n• The \"waiting for\" indicator now tints the player's name and dot with their seat color",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522013396021547059"
+    },
+    {
       "id": 157,
       "date": "2026-06-30",
       "title": "Mother of Runes protects again",

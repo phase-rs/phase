@@ -410,6 +410,11 @@ pub(crate) fn apply_zone_exit_cleanup(
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
+        // CR 506.4: A permanent is removed from combat when it leaves the
+        // battlefield. Combat role is snapshotted into the zone-change record
+        // (capture_combat_status) before this cleanup runs so look-back
+        // triggers still read attacking/blocking status (CR 603.10a).
+        super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
         // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
@@ -705,6 +710,21 @@ pub fn move_to_zone(
     // controller's hand (Carnage Interpreter, issue #3991) and hand-zone
     // effects (Miracle in hand). Re-evaluate layers on any hand entry/exit.
     if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
+        crate::game::layers::mark_layers_full(state);
+    }
+
+    // CR 404 + CR 611.3a: A card entering or leaving a graveyard changes
+    // graveyard population, which can flip a static condition gated on graveyard
+    // membership (Tarmogoyf, Cairn Wanderer: "as long as a creature card with
+    // <keyword> is in a graveyard, ~ has <keyword>"). The incremental layer path
+    // is battlefield-entry scoped and the hand/battlefield mark above does not
+    // cover graveyard moves (mill, discard, a death that lands in the graveyard),
+    // so re-evaluate layers on a graveyard membership change — but only when such
+    // a static is actually live, so routine graveyard churn stays cheap when no
+    // graveyard-gated static exists.
+    if (to == Zone::Graveyard || from == Zone::Graveyard)
+        && crate::game::layers::any_active_static_reads_zone_membership(state, Zone::Graveyard)
+    {
         crate::game::layers::mark_layers_full(state);
     }
 
@@ -1329,6 +1349,202 @@ mod tests {
         );
     }
 
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof for the graveyard-gated static
+    /// invalidation seam (issue #4774). A flying creature card milled from the
+    /// library into a graveyard via the normal `move_to_zone` path — with NO
+    /// manual `mark_layers_full` — must dirty layers so Cairn Wanderer's "~ has
+    /// flying as long as a creature card with flying is in a graveyard"
+    /// re-evaluates and the grant applies. Library→Graveyard deliberately avoids
+    /// the pre-existing hand/battlefield invalidation, so this exercises the new
+    /// graveyard seam specifically; it fails on revert of that seam.
+    #[test]
+    fn graveyard_arrival_reevaluates_graveyard_gated_static_via_zone_move() {
+        let cairn_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+                )),
+            });
+
+        let mut state = setup();
+        let cairn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cairn Wanderer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&cairn).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(cairn_static.clone());
+            o.base_static_definitions = Arc::new(vec![cairn_static]);
+        }
+
+        // A flying creature card in the library (to be milled into the graveyard).
+        let flyer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&flyer).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.base_keywords.push(Keyword::Flying);
+            o.keywords.push(Keyword::Flying);
+        }
+
+        // Baseline: empty graveyard → Cairn has no Flying; layers clean after eval.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&cairn].has_keyword(&Keyword::Flying));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // PRODUCTION PATH: mill the flyer Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, flyer, Zone::Graveyard, &mut events);
+
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a flying creature card entering a graveyard must dirty layers for Cairn's graveyard-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&cairn].has_keyword(&Keyword::Flying),
+            "after the flyer reaches the graveyard via move_to_zone, Cairn gains Flying without a manual mark_full"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: the graveyard invalidation is SCOPED — with no active
+    /// graveyard-membership-gated static, a card entering a graveyard must NOT
+    /// dirty layers, so routine graveyard churn (deaths, mill, discard) stays
+    /// cheap and this is not a blanket per-graveyard-move full re-eval.
+    #[test]
+    fn graveyard_arrival_does_not_dirty_layers_without_graveyard_gated_static() {
+        let mut state = setup();
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&bear).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "graveyard arrival must NOT dirty layers when no graveyard-membership-gated static is active"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof that the graveyard invalidation
+    /// also covers COUNT/threshold gates, not just `IsPresent`. A static gated on
+    /// `QuantityComparison(GraveyardSize >= 1)` must re-evaluate when a card is
+    /// milled into the graveyard via the normal `move_to_zone` path (no manual
+    /// `mark_full`). Fails on revert of the `QuantityComparison`/`QuantityRef`
+    /// branch of the zone-read detector.
+    #[test]
+    fn graveyard_count_gated_static_reevaluates_via_zone_move() {
+        let count_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }])
+            .condition(crate::types::ability::StaticCondition::QuantityComparison {
+                lhs: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::GraveyardSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            });
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard-count source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(count_static.clone());
+            o.base_static_definitions = Arc::new(vec![count_static]);
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Milled card".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        // Baseline: empty graveyard → count gate unsatisfied → no Trample.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&source].has_keyword(&Keyword::Trample));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // Production path: mill a card Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a card entering a graveyard must dirty layers for a GraveyardSize-count-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&source].has_keyword(&Keyword::Trample),
+            "with one card in the graveyard the count gate is satisfied and the grant applies"
+        );
+    }
+
     #[test]
     fn create_object_adds_to_battlefield() {
         let mut state = setup();
@@ -1517,6 +1733,105 @@ mod tests {
     /// rules say cease to exist. This test drives `move_to_zone` directly
     /// (not a shape assertion on the HashMap) and would have caught a
     /// regression in `apply_zone_exit_cleanup`'s counter-clear branch.
+    #[test]
+    fn issue_4223_combat_role_cleared_on_battlefield_exit() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strangleroot Geist".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+                attack_target: AttackTarget::Player(PlayerId(1)),
+                blocked: true,
+                band_id: None,
+            }],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        // Blocker dies (e.g. combat damage) — must leave combat before Undying
+        // returns the same ObjectId to the battlefield.
+        move_to_zone(&mut state, blocker, Zone::Graveyard, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&blocker),
+            "CR 506.4: blocker must be removed from combat when it leaves the battlefield"
+        );
+        assert!(
+            combat
+                .blocker_assignments
+                .get(&attacker)
+                .is_none_or(|blockers| !blockers.contains(&blocker)),
+            "dead blocker must not remain assigned to the attacker"
+        );
+
+        // Undying-style return: same ObjectId re-enters without combat role.
+        move_to_zone(&mut state, blocker, Zone::Battlefield, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&blocker),
+            "returned creature must not inherit stale blocking status (issue #4223)"
+        );
+
+        // Attacker dies and returns — must not remain an attacker either.
+        move_to_zone(&mut state, attacker, Zone::Graveyard, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat
+                .attackers
+                .iter()
+                .all(|info| info.object_id != attacker),
+            "CR 506.4: attacker must be removed from combat when it leaves the battlefield"
+        );
+        assert!(
+            !combat.blocker_assignments.contains_key(&attacker),
+            "CR 506.4: attacker-keyed block assignment must be removed on battlefield exit"
+        );
+        assert!(
+            combat
+                .blocker_to_attacker
+                .values()
+                .all(|attackers| !attackers.contains(&attacker)),
+            "CR 506.4: departed attacker must be pruned from every blocker's reverse lookup"
+        );
+        move_to_zone(&mut state, attacker, Zone::Battlefield, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat
+                .attackers
+                .iter()
+                .all(|info| info.object_id != attacker),
+            "returned attacker must not inherit stale attacking status"
+        );
+        assert!(
+            !combat.blocker_assignments.contains_key(&attacker),
+            "returned attacker must not inherit stale attacker-keyed block assignment"
+        );
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&attacker),
+            "returned attacker must not inherit stale blocking status via reverse lookup"
+        );
+    }
+
     #[test]
     fn counters_cease_to_exist_across_exile_and_return() {
         use crate::types::counter::CounterType;

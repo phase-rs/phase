@@ -1102,6 +1102,31 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
+    // CR 108.3 + CR 404.1: an opponent's graveyard as a target resolves to a
+    // card in that graveyard. This more-specific possessive phrase MUST be tried
+    // before the bare opponent-player references below: the un-bounded
+    // `tag("an opponent")` arm would otherwise match the "an opponent" prefix of
+    // "an opponent's graveyard" and return a bare Opponent-player filter, leaving
+    // "'s graveyard" as an unconsumed remainder. The no-"an" sibling
+    // ("opponent's graveyard") is unaffected either way (no opponent-player tag
+    // matches "opponent's"), so both possessive forms now agree.
+    for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+            return (
+                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
+    }
+
     // CR 115.1 + CR 102.2: Opponent player references — "each opponent",
     // "opponents", and the bare "an opponent" form used by postnominal
     // random-selection patterns (Zaffai — "an opponent chosen at random")
@@ -1127,23 +1152,6 @@ pub fn parse_target_with_syntax<'a>(
         .parse(input)
     }) {
         return (filter, rest, syntax);
-    }
-
-    for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
-            return (
-                TargetFilter::Typed(TypedFilter::card().properties(vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InZone {
-                        zone: Zone::Graveyard,
-                    },
-                ])),
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
-        }
     }
 
     // CR 610.3 / CR 406.6: "each card exiled with this <type>" is a linked-
@@ -3562,6 +3570,31 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
 
+    // CR 508.1 + CR 608.2c: "its controller controls" / "their controller
+    // controls" — the controller of the anaphoric object ("it"). In a trigger
+    // subject context the anaphor is the triggering source, whose controller is
+    // the triggering player (the active player who declared attackers per
+    // CR 508.1, or whichever player the triggering event identifies); otherwise
+    // ("it" refers to a chosen parent target) it is that target's controller.
+    // The subject discriminator is a verbatim mirror of `resolve_pronoun_target`
+    // / `resolve_it_pronoun`, so "its controller" binds to the SAME anaphor as a
+    // sibling "shares … with it" clause. Present-tense only; a past-tense
+    // look-back ("its controller controlled") would be a new alt() arm.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("its controller controls"),
+        tag("their controller controls"),
+    ))
+    .parse(trimmed)
+    {
+        let ctrl = match &ctx.subject {
+            Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+                ControllerRef::TriggeringPlayer
+            }
+            _ => ControllerRef::ParentTargetController,
+        };
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+
     // Delegate to nom_filter::parse_zone_controller which handles common patterns,
     // then fall through to additional nom-based patterns.
     if let Ok((rest, ctrl)) = nom_filter::parse_zone_controller(trimmed) {
@@ -5068,6 +5101,15 @@ pub(crate) fn parse_shared_quality(
         value(SharedQuality::CreatureType, tag("creature type")),
         value(SharedQuality::CardType, tag("card types")),
         value(SharedQuality::CardType, tag("card type")),
+        // CR 110.4: the six permanent types (artifact, battle, creature,
+        // enchantment, land, planeswalker) are only a SUBSET of the card types.
+        // "share a permanent type" must NOT map to SharedQuality::CardType,
+        // because CR 205.2a card types also include non-permanent types like
+        // Kindred/Tribal: two permanents sharing only Kindred would wrongly
+        // satisfy "share a permanent type". Map to the narrower
+        // SharedQuality::PermanentType instead (Role Reversal, Cloudstone Curio).
+        value(SharedQuality::PermanentType, tag("permanent types")),
+        value(SharedQuality::PermanentType, tag("permanent type")),
         value(SharedQuality::LandType, tag("land types")),
         value(SharedQuality::LandType, tag("land type")),
         value(SharedQuality::Color, tag("colors")),
@@ -5382,7 +5424,7 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         // CR 508.1a (attack declaration) / CR 509.1a (block declaration) /
         // CR 400.7 (entering the battlefield is a new object).
         static NEG_VERBS: &[(&str, FilterProp)] = &[
-            ("attack", FilterProp::AttackedThisTurn),
+            ("attack", FilterProp::AttackedThisTurn { defender: None }),
             ("block", FilterProp::BlockedThisTurn),
             ("enter the battlefield", FilterProp::EnteredThisTurn),
             ("enter", FilterProp::EnteredThisTurn),
@@ -5477,6 +5519,24 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 508.6: "that attacked you this turn" — defender-scoped attack-history
+    // relative clause (Jabari's Influence). Mirrors the PERMISSIVE VERB_PHRASES
+    // return below (not parse_attacking_defender_suffix, whose terminator/
+    // continuation guards would reject the non-empty " and put a -1/-0 counter
+    // on it" remainder). The "this turn" in the tag is the boundary; the
+    // permissive return leaves the trailing " and …" clause intact so
+    // try_split_targeted_compound can auto-chain the follow-on PutCounter.
+    // Placed before the bare "attacked this turn" entry — disjoint on the "you"
+    // token, so no shadowing. Scoped to `ControllerRef::You` (defer opponent).
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("attacked you this turn").parse(after_that) {
+        return Some((
+            vec![FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            }],
+            that_len + "attacked you this turn".len(),
+        ));
+    }
+
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
     // CR 120.6 + CR 120.9: "that was dealt damage this turn"
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
@@ -5494,7 +5554,10 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "attacked or blocked this turn",
             FilterProp::AttackedOrBlockedThisTurn,
         ),
-        ("attacked this turn", FilterProp::AttackedThisTurn),
+        (
+            "attacked this turn",
+            FilterProp::AttackedThisTurn { defender: None },
+        ),
         ("blocked this turn", FilterProp::BlockedThisTurn),
         // CR 702.171c: "that saddled it [this turn]" — the creature was tapped to
         // pay the source's saddle cost (recorded in the source's `saddled_by`,
@@ -10539,6 +10602,50 @@ mod tests {
         assert_eq!(len_ws, " defending player controls".len());
     }
 
+    // CR 508.1 + CR 608.2c: the "its controller controls" anaphoric suffix binds
+    // to the controller of "it". Mondassian Colony Ship class: "for each other
+    // creature its controller controls that shares a creature type with it". In a
+    // trigger-subject context (subject = the attacking creature) the anaphor is
+    // the triggering source, so the controller is the triggering player; with no
+    // subject (or a self/any subject) the anaphor is a chosen parent target, so
+    // the controller is that target's controller.
+    #[test]
+    fn parse_controller_suffix_its_controller_controls_anaphor() {
+        // Trigger-subject context → TriggeringPlayer (the attacking player).
+        let trigger_ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let (ctrl, len) = parse_controller_suffix("its controller controls", &trigger_ctx)
+            .expect("its controller controls should resolve a controller scope");
+        assert_eq!(ctrl, ControllerRef::TriggeringPlayer);
+        assert_eq!(len, "its controller controls".len());
+
+        // "their controller controls" is the same anaphor (plural pronoun).
+        let (ctrl_their, _) =
+            parse_controller_suffix("their controller controls", &trigger_ctx).unwrap();
+        assert_eq!(ctrl_their, ControllerRef::TriggeringPlayer);
+
+        // No-subject context → ParentTargetController (compound-effect anaphor),
+        // mirroring `resolve_pronoun_target`'s `None`/`SelfRef`/`Any` arm.
+        let default_ctx = ParseContext::default();
+        let (ctrl_parent, len_parent) =
+            parse_controller_suffix(" its controller controls", &default_ctx)
+                .expect("no-subject variant should resolve");
+        assert_eq!(ctrl_parent, ControllerRef::ParentTargetController);
+        assert_eq!(len_parent, " its controller controls".len());
+
+        // SelfRef subject is a self-ETB context — no non-source triggering
+        // object — so it also binds to the parent target, not the source.
+        let selfref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let (ctrl_self, _) =
+            parse_controller_suffix("its controller controls", &selfref_ctx).unwrap();
+        assert_eq!(ctrl_self, ControllerRef::ParentTargetController);
+    }
+
     // End-to-end target verb path: a representative effect phrase parses to a
     // Typed filter scoped to the defending player. Generic type phrase, not a
     // card name (The Tarrasque class: "fights target creature defending player
@@ -10881,7 +10988,7 @@ mod tests {
             props: vec![
                 FilterProp::Not {
                     prop: Box::new(FilterProp::Not {
-                        prop: Box::new(FilterProp::AttackedThisTurn),
+                        prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
                     }),
                 },
                 FilterProp::Not {
@@ -11812,6 +11919,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_shared_quality_permanent_type_maps_to_permanent_type() {
+        // CR 110.4: "permanent type" names only the six permanent types, a
+        // strict subset of the card types (CR 205.2a). The recognizer maps
+        // both the singular and plural forms to SharedQuality::PermanentType
+        // (NOT CardType), so a shared non-permanent card type like Kindred
+        // cannot satisfy "share a permanent type" (Role Reversal wording).
+        let (rest, q) = parse_shared_quality("permanent type").expect("singular");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+        let (rest, q) = parse_shared_quality("permanent types").expect("plural");
+        assert_eq!(q, SharedQuality::PermanentType);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_shares_permanent_type_with_it_consumed() {
+        // Cloudstone Curio: "... permanent you control that shares a permanent
+        // type with it ...". The relative clause must be consumed and lowered
+        // to a SharesQuality{PermanentType} constraint (CR 110.4 narrowing:
+        // NOT CardType, so a shared Kindred-only pairing does not match;
+        // previously the clause was silently dropped).
+        let (filter, rest) = parse_type_phrase("permanent that shares a permanent type with it");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::PermanentType,
+                relation: SharedQualityRelation::Shares,
+                ..
+            }
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
     fn that_dont_share_card_type_with_discarded_card_consumed() {
         let (filter, rest) =
             parse_type_phrase("cards that don't share a card type with the discarded card");
@@ -12013,13 +12157,75 @@ mod tests {
             assert!(tf
                 .properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::AttackedThisTurn)));
+                .any(|p| matches!(p, FilterProp::AttackedThisTurn { defender: None })));
         } else {
             panic!("expected Typed filter, got {filter:?}");
         }
         assert!(
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    /// CR 508.6: "that attacked you this turn" scopes the attack-history filter to
+    /// the ability controller as defending player (Jabari's Influence). The bare
+    /// "attacked this turn" path must stay board-wide (`defender: None`).
+    #[test]
+    fn that_attacked_you_this_turn_scopes_defender_to_you() {
+        let (filter, _rest) = parse_target("target creature that attacked you this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::AttackedThisTurn {
+                    defender: Some(ControllerRef::You)
+                }
+            )),
+            "expected defender-scoped AttackedThisTurn(Some(You)), got {tf:?}"
+        );
+    }
+
+    /// CR 508.6: the defender-scoped arm leaves a trailing " and …" clause intact
+    /// so `try_split_targeted_compound` can auto-chain a follow-on effect. The
+    /// permissive return (no terminator/continuation guard) is what preserves the
+    /// coupling between the target restriction and the counter clause.
+    #[test]
+    fn attacked_you_this_turn_leaves_trailing_and_clause() {
+        let (props, consumed) = parse_that_clause_suffix(
+            " that attacked you this turn and put a -1/-0 counter on it",
+            None,
+        )
+        .expect("defender-scoped clause must parse");
+        assert_eq!(
+            props,
+            vec![FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You)
+            }]
+        );
+        // Consumed exactly through "attacked you this turn"; the " and put …"
+        // remainder is left for the compound splitter.
+        assert_eq!(
+            consumed,
+            " that attacked you this turn".len(),
+            "must not consume the trailing ' and …' clause"
+        );
+    }
+
+    /// CR 608.2c: the negated present-tense arm ("didn't attack this turn")
+    /// De Morgan-decomposes to `Not(AttackedThisTurn { defender: None })` — still
+    /// board-wide, unaffected by the defender parameterization.
+    #[test]
+    fn didnt_attack_this_turn_negates_board_wide() {
+        let (props, _consumed) = parse_that_clause_suffix(" that didn't attack this turn", None)
+            .expect("negated clause must parse");
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None })
+            }]
         );
     }
 
@@ -12220,7 +12426,7 @@ mod tests {
         assert_eq!(
             props,
             vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }]
         );
     }
@@ -12235,7 +12441,7 @@ mod tests {
             props,
             vec![
                 FilterProp::Not {
-                    prop: Box::new(FilterProp::AttackedThisTurn),
+                    prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
                 },
                 FilterProp::Not {
                     prop: Box::new(FilterProp::EnteredThisTurn),
@@ -12286,7 +12492,7 @@ mod tests {
     fn that_attacked_still_emits_positive_attacked() {
         let (props, _) = parse_that_clause_suffix(" that attacked this turn", None)
             .expect("positive past-tense clause must still parse");
-        assert_eq!(props, vec![FilterProp::AttackedThisTurn]);
+        assert_eq!(props, vec![FilterProp::AttackedThisTurn { defender: None }]);
     }
 
     /// Upstream-truncated form: some producers (the "tap all" target extractor)
@@ -12300,7 +12506,7 @@ mod tests {
         assert_eq!(
             props,
             vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }]
         );
 
@@ -12310,7 +12516,7 @@ mod tests {
         assert_eq!(
             props,
             vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }]
         );
     }
@@ -12339,7 +12545,7 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(
             tf.properties.contains(&FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }),
             "must exclude attackers, got {:?}",
             tf.properties
@@ -12381,7 +12587,7 @@ mod tests {
         );
         assert!(
             tf.properties.contains(&FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }),
             "trailing negated clause must attach after the controller clause, got {:?}",
             tf.properties
@@ -13272,6 +13478,40 @@ mod tests {
             ]))
         );
         assert_eq!(rest, "");
+    }
+
+    /// Regression: the "an" possessive form must agree with the no-"an" sibling
+    /// above. Before the graveyard branch was ordered ahead of the opponent-
+    /// player references, the un-bounded `tag("an opponent")` arm matched the
+    /// "an opponent" prefix of "an opponent's graveyard" and returned a bare
+    /// Opponent-player filter, leaving "'s graveyard" as an unconsumed remainder.
+    #[test]
+    fn parse_target_an_opponents_graveyard_is_graveyard_filter() {
+        let (filter, rest) = parse_target("an opponent's graveyard");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]))
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// Guard: reordering the graveyard branch above the opponent-player arm must
+    /// not disturb the bare "an opponent" player reference (Zaffai — "an opponent
+    /// chosen at random"), which contains no "graveyard" token.
+    #[test]
+    fn parse_target_bare_an_opponent_still_player() {
+        let (filter, _rest) = parse_target("an opponent chosen at random");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
     }
 
     #[test]

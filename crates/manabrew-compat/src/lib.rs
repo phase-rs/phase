@@ -357,6 +357,12 @@ pub enum PlayerAction {
     DiscardDecision {
         discarded_card_ids: Vec<String>,
     },
+    // CR 107.1c + CR 701.21a (Slaughter the Strong): submit the chosen subset of
+    // eligible creatures to keep. The engine validates eligibility and the
+    // total-power cap on apply, so any subset of `eligibleCardIds` may be sent.
+    KeepCreaturesDecision {
+        kept_card_ids: Vec<String>,
+    },
     TargetSpell {
         spell_id: Option<String>,
     },
@@ -669,6 +675,14 @@ pub fn build_prompt(
             insert_json(&mut fields, "numToDiscard", count);
             "chooseDiscard"
         }
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of the
+        // eligible creatures whose combined power is at most the cap; the rest are
+        // sacrificed. Answered with `PlayerAction::KeepCreaturesDecision`.
+        WaitingFor::KeepWithinTotalPowerChoice { eligible, cap, .. } => {
+            insert_object_id_list(&mut fields, "eligibleCardIds", eligible);
+            insert_json(&mut fields, "totalPowerCap", cap);
+            "chooseKeepWithinTotalPower"
+        }
         WaitingFor::ModeChoice {
             modal,
             unavailable_modes,
@@ -814,6 +828,17 @@ pub fn translate_player_action(
             .get(action_index)
             .cloned()
             .ok_or(AdapterError::StaleOrInvalidActionIndex { action_index }),
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): the chosen keep subset is
+        // an arbitrary selection of the eligible creatures, so it is submitted
+        // directly (not via the candidate action table). The engine validates
+        // eligibility and the total-power cap when the action is applied.
+        PlayerAction::KeepCreaturesDecision { kept_card_ids } => {
+            let kept = kept_card_ids
+                .iter()
+                .map(|id| parse_object_id(id))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(GameAction::ChooseKeptCreatures { kept })
+        }
         PlayerAction::Pass { .. }
         | PlayerAction::MulliganDecision { .. }
         | PlayerAction::MulliganPutBackDecision { .. }
@@ -1331,6 +1356,9 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
             .iter()
             .flat_map(|ids| ids.iter().copied())
             .collect(),
+        WaitingFor::KeepWithinTotalPowerChoice {
+            player, eligible, ..
+        } if *player == viewer => eligible.iter().copied().collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             destinations,
@@ -1918,6 +1946,26 @@ mod tests {
         );
         assert_eq!(
             choosable_objects(
+                &WaitingFor::KeepWithinTotalPowerChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    eligible: vec![ObjectId(25), ObjectId(26)],
+                    cap: 4,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    source_id: ObjectId(1),
+                    source_controller: PlayerId(0),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(25), ObjectId(26)])
+        );
+        assert_eq!(
+            choosable_objects(
                 &WaitingFor::CopyRetarget {
                     player: PlayerId(0),
                     copy_id: ObjectId(1),
@@ -2371,6 +2419,23 @@ mod tests {
                 },
             ),
             ("gameOver", WaitingFor::GameOver { winner: None }),
+            (
+                "chooseKeepWithinTotalPower",
+                WaitingFor::KeepWithinTotalPowerChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    eligible: vec![ObjectId(1), ObjectId(2)],
+                    cap: 4,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    source_id: ObjectId(1),
+                    source_controller: PlayerId(0),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+            ),
         ];
 
         for (expected_type, waiting_for) in cases {
@@ -2378,6 +2443,54 @@ mod tests {
             assert_eq!(prompt.prompt_type, expected_type);
             assert!(prompt.fields.contains_key("availablePlayerActions"));
         }
+    }
+
+    #[test]
+    fn keep_within_total_power_prompt_and_action_round_trip() {
+        let prompt = prompt_for(WaitingFor::KeepWithinTotalPowerChoice {
+            player: PlayerId(0),
+            target_player: PlayerId(0),
+            eligible: vec![ObjectId(7), ObjectId(8)],
+            cap: 4,
+            choose_filter: TargetFilter::Any,
+            sacrifice_filter: TargetFilter::Any,
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            source_id: ObjectId(1),
+            source_controller: PlayerId(0),
+            remaining_players: vec![],
+            all_kept: vec![],
+            scoped_players: vec![PlayerId(0)],
+        })
+        .unwrap();
+        assert_eq!(prompt.prompt_type, "chooseKeepWithinTotalPower");
+        assert_eq!(
+            prompt.fields.get("eligibleCardIds").unwrap(),
+            &serde_json::json!(["card-7", "card-8"])
+        );
+        assert_eq!(
+            prompt.fields.get("totalPowerCap").unwrap(),
+            &serde_json::json!(4)
+        );
+
+        // An arbitrary kept subset is submitted directly and maps to the engine
+        // action; the engine validates eligibility / the cap on apply.
+        let context = PromptContext {
+            action_table: vec![],
+        };
+        let action = translate_player_action(
+            PlayerAction::KeepCreaturesDecision {
+                kept_card_ids: vec!["card-7".to_string()],
+            },
+            &context,
+            &GameState::new_two_player(7),
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            GameAction::ChooseKeptCreatures {
+                kept: vec![ObjectId(7)]
+            }
+        );
     }
 
     #[test]

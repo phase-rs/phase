@@ -106,12 +106,19 @@ export function ModeChoiceModal() {
   const isSingleChoice = !isBudget && modal.min_choices === 1 && modal.max_choices === 1;
   const canAdd = (index: number) => !isBudget || spent + (pawprints[index] ?? 0) <= budget;
 
+  // CR 602.2b vs CR 603.3c: only an ACTIVATED modal ability is cancellable at the
+  // mode-choice step; a triggered one must resolve its mode. Read engine-provided
+  // is_activated — no game-state inference here.
+  const isActivatedAbilityMode =
+    waitingFor?.type === "AbilityModeChoice" && waitingFor.data.is_activated === true;
+  const canCancel = !isAbilityMode || isActivatedAbilityMode;
+
   const chooseLabel =
     modal.min_choices === modal.max_choices
       ? t("modeChoice.chooseExact", { count: modal.min_choices })
       : t("modeChoice.chooseRange", { min: modal.min_choices, max: modal.max_choices });
 
-  const showFooter = !isSingleChoice || !isAbilityMode;
+  const showFooter = !isSingleChoice || canCancel;
   const footer = showFooter ? (
     <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
       {!isSingleChoice && (
@@ -137,7 +144,7 @@ export function ModeChoiceModal() {
           {t("modeChoice.clear")}
         </button>
       )}
-      {!isAbilityMode && (
+      {canCancel && (
         <button
           onClick={handleCancel}
           className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"

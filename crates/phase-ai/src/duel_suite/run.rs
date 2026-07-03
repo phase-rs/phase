@@ -300,27 +300,36 @@ fn run_matchups_parallel(
     let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..n_workers)
             .map(|_| {
-                scope.spawn(|| {
-                    let mut local: Vec<(usize, MatchupResult)> = Vec::new();
-                    loop {
-                        let pos = cursor.fetch_add(1, Ordering::Relaxed);
-                        if pos >= run_total {
-                            break;
+                // The plan-mandated `cargo ai-gate --difficulty hard` runs in a
+                // debug + measurement build with no wall-clock bail, so the
+                // determinized Hard+ search recurses deep — bounded, but deeper
+                // than the default ~2MB scoped-thread stack, which overflows.
+                // Give each worker a roomy 32 MiB stack. Test-harness only; zero
+                // production impact.
+                std::thread::Builder::new()
+                    .stack_size(32 << 20)
+                    .spawn_scoped(scope, || {
+                        let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                        loop {
+                            let pos = cursor.fetch_add(1, Ordering::Relaxed);
+                            if pos >= run_total {
+                                break;
+                            }
+                            let (idx, spec) = selected[pos];
+                            let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
+                            let result = run_single_matchup(db, spec, options, matchup_seed);
+                            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            eprintln!(
+                                "[{completed:>2}/{run_total}] {id}  done (games: {games})",
+                                id = spec.id,
+                                games = options.games_per_matchup,
+                            );
+                            print_matchup_row(&result);
+                            local.push((pos, result));
                         }
-                        let (idx, spec) = selected[pos];
-                        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-                        let result = run_single_matchup(db, spec, options, matchup_seed);
-                        let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!(
-                            "[{completed:>2}/{run_total}] {id}  done (games: {games})",
-                            id = spec.id,
-                            games = options.games_per_matchup,
-                        );
-                        print_matchup_row(&result);
-                        local.push((pos, result));
-                    }
-                    local
-                })
+                        local
+                    })
+                    .expect("failed to spawn suite worker thread")
             })
             .collect();
         handles
@@ -529,6 +538,24 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
 }
 
 fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
+    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+}
+
+/// Deterministic core game driver shared by the win-rate suite and the perf
+/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// loops `run_ai_actions` until the action stream is empty or `action_cap` total
+/// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
+/// realized count may overshoot the cap within a batch — identical semantics to
+/// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
+/// result `(winner, turn_number)` is a pure function of
+/// `(binary, payload, seed, difficulty, action_cap)`; no wall-clock or thread
+/// scheduling influences it.
+pub(crate) fn drive_game(
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    action_cap: usize,
+) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
     load_deck_into_state(&mut state, payload);
     engine::game::engine::start_game(&mut state);
@@ -555,7 +582,7 @@ fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Opti
             break;
         }
         total_actions += results.len();
-        if total_actions >= MAX_TOTAL_ACTIONS {
+        if total_actions >= action_cap {
             break;
         }
     }

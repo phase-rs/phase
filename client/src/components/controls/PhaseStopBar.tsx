@@ -211,7 +211,10 @@ export function CombatPhaseIndicator() {
   // next to the ActionButton. The phase pills along the top still convey phase.
   if (isCompactHeight) return null;
   return (
-    <div className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5">
+    <div
+      data-combat-phase-indicator
+      className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5"
+    >
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}

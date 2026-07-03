@@ -179,6 +179,23 @@ pub fn apply(
     apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
 }
 
+/// Explicit-actor simulation apply: [`apply`] for throwaway forward-projection
+/// clones the caller never renders (the AI velocity-policy `project_to`
+/// look-ahead). Identical rules resolution to [`apply`], but in
+/// `DeferredDisplay` mode it skips `finalize_display_state` — the board-global
+/// mana-availability sweep whose frontend-only output no rules or
+/// AI-evaluation path consults. See [`apply_as_current_for_simulation`] for the
+/// actor-derived counterpart used by the search's `apply_candidate`; both keep
+/// the projected/simulated game-logic state rules-correct while removing the
+/// per-step O(battlefield) display sweep (#4798).
+pub fn apply_for_simulation(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary(state, actor, action, PublicFinalizeMode::DeferredDisplay)
+}
+
 pub(super) fn apply_action_boundary(
     state: &mut GameState,
     actor: PlayerId,
@@ -323,15 +340,46 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         let priors: Vec<std::sync::Arc<GameState>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
-        // Carry the matching cycle's `delta` out of `find_map` alongside the winner so
+        // Carry the matching cycle's `delta` out of the scan alongside the winner so
         // the ∞ producer below can name the loop's unbounded axes without recomputing.
-        if let Some((winner, delta)) = priors.iter().find_map(|prior| {
+        // INDEXED scan (not `find_map`) so the matched prior's ring index `k` is known:
+        // the m9 controller-non-dip and R5-B2 faller-simultaneity checks consume the
+        // SAME `frames[k..] ++ live` per-resolution window. On a candidate winner that
+        // fails either seam gate, continue scanning older priors (fail-safe).
+        if let Some((winner, delta)) = priors.iter().enumerate().find_map(|(k, prior)| {
             let delta = crate::analysis::resource::ResourceVector::delta(
                 &crate::analysis::resource::ResourceVector::snapshot(prior),
                 &cur,
             );
-            crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)
-                .map(|winner| (winner, delta))
+            let winner =
+                crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)?;
+            // The matched window: the prior frame at `k`, every subsequent ring frame,
+            // then the live state — all per-resolution, no gaps (a non-sampling beat
+            // clears the ring, so a confirmed window is gap-free).
+            let mut frames: Vec<&GameState> = priors[k..].iter().map(|p| p.as_ref()).collect();
+            frames.push(state);
+            // CR 704.5a + CR 104.4a (m9): the winner (sole non-faller) must never dip
+            // across the window — a transient intra-cycle dip a net-delta check cannot
+            // see would kill it before the extrapolated win.
+            if !crate::analysis::loop_check::winner_life_never_dips(&frames, winner) {
+                return None;
+            }
+            // CR 704.3 + CR 800.4a + CR 104.2a (R5-B2): with ≥2 fallers, require
+            // pairwise-equal faller life at every frame so all cross lethal in ONE SBA
+            // batch (the first elimination is terminal — nothing past it is modeled).
+            let fallers: Vec<crate::types::player::PlayerId> = state
+                .players
+                .iter()
+                .filter(|p| !p.is_eliminated)
+                .map(|p| p.id)
+                .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
+                .collect();
+            if fallers.len() >= 2
+                && !crate::analysis::loop_check::fallers_lives_pairwise_equal(&frames, &fallers)
+            {
+                return None;
+            }
+            Some((winner, delta))
         }) {
             // CR 732.5: shortcut ONLY a loop NO living player can break. The gate runs
             // ONCE after find_map (not per prior). At the per-beat drive this is the
@@ -373,12 +421,14 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
 ///   their behalf (CR 104.3a).
-/// - **Preference actions** (SetPhaseStops, SetAutoPass, CancelAutoPass) are
-///   per-player UI settings. They have no CR semantics, mutate only the
-///   submitter's own preference slot, and may legitimately fire at any time —
-///   e.g. the human toggles a phase stop while the AI holds priority. The
-///   downstream handlers route by `actor`, so any seat may set its own
-///   preferences regardless of `WaitingFor`.
+/// - **Preference actions** (SetPhaseStops, CancelAutoPass) are per-player UI
+///   settings. They have no CR semantics, mutate only the submitter's own
+///   preference slot, and may legitimately fire at any time — e.g. the human
+///   toggles a phase stop while the AI holds priority. The downstream handlers
+///   route by `actor`, so any seat may set its own preferences regardless of
+///   `WaitingFor`. `SetAutoPass` is deliberately NOT exempt: its handler
+///   stores the mode for the `WaitingFor::Priority` player and immediately
+///   passes that priority, so it must come from the authorized submitter.
 fn check_actor_authorization(
     state: &GameState,
     actor: PlayerId,
@@ -428,16 +478,20 @@ pub fn apply_as_current(
     apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
 }
 
-/// Legality-probe variant of [`apply_as_current`] for throwaway simulation
-/// clones (the AI `SimulationFilter` oracle): the caller only reads `.is_ok()`
-/// and discards the mutated state. The Ok/Err verdict is fully decided inside
-/// `apply_action`; `finalize_display_state` only computes frontend-only hints
-/// (mana availability, devotion, summoning-sickness display) that no rules
-/// legality path consults. Applying in `DeferredDisplay` mode therefore yields
-/// the identical verdict while skipping the per-call `derive_display_state`
-/// board sweep — which on a go-wide mana board (Cryptolith Rite granting `{T}:
-/// Add` to hundreds of tokens) is an O(N^2) static scan paid once per candidate.
-pub(crate) fn apply_as_current_for_legality(
+/// Simulation-apply variant of [`apply_as_current`] for throwaway clones that
+/// are never rendered: either the caller discards the mutated state (the AI
+/// `SimulationFilter` legality oracle reads only `.is_ok()`) or it keeps the
+/// state solely to read *game-logic* fields for evaluation (the AI search
+/// rollout/expansion). `finalize_rules_state` still runs, so the result is
+/// rules-correct; only `finalize_display_state` — the board-global
+/// `derive_display_state` sweep computing frontend-only hints (mana
+/// availability `has_mana_ability`/`available_mana_pips`, devotion,
+/// summoning-sickness display) that no rules, enumeration, or AI-evaluation
+/// path consults — is skipped. On a large board this removes an
+/// O(battlefield) mana sweep from every legality probe AND every AI search
+/// node expansion; that per-node sweep, compounded across the un-timed
+/// `resolveAll` batch loop, was the AI-vs-AI "won't advance" wedge (#4798).
+pub fn apply_as_current_for_simulation(
     state: &mut GameState,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
@@ -645,13 +699,19 @@ fn active_until_stack_empty_requester(state: &GameState) -> Option<PlayerId> {
 }
 
 fn priority_player_has_meaningful_action(state: &GameState) -> bool {
-    let mut probe = state.clone();
-    probe.auto_pass.clear();
+    let mut probe_state = state.clone();
+    probe_state.auto_pass.clear();
+    super::layers::flush_layers(&mut probe_state);
+    let player = match probe_state.waiting_for {
+        WaitingFor::Priority { player } => player,
+        _ => probe_state.priority_player,
+    };
+    let probe = super::casting::PriorityCastProbe::from_flushed_state(probe_state, player);
     // The probe always has `waiting_for == Priority` at both call sites, so the
     // flat priority-action path is byte-identical to what `legal_actions` yielded
     // — it drops only the unused spell-cost object-walk and grouped-map build.
-    let actions = crate::ai_support::flat_priority_actions(&probe);
-    crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+    let actions = crate::ai_support::flat_priority_actions_with_probe(probe.state(), Some(&probe));
+    crate::ai_support::has_meaningful_priority_action(probe.state(), &actions)
 }
 
 /// CR 732.5: no player can be forced to keep looping if ANY of them could take an
@@ -667,12 +727,15 @@ fn priority_player_has_meaningful_action(state: &GameState) -> bool {
 /// fail-safe toward the status quo, never a wrong win.
 fn no_living_player_has_meaningful_priority_action(state: &GameState) -> bool {
     state.players.iter().filter(|p| !p.is_eliminated).all(|p| {
-        let mut probe = state.clone();
-        probe.auto_pass.clear();
-        probe.priority_player = p.id;
-        probe.waiting_for = WaitingFor::Priority { player: p.id };
-        let actions = crate::ai_support::legal_actions(&probe);
-        !crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+        let mut probe_state = state.clone();
+        probe_state.auto_pass.clear();
+        probe_state.priority_player = p.id;
+        probe_state.waiting_for = WaitingFor::Priority { player: p.id };
+        super::layers::flush_layers(&mut probe_state);
+        let probe = super::casting::PriorityCastProbe::from_flushed_state(probe_state, p.id);
+        let actions =
+            crate::ai_support::flat_priority_actions_with_probe(probe.state(), Some(&probe));
+        !crate::ai_support::has_meaningful_priority_action(probe.state(), &actions)
     })
 }
 
@@ -4113,6 +4176,23 @@ fn apply_action(
             indices,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2b: The controller chooses modes for an activated modal
+        // ability BEFORE any cost is paid, target is chosen, or stack object is created
+        // (those steps run later in engine_modes::handle_activated_mode_choice). At this
+        // pre-commit sub-step nothing has changed in the game state, so cancelling is a
+        // pure rollback to priority — mirroring the modal-spell (ModeChoice, CancelCast)
+        // and (ChoosePermanentTypeSlot, CancelCast) arms.
+        // CR 603.3c: A modal *triggered* ability's entry is already on the stack when the
+        // mode prompt appears; its controller MUST choose a mode. This arm is guarded to
+        // is_activated: true, so the triggered case falls through to the catch-all reject.
+        (
+            WaitingFor::AbilityModeChoice {
+                player,
+                is_activated: true,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => WaitingFor::Priority { player: *player },
         // CR 601.2c: Player selected targets from a multi-target set ("any number of").
         (WaitingFor::MultiTargetSelection { .. }, GameAction::SelectCards { cards: selected }) => {
             let waiting_for = state.waiting_for.clone();

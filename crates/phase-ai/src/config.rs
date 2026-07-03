@@ -11,6 +11,12 @@ use crate::strategy_profile::StrategyProfile;
 /// cost of search quality on slow hardware. The same deadline gates expensive
 /// tactical projections so optional lookahead cannot dominate a move.
 ///
+/// Search runs iterative deepening (rung `0 -> max_depth-1`): this budget now
+/// bounds the *rungs* — the deepest fully-completed rung's scores are returned
+/// on expiry (rather than a single fixed-depth pass collapsing to a
+/// tactical-only score). Measurement mode pins the iteration ceiling and never
+/// consults the wall clock, preserving byte-determinism.
+///
 /// Measurement test and duel-suite runs call [`AiConfig::into_measurement`]
 /// to disable this wall-clock cap and remain bounded solely by node/depth
 /// budgets.
@@ -121,6 +127,16 @@ pub struct SearchConfig {
     /// runs still allow projections because they have no wall-clock deadline.
     /// Set to 0 to always run projections.
     pub projection_min_budget_ms: u128,
+    /// Number of determinized opponent-hidden-zone samples to average the
+    /// `score_candidates` ensemble over. `0` disables determinization entirely
+    /// (perfect-information search, byte-identical to the pre-feature path) — the
+    /// disabled sentinel, matching the `max_nodes`/`rollout_samples` numeric-knob
+    /// convention rather than a bool flag. `K > 0` replaces the opponent's real
+    /// hidden hand/library with K resampled plausible worlds and means the
+    /// per-action scores across them (§7 of the determinization plan). Higher
+    /// tiers set larger K; Medium keeps `0` to preserve the default-tier strength
+    /// floor.
+    pub determinization_samples: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +199,7 @@ impl Default for SearchConfig {
             time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
             threat_awareness: ThreatAwareness::None,
             projection_min_budget_ms: 2000,
+            determinization_samples: 0,
         }
     }
 }
@@ -368,6 +385,31 @@ pub struct PolicyPenalties {
     /// Consumed by `EnergyPayoffPolicy`.
     #[serde(default = "default_energy_cast_bonus")]
     pub energy_cast_bonus: f64,
+    /// Penalty for a "wasted cast" the AI should avoid — a spell that whiffs or
+    /// backfires: a legendary duplicate the legend rule will immediately kill, an
+    /// ETB whose only target is illegal, or a creature-targeting spell with no
+    /// legal creature target (beneficial with no own creature, harmful
+    /// creature-only with no opponent creature, or bounce with no opponent
+    /// permanent). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_wasted_cast_penalty")]
+    pub wasted_cast_penalty: f64,
+    /// Bonus for untapping the AI's own tapped creature (frees a blocker /
+    /// re-enables a tapped attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_own_tapped_bonus")]
+    pub untap_own_tapped_bonus: f64,
+    /// Penalty for an untap effect that would untap an opponent's tapped creature
+    /// (hands them back a blocker/attacker). Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_opponent_tapped_penalty")]
+    pub untap_opponent_tapped_penalty: f64,
+    /// Penalty for targeting an already-untapped creature with an untap effect —
+    /// no state change, so the effect is wasted. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_untap_untapped_penalty")]
+    pub untap_untapped_penalty: f64,
+    /// Penalty for non-lethal removal aimed at a tapped opponent creature during
+    /// the pre-combat main phase — a tapped creature can't block, so there is no
+    /// urgency advantage over waiting. Consumed by `AntiSelfHarmPolicy`.
+    #[serde(default = "default_tapped_removal_no_urgency_penalty")]
+    pub tapped_removal_no_urgency_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -421,8 +463,29 @@ impl Default for PolicyPenalties {
             etb_payoff_cast_bonus: default_etb_payoff_cast_bonus(),
             mill_cast_bonus: default_mill_cast_bonus(),
             energy_cast_bonus: default_energy_cast_bonus(),
+            wasted_cast_penalty: default_wasted_cast_penalty(),
+            untap_own_tapped_bonus: default_untap_own_tapped_bonus(),
+            untap_opponent_tapped_penalty: default_untap_opponent_tapped_penalty(),
+            untap_untapped_penalty: default_untap_untapped_penalty(),
+            tapped_removal_no_urgency_penalty: default_tapped_removal_no_urgency_penalty(),
         }
     }
+}
+
+fn default_wasted_cast_penalty() -> f64 {
+    -8.0
+}
+fn default_untap_own_tapped_bonus() -> f64 {
+    8.0
+}
+fn default_untap_opponent_tapped_penalty() -> f64 {
+    -20.0
+}
+fn default_untap_untapped_penalty() -> f64 {
+    -6.0
+}
+fn default_tapped_removal_no_urgency_penalty() -> f64 {
+    -5.0
 }
 
 fn default_lethality_tapout_penalty() -> f64 {
@@ -615,6 +678,26 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
         "energy_cast_bonus",
         "new EnergyPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
+    (
+        "wasted_cast_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_own_tapped_bonus",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_opponent_tapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "untap_untapped_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "tapped_removal_no_urgency_penalty",
+        "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
 ];
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
@@ -668,6 +751,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Easy => (
@@ -691,6 +775,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Medium => (
@@ -714,6 +799,9 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
                 projection_min_budget_ms: 2000,
+                // Medium keeps perfect-information search (K=0): the default
+                // tier's strength floor (§7c/F1) — determinization is Hard+.
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::Hard => (
@@ -737,6 +825,9 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=2: halves single-sample variance at 2x base cost; node cap
+                // 48 keeps each search short. Exercised by the quick ai-gate.
+                determinization_samples: 2,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -760,6 +851,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
+                // K=3: materially de-biases without runaway cost; node cap 64.
+                determinization_samples: 3,
             },
         ),
         AiDifficulty::CEDH => (
@@ -785,6 +878,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
                 // before nodes consume the budget
                 projection_min_budget_ms: 1500,
+                // K=3: same as VeryHard; multiplayer + node cap 96 dominates cost.
+                determinization_samples: 3,
             },
         ),
     };
@@ -814,6 +909,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
         config.search.rollout_depth = config.search.rollout_depth.min(2);
+        // The frontend worker pool already provides cross-sample root
+        // parallelism (ai-worker-pool.ts merges N workers), so cap per-worker K
+        // at 2 — effective samples = N_workers x K without per-worker latency
+        // blow-up (§7c).
+        config.search.determinization_samples = config.search.determinization_samples.min(2);
     }
 
     config
@@ -854,6 +954,10 @@ pub fn create_config_for_players(
                 config.search.max_nodes = config.search.max_nodes * 2 / 3;
                 config.search.max_branching = config.search.max_branching.min(4);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
+                // Determinizing 3+ opponents per sample multiplies pool work;
+                // keep K modest beyond 2 players (§7c). cEDH keeps its tier K.
+                config.search.determinization_samples =
+                    config.search.determinization_samples.min(1);
             }
         }
         _ => {
@@ -865,6 +969,10 @@ pub fn create_config_for_players(
                 config.search.max_nodes /= 3;
                 config.search.max_branching = config.search.max_branching.min(3);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
+                // 5-6+ players: one determinized sample at most (pool work scales
+                // with opponent count).
+                config.search.determinization_samples =
+                    config.search.determinization_samples.min(1);
             }
         }
     }
@@ -904,6 +1012,9 @@ mod tests {
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
         assert_eq!(config.search.rollout_depth, 1);
+        // Medium stays at perfect-information search (K=0) — the default-tier
+        // strength floor (§7c/F1).
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -914,6 +1025,9 @@ mod tests {
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
         assert_eq!(config.search.rollout_depth, 2);
+        // Hard is the first tier to determinize opponent hidden zones (K=2) —
+        // the tier the quick ai-gate exercises (§7c/§11).
+        assert_eq!(config.search.determinization_samples, 2);
     }
 
     #[test]
@@ -925,6 +1039,7 @@ mod tests {
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 5);
         assert_eq!(config.search.rollout_samples, 2);
+        assert_eq!(config.search.determinization_samples, 3);
     }
 
     #[test]
@@ -935,6 +1050,28 @@ mod tests {
         assert!(wasm.search.max_depth <= 2);
         assert!(wasm.search.max_nodes < native.search.max_nodes);
         assert!(wasm.search.rollout_depth <= native.search.rollout_depth);
+        // WASM caps per-worker K at 2 (Hard native K=2 -> still 2 here).
+        assert!(wasm.search.determinization_samples <= 2);
+        assert_eq!(wasm.search.determinization_samples, 2);
+    }
+
+    #[test]
+    fn wasm_caps_determinization_samples_at_two() {
+        // VeryHard native K=3 must be capped to 2 on WASM (§7c min(2,tier)).
+        let native = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let wasm = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        assert_eq!(native.search.determinization_samples, 3);
+        assert_eq!(wasm.search.determinization_samples, 2);
+    }
+
+    #[test]
+    fn multiplayer_caps_determinization_samples() {
+        // Hard at 4 players: paranoid scaling caps K at 1 (§7c).
+        let four = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
+        assert_eq!(four.search.determinization_samples, 1);
+        // cEDH skips paranoid scaling entirely, so it keeps its tier K=3 at 4p.
+        let cedh4 = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 4);
+        assert_eq!(cedh4.search.determinization_samples, 3);
     }
 
     #[test]
@@ -1096,6 +1233,7 @@ mod tests {
         ));
         assert_eq!(config.search.projection_min_budget_ms, 1500);
         assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
+        assert_eq!(config.search.determinization_samples, 3);
     }
 
     #[test]
@@ -1148,6 +1286,19 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
         assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
+    }
+
+    /// Value-identity guard for the `AntiSelfHarmPolicy` magnitudes migrated from
+    /// raw literals into config. Each default MUST equal the exact literal the
+    /// bespoke code used before the lift, so a mistyped port is caught here.
+    #[test]
+    fn policy_penalties_default_anti_self_harm_migrated_magnitudes() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.wasted_cast_penalty, -8.0);
+        assert_eq!(p.untap_own_tapped_bonus, 8.0);
+        assert_eq!(p.untap_opponent_tapped_penalty, -20.0);
+        assert_eq!(p.untap_untapped_penalty, -6.0);
+        assert_eq!(p.tapped_removal_no_urgency_penalty, -5.0);
     }
 
     #[test]

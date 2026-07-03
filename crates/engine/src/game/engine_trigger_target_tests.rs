@@ -66,6 +66,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
     // Manually set up the pending trigger state (as process_triggers would)
     let ability = crate::types::ability::ResolvedAbility::new(
         Effect::ChangeZone {
+            enters_modified_if: None,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::Typed(
@@ -187,6 +188,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         condition: None,
         ability: crate::types::ability::ResolvedAbility::new(
             Effect::ChangeZone {
+                enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

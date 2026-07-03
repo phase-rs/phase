@@ -326,6 +326,7 @@ pub fn resolve(
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses

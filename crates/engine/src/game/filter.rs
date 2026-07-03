@@ -192,6 +192,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality reads the object's own printed characteristic, not
+        // the board population.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -205,7 +208,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -406,6 +409,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // CR 700.2: modality is candidate-local (the object's own printed
+        // characteristic), so a board entry cannot perturb it.
+        | FilterProp::Modal
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -419,7 +425,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -2890,6 +2896,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // Approach of the Second Sun's "you've cast another spell named
         // {LITERAL} this game" relies on this against the game-scope history.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
+        // SpellCastRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        FilterProp::Modal => false,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -2937,7 +2946,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // CR 122.6: A spell on the stack hasn't received counters as a
@@ -3852,8 +3861,21 @@ fn matches_filter_prop(
                     && to.is_none_or(|zone| record.to_zone == zone)
             })
         }
-        // CR 508.1a: Creature was declared as an attacker this turn.
-        FilterProp::AttackedThisTurn => state.creatures_attacked_this_turn.contains(&object_id),
+        // CR 508.1a: Creature was declared as an attacker this turn (board-wide,
+        // any defender). CR 508.6 + CR 508.1b: when `defender` is `Some`, scope to
+        // creatures that attacked the referenced player, reading the per-defender
+        // `creature_attacked_defenders_this_turn` ledger. Mirrors the
+        // `Attacking { defender }` arm above (live-combat analog).
+        FilterProp::AttackedThisTurn { defender } => match defender {
+            None => state.creatures_attacked_this_turn.contains(&object_id),
+            Some(_) => state
+                .creature_attacked_defenders_this_turn
+                .get(&object_id)
+                .is_some_and(|defs| {
+                    defs.iter()
+                        .any(|&d| attacking_defender_matches(state, source, d, defender.as_ref()))
+                }),
+        },
         // CR 509.1a: Creature was declared as a blocker this turn.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&object_id),
         // CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
@@ -3888,6 +3910,10 @@ fn matches_filter_prop(
         // CR 115.7: Stack entry has exactly one target — permissive at filter level,
         // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
+        // CR 700.2: The object is modal iff its printed modality is present. Read
+        // from the static printed characteristic populated at object creation,
+        // available at SpellCast-trigger match time (Riku, of Many Paths).
+        FilterProp::Modal => obj.modal.is_some(),
         // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
         // per-object level, validated by trigger matchers and retarget effects against the
         // stack entry's actual targets.
@@ -4293,7 +4319,12 @@ fn zone_change_record_matches_property(
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        | FilterProp::AttackedThisTurn
+        // CR 400.7: a permanent that changes zones becomes a new object with no
+        // memory of its previous existence, so the zone-change snapshot captures
+        // no attack history. Intentionally fail-closed for both `None` (board-wide)
+        // and `Some` (defender-scoped), matching the `Attacking { defender }`
+        // look-back behavior.
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
@@ -4323,6 +4354,9 @@ fn zone_change_record_matches_property(
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
+        // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
+        // evaluated on the live stack object, not the snapshot).
+        | FilterProp::Modal
         | FilterProp::Suspected
         | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +
@@ -4513,6 +4547,15 @@ fn shared_quality_values(
         SharedQuality::CardType => source
             .core_types
             .iter()
+            .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
+            .collect(),
+        // CR 110.4: only the six permanent types count; Kindred/Tribal and
+        // other non-permanent card types (CR 205.2a) are excluded, so two
+        // permanents sharing only Kindred do NOT share a permanent type.
+        SharedQuality::PermanentType => source
+            .core_types
+            .iter()
+            .filter(|card_type| card_type.is_permanent_type())
             .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
             .collect(),
         SharedQuality::LandType => source
@@ -5943,6 +5986,89 @@ mod tests {
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
+    /// CR 110.4 narrowing regression (maintainer CR on PR #4839): two objects
+    /// that share ONLY a non-permanent card type (Kindred) must NOT be treated
+    /// as sharing a permanent type. The value sets under
+    /// `SharedQuality::PermanentType` are disjoint (Kindred filtered out),
+    /// while under the old `SharedQuality::CardType` mapping they would overlap
+    /// on "kindred" — proving why "share a permanent type" cannot lower to
+    /// `CardType`.
+    #[test]
+    fn shared_permanent_type_excludes_kindred() {
+        let mut state = setup();
+
+        // Object A: Kindred Enchantment. Object B: Kindred Artifact.
+        // They share the Kindred card type but NO permanent type.
+        let a_card = CardId(state.next_object_id);
+        let a = create_object(
+            &mut state,
+            a_card,
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&a).unwrap();
+            obj.card_types.core_types = vec![CoreType::Kindred, CoreType::Enchantment];
+        }
+        let b_card = CardId(state.next_object_id);
+        let b = create_object(
+            &mut state,
+            b_card,
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&b).unwrap();
+            obj.card_types.core_types = vec![CoreType::Kindred, CoreType::Artifact];
+        }
+
+        let obj_a = state.objects.get(&a).unwrap();
+        let obj_b = state.objects.get(&b).unwrap();
+        let creature_types: &[String] = &[];
+
+        // Under PermanentType, Kindred is excluded: the value sets are the
+        // singletons {"enchantment"} and {"artifact"} and share nothing.
+        let perm_a = super::object_shared_quality_values_public(
+            obj_a,
+            &SharedQuality::PermanentType,
+            creature_types,
+        );
+        let perm_b = super::object_shared_quality_values_public(
+            obj_b,
+            &SharedQuality::PermanentType,
+            creature_types,
+        );
+        assert_eq!(perm_a, HashSet::from(["enchantment".to_string()]));
+        assert_eq!(perm_b, HashSet::from(["artifact".to_string()]));
+        assert!(
+            perm_a.is_disjoint(&perm_b),
+            "two permanents sharing only Kindred must NOT share a permanent type: {perm_a:?} vs {perm_b:?}"
+        );
+
+        // Sanity: under CardType (the old, wrong mapping) they DO overlap on
+        // "kindred", which is exactly the false positive CR 110.4 forbids.
+        let card_a = super::object_shared_quality_values_public(
+            obj_a,
+            &SharedQuality::CardType,
+            creature_types,
+        );
+        let card_b = super::object_shared_quality_values_public(
+            obj_b,
+            &SharedQuality::CardType,
+            creature_types,
+        );
+        assert!(
+            card_a.contains("kindred") && card_b.contains("kindred"),
+            "CardType mapping would (wrongly) let a shared Kindred satisfy the constraint: {card_a:?} vs {card_b:?}"
+        );
+        assert!(
+            !card_a.is_disjoint(&card_b),
+            "sanity: CardType sets overlap on kindred, proving the old mapping was over-broad"
+        );
+    }
+
     #[test]
     fn enchanted_by_only_matches_attached_creature() {
         let mut state = setup();
@@ -7199,7 +7325,8 @@ mod tests {
         state.creatures_attacked_this_turn.insert(attacker);
 
         let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
@@ -7215,9 +7342,74 @@ mod tests {
         assert!(state.combat.is_none());
 
         let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
+    }
+
+    /// CR 508.6 + CR 508.1b: Jabari's Influence target legality — "creature that
+    /// attacked you this turn" scopes to the caster (P0) as defending player. In
+    /// a 3-player game, a creature that attacked ONLY another player (P2) must NOT
+    /// be a legal target even though it appears in the board-wide
+    /// `creatures_attacked_this_turn` set. Revert-failing on the `Some(defender)`
+    /// eval leg: without the per-defender ledger check, `matcher_b` would fall
+    /// through to the board-wide `contains` and (wrongly) match.
+    #[test]
+    fn attacked_you_this_turn_scopes_to_caster_defender() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+
+        // Source (Jabari's Influence spell/permanent) controlled by the caster P0.
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        // A attacked the caster (P0); B attacked only P2.
+        let attacked_you = add_creature(&mut state, PlayerId(1), "AttackedYou");
+        let attacked_other = add_creature(&mut state, PlayerId(1), "AttackedOther");
+
+        // Board-wide set: both declared as attackers this turn.
+        state.creatures_attacked_this_turn.insert(attacked_you);
+        state.creatures_attacked_this_turn.insert(attacked_other);
+        // Per-defender ledger: A -> {P0}, B -> {P2}.
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacked_you)
+            .or_default()
+            .insert(PlayerId(0));
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacked_other)
+            .or_default()
+            .insert(PlayerId(2));
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+        ]));
+
+        // Source controlled by P0, so `You` resolves to P0.
+        assert!(
+            matches_target_filter_controlled(&state, attacked_you, &filter, source, PlayerId(0)),
+            "creature that attacked the caster must be a legal target"
+        );
+        assert!(
+            !matches_target_filter_controlled(&state, attacked_other, &filter, source, PlayerId(0)),
+            "creature that attacked only another player must NOT be a legal target"
+        );
+
+        // Board-wide (None) still matches both — confirms the parameterization
+        // only narrows the Some leg and the None regression path is intact.
+        let board_wide = TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+        );
+        assert!(matches_target_filter_controlled(
+            &state,
+            attacked_other,
+            &board_wide,
+            source,
+            PlayerId(0)
+        ));
     }
 
     #[test]
@@ -7264,7 +7456,7 @@ mod tests {
 
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             }]));
 
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
@@ -7308,7 +7500,7 @@ mod tests {
 
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn),
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
             },
             FilterProp::Not {
                 prop: Box::new(FilterProp::EnteredThisTurn),

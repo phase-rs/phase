@@ -24,10 +24,10 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
-    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageGroupKey, DamageKindFilter,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
-    QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
+    DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -94,6 +94,11 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
+        // CR 208.1 + CR 603.4 + CR 603.10a: "it had power greater than ~'s power"
+        // — triggering object's LKI stat vs the source's stat (Drizzt Do'Urden).
+        // Placed before `parse_source_state_conditions` so the "it had <stat>"
+        // subject is not mistaken for a source-subject fixed-threshold form.
+        parse_event_object_pt_vs_source_comparison,
         parse_attached_object_is_filter_condition,
         parse_recipient_is_filter_condition,
         parse_source_state_conditions,
@@ -135,6 +140,11 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
+        // CR 611.3a + CR 702: "a <type> card [with <keyword>] is in a graveyard"
+        // — graveyard-presence gate for conditional continuous statics
+        // (Tarmogoyf, Cairn Wanderer). Guarded by the "is in a graveyard"
+        // suffix, so it never mis-claims the other presence phrases above.
+        parse_card_in_graveyard,
     ))
     .parse(input)
 }
@@ -237,7 +247,7 @@ fn parse_type_phrase_nonempty(input: &str) -> OracleResult<'_, TargetFilter> {
 ///     opponent controlled" from Rith, Liberated Primeval).
 ///
 /// All forms map to `DamageDealtThisTurn { source: Any, target: <filter>,
-/// excess_only: true }` compared ≥ 1, which is true when at least one
+/// channel: Excess }` compared ≥ 1, which is true when at least one
 /// `DamageRecord` this turn targeted a matching object with `excess > 0`.
 fn parse_subject_was_dealt_excess_damage_this_turn(
     input: &str,
@@ -274,7 +284,7 @@ fn parse_subject_was_dealt_excess_damage_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
                 // CR 120.10: Only match records where the damage was overkill.
-                excess_only: true,
+                channel: DamageChannel::Excess,
             },
             1,
         ),
@@ -318,7 +328,7 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             amount,
         ),
@@ -373,7 +383,7 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::CombatOnly,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -404,7 +414,7 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -440,7 +450,7 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             1,
         ),
@@ -1410,7 +1420,12 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
-        // semantic. Longer tag first so the shorter one doesn't shadow it.
+        // semantic. Longer tag first so the shorter one doesn't shadow it. Only the
+        // `~`-normalized subject is accepted context-free; bare "it entered this turn"
+        // is deliberately NOT matched here (for an attached-subject static "it" binds
+        // the enchanted/equipped creature, not the source). The self-referential
+        // bound-pronoun form is handled by `rewrite_self_pronoun_subject` on the
+        // SelfRef static path (see oracle_static/anthem.rs).
         value(
             StaticCondition::SourceEnteredThisTurn,
             alt((
@@ -1641,6 +1656,15 @@ fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32
         parse_exactly_n_counters,
         parse_n_or_more_counters,
         parse_n_or_fewer_counters,
+        // CR 122.1: a bare "counter(s)" with no quantifier word means "at least
+        // one" — "if ~ has counters on it" (The Ozolith, Denry Klin). `peek` so
+        // the counter-type axis still consumes the noun, and gate on the bare
+        // counter word so a leading count ("three counters") or a typed noun
+        // ("+1/+1 counters") is never misread as an implicit-one quantity.
+        value(
+            (1u32, None),
+            nom::combinator::peek(alt((tag("counters"), tag("counter")))),
+        ),
     ))
     .parse(input)
 }
@@ -1758,15 +1782,25 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
 /// continuations such as "Then if ~ has power 7 or greater, …" (Cloud,
 /// Ex-SOLDIER). Without it, those clauses silently swallow the condition and
 /// the gated sub-ability fires unconditionally.
-fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+pub(crate) fn parse_source_power_toughness_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, qty) = alt((parse_possessive_property, parse_subject_has_property)).parse(input)?;
+    // CR 208.1: "exactly N" → EQ (Amalia Benavides Aguirre: "if its power is
+    // exactly 20"). The "exactly " prefix is consumed before the number, mirroring
+    // the proven "exactly N" → EQ leaf in `parse_hand_size_predicate`; otherwise
+    // the standard "N or less" / "N or greater" thresholds select LE / GE.
+    let (rest, exactly) = opt(tag("exactly ")).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
-    // Comparator: "or less" / "or greater"
-    let (rest, comparator) = alt((
-        value(Comparator::LE, tag(" or less")),
-        value(Comparator::GE, tag(" or greater")),
-    ))
-    .parse(rest)?;
+    let (rest, comparator) = if exactly.is_some() {
+        (rest, Comparator::EQ)
+    } else {
+        alt((
+            value(Comparator::LE, tag(" or less")),
+            value(Comparator::GE, tag(" or greater")),
+        ))
+        .parse(rest)?
+    };
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -1775,6 +1809,58 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 208.1 + CR 603.4 + CR 603.10a: Intervening-if comparing the *triggering*
+/// object's last-known stat against the ability source's stat — "it had power
+/// greater than ~'s power" (Drizzt Do'Urden's dies trigger). The subject "it" is
+/// the object referenced by the trigger event (the creature that died); "had"
+/// is past tense because CR 603.10a's look-back reads the dying creature's
+/// last-known power from the graveyard at resolution. "~'s power" is the ability
+/// source's current power.
+///
+/// Distinct from [`parse_source_power_toughness_condition`] ("its power is N",
+/// which compares the *source's* stat against a fixed threshold): here BOTH
+/// operands are dynamic P/T refs on two *different* objects — `EventSource` (the
+/// dying creature, resolved via LKI) and `Source` (the ability's own permanent).
+/// Emits a `QuantityComparison` so `static_condition_to_trigger_condition`
+/// bridges it onto the trigger's `condition`, and so the trigger-level
+/// difference binding in `lower_trigger_ir` (oracle_trigger.rs) can read the two
+/// operands for a paired "put ... counters equal to the difference" count.
+fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject: "it had " — the triggering-event object, past tense (LKI look-back).
+    let (rest, _) = tag("it had ").parse(input)?;
+    let (rest, lhs) = parse_pt_ref_scoped(rest, ObjectScope::EventSource)?;
+    // Comparator between the two stats. Longer phrases precede their prefixes so
+    // "greater than or equal to" wins over "greater than".
+    let (rest, comparator) = alt((
+        value(Comparator::GE, tag(" greater than or equal to ")),
+        value(Comparator::LE, tag(" less than or equal to ")),
+        value(Comparator::GT, tag(" greater than ")),
+        value(Comparator::LT, tag(" less than ")),
+    ))
+    .parse(rest)?;
+    // RHS: "~'s <stat>" — the ability source's stat.
+    let (rest, _) = tag("~'s ").parse(rest)?;
+    let (rest, rhs) = parse_pt_ref_scoped(rest, ObjectScope::Source)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty: lhs },
+            comparator,
+            rhs: QuantityExpr::Ref { qty: rhs },
+        },
+    ))
+}
+
+/// CR 208.1: Parse the bare stat word "power"/"toughness" into a P/T
+/// `QuantityRef` under the given object scope.
+fn parse_pt_ref_scoped(input: &str, scope: ObjectScope) -> OracleResult<'_, QuantityRef> {
+    alt((
+        value(QuantityRef::Power { scope }, tag("power")),
+        value(QuantityRef::Toughness { scope }, tag("toughness")),
+    ))
+    .parse(input)
 }
 
 /// Possessive-subject form: `<possessive> <property> is `, leaving the threshold
@@ -2748,8 +2834,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
-        // CR 508.1: "a creature is attacking you" → IsPresent(creature attacking you)
-        parse_creature_attacking_you,
+        // CR 508.1: "a[n] [filter] creature is attacking[ you]" → IsPresent(filter + attacking)
+        parse_filtered_creature_is_attacking,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -2905,13 +2991,32 @@ fn controlled_battlefield_subtype_filter(subtype: String) -> TargetFilter {
     )
 }
 
-/// Canonical combinator: "you control N or more [type]" → QuantityComparison.
+/// Parse the leading controller-scope phrase of a "control N or more" count
+/// condition, returning the `ControllerRef` the count is scoped to:
+/// "you control " → `You`, "your opponents control " → `Opponent`.
+///
+/// CR 109.3: object control is a per-player property; this is the single axis
+/// that distinguishes the self-scoped ("you control three or more creatures")
+/// and opponent-scoped ("your opponents control three or more creatures",
+/// Lashwhip Predator) forms of the same `ObjectCount >= N` threshold.
+fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag("you control ")),
+        value(ControllerRef::Opponent, tag("your opponents control ")),
+    ))
+    .parse(input)
+}
+
+/// Canonical combinator: "you control / your opponents control N or more [type]"
+/// → QuantityComparison.
 ///
 /// Single authority for this pattern — called from `oracle_static.rs` and
-/// `oracle_trigger.rs` to avoid three-way duplication.
+/// `oracle_trigger.rs` to avoid three-way duplication. The controller scope is
+/// parameterized on the `you control` / `your opponents control` axis
+/// (`parse_control_scope_prefix`) so both forms share one parse path.
 /// Returns the remainder after the type phrase (may be non-empty for trailing text).
 pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, ctrl) = parse_control_scope_prefix(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
@@ -2921,7 +3026,7 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
             nom::error::ErrorKind::Fail,
         )));
     }
-    let filter = inject_controller_you(filter);
+    let filter = inject_controller(filter, ctrl);
     // Map remainder back to original input slice — parse_type_phrase consumed
     // from a potentially trimmed copy, so use pointer arithmetic to get the
     // correct byte offset (remainder.len() would be wrong if trailing chars
@@ -2939,27 +3044,55 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
-/// Parse "you control a/an/another [type]" → IsPresent with filter.
-///
-/// Generalized: uses `parse_type_phrase` so any type phrase is supported,
-/// not just hardcoded creature/artifact/enchantment/planeswalker.
-/// "another" is handled by passing "another [type]" to `parse_type_phrase`,
-/// which recognizes "another" and adds `FilterProp::Another`.
-/// CR 508.1: "a creature is attacking you" — presence check for an attacker
-/// whose defending player is the controller. Gates Confront the Assault's
-/// casting restriction and the Swat Away / Heroic Return cost reductions.
-/// Lowers to `IsPresent` over a creature filter carrying `FilterProp::Attacking
-/// { defender: You }` — the same filter "for each creature attacking you" uses.
-fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("a creature is attacking you").parse(input)?;
-    let mut filter = TypedFilter::creature();
-    filter.properties.push(FilterProp::Attacking {
-        defender: Some(ControllerRef::You),
-    });
+/// CR 508.1: "a[n] [filter] creature is attacking[ you]" — presence check for
+/// an attacker, optionally qualified by a type/color/keyword filter. Gates
+/// Confront the Assault's casting restriction, the Swat Away / Heroic Return
+/// cost reductions (bare "a creature is attacking you"), and the filtered Trap
+/// cycle's alternative costs — Nemesis Trap ("a white creature is attacking"),
+/// Slingbow Trap ("a black creature with flying is attacking"). The qualifier
+/// is delegated to `parse_type_phrase` (mirrors `parse_creature_has_keyword`)
+/// so the whole class of attacker filters is covered by one combinator rather
+/// than the former bare-only literal. Lowers to `IsPresent` over the filter
+/// with `FilterProp::Attacking { defender }` appended — the same property
+/// "for each creature attacking you" uses.
+fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticCondition> {
+    // CR 508.1a + CR 509.1a + CR 611.3a: every attached-subject prefix
+    // `parse_attached_subject_combat_state` owns — "enchanted permanent",
+    // "enchanted creature", "enchanted artifact", "enchanted land", "equipped
+    // creature" (see `parse_attached_condition_subject_core`) — is
+    // self-referential: the host of THIS Aura/Equipment, not a generic
+    // board-wide filter. `parse_type_phrase` would otherwise happily match
+    // any of these as a permanent/creature/artifact/land with
+    // `FilterProp::EnchantedBy`/`EquippedBy`, silently swapping "is the
+    // specific permanent this Aura/Equipment is attached to attacking" for
+    // "does any enchanted/equipped <type> exist that's attacking". That
+    // phrase is owned by `parse_attached_subject_combat_state` (the
+    // inverted-grant path) — defer to it by refusing to match here. Reuses
+    // `parse_attached_condition_subject` itself (rather than hand-listing its
+    // five tags again) so this guard can't drift out of sync with that
+    // subject set, mirroring how `parse_self_source_subject` excludes the
+    // same family of prefixes for the source combat-state predicate.
+    if parse_attached_condition_subject(input).is_ok() {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = opt(parse_article).parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (after, defender) = preceded(
+        opt(tag(" ")),
+        alt((
+            value(Some(ControllerRef::You), tag("is attacking you")),
+            value(None::<ControllerRef>, tag("is attacking")),
+        )),
+    )
+    .parse(remainder)?;
+    let filter = add_filter_property(filter, FilterProp::Attacking { defender });
     Ok((
-        rest,
+        after,
         StaticCondition::IsPresent {
-            filter: Some(TargetFilter::Typed(filter)),
+            filter: Some(filter),
         },
     ))
 }
@@ -3124,6 +3257,89 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
             filter: Some(filter),
         },
     ))
+}
+
+/// CR 611.3a + CR 702: Parse "[a/an] <type-phrase> [with <keyword>] is in a
+/// graveyard" → `IsPresent` whose filter carries `FilterProp::InZone { zone:
+/// Graveyard }` (plus any `FilterProp::WithKeyword` the type phrase's "with
+/// <keyword>" clause supplies).
+///
+/// Graveyard-presence sibling of `parse_creature_has_keyword`: instead of a "has
+/// <keyword>" battlefield predicate, the subject's presence is checked in a
+/// graveyard. This is the gate half of a conditional continuous static (CR
+/// 611.3a) whose grant is a keyword ability (CR 702). Generalized over every
+/// type phrase `parse_type_phrase` recognizes and every keyword its "with
+/// <keyword>" suffix folds in, so it covers the whole class, not one card:
+///   - Tarmogoyf: "a land card is in a graveyard" (bare card-type gate)
+///   - Cairn Wanderer: "a creature card with flying is in a graveyard"
+///     (card-type + `WithKeyword { Flying }` gate)
+///
+/// In a graveyard every object is a card, so "creature card" / "land card" is the
+/// card-type filter — `parse_type_phrase` folds the informational " card" suffix
+/// and the "with <keyword>" suffix, so no bespoke keyword parsing is needed here.
+/// "in a graveyard" is controller-agnostic (any graveyard); no controller is
+/// injected. The `is in a graveyard` suffix is required, so this never mis-claims
+/// a bare "a creature card ..." presence phrase handled elsewhere.
+pub(crate) fn parse_card_in_graveyard(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Optional leading article — `parse_type_phrase` also strips it, but guard it
+    // explicitly first to mirror `parse_creature_has_keyword`.
+    let (rest, _) = opt(parse_article).parse(input)?;
+    // `parse_type_phrase` consumes the type word, the informational " card"
+    // suffix, and any "with <keyword>" clause (folded into the filter as
+    // `FilterProp::WithKeyword`). The remainder begins at the presence predicate.
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (after, _) = (
+        opt(tag(" ")),
+        opt(alt((tag("is "), tag("are ")))),
+        tag("in "),
+        // CR 404: "a graveyard" (any player's graveyard) or "any graveyard" —
+        // require the article so an ungrammatical bare "in graveyard" or a
+        // dangling "graveyards" is not loosely claimed.
+        alt((tag("a graveyard"), tag("any graveyard"))),
+    )
+        .parse(remainder)?;
+    let filter = add_filter_property(
+        filter,
+        FilterProp::InZone {
+            zone: Zone::Graveyard,
+        },
+    );
+    Ok((
+        after,
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    ))
+}
+
+/// CR 611.3a + CR 702: Consume a full modeled graveyard-keyword grant sentence —
+/// "as long as <type> card [with <keyword>] is in a graveyard, this creature has
+/// <keyword>" — returning `()` on success. This is the sentence-boundary
+/// recognizer for a following "The same is true for <keyword list>" continuation
+/// (Cairn Wanderer). It reuses `parse_card_in_graveyard` for the gate half so it
+/// stays in lockstep with the condition grammar; the grant keyword itself is not
+/// captured here (the static distributor re-parses it from the resulting
+/// `StaticDefinition`), only the sentence extent matters. `input` is lowercased
+/// by the caller (`split_same_is_true_static_tail`).
+pub(crate) fn parse_graveyard_keyword_grant_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as long as ").parse(input)?;
+    let (input, _condition) = parse_card_in_graveyard(input)?;
+    let (input, _) = tag(", ").parse(input)?;
+    let (input, _) = alt((
+        tag("this creature has "),
+        tag("this permanent has "),
+        tag("~ has "),
+    ))
+    .parse(input)?;
+    let (input, _keyword) = parse_keyword_name(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
 }
 
 fn add_filter_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
@@ -4376,7 +4592,7 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
                 group_by: Some(DamageGroupKey::SourceId),
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
             amount,
         ),
@@ -5728,7 +5944,7 @@ fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition
     let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
     alt((
         value(
-            make_source_history_absence(FilterProp::AttackedThisTurn),
+            make_source_history_absence(FilterProp::AttackedThisTurn { defender: None }),
             tag("attack this turn"),
         ),
         value(
@@ -5756,33 +5972,54 @@ fn make_source_history_absence(prop: FilterProp) -> StaticCondition {
     }
 }
 
-/// Parse "no [type] are on the battlefield" → ObjectCount EQ 0.
+/// Parse the global battlefield-absence condition in both surface forms →
+/// `ObjectCount(<filter>) == 0`:
+///   - subject-first "no [type] are on the battlefield"
+///     (Call to the Grave, Pestilence, Pyrohemia, Last Laugh: "if no
+///     creatures are on the battlefield, sacrifice ~"), and
+///   - existential there-form "there are no [type] on the battlefield"
+///     (Sarcomancy: "if there are no Zombies on the battlefield"; Mana
+///     Vortex: "there are no lands"; Spirit Mirror: "there are no Reflection
+///     tokens"; Drop of Honey / Porphyry Nodes / Task Mage Assembly: "when
+///     there are no creatures on the battlefield").
 ///
-/// CR 603.8: State-trigger conditions for global absence checks.
-/// Handles "no creatures are on the battlefield", "no nonland permanents are on the battlefield".
+/// CR 603.4 (intervening-`if`) + CR 110.1 / CR 403.1: "there are no X on the
+/// battlefield" == count(X on the battlefield) == 0 — the same predicate the
+/// subject-first form already lowered to, so both forms share one
+/// `QuantityComparison(ObjectCount == 0)` output and no controller restriction
+/// ("no creatures" / "no Zombies" / "no lands" counts *any* player's matching
+/// permanents). The `<type>` reuses `parse_type_phrase`, so a subtype
+/// ("Zombies"), a card type ("lands"), or a token phrase ("Reflection tokens")
+/// scopes the emptiness check exactly, and the trailing anchor is a bounded
+/// `tag` so the recognizer never runs into the effect clause.
 fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("no ").parse(input)?;
-    if let Some(are_pos) = rest.find(" are on the battlefield") {
-        let type_text = &rest[..are_pos];
-        let (filter, _) = parse_type_phrase(type_text);
-        if !matches!(filter, TargetFilter::Any) {
-            let consumed = "no ".len() + are_pos + " are on the battlefield".len();
-            return Ok((
-                &input[consumed..],
-                StaticCondition::QuantityComparison {
-                    lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter },
-                    },
-                    comparator: Comparator::EQ,
-                    rhs: QuantityExpr::Fixed { value: 0 },
-                },
-            ));
-        }
+    // Prefix axis selects the surface form and, with it, the trailing anchor:
+    // the there-form places "on the battlefield" directly after the noun
+    // phrase, while the subject-first form places the copula "are" first.
+    let (rest, anchor) = alt((
+        value(" on the battlefield", tag("there are no ")),
+        value(" are on the battlefield", tag("no ")),
+    ))
+    .parse(input)?;
+    let (rest, type_text) = take_until(anchor).parse(rest)?;
+    let (rest, _) = tag(anchor).parse(rest)?;
+    let (filter, _) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
 }
 
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
@@ -7894,6 +8131,79 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 105.1: Nemesis Trap — "a white creature is attacking"
+    /// qualifies the bare attacker presence check with a color filter. No
+    /// trailing "you": the attacker may be attacking any player.
+    #[test]
+    fn test_filtered_creature_is_attacking_color() {
+        let (rest, c) = parse_inner_condition("a white creature is attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasColor {
+                            color: ManaColor::White
+                        }
+                    )),
+                    "filter should carry HasColor(White), got {tf:?}"
+                );
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    "filter should carry Attacking {{ defender: None }}, got {tf:?}"
+                );
+            }
+            other => panic!("expected IsPresent with a white attacking filter, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 702.9: Slingbow Trap — "a black creature with flying is
+    /// attacking" stacks a color filter and a keyword filter onto the same
+    /// attacker presence check.
+    #[test]
+    fn test_filtered_creature_is_attacking_color_and_keyword() {
+        let (rest, c) = parse_inner_condition("a black creature with flying is attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasColor {
+                            color: ManaColor::Black
+                        }
+                    )),
+                    "filter should carry HasColor(Black), got {tf:?}"
+                );
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying
+                        }
+                    )),
+                    "filter should carry WithKeyword(Flying), got {tf:?}"
+                );
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                    "filter should carry Attacking {{ defender: None }}, got {tf:?}"
+                );
+            }
+            other => {
+                panic!("expected IsPresent with a black flying attacking filter, got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn test_you_control_an_artifact() {
         let (rest, c) = parse_inner_condition("you control an artifact").unwrap();
@@ -8060,6 +8370,52 @@ mod tests {
             matches!(c, StaticCondition::Not { .. }),
             "expected Not(IsPresent), got {c:?}"
         );
+    }
+
+    /// CR 109.3 + CR 603.4: The shared `you control / your opponents control N
+    /// or more [type]` count authority is parameterized on the controller-scope
+    /// axis. Both surface forms flow through `parse_inner_condition` and produce
+    /// the same `ObjectCount >= N` shape, differing only in the injected
+    /// `ControllerRef`. Self form ("you control three or more creatures") pins
+    /// `You`; opponent form (Lashwhip Predator: "your opponents control three or
+    /// more creatures") pins `Opponent`.
+    #[test]
+    fn parse_inner_condition_control_count_ge_controller_scope_axis() {
+        for (text, expected_ctrl) in [
+            ("you control three or more creatures", ControllerRef::You),
+            (
+                "your opponents control three or more creatures",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (rest, cond) = parse_inner_condition(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "gate must count creatures for {text:?}, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(expected_ctrl),
+                "controller axis mis-scoped for {text:?}"
+            );
+        }
     }
 
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
@@ -8958,6 +9314,19 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
     }
 
+    // CR 400.7: bare "it entered this turn" is deliberately NOT matched
+    // context-free. For an attached-subject static (an Aura/Equipment) "it"
+    // binds the enchanted/equipped creature, not the source, so accepting it
+    // here would turn an honest gap into wrong coverage. The self-referential
+    // bound-pronoun form is rewritten to "~ entered ..." on the SelfRef static
+    // path (`rewrite_self_pronoun_subject`, oracle_static/anthem.rs) before it
+    // reaches this grammar.
+    #[test]
+    fn test_bare_it_entered_this_turn_not_matched_context_free() {
+        assert!(parse_inner_condition("it entered this turn").is_err());
+        assert!(parse_inner_condition("it entered the battlefield this turn").is_err());
+    }
+
     // CR 708.2: Unable to Scream — attached-to creature face-down gate.
     #[test]
     fn test_enchanted_creature_is_face_down() {
@@ -9079,6 +9448,47 @@ mod tests {
             )
         );
         assert_eq!(prop, FilterProp::Attacking { defender: None });
+    }
+
+    /// CR 611.3a: the non-creature `parse_attached_condition_subject_core`
+    /// subjects ("enchanted permanent" / "enchanted artifact" / "enchanted
+    /// land") must stay on the attached-subject seam too, not just "enchanted
+    /// creature" — `parse_filtered_creature_is_attacking` must reject all five
+    /// subjects that combinator owns, not just the two creature-typed ones.
+    #[test]
+    fn test_enchanted_non_creature_subjects_are_attacking_not_source_condition() {
+        let cases = [
+            (
+                "enchanted permanent is attacking",
+                TypeFilter::Permanent,
+                FilterProp::EnchantedBy,
+            ),
+            (
+                "enchanted artifact is attacking",
+                TypeFilter::Artifact,
+                FilterProp::EnchantedBy,
+            ),
+            (
+                "enchanted land is attacking",
+                TypeFilter::Land,
+                FilterProp::EnchantedBy,
+            ),
+        ];
+        for (text, type_filter, attachment_prop) in cases {
+            assert!(
+                parse_inner_condition(text).is_err(),
+                "{text} must not resolve via the generic filtered-attacker condition"
+            );
+            let (rest, (filter, prop)) = parse_attached_subject_combat_state(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(
+                    TypedFilter::new(type_filter).properties(vec![attachment_prop])
+                )
+            );
+            assert_eq!(prop, FilterProp::Attacking { defender: None });
+        }
     }
 
     #[test]
@@ -11251,6 +11661,41 @@ mod tests {
         }
     }
 
+    /// CR 208.1: "its power is exactly N" → `EQ` (Amalia Benavides Aguirre). The
+    /// equality leaf is added alongside the existing "or less"/"or greater"
+    /// thresholds, which must still parse unchanged (no regression).
+    #[test]
+    fn test_its_power_is_exactly_n() {
+        let (rest, c) = parse_inner_condition("its power is exactly 20").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            }
+        );
+        // No regression: threshold forms still select LE / GE.
+        for (text, cmp) in [
+            ("its power is 2 or less", Comparator::LE),
+            ("its power is 2 or greater", Comparator::GE),
+            ("its toughness is exactly 5", Comparator::EQ),
+        ] {
+            let (_, parsed) = parse_inner_condition(text).unwrap();
+            match parsed {
+                StaticCondition::QuantityComparison { comparator, .. } => {
+                    assert_eq!(comparator, cmp, "{text:?}")
+                }
+                other => panic!("{text:?} → {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_gendered_possessive_pronoun_power_condition() {
         // CR 201.5: "her"/"his"/"their power is N" refers to the source creature,
@@ -12047,7 +12492,7 @@ mod tests {
     fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
         let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
         assert_eq!(rest, "");
-        assert_source_history_absence(c, FilterProp::AttackedThisTurn);
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn { defender: None });
     }
 
     #[test]
@@ -12106,6 +12551,117 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
         }
+    }
+
+    /// CR 603.4 (intervening-`if`) + CR 110.1: existential there-form
+    /// "there are no [type] on the battlefield" lowers to the SAME
+    /// `ObjectCount == 0` predicate as the subject-first form above. Drop of
+    /// Honey / Porphyry Nodes / Task Mage Assembly: "when there are no
+    /// creatures on the battlefield, sacrifice ~". Previously the intervening-
+    /// `if` was dropped (trigger `condition: null`).
+    #[test]
+    fn test_there_are_no_creatures_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no creatures on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected creature filter, got {:?}",
+                        tf.type_filters
+                    );
+                    // No controller restriction — any player's creatures count.
+                    assert_eq!(tf.controller, None);
+                }
+                other => panic!("expected typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount == 0, got {other:?}"),
+        }
+    }
+
+    /// SEMANTIC CORRECTNESS: the there-form scopes to exactly the stated
+    /// objects. "there are no Zombies on the battlefield" (Sarcomancy) counts
+    /// only the Zombie subtype, NOT all creatures.
+    #[test]
+    fn test_there_are_no_zombies_on_battlefield_subtype_scoped() {
+        let (rest, c) = parse_inner_condition("there are no Zombies on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } = c
+        else {
+            panic!("expected ObjectCount == 0 over a typed filter, got {c:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Zombie")),
+            "expected Zombie subtype filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters.contains(&TypeFilter::Creature),
+            "must not silently widen Zombies to all creatures: {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// there-form with a card type: "there are no lands on the battlefield"
+    /// (Mana Vortex) keeps the land restriction.
+    #[test]
+    fn test_there_are_no_lands_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no lands on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                },
+            ..
+        } = c
+        else {
+            panic!("expected ObjectCount over a typed land filter, got {c:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Land),
+            "expected land filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// GUARD (no over-match): the recognizer requires the bounded battlefield
+    /// anchor, so a "there are no <type>" phrase without "on the battlefield"
+    /// (or a bare "no <type>" without "are on the battlefield") is left for
+    /// other combinators and never runs into the following clause.
+    #[test]
+    fn test_no_on_battlefield_requires_anchor() {
+        assert!(
+            parse_no_on_battlefield("there are no cards in your hand").is_err(),
+            "there-form must require the 'on the battlefield' anchor"
+        );
+        assert!(
+            parse_no_on_battlefield("no opponent controls a creature").is_err(),
+            "'no opponent controls ...' is not a battlefield-emptiness gate"
+        );
     }
 
     // -- "a nonland permanent left the battlefield this turn" --
@@ -12424,7 +12980,7 @@ mod tests {
                                 group_by: Some(DamageGroupKey::SourceId),
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12456,7 +13012,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12489,7 +13045,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12522,7 +13078,7 @@ mod tests {
                                 group_by: None,
                                 damage_kind: DamageKindFilter::Any,
 
-                                excess_only: false,
+                                channel: DamageChannel::Total,
                             },
                     },
                 comparator: Comparator::GE,
@@ -12553,7 +13109,7 @@ mod tests {
                         group_by: None,
                         damage_kind: DamageKindFilter::Any,
 
-                        excess_only: false,
+                        channel: DamageChannel::Total,
                     },
                 },
                 comparator: Comparator::GE,
@@ -12584,7 +13140,7 @@ mod tests {
                             group_by: None,
                             damage_kind: DamageKindFilter::CombatOnly,
 
-                            excess_only: false,
+                            channel: DamageChannel::Total,
                         },
                 },
             comparator: Comparator::GE,
@@ -12624,7 +13180,7 @@ mod tests {
                     qty: QuantityRef::DamageDealtThisTurn {
                         damage_kind: DamageKindFilter::CombatOnly,
 
-                        excess_only: false,
+                        channel: DamageChannel::Total,
                         ..
                     },
                 },
@@ -14430,6 +14986,44 @@ mod tests {
         }
     }
 
+    /// CR 122.1: a bare "counter(s)" with no quantifier word means "at least
+    /// one". "~ has counters on it" (The Ozolith, Denry Klin) must parse to
+    /// `HasCounters { Any, minimum: 1 }` — the intervening-if that was previously
+    /// dropped because the quantity axis had no no-quantifier arm. Discriminating:
+    /// revert the bare-`peek` arm in `parse_has_counters_quantity` and the bare
+    /// form no longer parses, so the trigger silently loses its gate.
+    #[test]
+    fn parse_source_has_counters_accepts_bare_any_counter() {
+        let (rest, cond) = parse_source_has_counters("~ has counters on it")
+            .expect("bare 'has counters on it' should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 1,
+                maximum: None,
+            }
+        );
+
+        // Regression: the quantified typed forms are unchanged by the new arm.
+        let (_, quant) = parse_source_has_counters("~ has three or more +1/+1 counters on it")
+            .expect("quantified typed form should still parse");
+        assert!(matches!(
+            quant,
+            StaticCondition::HasCounters {
+                minimum: 3,
+                maximum: None,
+                counters: CounterMatch::OfType(_),
+            }
+        ));
+
+        // Guard: a leading bare count ("three counters", no "or more") is not a
+        // quantity the axis recognizes, so the whole predicate fails rather than
+        // misreading "three" as an implicit-one quantity with a "three" type.
+        assert!(parse_source_has_counters("~ has three counters on it").is_err());
+    }
+
     /// CR 122.1: the recipient-side counter path (`parse_recipient_has_counters`,
     /// used by `Duration::ForAsLongAs` clauses) shares `parse_has_counters_axes`,
     /// so it also gains the gendered pronoun. Positive: "it has a shield counter
@@ -14478,7 +15072,7 @@ mod tests {
 
     /// CR 120.10 + CR 603.4 + CR 603.2 + CR 120.1: "that creature was dealt
     /// excess damage this turn" is the Maarika-class intervening-if. It must map
-    /// to a `DamageDealtThisTurn` check with `excess_only: true` whose target is
+    /// to a `DamageDealtThisTurn` check with `channel: Excess` whose target is
     /// bound to `TargetFilter::EventTarget` — the *specific* damaged object of
     /// the trigger — not a generic creature filter. A generic filter would let
     /// the condition fire off an unrelated creature's earlier excess hit.
@@ -14493,7 +15087,7 @@ mod tests {
                     qty:
                         QuantityRef::DamageDealtThisTurn {
                             ref target,
-                            excess_only,
+                            channel,
                             ..
                         },
                 },
@@ -14503,7 +15097,7 @@ mod tests {
         else {
             panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
         };
-        assert!(excess_only, "excess_only must be true");
+        assert_eq!(channel, DamageChannel::Excess, "channel must be Excess");
         assert_eq!(
             target.as_ref(),
             &TargetFilter::EventTarget,
@@ -14533,9 +15127,9 @@ mod tests {
 
     /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's "a creature or
     /// planeswalker an opponent controlled was dealt excess damage this turn"
-    /// must parse as an opponent-filtered DamageDealtThisTurn with excess_only.
+    /// must parse as an opponent-filtered DamageDealtThisTurn with channel:Excess.
     /// `parse_type_phrase` produces `TargetFilter::Or` for compound types, so
-    /// this test checks that excess_only is set and the target is non-Any.
+    /// this test checks that the channel is Excess and the target is non-Any.
     #[test]
     fn parse_inner_condition_typed_subject_was_dealt_excess_damage_this_turn() {
         let (rest, cond) = parse_inner_condition(
@@ -14549,7 +15143,7 @@ mod tests {
                     qty:
                         QuantityRef::DamageDealtThisTurn {
                             ref target,
-                            excess_only,
+                            channel,
                             ..
                         },
                 },
@@ -14559,7 +15153,7 @@ mod tests {
         else {
             panic!("expected QuantityComparison(DamageDealtThisTurn), got: {cond:?}");
         };
-        assert!(excess_only, "excess_only must be true");
+        assert_eq!(channel, DamageChannel::Excess, "channel must be Excess");
         // parse_type_phrase emits Or{Typed(Creature+Opp), Typed(Planeswalker+Opp)}
         // for compound types — verify the filter is non-trivial (not Any).
         assert!(

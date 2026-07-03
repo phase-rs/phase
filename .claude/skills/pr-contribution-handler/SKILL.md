@@ -18,6 +18,7 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 2. **CI/Tilt green is necessary, NOT sufficient.** Green CI proves it compiles and existing tests pass. It does **not** prove correctness, no-regression, or performance. Never present "CI green" as evidence a PR is ready. For every PR you must additionally:
    - **Trace the changed logic by hand**, end to end, for the target case AND 2–3 sibling cases in the class AND the obvious edge cases (multiplayer, zero/empty, interaction with existing effects). Confirm it actually produces the rules-correct result — not merely that it "conforms to CLAUDE.md."
    - **Verify the tests DISCRIMINATE.** For every assertion, ask: *would this fail if the fix were reverted?* An assertion that passes both before and after the fix is coverage theater. A bug-fix PR must have at least one runtime test that drives the engine through the real pipeline (`apply()` / scenario runner) and would fail without the change. Name any behavior with no discriminating test as a gap, and add the missing test before enqueue.
+   - **Read the parse-diff sticky comment (engine/parser-surface PRs).** CI posts a sticky comment (marker `<!-- coverage-parse-diff -->`) with the card-level parse changes this PR introduces — it exists *for the reviewing LLM* and is required evidence, not optional context. Fetch its full body and confront the card diff against the PR's claimed scope: unexplained gained/lost/changed cards are findings (scope contamination or unintended parser blast radius). The `pr_review.py` packet's `parse_diff` field carries presence/state/`updated_at`; compare `updated_at` against the head's push time to confirm the diff reflects the current head. If the comment is absent but engine source changed, treat it as missing evidence and check whether CI ran for the current head before reviewing.
 
 3. **Regressions, performance, and clean architecture are first-class enqueue gates.** Before enqueue, answer each with evidence:
    - *Regression:* which existing cards/paths could this break? Anything touching a shared resolver, the casting/priority path, the protection/targeting gate, the layer system, or combat — i.e. code with many callers — gets a hand-traced blast-radius review and, where coverage is thin, a new regression test.
@@ -198,7 +199,7 @@ git diff --stat origin/main...HEAD
 - Diff touches generated registries (`known-tokens.toml`), stray gitlinks/submodules (`new file mode 160000`), or subsystems unrelated to the stated scope → handle via the Security/Sanity auto-fix classes (strip/revert); if the contamination is load-bearing to the PR's logic, reduce the PR to its real change before review.
 - A PR body claiming "Scope Expansion: None" whose diff is large and cross-cutting is a contradiction to verify, not to trust.
 
-## Prioritize (multi-PR runs and Standard-tier quality gauge)
+## Prioritize (multi-PR runs and gate quality gauge)
 
 When given multiple PRs, fetch each PR body before checkout and read its `Tier:` line:
 
@@ -214,9 +215,9 @@ gh pr view <N> --json body --jq '.body' | grep -E '^Tier: (Frontier|Standard)'
 
 **The gauge below is a triage signal, not a kill switch.** This skill exists to merge PRs, not close them. Existing PRs predate the §0.1 policy and will not have `## Gate A` or `## Anchored on` sections — that is not their fault and not grounds for closure. Use the gauge to decide *how much scrutiny* and *how much inline cleanup* a PR needs, not whether to engage with it at all.
 
-### Standard-tier quality gauge (informs scrutiny level)
+### Gate quality gauge (informs scrutiny level)
 
-Per `AI-CONTRIBUTOR.md` §0.1.2, a Standard PR opened under the new policy should include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations).
+Per `AI-CONTRIBUTOR.md` §0.1.2, the Gate A / Gate B requirements are universal: every PR opened under the current policy — Frontier or Standard — should include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations). PRs predating the universal-gate policy will lack them on Frontier submissions; treat absence as "older PR", not a violation.
 
 **Gate A check.** If `## Gate A` is present and shows violations from `./scripts/check-parser-combinators.sh`, run the script yourself on the diff and treat the violations as a required fix inline (manual string manipulation in parser dispatch must be converted to nom combinators before merge). If the section is absent (older PR or contributor unaware), run the script yourself silently and address violations during normal Architecture Review.
 
@@ -229,6 +230,15 @@ Per `AI-CONTRIBUTOR.md` §0.1.2, a Standard PR opened under the new policy shoul
 The judgement is yours (the maintainer or the agent executing the skill) — keep it lightweight, the citations are short. Weak, fabricated, or unrelated citations are a **signal to apply elevated scrutiny in Architecture Review**, not a reason to close the PR. Note the gap in the final report; the maintainer decides whether to push back on the contributor.
 
 If `## Anchored on` is absent, do not penalize — the policy is new and most existing PRs will lack it. Just apply normal Architecture Review.
+
+### Contributor standing gauge (informs scrutiny level)
+
+`python3 scripts/pr_review.py recommend <N>` returns an advisory `contributor` block — `standing`, `scrutiny`, `scrutiny_reasons`, `recurrence`, `first_contribution` — derived from local review history plus `contributor_standing` in the review host's gitignored `private-overrides.json` (other hosts see only derived standing). Use it alongside the Tier line:
+
+- A self-declared `Tier: Frontier` PR whose author sits at `elevated` or `maintainer_attention` scrutiny gets Standard-tier scrutiny regardless of the declared tier — declared tier never outranks observed track record.
+- When `recurrence` lists the same signal class you just found in review, say so in the review comment ("Nth PR with `<signal>` in the last 60 days") — repeat-after-feedback is the primary pattern the maintainer wants surfaced.
+- `first_contribution` → apply the full evidence bar and point the author at the `docs/AI-CONTRIBUTOR.md` gates in the first review comment.
+- Attach `signals` (closed vocabulary, defect AND praise tokens) to the recorded outcome event — this review's observations only, never re-recorded history. Praise (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback`) earns a capped score credit and never affects recurrence or scrutiny. Never invent tokens — out-of-vocabulary signals are rejected at record time; missing concepts are vocabulary additions in `pr_review.py`, not `--force` recordings.
 
 ## Checkout
 
@@ -274,6 +284,8 @@ Resolve conflicts in the same architectural style as the surrounding code. Do no
 **The `main.rs` mod-line tax (recurring, deterministic).** `crates/engine/tests/integration/main.rs` is rustfmt-sorted (`reorder_modules`), and every test-carrying PR appends a `mod issue_XXXX;` line. Two test PRs near each other in the queue therefore conflict **deterministically** on that file, and GitHub's auto-rebase bails (leaving the PR `DIRTY`). The resolution is always the same: keep **both** mod lines, in sorted order. This is a merge-queue serialization artifact, not a contributor defect — resolve it mechanically and move on. (Inline `#[cfg(test)]` tests avoid it entirely.)
 
 If `origin/main` is already an ancestor and there are no conflicts, skip the merge — repeatedly bringing-current adds noise to the PR history without changing mergeability under the queue.
+
+**One targeted exception — `baseline_pending` parse-diff.** The parse-diff CI step is merge-base-pinned and immune to branch staleness (see `ci.yml` "Parse-detail diff vs base baseline"), so staleness alone is never a reason to bring-current-and-push. But when the sticky parse-diff comment shows *Baseline pending* (packet reason `review_parse_baseline_pending`), the merge-base's R2 baseline has likely aged out of retention and will **never** populate — bringing the branch current with `origin/main` and pushing is the remedy, because a fresh merge-base has a live baseline and the re-triggered CI regenerates the diff. Do this *before* the review so the card diff is available as evidence (and remember a push to an enqueued PR cancels auto-merge — re-run `gh pr merge --auto` after).
 
 ## Review Comment Resolution
 
@@ -322,7 +334,7 @@ Apply the relevant lenses from `review-impl.md`, especially:
 - class of cases vs one-off special case
 - sibling coverage
 - building-block reuse
-- **test discrimination** — would each assertion FAIL if the fix were reverted? (this replaces vague "test adequacy" — a green test that pins nothing is coverage theater)
+- **test discrimination** — would each assertion FAIL if the fix were reverted? (this replaces vague "test adequacy" — a green test that pins nothing is coverage theater). Check negative assertions specifically: an upstream short-circuit (e.g. `check_swallowed_clauses` early-returning on `Effect::Unimplemented`) makes `!detector(...)` assertions pass vacuously — require a paired positive reach-guard in the same test. This is the single most frequent finding across contributor PRs.
 - **behavioral trace** — hand-trace the logic for target + 2–3 sibling cases + edge cases (multiplayer, zero/empty, interaction); confirm rules-correct *output*, not just CLAUDE.md conformance
 - **new machinery earns its keep** — card-class size vs complexity; reuse vs duplication; sibling-cluster smell
 - **regression blast-radius** — every caller of any shared/hot path the change touches
@@ -342,6 +354,8 @@ Make inline changes when the fix is local, well-understood, and does not require
 - straightforward use of an existing helper
 - local bug fix in one resolver, component, or adapter
 - cleanup of a reviewer-requested nit that does not alter design
+
+**Pipeline-evidence check (runs before the inline-vs-cycle decision).** For any PR that adds new engine or parser *surface* — a new `Effect`/`Keyword`/`TriggerCondition`/`WaitingFor`/`GameAction` variant, a new parser grammar family, a new resolver module — check the PR body and description for evidence the engine-implementer pipeline ran (plan/review sections, the `/engine-implementer` checkbox, `## Anchored on` citations). A new-surface PR with no pipeline evidence gets elevated scrutiny and defaults to routing through the full engine cycle rather than inline patching — precedent: #3816 (Heist) shipped a new mechanic with the pipeline checkbox unchecked, broke an exhaustive match across existing consumers, and took 4 review rounds. Absence of evidence is a scrutiny signal, not an auto-BLOCK: small-surface PRs that clearly followed the architecture may still be handled inline.
 
 Use `$engine-implementer` and the full plan -> implement -> review cycle when the PR needs architectural redesign or new engine primitives. Typical triggers:
 

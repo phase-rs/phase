@@ -13,7 +13,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_quantity_ref,
+    parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -25,12 +25,13 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    CastFromZoneDriver, CastingPermission, Comparator, ContinuousModification, ControllerRef,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CastFromZoneDriver, CastingPermission, Comparator, ConjureSource, ContinuousModification,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
+    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -48,15 +49,17 @@ use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
     attach_repeat_process_keywords, attach_same_is_true_keywords,
-    collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
-    contains_implicit_tracked_set_pronoun, each_target_filter_mut, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
-    publishes_tracked_set_from_resolution, refine_damage_target_remainder,
-    replace_player_anaphor_with_parent_target, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
+    contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
+    each_target_filter_mut, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    has_typed_target, inject_chosen_color_choice_grant, mark_uses_tracked_set, parse_effect_clause,
+    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
+    refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
+    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
+    rewrite_rounding_mode, rewrite_that_type_mana_instead, scan_contains_phrase,
+    stamp_delayed_returns, target_filter_controller_ref, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -754,7 +757,11 @@ fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
         return false;
     };
     if static_abilities.len() != 1
-        || static_abilities[0].mode != (StaticMode::SpendManaAsAnyColor { spell_filter: None })
+        || static_abilities[0].mode
+            != (StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+            })
     {
         return false;
     }
@@ -799,6 +806,63 @@ fn attach_any_color_mana_rider_to_previous_play_from_exile(defs: &mut [AbilityDe
     };
 
     *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
+    true
+}
+
+/// CR 614.1a + CR 608.2n: Fold a "if that spell would be put into a graveyard,
+/// [put it on the library / return it to its owner's hand] instead" rider onto
+/// the immediately-preceding optional `CastFromZone` as its canonical
+/// sub-ability — targeting the cast spell (`ParentTarget`), count 1, the parsed
+/// destination. The rider is a CR 608.2n destination-replacement on the *cast
+/// spell* (Kylox's Voltstrider → library bottom; the hand variant), NOT a
+/// sibling effect and NOT the Sanwell/Chaos-Wand free-cast bottom-cleanup that
+/// `is_linked_exile_cast_bottom_cleanup` would otherwise mistake the
+/// `PutAtLibraryPosition{Bottom}` for (mis-binding it to `ExiledBySource`,
+/// count 0, and duplicating it into a bogus `else_ability`). Building the rider
+/// directly here bypasses that generic mis-route.
+///
+/// The exile destination is intentionally NOT handled here: it already lowers to
+/// the clean `ChangeZone{Exile, ParentTarget}` sub-ability via the general
+/// anaphor rebind (Torrential Gearhulk), and its effect shape never trips the
+/// bottom-cleanup detector. Returns `false` (no fold) for exile so that path is
+/// left undisturbed.
+fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
+    defs: &mut [AbilityDefinition],
+    dest: SpellStackToGraveyardReplacement,
+) -> bool {
+    let rider_effect = match dest {
+        SpellStackToGraveyardReplacement::Library { position } => Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            count: QuantityExpr::Fixed { value: 1 },
+            position,
+        },
+        SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
+            destination: Zone::Hand,
+            origin: None,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        // Exile keeps its existing clean `ChangeZone{Exile, ParentTarget}` path.
+        SpellStackToGraveyardReplacement::Exile => return false,
+    };
+    let Some(prev) = defs.last_mut() else {
+        return false;
+    };
+    if !matches!(&*prev.effect, Effect::CastFromZone { .. }) || prev.sub_ability.is_some() {
+        return false;
+    }
+    let mut rider = AbilityDefinition::new(AbilityKind::Spell, rider_effect);
+    rider.sub_link = SubAbilityLink::SequentialSibling;
+    prev.sub_ability = Some(Box::new(rider));
     true
 }
 
@@ -930,6 +994,7 @@ mod linked_exile_cleanup_tests {
             constraint: None,
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         }
     }
 
@@ -1323,6 +1388,23 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             continue;
         }
 
+        // CR 614.1a + CR 608.2n: a "if that spell would be put into a graveyard,
+        // [put on library / return to hand] instead" rider that trails an
+        // optional `CastFromZone` (Kylox's Voltstrider) is a CR 608.2n
+        // destination-replacement on the cast spell. Fold the canonical rider
+        // onto the prior cast so the runtime stamps the redirect, intercepting it
+        // before the generic chain assembly mistakes a `PutAtLibraryPosition{
+        // Bottom}` for the Sanwell free-cast bottom-cleanup. Exile is left to its
+        // existing clean path (the helper declines it).
+        if let Some(dest) =
+            parse_spell_graveyard_replacement_rider(&clause_ir.source_text.to_lowercase())
+        {
+            if attach_graveyard_redirect_rider_to_prior_cast_from_zone(&mut defs, dest) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+        }
+
         // CR 601.2f + CR 614.1c: Lightstall Inquisitor's "Each spell cast this
         // way costs {1} more to cast." / "Each land played this way enters
         // tapped." rider sentences scope to the preceding `PlayFromExile`
@@ -1353,6 +1435,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // ── Build AbilityDefinition from ClauseIr ──
         let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // CR 702.26a: Preserve clause provenance on parent-target tap riders so
+        // host-bound phase-in rewrites can match the exact printed phrase without
+        // falling back to whole-trigger text.
+        if matches!(
+            def.effect.as_ref(),
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ) {
+            def.description = Some(clause_ir.source_text.clone());
+        }
         // CR 608.2c: This clause's link to its parent = the boundary that
         // SEPARATED the previous clause from this one. A `Sentence` boundary
         // marks a `SequentialSibling` (next printed instruction, resolves even
@@ -1848,6 +1943,26 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 while cursor.sub_ability.is_some() {
                     cursor = cursor.sub_ability.as_mut().unwrap();
                 }
+                // FIX C — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
+                // its power to <fresh opponent>" tail appended after a `ConditionInstead`
+                // override is the same one-sided-fight anaphor as the non-nested Ambuscade
+                // form ("It" = the boosted creature = Target1, the source; "its power" read
+                // live). The generic fold loop appends it without the chunk-loop's anaphor
+                // rebind, so it would otherwise keep the subject-stamping default
+                // (`Power{Source}` + `damage_source: None` → 0 damage from the spell). Reuse
+                // the one-sided-fight rebind to restore `Power{Anaphoric}` + `DamageSource::
+                // Target`. No-op (returns false, mutates nothing) for non-damage /
+                // non-fresh-opponent tails (Evil's Thrall's Untap, the Draw tails). Gated to
+                // the override cursor + an independent `SequentialSibling` tail so non-nested
+                // Ambuscade/Bite Down/Rabid Bite (rebound at the chunk-loop site) are
+                // untouched.
+                if matches!(
+                    cursor.condition,
+                    Some(AbilityCondition::ConditionInstead { .. })
+                ) && chain.sub_link == SubAbilityLink::SequentialSibling
+                {
+                    bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
+                }
                 cursor.sub_ability = Some(Box::new(chain));
             } else {
                 prev.sub_ability = Some(Box::new(chain));
@@ -2142,6 +2257,9 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
             } | Effect::ChangeZone {
                 destination: Zone::Battlefield,
                 ..
+            } | Effect::Conjure {
+                destination: Zone::Battlefield,
+                ..
             }
         );
         let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
@@ -2207,6 +2325,18 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
         Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
     ) {
         return true;
+    }
+    if let Effect::Conjure { cards, .. } = &*sub.effect {
+        if cards.iter().any(|card| {
+            matches!(
+                &card.source,
+                ConjureSource::Duplicate {
+                    duplicate_of: TargetFilter::ParentTarget | TargetFilter::SelfRef,
+                }
+            )
+        }) {
+            return true;
+        }
     }
     if let Effect::GenericEffect {
         static_abilities, ..
@@ -2329,15 +2459,28 @@ fn rewrite_counter_instead_target_from_antecedent(cur: &mut Effect, antecedent: 
     if !matches!(current_target, TargetFilter::SelfRef) {
         return false;
     }
-    let Effect::PutCounter {
+    // Existing attachment-host case — only when the antecedent is itself a `PutCounter`.
+    // Preserved verbatim (clone the host filter) so attachment-host cards stay byte-identical.
+    if let Effect::PutCounter {
         target: antecedent_target,
         ..
     } = antecedent
-    else {
+    {
+        if antecedent_target.contains_source_attachment_host() {
+            *current_target = antecedent_target.clone();
+            return true;
+        }
         return false;
-    };
-    if antecedent_target.contains_source_attachment_host() {
-        *current_target = antecedent_target.clone();
+    }
+    // FIX A′ — CR 608.2c: an instead-override "Put a +1/+1 counter on it" whose antecedent
+    // is a typed-targeted non-counter clause (Throw from the Saddle's "Target creature you
+    // control gets +1/+1") anaphors that chosen target (Target1). Bind the override's
+    // `SelfRef` counter to `ParentTarget` — a reference to the parent ability's chosen
+    // object — NOT a clone of the antecedent's `Typed` filter (which would announce a fresh
+    // target). Scoped to `PutCounter{SelfRef}`; demonstrative overrides ("on that creature")
+    // are already `ParentTarget` and never reach here.
+    if has_typed_target(antecedent) {
+        *current_target = TargetFilter::ParentTarget;
         return true;
     }
     false
@@ -3538,6 +3681,16 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(controls_scope), deconjugated);
     }
 
+    // CR 122.1 + CR 122.2: "who has/have N or more <kind> counters" restricts
+    // the player set to those whose per-candidate counter total meets the
+    // threshold (Ixhel, Scion of Atraxa: "each opponent who has three or more
+    // poison counters exiles …"; Glissa's Retriever quantity path shares the
+    // same attr-clause grammar via `parse_player_attribute_attr_clause`).
+    if let Some((attr_scope, after_clause)) = strip_player_attribute_clause(&scope, rest) {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(attr_scope), deconjugated);
+    }
+
     // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
@@ -4055,6 +4208,39 @@ fn strip_controls_permanent_clause(
             filter,
             comparator,
             count: Box::new(count),
+        },
+        verb_phrase.to_string(),
+    ))
+}
+
+/// CR 122.1 + CR 122.2 + CR 402.1 + CR 403.3: Strip a "who has/have N or more
+/// <attribute>" relative clause after an "each opponent"/"each player" subject.
+/// Covers counters, hand size, cards drawn, and battlefield-entry predicates via
+/// `parse_player_attribute_attr_clause`. Returns `PlayerFilter::PlayerAttribute`
+/// and the verb-phrase remainder.
+fn strip_player_attribute_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::PlayerRelation;
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        _ => return None,
+    };
+    let lower = rest.to_lowercase();
+    let ((attr, count), remainder) =
+        nom_on_lower(rest, &lower, parse_player_attribute_attr_clause)?;
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: count }),
         },
         verb_phrase.to_string(),
     ))
@@ -7019,6 +7205,35 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     {
         return None;
     }
+    // CR 608.2c + CR 115.10a + CR 202.3: "that card's mana value" in a "where X
+    // is …" binding is anaphoric, not targeted. The revealed/looked-at card is
+    // an affected object introduced by an earlier instruction in the SAME
+    // ability (e.g. Twilight Prophet's "reveal the top card … Each opponent
+    // loses X life … where X is that card's mana value") — CR 115.10a: it is
+    // NOT a target (no "target" word), so it must resolve against the anaphoric
+    // referent, not the empty target slot. `parse_cda_quantity` (below) would
+    // hard-map "that card's mana value" to `ObjectScope::Target` (see
+    // `oracle_target::parse_mana_value_reference_qty`), which reads only the
+    // target slot and yields 0 at runtime. Route ONLY the literal "card"
+    // possessive through `parse_event_context_quantity`, which classifies the
+    // demonstrative referent as `ObjectScope::Demonstrative` (resolved via
+    // `effect_context_object` — the revealed card, LKI-snapshotted before it
+    // moves zones, CR 202.3 mana value). "card" is the only unambiguously-safe
+    // referent: unlike "creature"/"permanent"/"planeswalker" (which are correct
+    // `Target` for targeted where-X cards like Feeding Grounds) it is never a
+    // battlefield target here. "spell" is explicitly excluded — its current
+    // `EventSource` binding (Draining Whelk class) must be preserved, and
+    // `parse_event_context_quantity` would instead emit `Demonstrative` for it.
+    // Restricted to the mana-value property only (CR 202.3), never power /
+    // toughness.
+    if is_that_card_mana_value_where_x(expression_lower.as_str()) {
+        // Pass the already-trimmed `expression` (trailing `.` stripped at the top
+        // of this fn), not the raw `where_x_expression`: the guard matches the
+        // trimmed phrase, so a punctuation-bearing input like "that card's mana
+        // value." must resolve through the same trimmed text or the demonstrative
+        // binding would fall back to `None` and the bug would survive.
+        return parse_event_context_quantity(expression);
+    }
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
@@ -7049,6 +7264,23 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
     // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
+}
+
+/// CR 608.2c + CR 202.3: Match EXACTLY `that card's mana value` (or its
+/// `converted mana cost` synonym; CR 202.3 defines the mana value) — the
+/// anaphoric "that card's MV"
+/// where-X referent. Matches only the literal `card` possessive (never `spell`,
+/// `creature`, `permanent`, or `planeswalker`) and only the mana-value property
+/// (never power/toughness). Callers route a positive match through
+/// `parse_event_context_quantity` so the referent classifies as
+/// `ObjectScope::Demonstrative` (CR 115.10a: not a target).
+fn is_that_card_mana_value_where_x(expression_lower: &str) -> bool {
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("that card's "),
+        alt((tag("mana value"), tag("converted mana cost"))),
+    ))
+    .parse(expression_lower)
+    .is_ok()
 }
 
 /// CR 107.3f + CR 113.7: Printed-name possessive in a where-X binding
@@ -8370,6 +8602,58 @@ mod tests {
         );
     }
 
+    // CR 122.1 + CR 402.1: "each opponent who has N or more poison counters"
+    // and sibling hand-size / cards-drawn attr clauses share the quantity-path
+    // attribute grammar via `parse_player_attribute_attr_clause`.
+    #[test]
+    fn each_opponent_who_has_poison_counters_strips_player_attribute_scope() {
+        use crate::types::ability::{
+            Comparator, CountScope, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        };
+        use crate::types::player::PlayerCounterKind;
+        let (scope, residual) = super::strip_each_player_subject(
+            "each opponent who has three or more poison counters exiles the top card of their library",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 3 }),
+            })
+        );
+        assert_eq!(
+            residual, "exile the top card of their library",
+            "residual must be the deconjugated imperative after the attr clause"
+        );
+    }
+
+    #[test]
+    fn each_opponent_with_cards_in_hand_strips_hand_size_attribute_scope() {
+        use crate::types::ability::{
+            Comparator, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
+        };
+        let (scope, residual) = super::strip_each_player_subject(
+            "each opponent with two or more cards in hand discards a card",
+        );
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 2 }),
+            })
+        );
+        assert_eq!(residual, "discard a card");
+    }
+
     // CR 406.2 + CR 610.3: "the owner of each card exiled with ~ " strips to the
     // OwnersOfCardsExiledBySource player scope. Building block for Trial of a Time
     // Lord IV (and unblocks the Possibility Storm owner-of-exiled sibling).
@@ -9247,6 +9531,144 @@ mod where_x_tests {
         assert!(
             !value.contains_x(),
             "Dig filter Cmc must bind where-X: {value:?}"
+        );
+    }
+
+    /// Issue #1375 — CR 608.2c + CR 115.10a + CR 202.3: "where X is that card's
+    /// mana value" is an anaphoric reference to a card revealed by an earlier
+    /// instruction in the same ability (Twilight Prophet, Erratic Mutation, …),
+    /// NOT a target (CR 115.10a — no "target" word). It must bind to
+    /// `ObjectScope::Demonstrative` (resolved via `effect_context_object`), not
+    /// `Target` (which reads the empty target slot and yields 0). Reverting the
+    /// guard makes this bind `Target` — the failing assertion below.
+    #[test]
+    fn where_x_that_cards_mana_value_binds_demonstrative() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        // CR 202.3 synonym: "converted mana cost" routes identically.
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's converted mana cost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        // Trailing sentence punctuation must resolve identically — the guard
+        // matches the trimmed phrase, so the demonstrative binding must be built
+        // from the trimmed text, not the raw "that card's mana value." input.
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's mana value."),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+    }
+
+    /// G2 no-regression — "that spell's mana value" in the SAME where-X path
+    /// must stay on its current `EventSource` binding (Draining Whelk / Spell
+    /// Swindle class). The "that card's MV" guard matches only the literal
+    /// `card` possessive, never `spell`, so `parse_event_context_quantity`
+    /// (which would emit `Demonstrative` for "that spell's") is never consulted
+    /// for spells.
+    #[test]
+    fn where_x_that_spells_mana_value_stays_event_source() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that spell's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+            })
+        );
+    }
+
+    /// G1 safety proof — "that creature's mana value" (targeted where-X cards
+    /// like Feeding Grounds / Living Armor) must stay `Target`. The guard
+    /// deliberately excludes `creature`/`permanent`/`planeswalker` because those
+    /// are correctly the targeted object in these bindings; flipping them to
+    /// Demonstrative would regress those cards to 0.
+    #[test]
+    fn where_x_that_creatures_mana_value_stays_target() {
+        assert_eq!(
+            parse_where_x_quantity_expression("that creature's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression("that permanent's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })
+        );
+    }
+
+    /// Issue #1375 full-card — Twilight Prophet's real Oracle text. BOTH the
+    /// upkeep trigger's `LoseLife.amount` and `GainLife.amount` must bind
+    /// `ObjectManaValue { scope: Demonstrative }` (was `Target` → 0/0 drain).
+    #[test]
+    fn twilight_prophet_upkeep_drains_bind_demonstrative_mana_value() {
+        use crate::types::ability::Effect;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Ascend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\nAt the beginning of your upkeep, if you have the city's blessing, reveal the top card of your library and put it into your hand. Each opponent loses X life and you gain X life, where X is that card's mana value.",
+            "Twilight Prophet",
+            &["Ascend".to_string()],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Cleric".to_string()],
+        );
+
+        // Walk the upkeep trigger's execute chain, collecting every LoseLife /
+        // GainLife amount. (test-only tree walk over parsed AbilityDefinitions —
+        // not parser dispatch.)
+        fn collect_life_amounts(
+            def: &crate::types::ability::AbilityDefinition,
+            lose: &mut Vec<QuantityExpr>,
+            gain: &mut Vec<QuantityExpr>,
+        ) {
+            match &*def.effect {
+                Effect::LoseLife { amount, .. } => lose.push(amount.clone()),
+                Effect::GainLife { amount, .. } => gain.push(amount.clone()),
+                _ => {}
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                collect_life_amounts(sub, lose, gain);
+            }
+        }
+
+        let mut lose = Vec::new();
+        let mut gain = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(exec) = trigger.execute.as_ref() {
+                collect_life_amounts(exec, &mut lose, &mut gain);
+            }
+        }
+
+        let demonstrative_mv = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        };
+        assert!(
+            lose.contains(&demonstrative_mv),
+            "each-opponent LoseLife.amount must bind Demonstrative mana value, got {lose:?}"
+        );
+        assert!(
+            gain.contains(&demonstrative_mv),
+            "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
     }
 }
