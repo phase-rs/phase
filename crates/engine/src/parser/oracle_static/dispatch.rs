@@ -2860,23 +2860,20 @@ pub(crate) fn parse_static_line_inner(
     // CR 509.1c + CR 611.3a: an extra-blocker grant may carry a trailing "as long
     // as <cond>" / "if <cond>" gate (Entourage of Trest: "This creature can block
     // an additional creature each combat as long as you're the monarch"). The bare
-    // form is parsed directly; when a trailing gate is present, peel it so the
-    // condition-free body reaches `parse_extra_blockers_static`, then attach the
-    // parsed condition (IsMonarch, etc.) via `parse_static_condition`.
+    // form is parsed directly; a trailing gate is peeled via the shared gate
+    // authority (`split_trailing_gate_condition_with_body`, which owns the
+    // `as long as` > last-valid-`if` > `as if`-exclusion rules) so the
+    // condition-free body reaches `parse_extra_blockers_static`, then the parsed
+    // condition attaches. CR 611.3a: fail CLOSED — an unrecognized condition leaves
+    // the whole line unsupported (`parse_static_condition` returns `None` → `?`)
+    // rather than enforcing the extra-block grant unconditionally (an `Unrecognized`
+    // gate evaluates as always-true in the layer system).
     if let Some(def) = parse_extra_blockers_static(&text) {
         return Some(def);
     }
-    if let Some((body_tp, condition_tp)) = tp
-        .split_around(" as long as ")
-        .or_else(|| tp.split_around(" if "))
-    {
-        if let Some(mut def) = parse_extra_blockers_static(body_tp.original) {
-            let condition_text = condition_tp.original.trim().trim_end_matches('.');
-            def.condition = Some(parse_static_condition(condition_text).unwrap_or(
-                StaticCondition::Unrecognized {
-                    text: condition_text.to_string(),
-                },
-            ));
+    if let Some((body, condition_text)) = split_trailing_gate_condition_with_body(&tp) {
+        if let Some(mut def) = parse_extra_blockers_static(body) {
+            def.condition = Some(parse_static_condition(condition_text)?);
             return Some(def);
         }
     }

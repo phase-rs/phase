@@ -2124,6 +2124,36 @@ pub(crate) fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
     split_trailing_as_long_as(lower).or_else(|| split_trailing_if_condition(lower))
 }
 
+/// Body-preserving sibling of [`split_trailing_gate_condition`] for callers that
+/// must re-parse the pre-gate body as its own static (e.g. an extra-blocker grant
+/// gated on "… as long as you're the monarch"). Returns `(body, condition)` in
+/// ORIGINAL case from the SAME authority — `as long as` is tried first, then the
+/// last valid `if` marker (excluding `as if`) — so trailing-gate splitting is not
+/// re-implemented per call site. `body` is the line with the trailing gate
+/// removed (trailing separator whitespace trimmed); `condition` is the gate's
+/// condition text for [`parse_static_condition`]. The word-boundary scan yields
+/// the marker's byte offset, so the original-case body/condition are recovered by
+/// slicing `tp.original` (mirroring `split_trailing_if_condition_tp`).
+pub(crate) fn split_trailing_gate_condition_with_body<'a>(
+    tp: &'a TextPair<'a>,
+) -> Option<(&'a str, &'a str)> {
+    let (marker_offset, _, tail_lower) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("as long as ").parse(i)
+        })
+        .or_else(|| {
+            nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+                tp.lower,
+                |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+                |if_offset| !is_as_if_gate_marker(tp.lower, if_offset),
+            )
+        })?;
+    let condition_start = tp.lower.len().checked_sub(tail_lower.len())?;
+    let condition = tp.original.get(condition_start..)?.trim_start();
+    let body = tp.original.get(..marker_offset)?.trim_end();
+    Some((body, condition))
+}
+
 /// CR 508.1c / CR 509.1b: Parse the trailing " if [condition]" clause of a
 /// combat-restriction static ("~ can't attack if defending player controls an
 /// untapped land"; "~ can't block if you control an untapped land"). Mirrors
