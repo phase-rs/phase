@@ -240,6 +240,17 @@ fn prompt_resolution_tap_untap_choice(
         return true;
     }
 
+    // CR 608.2d: zero eligible objects with a positive minimum is unsatisfiable.
+    // Mirror attach.rs empty-pool no-op so resolution does not wedge the game
+    // (issue #4961 class — no-candidate zone-choice prompts).
+    if eligible.is_empty() && bounds.min > 0 {
+        events.push(GameEvent::EffectResolved {
+            kind: effect_kind,
+            source_id: ability.source_id,
+        });
+        return true;
+    }
+
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player: ability.controller,
         cards: eligible,
@@ -708,6 +719,50 @@ mod tests {
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
         assert!(events.is_empty());
+    }
+
+    /// Issue #4961: zero eligible permanents with `min_count >= 1` must no-op
+    /// instead of building an unsatisfiable `EffectZoneChoice` wedge.
+    #[test]
+    fn tap_untap_choice_with_no_eligible_permanents_does_not_deadlock() {
+        use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(4961);
+        let mut ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature)
+                        .subtype("Zombie".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "zero eligible tap targets must not wedge, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Tap,
+                    ..
+                }
+            )),
+            "no-op path must emit EffectResolved"
+        );
     }
 
     #[test]
