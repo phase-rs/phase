@@ -3479,6 +3479,37 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
         })
         .or_else(|| {
             // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            // CR 614.1c: WotC templates the entry event as both "enter tapped"
+            // and the fully-spelled "enter the battlefield tapped" (Frozen Aether
+            // vs Kismet). Peel the long form too so the type-phrase subject
+            // ("Artifacts, creatures, and lands your opponents control") reaches
+            // the same control-scoped replacement the short form already builds.
+            stripped
+                .strip_suffix(" enter the battlefield tapped")
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::Plain {
+                            enters_tapped: true,
+                        },
+                    )
+                })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped
+                .strip_suffix(" enters the battlefield tapped")
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::Plain {
+                            enters_tapped: true,
+                        },
+                    )
+                })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
             stripped.strip_suffix(" enter tapped").map(|subject| {
                 (
                     subject,
@@ -12182,6 +12213,75 @@ mod tests {
                 );
             }
             other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
+
+    // CR 614.1c: the printed Frozen Aether Oracle spells the entry event in full
+    // ("enter the battlefield tapped"); the `frozen_aether_comma_list` case above
+    // uses the short "enter tapped" simplification. Both must lower to the same
+    // control-scoped Or filter — the long form previously fell through to an
+    // `Unimplemented` effect because neither the classifier nor the suffix peeler
+    // accepted the fully-spelled plural verb.
+    #[test]
+    fn frozen_aether_enters_the_battlefield_tapped_long_form() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter the battlefield tapped.",
+            "Frozen Aether",
+        )
+        .expect("long-form 'enter the battlefield tapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
+
+    // The single-type long form ("Creatures your opponents control enter the
+    // battlefield tapped.") must reach the same control-scoped replacement the
+    // short "enter tapped" form builds for Imposing Sovereign / Authority of the
+    // Consuls.
+    #[test]
+    fn single_type_enters_the_battlefield_tapped_long_form() {
+        let def = parse_replacement_line(
+            "Creatures your opponents control enter the battlefield tapped.",
+            "Imposing Sovereign",
+        )
+        .expect("single-type long-form 'enter the battlefield tapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
         }
     }
 

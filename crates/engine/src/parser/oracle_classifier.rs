@@ -720,6 +720,18 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 614.1c: the plural-subject entry event is templated both as the short
+    // "enter tapped" and the fully-spelled "enter the battlefield tapped"
+    // (Kismet vs Frozen Aether). The `ends_with(" enter tapped")` check above
+    // misses the long form because "…the battlefield tapped" is not a suffix of
+    // "…enter tapped", so classify it explicitly.
+    if lower
+        .trim_end_matches('.')
+        .ends_with(" enter the battlefield tapped")
+    {
+        return true;
+    }
+
     if lower.trim_end_matches('.').ends_with(" enter untapped") {
         return true;
     }
