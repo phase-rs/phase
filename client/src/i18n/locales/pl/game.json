@@ -77,7 +77,8 @@
     "priorityTooltip": "Przekaż priorytet. Jeśli stos jest pusty, spowoduje to przejście przez bieżące okno priorytetu. Skrót: Spacja.",
     "pass": "Przekaż",
     "passToEndTooltip": "Automatycznie przekazuj priorytet aż do kroku końcowego, chyba że przerwie to wybór, zatrzymanie lub Pełna kontrola. Skrót: Enter.",
-    "autoPassing": "Automatyczne przekazywanie do kroku końcowego..."
+    "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
+    "resolvingStack": "Rozpatrywanie stosu..."
   },
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",

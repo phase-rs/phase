@@ -258,6 +258,16 @@ pub(crate) fn bind_named_choice(
                         | ChoiceType::Keyword { .. }
                         | ChoiceType::Player
                         | ChoiceType::Opponent { .. }
+                        // CR 613.1: A persisted `Label` gates `ChosenLabelIs`
+                        // continuous statics — anchor-word modal permanents
+                        // (Khans Sieges) and the modal as-enters P/T class
+                        // (Primal Plasma/Clay, Corrupted Shapeshifter, Aquamorph
+                        // Entity), whose Layer-7b SetPower/SetToughness apply only
+                        // while the chosen label is active. Without re-running
+                        // layers here the pre-choice printed P/T survives (a modal
+                        // creature that entered printed 0/0 would then die to SBAs
+                        // before its gated static could set its real P/T).
+                        | ChoiceType::Labeled { .. }
                 ) {
                     crate::game::layers::mark_layers_full(state);
                 }

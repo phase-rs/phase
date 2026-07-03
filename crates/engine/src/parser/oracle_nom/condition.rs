@@ -94,6 +94,11 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
+        // CR 208.1 + CR 603.4 + CR 603.10a: "it had power greater than ~'s power"
+        // — triggering object's LKI stat vs the source's stat (Drizzt Do'Urden).
+        // Placed before `parse_source_state_conditions` so the "it had <stat>"
+        // subject is not mistaken for a source-subject fixed-threshold form.
+        parse_event_object_pt_vs_source_comparison,
         parse_attached_object_is_filter_condition,
         parse_recipient_is_filter_condition,
         parse_source_state_conditions,
@@ -135,6 +140,11 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
+        // CR 611.3a + CR 702: "a <type> card [with <keyword>] is in a graveyard"
+        // — graveyard-presence gate for conditional continuous statics
+        // (Tarmogoyf, Cairn Wanderer). Guarded by the "is in a graveyard"
+        // suffix, so it never mis-claims the other presence phrases above.
+        parse_card_in_graveyard,
     ))
     .parse(input)
 }
@@ -1646,6 +1656,15 @@ fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32
         parse_exactly_n_counters,
         parse_n_or_more_counters,
         parse_n_or_fewer_counters,
+        // CR 122.1: a bare "counter(s)" with no quantifier word means "at least
+        // one" — "if ~ has counters on it" (The Ozolith, Denry Klin). `peek` so
+        // the counter-type axis still consumes the noun, and gate on the bare
+        // counter word so a leading count ("three counters") or a typed noun
+        // ("+1/+1 counters") is never misread as an implicit-one quantity.
+        value(
+            (1u32, None),
+            nom::combinator::peek(alt((tag("counters"), tag("counter")))),
+        ),
     ))
     .parse(input)
 }
@@ -1790,6 +1809,58 @@ pub(crate) fn parse_source_power_toughness_condition(
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 208.1 + CR 603.4 + CR 603.10a: Intervening-if comparing the *triggering*
+/// object's last-known stat against the ability source's stat — "it had power
+/// greater than ~'s power" (Drizzt Do'Urden's dies trigger). The subject "it" is
+/// the object referenced by the trigger event (the creature that died); "had"
+/// is past tense because CR 603.10a's look-back reads the dying creature's
+/// last-known power from the graveyard at resolution. "~'s power" is the ability
+/// source's current power.
+///
+/// Distinct from [`parse_source_power_toughness_condition`] ("its power is N",
+/// which compares the *source's* stat against a fixed threshold): here BOTH
+/// operands are dynamic P/T refs on two *different* objects — `EventSource` (the
+/// dying creature, resolved via LKI) and `Source` (the ability's own permanent).
+/// Emits a `QuantityComparison` so `static_condition_to_trigger_condition`
+/// bridges it onto the trigger's `condition`, and so the trigger-level
+/// difference binding in `lower_trigger_ir` (oracle_trigger.rs) can read the two
+/// operands for a paired "put ... counters equal to the difference" count.
+fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject: "it had " — the triggering-event object, past tense (LKI look-back).
+    let (rest, _) = tag("it had ").parse(input)?;
+    let (rest, lhs) = parse_pt_ref_scoped(rest, ObjectScope::EventSource)?;
+    // Comparator between the two stats. Longer phrases precede their prefixes so
+    // "greater than or equal to" wins over "greater than".
+    let (rest, comparator) = alt((
+        value(Comparator::GE, tag(" greater than or equal to ")),
+        value(Comparator::LE, tag(" less than or equal to ")),
+        value(Comparator::GT, tag(" greater than ")),
+        value(Comparator::LT, tag(" less than ")),
+    ))
+    .parse(rest)?;
+    // RHS: "~'s <stat>" — the ability source's stat.
+    let (rest, _) = tag("~'s ").parse(rest)?;
+    let (rest, rhs) = parse_pt_ref_scoped(rest, ObjectScope::Source)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty: lhs },
+            comparator,
+            rhs: QuantityExpr::Ref { qty: rhs },
+        },
+    ))
+}
+
+/// CR 208.1: Parse the bare stat word "power"/"toughness" into a P/T
+/// `QuantityRef` under the given object scope.
+fn parse_pt_ref_scoped(input: &str, scope: ObjectScope) -> OracleResult<'_, QuantityRef> {
+    alt((
+        value(QuantityRef::Power { scope }, tag("power")),
+        value(QuantityRef::Toughness { scope }, tag("toughness")),
+    ))
+    .parse(input)
 }
 
 /// Possessive-subject form: `<possessive> <property> is `, leaving the threshold
@@ -3186,6 +3257,89 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
             filter: Some(filter),
         },
     ))
+}
+
+/// CR 611.3a + CR 702: Parse "[a/an] <type-phrase> [with <keyword>] is in a
+/// graveyard" → `IsPresent` whose filter carries `FilterProp::InZone { zone:
+/// Graveyard }` (plus any `FilterProp::WithKeyword` the type phrase's "with
+/// <keyword>" clause supplies).
+///
+/// Graveyard-presence sibling of `parse_creature_has_keyword`: instead of a "has
+/// <keyword>" battlefield predicate, the subject's presence is checked in a
+/// graveyard. This is the gate half of a conditional continuous static (CR
+/// 611.3a) whose grant is a keyword ability (CR 702). Generalized over every
+/// type phrase `parse_type_phrase` recognizes and every keyword its "with
+/// <keyword>" suffix folds in, so it covers the whole class, not one card:
+///   - Tarmogoyf: "a land card is in a graveyard" (bare card-type gate)
+///   - Cairn Wanderer: "a creature card with flying is in a graveyard"
+///     (card-type + `WithKeyword { Flying }` gate)
+///
+/// In a graveyard every object is a card, so "creature card" / "land card" is the
+/// card-type filter — `parse_type_phrase` folds the informational " card" suffix
+/// and the "with <keyword>" suffix, so no bespoke keyword parsing is needed here.
+/// "in a graveyard" is controller-agnostic (any graveyard); no controller is
+/// injected. The `is in a graveyard` suffix is required, so this never mis-claims
+/// a bare "a creature card ..." presence phrase handled elsewhere.
+pub(crate) fn parse_card_in_graveyard(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Optional leading article — `parse_type_phrase` also strips it, but guard it
+    // explicitly first to mirror `parse_creature_has_keyword`.
+    let (rest, _) = opt(parse_article).parse(input)?;
+    // `parse_type_phrase` consumes the type word, the informational " card"
+    // suffix, and any "with <keyword>" clause (folded into the filter as
+    // `FilterProp::WithKeyword`). The remainder begins at the presence predicate.
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (after, _) = (
+        opt(tag(" ")),
+        opt(alt((tag("is "), tag("are ")))),
+        tag("in "),
+        // CR 404: "a graveyard" (any player's graveyard) or "any graveyard" —
+        // require the article so an ungrammatical bare "in graveyard" or a
+        // dangling "graveyards" is not loosely claimed.
+        alt((tag("a graveyard"), tag("any graveyard"))),
+    )
+        .parse(remainder)?;
+    let filter = add_filter_property(
+        filter,
+        FilterProp::InZone {
+            zone: Zone::Graveyard,
+        },
+    );
+    Ok((
+        after,
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    ))
+}
+
+/// CR 611.3a + CR 702: Consume a full modeled graveyard-keyword grant sentence —
+/// "as long as <type> card [with <keyword>] is in a graveyard, this creature has
+/// <keyword>" — returning `()` on success. This is the sentence-boundary
+/// recognizer for a following "The same is true for <keyword list>" continuation
+/// (Cairn Wanderer). It reuses `parse_card_in_graveyard` for the gate half so it
+/// stays in lockstep with the condition grammar; the grant keyword itself is not
+/// captured here (the static distributor re-parses it from the resulting
+/// `StaticDefinition`), only the sentence extent matters. `input` is lowercased
+/// by the caller (`split_same_is_true_static_tail`).
+pub(crate) fn parse_graveyard_keyword_grant_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as long as ").parse(input)?;
+    let (input, _condition) = parse_card_in_graveyard(input)?;
+    let (input, _) = tag(", ").parse(input)?;
+    let (input, _) = alt((
+        tag("this creature has "),
+        tag("this permanent has "),
+        tag("~ has "),
+    ))
+    .parse(input)?;
+    let (input, _keyword) = parse_keyword_name(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
 }
 
 fn add_filter_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
@@ -14830,6 +14984,44 @@ mod tests {
             assert_eq!(rest, "", "unconsumed remainder for {text:?}");
             assert_eq!(cond, expected, "wrong condition for {text:?}");
         }
+    }
+
+    /// CR 122.1: a bare "counter(s)" with no quantifier word means "at least
+    /// one". "~ has counters on it" (The Ozolith, Denry Klin) must parse to
+    /// `HasCounters { Any, minimum: 1 }` — the intervening-if that was previously
+    /// dropped because the quantity axis had no no-quantifier arm. Discriminating:
+    /// revert the bare-`peek` arm in `parse_has_counters_quantity` and the bare
+    /// form no longer parses, so the trigger silently loses its gate.
+    #[test]
+    fn parse_source_has_counters_accepts_bare_any_counter() {
+        let (rest, cond) = parse_source_has_counters("~ has counters on it")
+            .expect("bare 'has counters on it' should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 1,
+                maximum: None,
+            }
+        );
+
+        // Regression: the quantified typed forms are unchanged by the new arm.
+        let (_, quant) = parse_source_has_counters("~ has three or more +1/+1 counters on it")
+            .expect("quantified typed form should still parse");
+        assert!(matches!(
+            quant,
+            StaticCondition::HasCounters {
+                minimum: 3,
+                maximum: None,
+                counters: CounterMatch::OfType(_),
+            }
+        ));
+
+        // Guard: a leading bare count ("three counters", no "or more") is not a
+        // quantity the axis recognizes, so the whole predicate fails rather than
+        // misreading "three" as an implicit-one quantity with a "three" type.
+        assert!(parse_source_has_counters("~ has three counters on it").is_err());
     }
 
     /// CR 122.1: the recipient-side counter path (`parse_recipient_has_counters`,

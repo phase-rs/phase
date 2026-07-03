@@ -2048,6 +2048,162 @@ fn enters_modified_if_is_only_if_marker(stripped: &str, ast_json: &str) -> bool 
     !has_other_if
 }
 
+/// CR 614.1a: A replacement effect's antecedent ("If [subject] would
+/// [event], [effect] instead.") is not an independent CR 608.2c conditional
+/// gate — the leading "if" is part of the replacement's event description.
+/// Detector G (`detect_condition_if`) must not flag it.
+///
+/// Unlike the card-wide gate this replaces, the exemption here is
+/// structural and per-sentence: a sentence is only stripped when it is
+/// actually shaped like a represented replacement antecedent AND (where a
+/// `ReplacementDefinition` exists to check against) its text is actually
+/// backed by one of `parsed.replacements`. This keeps compound replacement
+/// text honest — a card that pairs one *represented* replacement sentence
+/// with a second " instead" sentence carrying an unrepresented conditional
+/// still gets flagged for the second sentence, and a single sentence that
+/// smuggles in a second, unrelated "if" clause is not exempted either.
+///
+/// Conditions for stripping a given sentence (ALL must hold):
+///   (a) the sentence contains " instead" (CR 614.1a marker);
+///   (b) the sentence structurally matches a replacement antecedent shape:
+///       after skipping any leading ability-word / keyword-line prefix (text
+///       up to and including the last CR 207.2c ability-word em-dash "— " or
+///       newline that appears before the clause), the remainder starts with
+///       "if " and contains " would ". Ability-word lines (e.g. "Rot Fly —
+///       If an opponent would gain life, ...") and preceding keyword lines
+///       ("Flying\n...") are extremely common on replacement-bearing cards,
+///       so the shape check is anchored to the clause itself, not to
+///       byte-offset 0 of the whole (possibly multi-line) `.`-delimited
+///       sentence;
+///   (c) the sentence contains exactly one "if" clause — i.e. no second bare
+///       " if " later in the sentence, counting from the start of the
+///       antecedent clause located in (b). A second bare "if" means a real,
+///       additional conditional clause is riding along with the replacement
+///       and must survive to be checked by the rest of `detect_condition_if`;
+///   (d) it corresponds to an actually-parsed replacement: either
+///       - some entry in `parsed.replacements` has a `description` whose
+///         normalized (lowercased, whitespace-collapsed) text contains the
+///         sentence's normalized text or vice versa, or
+///       - no such entry exists, but `any_ability_has_target_replacement`
+///         is true for this card (CR 614.1a `AddTargetReplacement` riders —
+///         e.g. "if [target] would die" — register their replacement at
+///         resolution time on the parent target and never appear in the
+///         static `parsed.replacements` collection, so they have no
+///         description to match against). This fallback is intentionally
+///         narrow: it only ever accepts sentences that already satisfied
+///         (a)-(c), so it cannot paper over a genuinely-unrepresented
+///         compound conditional.
+fn strip_represented_replacement_instead_sentences(
+    stripped: &str,
+    parsed: &ParsedAbilities,
+) -> String {
+    // `stripped` is derived from `check_swallowed_clauses`'s `cleaned`, which
+    // is already `to_ascii_lowercase()`'d — sentences pulled from it are
+    // already lowercase. Only the replacement `description` (raw builder
+    // text, case-preserved, and NOT split on '.' so it still carries its
+    // trailing period) needs lower-casing and trailing-punctuation trimming
+    // before comparison against a clause pulled out of `stripped`.
+    // allow-noncombinator: swallow detector phrase scan on normalized description text
+    fn normalize_for_match(s: &str) -> String {
+        s.trim()
+            .trim_end_matches('.')
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // CR 207.2c: locate where the actual antecedent clause begins by
+    // skipping past any leading ability-word / keyword-line prefix. Returns
+    // the byte offset (into `sentence`) of the last "— " or "\n" separator
+    // that occurs before the clause, or `0` if there is none (the whole
+    // sentence IS the clause). Only ever walks forward from a separator to
+    // the next one — it does not itself require an "if" to be present.
+    fn antecedent_clause_start(sentence: &str) -> usize {
+        // allow-noncombinator: structural ability-word em-dash boundary scan on cleaned text
+        let em_dash_pos = sentence.rfind("— ").map(|i| i + "— ".len());
+        let newline_pos = sentence.rfind('\n').map(|i| i + 1);
+        em_dash_pos
+            .into_iter()
+            .chain(newline_pos)
+            .max()
+            .unwrap_or(0)
+    }
+
+    // Structural shape check per condition (b): after skipping any leading
+    // ability-word / keyword-line prefix, the clause must start with "if "
+    // and contain " would ".
+    fn matches_replacement_antecedent_shape(sentence: &str) -> bool {
+        let clause = &sentence[antecedent_clause_start(sentence)..];
+        // allow-noncombinator: swallow detector phrase scan on cleaned sentence
+        clause.starts_with("if ") && clause.contains(" would ")
+    }
+
+    // Condition (c): exactly one "if" clause from the antecedent clause
+    // start onward. The clause already starts with "if " (checked by the
+    // caller via (b)); reject it if a *second* bare " if " appears later —
+    // that is an additional, independent conditional clause riding along
+    // with the replacement and must not be silently swallowed. Text BEFORE
+    // the antecedent clause (ability-word / keyword-line prefix) is not
+    // scanned — an "if" there would belong to a different line entirely.
+    fn has_single_if_clause(sentence: &str) -> bool {
+        let clause = &sentence[antecedent_clause_start(sentence)..];
+        let after_leading_if = &clause[3.min(clause.len())..];
+        !after_leading_if.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+    }
+
+    // Condition (d): match against a parsed replacement's description, or
+    // fall back to the target-replacement carve-out. `clause_norm` is the
+    // normalized *antecedent clause* (ability-word / keyword-line prefix
+    // already stripped by the caller) — comparing against the clause rather
+    // than the whole (possibly multi-line, multi-keyword) sentence avoids
+    // false negatives from unrelated leading keyword lines that never made
+    // it into the replacement's `description` (which is set from the single
+    // source line the replacement was parsed from).
+    fn is_backed_by_parsed_replacement(clause_norm: &str, parsed: &ParsedAbilities) -> bool {
+        let matched_by_description = parsed.replacements.iter().any(|r| {
+            r.description.as_deref().is_some_and(|d| {
+                let d_norm = normalize_for_match(d);
+                // allow-noncombinator: swallow detector description-vs-clause containment check
+                d_norm.contains(clause_norm) || clause_norm.contains(&d_norm)
+            })
+        });
+        if matched_by_description {
+            return true;
+        }
+        // CR 614.1a: AddTargetReplacement riders (e.g. "if [target] would
+        // die, exile it instead") register their replacement at resolution
+        // time on the parent target and carry no top-level
+        // `ReplacementDefinition`/description to match against. Only accept
+        // this fallback when there is no matching description AND no
+        // top-level replacement at all could plausibly correspond to this
+        // sentence — i.e. when the card's *only* evidence of a replacement
+        // is the target-replacement rider itself.
+        parsed.replacements.is_empty() && any_ability_has_target_replacement(parsed)
+    }
+
+    let mut out = String::with_capacity(stripped.len());
+    for sentence in stripped.split('.') {
+        let s = sentence.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // allow-noncombinator: swallow detector phrase scan on cleaned sentence
+        let has_instead = s.contains(" instead");
+        let clause = &s[antecedent_clause_start(s)..];
+        let strip_this_sentence = has_instead
+            && matches_replacement_antecedent_shape(s)
+            && has_single_if_clause(s)
+            && is_backed_by_parsed_replacement(&normalize_for_match(clause), parsed);
+        if strip_this_sentence {
+            continue;
+        }
+        out.push_str(sentence);
+        out.push('.');
+    }
+    out
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -2108,6 +2264,13 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 614.1a: strip sentences that are structurally a *represented*
+    // replacement antecedent ("if [subject] would [event], ... instead").
+    // See `strip_represented_replacement_instead_sentences` doc comment for
+    // the full per-sentence exemption criteria — this is intentionally NOT
+    // a card-wide gate (a card having *some* replacement no longer exempts
+    // *every* " instead" sentence on it).
+    let stripped = strip_represented_replacement_instead_sentences(&stripped, parsed);
     let stripped =
         strip_represented_tiered_enters_with_additional_counter_if_pairs(&stripped, parsed);
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
@@ -6316,6 +6479,151 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             has_owned_triggering(target),
             "Tinybones must restrict the cast to the damaged player's graveyard \
              via Owned{{TriggeringPlayer}}; got {target:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detect_condition_if_replacement_exemption_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::replacements::ReplacementEvent;
+
+    /// Plague Drone-class text: a single represented gain-life replacement,
+    /// preceded by a keyword line and an ability-word line. The structural
+    /// per-sentence exemption must still recognize and strip this sentence's
+    /// leading "if" even though it isn't at byte offset 0 of the sentence
+    /// (it follows "Flying\nRot Fly — ").
+    const PLAGUE_DRONE_TEXT: &str =
+        "Flying\nRot Fly — If an opponent would gain life, that player loses that much life instead.";
+
+    fn has_condition_if_swallow(diagnostics: &[OracleDiagnostic]) -> bool {
+        diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+    }
+
+    /// Positive, end-to-end through the real parser: Plague Drone's
+    /// represented gain-life replacement must NOT trip Condition_If. This is
+    /// the exact regression the reviewer's original card-wide gate was
+    /// (over-broadly) fixing, exercised here through `parse_oracle_text` +
+    /// `check_swallowed_clauses` exactly as production code calls them.
+    #[test]
+    fn plague_drone_replacement_antecedent_is_not_swallowed_condition() {
+        let parsed = parse_oracle_text(
+            PLAGUE_DRONE_TEXT,
+            "Plague Drone",
+            &[],
+            &["Creature".to_string()],
+            &["Phyrexian".to_string(), "Insect".to_string()],
+        );
+        let mut diagnostics = Vec::new();
+        check_swallowed_clauses(PLAGUE_DRONE_TEXT, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "Plague Drone's represented replacement antecedent must not be flagged \
+             as a swallowed Condition_If; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Builds a minimal, otherwise-empty `ParsedAbilities` carrying exactly
+    /// one `ReplacementDefinition` whose `description` is `description`.
+    /// Field list is taken verbatim from the `ParsedAbilities` struct
+    /// definition in `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_one_replacement_description(description: &str) -> ParsedAbilities {
+        let mut def = ReplacementDefinition::new(ReplacementEvent::GainLife);
+        def.description = Some(description.to_string());
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: vec![def],
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// Negative (compound-replacement honesty): one sentence's antecedent IS
+    /// backed by a `ReplacementDefinition.description` in `parsed.replacements`;
+    /// a second " instead" sentence, structurally shaped the same way, has NO
+    /// matching description anywhere in `parsed.replacements` (simulating a
+    /// card whose second replacement clause the parser failed to represent).
+    /// The card-wide gate this PR originally shipped would have exempted
+    /// BOTH sentences once `parsed.replacements` was non-empty; the
+    /// structural per-sentence exemption must still flag the unrepresented
+    /// second one.
+    #[test]
+    fn compound_replacement_with_unrepresented_second_instead_sentence_is_flagged() {
+        let represented_sentence =
+            "If an opponent would gain life, that player loses that much life instead.";
+        let unrepresented_sentence = "If a player would sacrifice a permanent, exile it instead.";
+        // A neutral leading sentence keeps the unrepresented "if" clause off
+        // byte offset 0 of the cleaned text: the detector's bare-" if " scan
+        // (like every marker scan in this file) requires a preceding space,
+        // which sentence-initial text at offset 0 never has.
+        let text = format!("You gain 1 life. {represented_sentence} {unrepresented_sentence}");
+        let parsed = parsed_with_one_replacement_description(represented_sentence);
+
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, "{}", &parsed, &mut diagnostics);
+
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "the unrepresented second replacement sentence's 'if' must still be \
+             flagged as a swallowed Condition_If; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Negative (extra real conditional riding on a represented sentence):
+    /// even when the leading antecedent IS represented (its description
+    /// matches), a second bare "if" later in the SAME sentence is a real,
+    /// additional conditional gate that must not be silently swallowed by
+    /// the replacement exemption.
+    #[test]
+    fn represented_replacement_with_trailing_extra_conditional_is_flagged() {
+        let sentence = "If an opponent would gain life, that player loses that much life \
+             instead if that player controls no lands.";
+        let parsed = parsed_with_one_replacement_description(
+            "If an opponent would gain life, that player loses that much life instead.",
+        );
+
+        let cleaned = sentence.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, sentence, "{}", &parsed, &mut diagnostics);
+
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a second, independent 'if' clause riding on an otherwise-represented \
+             replacement sentence must still be flagged; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Sanity check on the helper in isolation: a represented sentence
+    /// (matching description present) has its leading "if" fully stripped,
+    /// while an unrepresented one survives untouched.
+    #[test]
+    fn strip_helper_only_removes_sentences_backed_by_a_parsed_replacement() {
+        let represented =
+            "if an opponent would gain life, that player loses that much life instead";
+        let unrepresented = "if a player would sacrifice a permanent, exile it instead";
+        let combined = format!("{represented}. {unrepresented}.");
+        let parsed = parsed_with_one_replacement_description(&format!("{represented}."));
+
+        let result = strip_represented_replacement_instead_sentences(&combined, &parsed);
+
+        assert_eq!(
+            result, " if a player would sacrifice a permanent, exile it instead.",
+            "only the represented sentence should have been stripped"
         );
     }
 }

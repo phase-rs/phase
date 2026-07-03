@@ -838,6 +838,56 @@ fn as_foretold_free_cast_line_is_unsupported() {
     );
 }
 
+/// CR 509.1c (issue #4949): Ochran Assassin's printed "All creatures able to
+/// block ~ do so" is a PERMANENT forced-block ("lure") static, not a one-shot
+/// effect. It must land as a `StaticMode::MustBeBlockedByAll` in `r.statics`
+/// (affected = the source itself), with NO leftover one-shot `GenericEffect`
+/// ability — that form has no trigger/cost and never resolves, so the lure never
+/// applies. Revert-discriminating: before the fix the line misclassifies to the
+/// effect parser and `r.statics` carries no MustBeBlockedByAll. Same printed line
+/// fixes Breaker of Armies / Prized Unicorn / Lure as a class.
+#[test]
+fn ochran_assassin_forced_block_is_permanent_static() {
+    use crate::types::ability::TargetFilter;
+    let r = parse(
+        "Deathtouch\nAll creatures able to block Ochran Assassin do so.",
+        "Ochran Assassin",
+        &[Keyword::Deathtouch],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::SelfRef),
+        "the lure must affect the source creature itself"
+    );
+
+    // No leftover one-shot GenericEffect ability carrying MustBeBlockedByAll — that
+    // form never resolves (the pre-fix bug).
+    assert!(
+        !r.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities
+                    .iter()
+                    .any(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        )),
+        "no one-shot GenericEffect MustBeBlockedByAll ability should remain, got {:?}",
+        r.abilities
+    );
+}
+
 /// Cavernous Maw (std BATCH 12): the `{2}` activated ability animates the
 /// land into a 3/3 Elemental creature, and the confirmatory "It's still a
 /// Cave land" sentence (CR 205.1b, CR 305.7) must NOT remain
@@ -7941,6 +7991,132 @@ fn conditional_modal_max_reuses_static_condition_parser() {
 }
 
 #[test]
+fn cairn_wanderer_distributes_graveyard_keyword_gate_per_keyword() {
+    use crate::types::ability::{
+        ContinuousModification, Effect, FilterProp, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::zones::Zone;
+
+    // CR 611.3a + CR 702: Cairn Wanderer grants each listed keyword ONLY while a
+    // creature card WITH that keyword is in a graveyard — an independent per-keyword
+    // conditional continuous static. The "The same is true for <list>" tail must
+    // distribute the modeled flying grant across every listed keyword, each with its
+    // OWN keyword swapped into both the grant and the graveyard-presence gate.
+    let r = parse(
+        "Changeling (This card is every creature type.)\nAs long as a creature card with flying is in a graveyard, this creature has flying. The same is true for fear, first strike, double strike, deathtouch, haste, landwalk, lifelink, protection, reach, trample, shroud, and vigilance.",
+        "Cairn Wanderer",
+        &[Keyword::Changeling],
+        &["Creature"],
+        &["Shapeshifter"],
+    );
+
+    // 11 gated grants: the modeled "flying" plus the 10 continuation keywords that
+    // resolve to a real Keyword. The unqualified `landwalk` / `protection` entries
+    // resolve to Keyword::Unknown (no quality/subtype to type) and are NOT cloned into
+    // inert statics — they surface as an explicit Unimplemented residual instead
+    // (coverage-honesty; asserted below), so the card is not falsely marked supported.
+    assert_eq!(
+        r.statics.len(),
+        11,
+        "expected one gated static per parameter-free keyword, got {:#?}",
+        r.statics
+    );
+
+    let grant_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        def.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+    };
+    let gate_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        match def.condition.as_ref()? {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(typed)),
+            } => typed.properties.iter().find_map(|p| match p {
+                FilterProp::WithKeyword { value } => Some(value.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    };
+
+    // Spot-check the two the spec calls out: flying gates on flying, trample on
+    // trample — proving the gate keyword is swapped PER static, not left on flying.
+    for kw in [Keyword::Flying, Keyword::Trample] {
+        let def = r
+            .statics
+            .iter()
+            .find(|d| grant_keyword(d) == Some(kw.clone()))
+            .unwrap_or_else(|| panic!("no static granting {kw:?}"));
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        } = def.condition.as_ref().expect("gated")
+        else {
+            panic!(
+                "expected typed IsPresent gate for {kw:?}, got {:?}",
+                def.condition
+            );
+        };
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|t| t == &TypeFilter::Creature),
+            "{kw:?} gate must carry the Creature card-type filter"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "{kw:?} gate must carry InZone(Graveyard)"
+        );
+        assert_eq!(
+            gate_keyword(def),
+            Some(kw.clone()),
+            "{kw:?} grant must gate on a graveyard card with {kw:?} (per-keyword gate)"
+        );
+    }
+
+    // Every gated static grants exactly the keyword it gates on.
+    for def in &r.statics {
+        assert_eq!(
+            grant_keyword(def),
+            gate_keyword(def),
+            "each static's granted keyword must equal its gate keyword: {def:#?}"
+        );
+    }
+
+    // Coverage-honesty: NO static may grant Keyword::Unknown — an inert
+    // AddKeyword(Unknown) would still read as Continuous-mode "supported" in
+    // game/coverage.rs, letting the card be marked supported while a clause does
+    // nothing. The unqualified `landwalk` / `protection` continuation clauses must
+    // instead surface as an explicit Unimplemented residual (a loud unsupported gap).
+    for def in &r.statics {
+        assert!(
+            !matches!(grant_keyword(def), Some(Keyword::Unknown(_))),
+            "no gated static may grant Keyword::Unknown, got {def:#?}"
+        );
+    }
+    let residual = r
+        .abilities
+        .iter()
+        .find_map(|a| match &*a.effect {
+            Effect::Unimplemented {
+                description: Some(d),
+                ..
+            } => Some(d.to_lowercase()),
+            _ => None,
+        })
+        .expect("unqualified landwalk/protection must surface as an Unimplemented residual");
+    assert!(
+        residual.contains("landwalk") && residual.contains("protection"),
+        "the Unimplemented residual must name the unqualified keywords, got {residual:?}"
+    );
+}
+
+#[test]
 fn conditional_modal_max_supports_compound_presence_conditions() {
     let r = parse(
             "Choose one. If you control an artifact and an enchantment as you cast this spell, you may choose both instead.\n• Exile target creature or planeswalker.\n• Return target creature or planeswalker card from your graveyard to your hand.",
@@ -13593,6 +13769,8 @@ fn spell_cost_reduction_for_creatures_that_attacked_preserves_damage_effect() {
 
 #[test]
 fn negative_self_casting_restriction_stays_metadata() {
+    use crate::types::statics::StaticMode;
+
     let r = parse(
             "You can't cast Rock Jockey if you've played a land this turn.\nYou can't play lands if Rock Jockey was cast this turn.",
             "Rock Jockey",
@@ -13608,6 +13786,19 @@ fn negative_self_casting_restriction_stays_metadata() {
                 condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
             }),
         }]
+    );
+    assert!(
+        r.statics.iter().any(|d| {
+            matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && matches!(
+                    d.condition,
+                    Some(StaticCondition::And { ref conditions })
+                        if conditions.contains(&StaticCondition::WasCast { zone: None })
+                            && conditions.contains(&StaticCondition::SourceEnteredThisTurn)
+                )
+        }),
+        "Rock Jockey's gated CantPlayLand static must survive full-card dispatch, got statics={:?}",
+        r.statics
     );
     assert!(
         r.abilities
@@ -17487,5 +17678,208 @@ fn phase_out_preserves_intervening_tap_before_host_bound_rider() {
                 .to_ascii_lowercase()
                 .contains("as it phases in this way")),
         "intervening tap must not be classified as the host-bound rider"
+    );
+}
+
+/// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden's dies trigger — "Whenever
+/// a creature dies, if it had power greater than Drizzt's power, put a number of
+/// +1/+1 counters on Drizzt equal to the difference." The bare anaphoric "the
+/// difference" has no operands in its own clause; they live on the
+/// intervening-if comparison. The trigger must (1) carry the comparison as its
+/// gate and (2) resolve the count to `QuantityExpr::Difference` of the two power
+/// operands — NOT leave the effect `Unimplemented`.
+#[test]
+fn drizzt_dies_trigger_puts_difference_counters_gated_by_power_comparison() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+    use crate::types::counter::CounterType;
+
+    let r = parse(
+        "Double strike\n\
+         When Drizzt enters, create Guenhwyvar, a legendary 4/1 green Cat creature token with trample.\n\
+         Whenever a creature dies, if it had power greater than Drizzt's power, put a number of +1/+1 counters on Drizzt equal to the difference.",
+        "Drizzt Do'Urden",
+        &[],
+        &["Creature"],
+        &["Elf", "Ranger"],
+    );
+
+    // Locate the dies trigger (the one whose body puts counters).
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+        })
+        .unwrap_or_else(|| panic!("no dies PutCounter trigger parsed: {r:#?}"));
+
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "dies trigger body must not be Unimplemented: {execute:#?}"
+    );
+
+    // (1) Effect: PutCounter of +1/+1 counters on ~ with a Difference count over
+    // the dying creature's (EventSource, LKI) power and the source's power.
+    match &*execute.effect {
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Difference { left, right },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*target, TargetFilter::SelfRef, "counters go on ~ (Drizzt)");
+            assert_eq!(
+                **left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+                "left operand is the dying creature's (LKI) power"
+            );
+            assert_eq!(
+                **right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+                "right operand is the source's power"
+            );
+        }
+        other => panic!("expected PutCounter with Difference count, got {other:#?}"),
+    }
+
+    // (2) Intervening-if gate: the trigger only fires when the dying creature's
+    // power exceeded the source's power.
+    fn find_power_gt(cond: &TriggerCondition) -> Option<(&QuantityExpr, &QuantityExpr)> {
+        match cond {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            } => Some((lhs, rhs)),
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().find_map(find_power_gt)
+            }
+            _ => None,
+        }
+    }
+    let condition = dies
+        .condition
+        .as_ref()
+        .unwrap_or_else(|| panic!("dies trigger must carry the power-comparison gate: {dies:#?}"));
+    let (lhs, rhs) = find_power_gt(condition)
+        .unwrap_or_else(|| panic!("gate must be a GT power comparison: {condition:#?}"));
+    assert_eq!(
+        *lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        }
+    );
+    assert_eq!(
+        *rhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }
+    );
+}
+
+/// CR 122.1 coverage-honesty: a "put ... counters equal to the difference" whose
+/// enclosing trigger has NO "if it had <stat> greater than ~'s <stat>"
+/// comparison has nothing to bind the anaphor to. It must surface as a loud
+/// `Unimplemented` residual (mirroring the draw/lose difference siblings), NOT a
+/// silently-zero `PutCounter` that would read as coverage-supported. Fails on
+/// revert of the unbound-placeholder guard in `lower_trigger_ir`.
+#[test]
+fn difference_counter_anaphor_without_comparison_stays_unimplemented() {
+    let r = parse(
+        "Whenever a creature dies, put a number of +1/+1 counters on ~ equal to the difference.",
+        "Test Card",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no dies trigger parsed: {r:#?}"));
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !matches!(&*execute.effect, Effect::PutCounter { .. }),
+        "an unbindable 'the difference' must not survive as a silently-zero PutCounter: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "an unbindable difference anaphor must be a loud Unimplemented residual: {execute:#?}"
+    );
+}
+
+/// CR 122.1 + CR 603.4: Conformer Shuriken class — the "equal to the difference"
+/// put-counter sits under a CLAUSE-LEVEL conditional continuation (a
+/// `sub_ability`), not the trigger's hoisted intervening-if, so there is no
+/// `QuantityComparison` on `def.condition` to bind against. The deferred
+/// placeholder is nested one level below the top-level effect, where the
+/// top-level-only `count_expr_mut` guard cannot see it. The recursive resolver
+/// must still downgrade it to an honest Unimplemented so the card does NOT
+/// appear falsely supported (no surviving `PutCounter { Variable{"difference"} }`
+/// anywhere in the tree).
+#[test]
+fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
+    use crate::types::ability::QuantityRef;
+
+    fn surviving_difference_placeholder(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let here = matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } | Effect::PutCounterAll {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } if name == "difference"
+        );
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(surviving_difference_placeholder)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(surviving_difference_placeholder)
+    }
+
+    let r = parse(
+        "Whenever this creature attacks, tap target creature defending player controls. \
+         If that creature has power greater than this creature's power, put a number of \
+         +1/+1 counters on this creature equal to the difference.",
+        "Conformer Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let trig = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no attacks trigger parsed: {r:#?}"));
+    let execute = trig.execute.as_ref().expect("trigger has a body");
+
+    assert!(
+        !surviving_difference_placeholder(execute),
+        "nested unbindable 'the difference' must not survive as a PutCounter placeholder: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
     );
 }

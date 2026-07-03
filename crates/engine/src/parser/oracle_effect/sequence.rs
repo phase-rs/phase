@@ -6345,7 +6345,7 @@ pub(super) fn parse_keyword_grant_list(input: &str) -> Option<(Vec<Keyword>, &st
 /// `GenericEffect` clause and clones its grant template once per keyword.
 /// Generalized over the whole evergreen-keyword vocabulary — covers every card
 /// of this "the same is true for …" class, not Odric alone.
-pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyword>> {
+pub(crate) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyword>> {
     let lower = text.to_lowercase();
     let (keywords, rest) = nom_on_lower(text, &lower, |i| {
         let (i, _) = tag("the same is true for ").parse(i)?;

@@ -517,6 +517,54 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
     parse_extra_blockers_static(lower).is_some()
 }
 
+/// CR 509.1c + CR 611.3a: A printed permanent forced-block ("lure") static —
+/// "All creatures able to block `<subject>` do so" — where `<subject>` is a
+/// rule-static subject (a self-reference `~`, or "enchanted creature" for the
+/// Aura form). This is the PERMANENT static class (Ochran Assassin, Breaker of
+/// Armies, Prized Unicorn, Lure), distinct from the one-shot spell/activated
+/// form "… target creature this turn do so" (Alluring Scent), which
+/// `try_parse_mass_forced_block` lowers to a duration-bounded `GenericEffect`.
+/// Misclassifying the printed static as that one-shot effect leaves it as a
+/// never-resolving ability, so the lure never applies (issue #4949). Emitting a
+/// permanent `StaticMode::MustBeBlockedByAll` static routes it through the combat
+/// enforcement that already exists (`game/combat.rs`, CR 509.1c). The subject is
+/// resolved by `parse_rule_static_subject_filter`, which returns `None` for a
+/// `target …` subject so a genuine spell/effect form still falls through to the
+/// effect parser.
+pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    // Grammar: "all creatures able to block <subject> do so[.]". The subject is
+    // taken up to the " do so" imperative, then classified by
+    // `parse_rule_static_subject_filter`. A one-shot spell form ("… target
+    // creature this turn do so", Alluring Scent) has a `target …` subject, which
+    // is not a rule-static subject, so this returns `None` and the line falls
+    // through to `try_parse_mass_forced_block` — no separate duration/target check
+    // is needed.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("all creatures able to block ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (_, subject_lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" do so"),
+        (tag(" do so"), opt(tag(".")), space0),
+    ))
+    .parse(rest)
+    .ok()?;
+    // The lowercasing is ASCII-length-preserving, so the subject occupies the same
+    // byte span in the original-cased `text`.
+    let start = lower.len() - rest.len();
+    let subject = text.get(start..start + subject_lower.len())?.trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    Some(
+        StaticDefinition::new(StaticMode::MustBeBlockedByAll)
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
+pub(crate) fn is_forced_block_static_candidate(lower: &str) -> bool {
+    parse_forced_block_static(lower).is_some()
+}
+
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
 /// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
 /// independent `StaticDefinition`s sharing the same `affected` + `condition`.
