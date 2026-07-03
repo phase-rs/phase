@@ -734,12 +734,12 @@ fn compound_target_player_continuations_share_one_target() {
 
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-    Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange, TargetFilter,
-    TriggerCondition, TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
+    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -17502,12 +17502,6 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
 }
 #[test]
 fn oubliette_host_bound_parse_structure() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{
-        DelayedTriggerCondition, Duration, Effect, EffectScope, TapStateChange, TargetFilter,
-    };
-    use crate::types::statics::StaticMode;
-
     let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
     let parsed = parse_oracle_text(text, "Oubliette", &[], &["Enchantment".to_string()], &[]);
 
@@ -17590,10 +17584,6 @@ fn oubliette_host_bound_parse_structure() {
 
 #[test]
 fn phase_out_with_unrelated_tap_does_not_upgrade_to_host_bound_lock() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::Effect;
-    use crate::types::statics::StaticMode;
-
     let text = "When this enchantment enters, target creature phases out. Tap that creature.";
     let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
     let execute = parsed.triggers[0]
@@ -17621,10 +17611,6 @@ fn phase_out_with_unrelated_tap_does_not_upgrade_to_host_bound_lock() {
 
 #[test]
 fn phase_out_preserves_intervening_tap_before_host_bound_rider() {
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{Effect, EffectScope, TapStateChange, TargetFilter};
-    use crate::types::statics::StaticMode;
-
     let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature. Tap that creature as it phases in this way.";
     let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
     let execute = parsed.triggers[0]
