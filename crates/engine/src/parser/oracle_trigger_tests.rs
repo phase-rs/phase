@@ -1532,6 +1532,21 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
         execute.optional,
         "they may tap must be optional, got execute={execute:?}"
     );
+    // CR 608.2k: "tap that permanent" must keep the tap verb (peel only the
+    // "they may " optional marker) and bind "that permanent" to the entering
+    // object via `TriggeringSource` — not strand a bare noun phrase.
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::TriggeringSource,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ),
+        "expected optional tap on the triggering source, got {:?}",
+        execute.effect
+    );
 }
 
 // Guard: a bare "enters" (no tapped-state rider) must NOT attach a

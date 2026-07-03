@@ -69,7 +69,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, value};
+use nom::combinator::{opt, peek, value};
+use nom::sequence::terminated;
 use nom::Parser;
 
 use super::oracle_effect::conditions::{
@@ -286,14 +287,24 @@ pub(crate) fn peel_optional_slots(
     if let Some((scope, player_scope, rest)) = try_peel_opponent_may_prefix(text) {
         return (true, scope, player_scope, rest);
     }
-    // CR 608.2d: "they may tap …" on zone-change observer triggers
-    // (Charismatic Conqueror: the entering permanent's controller may tap it).
-    // The optional prompt player is resolved at runtime via
-    // `optional_prompt_player` for `SetTapState { TriggeringSource }` effects.
+    // CR 608.2d: "they may tap …" third-person optional tap on a triggered
+    // ability whose actor is the trigger's subject player, not the ability's
+    // controller (Charismatic Conqueror: the entering permanent's controller may
+    // tap it; Bow to My Command: your opponents may tap their own creatures).
+    // Peel ONLY the "they may " optional marker and leave the "tap …" verb for
+    // the effect parser — consuming the verb would strand a bare noun phrase.
+    // Scoped to a following "tap" so unrelated "they may play/cast/…" grants
+    // (Gonti and siblings) keep their specialized routes. The prompt player is
+    // resolved at runtime by `optional_prompt_player` for
+    // `SetTapState { TriggeringSource }` effects.
     let lower = text.to_lowercase();
-    if let Some((_, rest)) =
-        nom_on_lower(text, &lower, |i| value((), tag("they may tap ")).parse(i))
-    {
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            terminated(tag::<_, _, OracleError<'_>>("they may "), peek(tag("tap"))),
+        )
+        .parse(i)
+    }) {
         return (true, None, None, rest.to_string());
     }
     if let Some(rest) = peel_you_may_prefix(text, YouMayBlocklist::ChunkLoop) {

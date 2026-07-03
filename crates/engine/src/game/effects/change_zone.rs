@@ -5602,6 +5602,155 @@ mod tests {
         );
     }
 
+    /// Issue #4963 (runtime): set up Charismatic Conqueror under `PlayerId(0)`
+    /// with its trigger parsed from Oracle text, make an opponent's creature
+    /// enter untapped, then resolve the stacked trigger to its optional prompt.
+    /// Returns the state paused at the `OptionalEffectChoice`, plus the
+    /// conqueror and the entering permanent ids.
+    fn fire_charismatic_conqueror_optional_tap() -> (GameState, ObjectId, ObjectId) {
+        use crate::game::triggers::process_triggers;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        let mut state = GameState::new_two_player(4963);
+
+        let conqueror = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Charismatic Conqueror".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever an artifact or creature an opponent controls enters untapped, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.",
+            "Charismatic Conqueror",
+        );
+        {
+            let obj = state.objects.get_mut(&conqueror).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(opp_creature)],
+            ObjectId(999),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        process_triggers(&mut state, &events);
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        (state, conqueror, opp_creature)
+    }
+
+    /// CR 608.2d (issue #4963): the "they may tap that permanent" optional
+    /// decision is offered to the ENTERING permanent's controller (the
+    /// opponent), not to Charismatic Conqueror's controller.
+    #[test]
+    fn charismatic_conqueror_optional_tap_prompts_entering_controller() {
+        let (state, _conqueror, _opp) = fire_charismatic_conqueror_optional_tap();
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the entering permanent's controller (opponent) must decide the optional tap"
+                );
+            }
+            other => panic!("expected an OptionalEffectChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// Accepting taps the entering permanent (and, per the `Not(OptionalEffect
+    /// Performed)` gate, no Vampire token is created).
+    #[test]
+    fn charismatic_conqueror_optional_tap_accept_taps_entering_permanent() {
+        let (mut state, _conqueror, opp) = fire_charismatic_conqueror_optional_tap();
+        let mut events = Vec::new();
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            state.objects[&opp].tapped,
+            "accepting the optional tap must tap the entering permanent"
+        );
+        assert!(
+            !state
+                .battlefield
+                .iter()
+                .any(|id| state.objects.get(id).is_some_and(|o| o.name == "Vampire")),
+            "accepting must NOT create the 'if they don't' Vampire token"
+        );
+    }
+
+    /// Declining leaves the permanent untapped and creates the 1/1 white Vampire
+    /// token with lifelink under Charismatic Conqueror's controller.
+    #[test]
+    fn charismatic_conqueror_optional_tap_decline_creates_vampire_token() {
+        let (mut state, _conqueror, opp) = fire_charismatic_conqueror_optional_tap();
+        let mut events = Vec::new();
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.objects[&opp].tapped,
+            "declining the optional tap must leave the entering permanent untapped"
+        );
+        let vampire = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|o| o.name == "Vampire")
+            .expect("declining must create the Vampire token");
+        assert_eq!(
+            vampire.controller,
+            PlayerId(0),
+            "the token is created under Charismatic Conqueror's controller ('you')"
+        );
+        assert!(
+            vampire.has_keyword(&Keyword::Lifelink),
+            "the created Vampire token must have lifelink"
+        );
+    }
+
     /// CR 400.6 + CR 608.2c: `ChangeZoneAll` must set `last_effect_count` to
     /// the number of objects moved so downstream sub-abilities referring to
     /// "that many" (via `QuantityRef::EventContextAmount`) resolve correctly.

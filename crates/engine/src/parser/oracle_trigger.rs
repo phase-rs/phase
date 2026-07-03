@@ -1590,6 +1590,12 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
         // "create a token that's a copy of that creature" (Necroduality) — the
         // copy source is the entering object, not the trigger's own source.
         Effect::CopyTokenOf { target, .. } => target,
+        // CR 608.2k: "they may tap that permanent" on a single-object zone-change
+        // trigger (Charismatic Conqueror) — "that permanent" is the entering
+        // object. Binding to `TriggeringSource` makes both the tap target and the
+        // runtime optional-prompt player (its controller) resolve off the event
+        // object instead of the ability's own source/controller.
+        Effect::SetTapState { target, .. } => target,
         _ => return,
     };
     if matches!(target, TargetFilter::ParentTarget) {
