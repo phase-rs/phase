@@ -636,8 +636,11 @@ pub(crate) fn attachment_illegality(
 /// same quality affect the attached permanent normally).
 ///
 /// Fail-closed: a protection quality present on the host that cannot be traced
-/// back to an exempting granting effect (e.g. a transient "gains protection
-/// until end of turn") counts as a non-exempt instance.
+/// back to an exempting granting effect (e.g. protection granted by a copy
+/// effect) counts as a non-exempt instance. Both static AND transient continuous
+/// grants are enumerated, because identical `Protection(Color(_))` values from
+/// different effects are deduplicated into a single baked keyword — so a
+/// same-quality transient grant would otherwise be masked by an exempting static.
 fn attachment_exempt_from_protection(
     state: &GameState,
     host_id: ObjectId,
@@ -645,7 +648,6 @@ fn attachment_exempt_from_protection(
     attacher_is_aura: bool,
     attacher_is_equipment: bool,
 ) -> bool {
-    use crate::types::ability::ContinuousModification;
     use crate::types::keywords::{Keyword, ProtectionTarget};
 
     let (Some(host), Some(attachment)) = (
@@ -664,8 +666,11 @@ fn attachment_exempt_from_protection(
         return false;
     }
 
-    let matches_attachment = |pt: &ProtectionTarget| {
-        crate::game::keywords::source_matches_protection_target(pt, host, attachment)
+    let scan = ProtectionExemptionScan {
+        host,
+        attachment,
+        attacher_is_aura,
+        attacher_is_equipment,
     };
 
     // Protection targets granted by an effect that exempts THIS attachment.
@@ -677,29 +682,120 @@ fn attachment_exempt_from_protection(
     // exemption, so a matching printed keyword always detaches.
     for kw in &host.base_keywords {
         if let Keyword::Protection(pt) = kw {
-            if matches_attachment(pt) {
+            if scan.matches(pt) {
                 has_unexempted = true;
             }
         }
     }
 
-    // Granted protection scanned WITH provenance: the granting `StaticDefinition`
-    // exposes both its `AddKeyword(Protection)` and any sibling exemption
-    // `AddStaticMode`, so the exemption binds to that one specific effect.
+    // Static continuous effects, scanned WITH provenance: the granting
+    // `StaticDefinition` exposes both its `AddKeyword(Protection)` and any sibling
+    // exemption `AddStaticMode`, so the exemption binds to that one effect.
     for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
         let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
         let ctx = FilterContext::from_source(state, source_obj.id);
         if !matches_target_filter(state, host_id, &affected, &ctx) {
             continue;
         }
-        let def_exempts = definition_exempts_attachment(
-            def,
+        scan.classify_effect(
             source_obj,
-            attachment,
-            attacher_is_aura,
-            attacher_is_equipment,
+            &def.modifications,
+            &mut exempted,
+            &mut has_unexempted,
         );
-        for modification in &def.modifications {
+    }
+
+    // CR 702.16n/p: transient continuous grants ("gains protection from white
+    // until end of turn") also grant protection but collapse into the deduped
+    // baked keyword set, so enumerate them separately to keep their provenance —
+    // a same-quality transient grant carries no exemption and still detaches.
+    crate::game::layers::for_each_transient_protection_grant(
+        state,
+        host_id,
+        |source_obj, modifications| {
+            scan.classify_effect(
+                source_obj,
+                modifications,
+                &mut exempted,
+                &mut has_unexempted,
+            );
+        },
+    );
+
+    if has_unexempted {
+        return false;
+    }
+
+    // Fail-closed: every protection quality currently on the host that matches
+    // the attachment must be covered by an exempting granting effect. A baked
+    // quality with no traceable exempting source (e.g. a copy effect) is
+    // non-exempt.
+    let matching_on_host = crate::game::keywords::protection_targets_matching(host, attachment);
+    let all_matching_covered = matching_on_host
+        .iter()
+        .all(|pt| exempted.iter().any(|e| e == pt));
+
+    all_matching_covered && !exempted.is_empty()
+}
+
+/// Immutable context for one CR 702.16n/p attachment-exemption scan: the host,
+/// the candidate attachment, and its attach kind.
+struct ProtectionExemptionScan<'a> {
+    host: &'a crate::game::game_object::GameObject,
+    attachment: &'a crate::game::game_object::GameObject,
+    attacher_is_aura: bool,
+    attacher_is_equipment: bool,
+}
+
+impl ProtectionExemptionScan<'_> {
+    /// True if `pt` (a protection quality on the host) would remove the attachment.
+    fn matches(&self, pt: &crate::types::keywords::ProtectionTarget) -> bool {
+        crate::game::keywords::source_matches_protection_target(pt, self.host, self.attachment)
+    }
+
+    /// CR 702.16n / CR 702.16p: True if the continuous effect described by
+    /// `modifications` (granted from `source_obj`) carries the attachment
+    /// exemption that names this attachment.
+    fn effect_exempts(
+        &self,
+        modifications: &[crate::types::ability::ContinuousModification],
+        source_obj: &crate::game::game_object::GameObject,
+    ) -> bool {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::statics::StaticMode;
+        modifications.iter().any(|modification| match modification {
+            ContinuousModification::AddStaticMode { mode } => match mode {
+                // CR 702.16n: "This effect doesn't remove this Aura" — only the Aura
+                // that IS the protection source is exempt from its own protection.
+                StaticMode::ProtectionDoesntRemoveThisAura => {
+                    self.attacher_is_aura && self.attachment.id == source_obj.id
+                }
+                // CR 702.16p: "...doesn't remove Auras and Equipment you control" —
+                // attachments controlled by the controller of the granting effect.
+                StaticMode::ProtectionDoesntRemoveControlledAttachments => {
+                    (self.attacher_is_aura || self.attacher_is_equipment)
+                        && self.attachment.controller == source_obj.controller
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
+    /// Classify every `Protection` grant carried by one continuous effect. A grant
+    /// matching the attachment is recorded in `exempted` when the SAME effect
+    /// exempts this attachment, otherwise it flips `has_unexempted`.
+    fn classify_effect(
+        &self,
+        source_obj: &crate::game::game_object::GameObject,
+        modifications: &[crate::types::ability::ContinuousModification],
+        exempted: &mut Vec<crate::types::keywords::ProtectionTarget>,
+        has_unexempted: &mut bool,
+    ) {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::Keyword;
+        let effect_exempts = self.effect_exempts(modifications, source_obj);
+        for modification in modifications {
             let ContinuousModification::AddKeyword {
                 keyword: Keyword::Protection(pt),
             } = modification
@@ -709,62 +805,16 @@ fn attachment_exempt_from_protection(
             let Some(resolved) = resolve_granted_protection_target(pt, source_obj) else {
                 continue;
             };
-            if !matches_attachment(&resolved) {
+            if !self.matches(&resolved) {
                 continue;
             }
-            if def_exempts {
+            if effect_exempts {
                 exempted.push(resolved);
             } else {
-                has_unexempted = true;
+                *has_unexempted = true;
             }
         }
     }
-
-    if has_unexempted {
-        return false;
-    }
-
-    // Fail-closed: every protection quality currently on the host that matches
-    // the attachment must be covered by an exempting granting effect. A baked
-    // quality with no such source (e.g. a transient grant) is non-exempt.
-    let matching_on_host = crate::game::keywords::protection_targets_matching(host, attachment);
-    let all_matching_covered = matching_on_host
-        .iter()
-        .all(|pt| exempted.iter().any(|e| e == pt));
-
-    all_matching_covered && !exempted.is_empty()
-}
-
-/// CR 702.16n / CR 702.16p: True if the continuous effect `def` (functioning from
-/// `source_obj`) carries the attachment-exemption static that names `attachment`.
-fn definition_exempts_attachment(
-    def: &crate::types::ability::StaticDefinition,
-    source_obj: &crate::game::game_object::GameObject,
-    attachment: &crate::game::game_object::GameObject,
-    attacher_is_aura: bool,
-    attacher_is_equipment: bool,
-) -> bool {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::statics::StaticMode;
-    def.modifications
-        .iter()
-        .any(|modification| match modification {
-            ContinuousModification::AddStaticMode { mode } => match mode {
-                // CR 702.16n: "This effect doesn't remove this Aura" — only the Aura
-                // that IS the protection source is exempt from its own protection.
-                StaticMode::ProtectionDoesntRemoveThisAura => {
-                    attacher_is_aura && attachment.id == source_obj.id
-                }
-                // CR 702.16p: "...doesn't remove Auras and Equipment you control" —
-                // attachments controlled by the controller of the granting effect.
-                StaticMode::ProtectionDoesntRemoveControlledAttachments => {
-                    (attacher_is_aura || attacher_is_equipment)
-                        && attachment.controller == source_obj.controller
-                }
-                _ => false,
-            },
-            _ => false,
-        })
 }
 
 /// Resolve a granted protection target against its SOURCE (e.g. `ChosenColor` →
@@ -959,8 +1009,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AttachmentKind, ContinuousModification, ControllerRef, FilterProp, StaticDefinition,
-        TargetFilter, TargetRef, TypedFilter,
+        AttachmentKind, ContinuousModification, ControllerRef, Duration, FilterProp,
+        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
@@ -1209,6 +1259,60 @@ mod tests {
             attachment_illegality(&state, blessing, creature),
             Some(AttachIllegality::Protection),
             "a same-quality protection instance from another source must still \
+             detach the otherwise-exempt Aura (CR 702.16n/p)"
+        );
+    }
+
+    /// CR 702.16n/p (issue #4964 review, [HIGH] round 2): a same-quality
+    /// protection grant from a TRANSIENT continuous effect ("gains protection
+    /// from white until end of turn") deduplicates into the host's single baked
+    /// `Protection(White)` keyword, so it must be enumerated from
+    /// `transient_continuous_effects` to preserve its provenance. Benevolent
+    /// Blessing's exemption neutralizes only its OWN static grant; the unexempted
+    /// transient grant still detaches the Aura.
+    #[test]
+    fn attachment_illegality_transient_protection_still_detaches_exempt_aura() {
+        let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bear");
+
+        // Benevolent Blessing: white Aura granting protection-from-white plus the
+        // controlled-attachment exemption on ONE static effect.
+        let blessing = spawn_with_subtype(&mut state, "Benevolent Blessing", "Aura");
+        {
+            let obj = state.objects.get_mut(&blessing).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(ManaColor::White);
+        }
+        attach_protection_grant(
+            &mut state,
+            blessing,
+            creature,
+            ManaColor::White,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }],
+        );
+
+        // A later "gains protection from white until end of turn" TRANSIENT grant
+        // on the same creature, from an unrelated source, carrying NO exemption.
+        // Its baked keyword collapses into the single deduped Protection(White)
+        // already on the host, so only its transient provenance distinguishes it.
+        let caster = spawn_creature(&mut state, "Gods Willing caster");
+        state.add_transient_continuous_effect(
+            caster,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: creature },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            }],
+            None,
+        );
+
+        assert_eq!(
+            attachment_illegality(&state, blessing, creature),
+            Some(AttachIllegality::Protection),
+            "an unexempted same-quality transient protection grant must still \
              detach the otherwise-exempt Aura (CR 702.16n/p)"
         );
     }

@@ -3609,6 +3609,72 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
     }
 }
 
+/// CR 702.16n/p provenance helper: visit every currently-active TRANSIENT
+/// continuous effect that grants a `Protection` keyword to `affected_id`. The
+/// visitor receives the granting source object plus that effect's FULL sibling
+/// modification list, so callers can reconstruct per-effect protection
+/// provenance that the deduplicated baked `keywords` set discards — identical
+/// `Protection(Color(_))` grants from different effects collapse to one keyword,
+/// so a same-quality transient grant would otherwise be masked by an exempting
+/// static grant.
+///
+/// Applies the same duration / source-condition / recipient-condition / affected
+/// gating as `gather_transient_continuous_effects`, so only grants that actually
+/// bake onto `affected_id` are surfaced.
+pub(crate) fn for_each_transient_protection_grant(
+    state: &GameState,
+    affected_id: ObjectId,
+    mut visit: impl FnMut(&crate::game::game_object::GameObject, &[ContinuousModification]),
+) {
+    for tce in &state.transient_continuous_effects {
+        if tce.duration == Duration::UntilHostLeavesPlay
+            && !state
+                .objects
+                .get(&tce.source_id)
+                .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+        {
+            continue;
+        }
+        if !transient_duration_holds(state, tce) {
+            continue;
+        }
+        if let Some(condition) = &tce.condition {
+            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+            if condition_uses_recipient_context(condition)
+                && !evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    tce.controller,
+                    tce.source_id,
+                    affected_id,
+                )
+            {
+                continue;
+            }
+        }
+        let ctx = FilterContext::from_source(state, tce.source_id);
+        if !matches_target_filter(state, affected_id, &tce.affected, &ctx) {
+            continue;
+        }
+        let grants_protection = tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Protection(_)
+                }
+            )
+        });
+        if !grants_protection {
+            continue;
+        }
+        if let Some(source_obj) = state.objects.get(&tce.source_id) {
+            visit(source_obj, &tce.modifications);
+        }
+    }
+}
+
 #[allow(clippy::ptr_arg)]
 fn push_effect(
     effects: &mut Vec<(Layer, Vec<ActiveContinuousEffect>)>,
