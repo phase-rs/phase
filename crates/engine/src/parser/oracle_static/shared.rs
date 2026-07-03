@@ -1948,14 +1948,21 @@ fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
     Some(tp.original.get(start..)?.trim_start())
 }
 
+/// CR 508.1c + CR 509.1b: Split the gated combat tail `<A> and can't block if <B>`
+/// after the leading `"can't attack if "` marker has been consumed.
+fn parse_dual_gated_combat_condition_tails(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
+    let (input, _) = tag(" and can't block if ").parse(input)?;
+    let (input, block_cond) = terminated(rest, opt(tag("."))).parse(input)?;
+    Ok((input, (attack_cond, block_cond)))
+}
+
 /// CR 508.1c + CR 509.1b: Split a compound "~ can't attack if <A> and can't block
 /// if <B>" static into two gated restrictions (The Fallen Apart).
 fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str, &str)> {
     let (input, subject) = take_until("can't attack if ").parse(input)?;
     let (input, _) = tag("can't attack if ").parse(input)?;
-    let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
-    let (input, _) = tag(" and can't block if ").parse(input)?;
-    let (input, block_cond) = terminated(rest, opt(tag("."))).parse(input)?;
+    let (input, (attack_cond, block_cond)) = parse_dual_gated_combat_condition_tails(input)?;
     Ok((input, (subject, attack_cond, block_cond)))
 }
 
@@ -2050,13 +2057,9 @@ fn try_split_grant_and_dual_gated_combat(
             Ok((i, ()))
         })?;
 
-    let (remainder, (gate_subject, attack_cond_lower, block_cond_lower)) =
-        parse_dual_gated_cant_attack_block(gates_lower).ok()?;
-    if !gate_subject.trim().is_empty()
-        || !remainder.trim().is_empty()
-        || attack_cond_lower.is_empty()
-        || block_cond_lower.is_empty()
-    {
+    let (remainder, (attack_cond_lower, block_cond_lower)) =
+        parse_dual_gated_combat_condition_tails(gates_lower).ok()?;
+    if !remainder.trim().is_empty() || attack_cond_lower.is_empty() || block_cond_lower.is_empty() {
         return None;
     }
 
@@ -2475,53 +2478,6 @@ fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondit
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount { filter },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
-        },
-    ))
-}
-
-/// CR 611.3a: "there's / there is another <type> on the battlefield" (Shauku).
-fn parse_another_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
-    another_on_battlefield_condition(lower)
-        .ok()
-        .and_then(|(rest, cond)| rest.trim().trim_end_matches('.').is_empty().then_some(cond))
-}
-
-fn another_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (input, _) = alt((tag("there's another "), tag("there is another "))).parse(input)?;
-    let (input, type_text) = take_until(" on the battlefield").parse(input)?;
-    let (input, _) = tag(" on the battlefield").parse(input)?;
-    let (filter, remainder) = parse_type_phrase(type_text.trim());
-    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return Err(nom::Err::Error(OracleError::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    let TargetFilter::Typed(mut tf) = filter else {
-        return Err(nom::Err::Error(OracleError::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    };
-    // "another <type>" excludes the ability source at runtime via
-    // FilterProp::Another — not ObjectCount(type) >= 2.
-    if !tf
-        .properties
-        .iter()
-        .any(|p| matches!(p, FilterProp::Another))
-    {
-        tf.properties.push(FilterProp::Another);
-    }
-    Ok((
-        input,
-        StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount {
-                    filter: TargetFilter::Typed(tf),
-                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
