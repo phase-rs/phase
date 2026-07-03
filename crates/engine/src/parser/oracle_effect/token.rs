@@ -1390,7 +1390,6 @@ mod tests {
         // way, you create a … token." The token count must restrict to CREATURE
         // cards moved this way (`FilteredTrackedSetSize`), not every card
         // (`TrackedSetSize`, which would create X tokens for X cards milled).
-        use crate::types::ability::TargetFilter;
         let txt = "Create a tapped 2/2 black Zombie creature token for each creature card put into a graveyard this way.";
         let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
             .expect("expected Token effect");
