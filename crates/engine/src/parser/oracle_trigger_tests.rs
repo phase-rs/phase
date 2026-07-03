@@ -21245,3 +21245,77 @@ fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
         ),
     }
 }
+
+#[test]
+fn set_tap_state_lift_skips_reflexive_and_targeted_taps() {
+    // Walk an ability chain and return the first `SetTapState` effect (so tests
+    // can inspect both its tap/untap `state` and its `target`).
+    fn find_set_tap(a: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(a.effect.as_ref(), Effect::SetTapState { .. }) {
+            return Some(a.effect.as_ref());
+        }
+        a.sub_ability.as_deref().and_then(find_set_tap)
+    }
+
+    // CR 608.2c: Snaremaster Sprite lowers "you may pay {2}. When you do, tap
+    // target creature an opponent controls" as a reflexive tap under a `PayCost`
+    // sub-ability. Its `ParentTarget` is the player-chosen creature, so the
+    // anaphor lift must leave it alone (it must NOT become `TriggeringSource`,
+    // which would retarget the tap onto the entering object).
+    let snare = parse_trigger_line(
+        "When Snaremaster Sprite enters, you may pay {2}. When you do, tap target creature an opponent controls and put a stun counter on it.",
+        "Snaremaster Sprite",
+    );
+    match snare.execute.as_deref().and_then(find_set_tap) {
+        Some(Effect::SetTapState { target, state, .. }) => {
+            assert_eq!(*state, TapStateChange::Tap);
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "a reflexive/targeted tap must keep its player-chosen target, not \
+                 lift to TriggeringSource, got {target:?}"
+            );
+        }
+        other => panic!("Snaremaster Sprite must lower a SetTapState tap, got {other:?}"),
+    }
+
+    // CR 608.2k: Charismatic Conqueror's top-level "they may tap that permanent"
+    // anaphor still lifts to `TriggeringSource` so the tap and its optional
+    // prompt resolve off the entering object's controller.
+    let charis = parse_trigger_line(
+        "Whenever an artifact or creature an opponent controls enters untapped, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.",
+        "Charismatic Conqueror",
+    );
+    match charis.execute.as_deref().and_then(find_set_tap) {
+        Some(Effect::SetTapState { target, state, .. }) => {
+            assert_eq!(*state, TapStateChange::Tap);
+            assert_eq!(
+                *target,
+                TargetFilter::TriggeringSource,
+                "the top-level 'that permanent' anaphor must lift to TriggeringSource, \
+                 got {target:?}"
+            );
+        }
+        other => panic!("Charismatic Conqueror must lower a SetTapState tap, got {other:?}"),
+    }
+
+    // CR 608.2c: Howl of the Hunt's "untap that creature" refers to the
+    // *enchanted* creature (the condition's subject), not the entering Aura, so
+    // the anaphor lift is restricted to `Tap` and must leave this `Untap` alone.
+    let howl = parse_trigger_line(
+        "When Howl of the Hunt enters, if enchanted creature is a Wolf or Werewolf, untap that creature.",
+        "Howl of the Hunt",
+    );
+    match howl.execute.as_deref().and_then(find_set_tap) {
+        Some(Effect::SetTapState { target, state, .. }) => {
+            assert_eq!(*state, TapStateChange::Untap);
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "an untap-that-creature anaphor must not lift to TriggeringSource, \
+                 got {target:?}"
+            );
+        }
+        other => panic!("Howl of the Hunt must lower a SetTapState untap, got {other:?}"),
+    }
+}

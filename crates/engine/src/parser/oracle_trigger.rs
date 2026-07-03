@@ -43,8 +43,8 @@ use crate::types::ability::{
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
     ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
-    TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1581,7 +1581,7 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
 /// TargetFilter` and whose runtime semantics make sense against the event
 /// object (e.g. `ChangeZone` operating on the just-discarded card). Other
 /// effect variants are left untouched.
-fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
+fn lift_parent_target_to_triggering_source(effect: &mut Effect, allow_set_tap_lift: bool) {
     // CR 608.2k: each variant carries a top-level `target` that, when the
     // surface anaphor was "that <object>", refers to the event object.
     let target = match effect {
@@ -1595,7 +1595,25 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
         // object. Binding to `TriggeringSource` makes both the tap target and the
         // runtime optional-prompt player (its controller) resolve off the event
         // object instead of the ability's own source/controller.
-        Effect::SetTapState { target, .. } => target,
+        //
+        // Restricted to `TapStateChange::Tap`: a permanent enters *untapped*
+        // (Charismatic Conqueror keys off "enters untapped"), so the "that
+        // permanent" anaphor is only ever *tapped*, never untapped. An `Untap`
+        // that survives to here refers to some other object (e.g. Howl of the
+        // Hunt's "untap that creature" = the *enchanted* creature, not the
+        // entering Aura) and must not be lifted onto the trigger source.
+        //
+        // CR 608.2c: also gated on `allow_set_tap_lift` (see the caller) so a
+        // *targeted* or *reflexive* tap keeps its player-chosen target — e.g.
+        // Snaremaster Sprite's "you may pay {2}. When you do, tap target creature
+        // an opponent controls" lowers the tap under a `PayCost` sub-ability and
+        // any multi-target/optional tap carries its own chosen slot. Their
+        // `ParentTarget` refers to the chosen creature, not the event object.
+        Effect::SetTapState {
+            target,
+            state: TapStateChange::Tap,
+            ..
+        } if allow_set_tap_lift => target,
         _ => return,
     };
     if matches!(target, TargetFilter::ParentTarget) {
@@ -1619,12 +1637,24 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     // Necroduality (top-level `CopyTokenOf` with no prior choice) and Tergrid
     // ("put that card …, then create a token") still lift correctly.
     let mut node = Some(ability);
+    let mut is_top_level = true;
     while let Some(link) = node {
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
         }
-        lift_parent_target_to_triggering_source(link.effect.as_mut());
+        // CR 608.2c + CR 608.2k: `SetTapState` only lifts as the trigger's OWN
+        // top-level "that permanent" anaphor (Charismatic Conqueror). It must not
+        // lift when the tap is a reflexive "when you do" sub-ability (reached
+        // below the top link) or carries its own player-chosen target slot
+        // (`multi_target` / `optional_targeting`) — those `ParentTarget`s refer to
+        // the chosen creature, not the entering object. The other anaphoric
+        // variants (`ChangeZone`/`Sacrifice`/`CopyTokenOf`) still lift at any
+        // depth for the Tergrid punisher class.
+        let allow_set_tap_lift =
+            is_top_level && link.multi_target.is_none() && !link.optional_targeting;
+        lift_parent_target_to_triggering_source(link.effect.as_mut(), allow_set_tap_lift);
         node = link.sub_ability.as_deref_mut();
+        is_top_level = false;
     }
 }
 
