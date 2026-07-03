@@ -923,25 +923,25 @@ async fn main() {
                             if register_in_lobby {
                                 if let Some(meta) = lobby_meta {
                                     lob.register_game(
-                                    draft_code,
-                                    RegisterGameRequest {
-                                        host_name: meta.host_name,
-                                        public: meta.public,
-                                        password: meta.password,
-                                        timer_seconds: meta.timer_seconds,
-                                        current_players: filled as u32,
-                                        max_players: pod_size as u32,
-                                        draft_metadata: Some(
-                                            server_core::protocol::DraftLobbyMetadata {
-                                                set_code,
-                                                draft_kind,
-                                                cube_name: None,
-                                            },
-                                        ),
-                                        ..Default::default()
-                                    },
-                                    &SysEnv,
-                                );
+                                        draft_code,
+                                        RegisterGameRequest {
+                                            host_name: meta.host_name,
+                                            public: meta.public,
+                                            password: meta.password,
+                                            timer_seconds: meta.timer_seconds,
+                                            current_players: filled as u32,
+                                            max_players: pod_size as u32,
+                                            draft_metadata: Some(
+                                                server_core::protocol::DraftLobbyMetadata {
+                                                    set_code,
+                                                    draft_kind,
+                                                    cube_name: None,
+                                                },
+                                            ),
+                                            ..Default::default()
+                                        },
+                                        &SysEnv,
+                                    );
                                 }
                             }
                             if let Some(ms) = timer_ms {
