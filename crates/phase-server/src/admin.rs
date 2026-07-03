@@ -52,7 +52,10 @@ pub async fn admin_get_draft(
     let drafts = app_state.draft_sessions.lock().await;
     match drafts.sessions.get(&code) {
         Some(session) => {
-            let persisted = session.to_persisted();
+            // Secret-redacted snapshot: this endpoint is reachable unauthenticated
+            // (nginx proxies `/`), so it must never disclose seat tokens, lobby
+            // passwords, or the draft RNG seed.
+            let persisted = session.to_admin_snapshot();
             match serde_json::to_value(&persisted) {
                 Ok(val) => Json(val).into_response(),
                 Err(_) => {

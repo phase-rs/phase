@@ -58,6 +58,12 @@ impl DraftSession {
     }
 
     /// Create a serializable snapshot for disk persistence.
+    ///
+    /// Includes secrets (`player_tokens`, `lobby_meta.password`, `config.rng_seed`)
+    /// because they must survive a restart. This snapshot is for trusted local
+    /// disk only — never serialize it onto a client-reachable transport. Use
+    /// [`DraftSession::to_admin_snapshot`] for the unauthenticated admin/HTTP
+    /// inspection surface.
     pub fn to_persisted(&self) -> PersistedDraftSession {
         PersistedDraftSession {
             draft_code: self.draft_code.clone(),
@@ -69,6 +75,18 @@ impl DraftSession {
             lobby_meta: self.lobby_meta.clone(),
             timer_remaining_ms: self.timer_remaining_ms,
         }
+    }
+
+    /// Snapshot for admin / HTTP inspection with every session secret stripped.
+    ///
+    /// Unlike [`to_persisted`](Self::to_persisted), this NEVER exposes per-seat
+    /// `player_tokens` (which authorize a client into a seat via
+    /// [`seat_for_token`](Self::seat_for_token)), the lobby `password`, or
+    /// `config.rng_seed` (which seeds deterministic pack generation).
+    pub fn to_admin_snapshot(&self) -> PersistedDraftSession {
+        let mut snapshot = self.to_persisted();
+        redact_persisted_draft_secrets(&mut snapshot);
+        snapshot
     }
 
     /// Restore a draft session from a persisted snapshot.
@@ -97,6 +115,31 @@ impl DraftSession {
         view.timer_remaining_ms = self.timer_remaining_ms;
         view
     }
+}
+
+/// Placeholder written in place of any redacted session secret. A single fixed
+/// marker for every claimed seat leaks nothing (all claimed seats look
+/// identical) while keeping the snapshot's shape intact.
+pub const REDACTED_SECRET: &str = "<redacted>";
+
+/// Strip session secrets from a persisted draft snapshot in place so it is safe
+/// to expose over an unauthenticated transport.
+///
+/// - Each non-empty per-seat `player_token` is replaced with [`REDACTED_SECRET`].
+/// - Any lobby `password` is replaced with [`REDACTED_SECRET`].
+/// - `config.rng_seed` is zeroed so pack order cannot be predicted from the wire.
+pub fn redact_persisted_draft_secrets(snapshot: &mut PersistedDraftSession) {
+    for token in &mut snapshot.player_tokens {
+        if !token.is_empty() {
+            *token = REDACTED_SECRET.to_string();
+        }
+    }
+    if let Some(meta) = snapshot.lobby_meta.as_mut() {
+        if meta.password.is_some() {
+            meta.password = Some(REDACTED_SECRET.to_string());
+        }
+    }
+    snapshot.config.rng_seed = 0;
 }
 
 /// Seats that still owe a pick this round and have not yet submitted one.
@@ -916,6 +959,73 @@ mod tests {
         assert_eq!(restored.player_tokens, persisted.player_tokens);
         assert_eq!(restored.display_names, persisted.display_names);
         assert_eq!(restored.timer_remaining_ms, persisted.timer_remaining_ms);
+    }
+
+    #[test]
+    fn to_admin_snapshot_redacts_player_tokens_but_preserves_occupancy() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..4 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+
+        let session = &mgr.sessions[&code];
+        let real = session.to_persisted();
+        let admin = session.to_admin_snapshot();
+
+        assert_eq!(admin.player_tokens.len(), real.player_tokens.len());
+        for (admin_tok, real_tok) in admin.player_tokens.iter().zip(&real.player_tokens) {
+            if real_tok.is_empty() {
+                assert!(admin_tok.is_empty(), "unclaimed seat must stay empty");
+            } else {
+                assert_eq!(admin_tok, REDACTED_SECRET, "claimed seat must be redacted");
+                assert_ne!(admin_tok, real_tok, "raw token must never survive");
+            }
+        }
+
+        let admin_json = serde_json::to_string(&admin).expect("serialize admin snapshot");
+        assert!(
+            !admin_json.contains(&host_token),
+            "admin snapshot must not leak any real player token"
+        );
+        assert!(real.player_tokens.iter().any(|t| t == &host_token));
+    }
+
+    #[test]
+    fn to_admin_snapshot_redacts_rng_seed() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.sessions.get_mut(&code).unwrap().config.rng_seed = 0xDEAD_BEEF;
+
+        let session = &mgr.sessions[&code];
+        assert_eq!(session.to_persisted().config.rng_seed, 0xDEAD_BEEF);
+        assert_eq!(session.to_admin_snapshot().config.rng_seed, 0);
+    }
+
+    #[test]
+    fn redact_persisted_draft_secrets_clears_lobby_password_and_rng_seed() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+
+        let mut snapshot = mgr.sessions[&code].to_persisted();
+        snapshot.config.rng_seed = 0x1234_5678;
+        snapshot.lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: Some("hunter2".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+
+        redact_persisted_draft_secrets(&mut snapshot);
+
+        assert_eq!(
+            snapshot.lobby_meta.as_ref().unwrap().password.as_deref(),
+            Some(REDACTED_SECRET),
+            "lobby password must be redacted"
+        );
+        assert_eq!(snapshot.config.rng_seed, 0, "rng_seed must be redacted");
     }
 
     #[test]
