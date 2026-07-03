@@ -3007,6 +3007,33 @@ fn effect_lightning_bolt() {
 }
 
 #[test]
+fn effect_deal_x_plus_two_damage_uses_offset_amount() {
+    // Flame Discharge / Light Up the Night: "deals X plus N damage" composes the
+    // spell's announced X with a fixed bonus. The DealDamage amount must be
+    // Offset { X, offset: N } via parse_count_expr, not a bare X with a dropped
+    // "plus N" tail (the pre-fix behavior that left the effect unsupported).
+    let e = parse_effect("~ deals X plus 2 damage to any target");
+    match e {
+        Effect::DealDamage { amount, target, .. } => {
+            assert_eq!(target, TargetFilter::Any);
+            match amount {
+                QuantityExpr::Offset { inner, offset } => {
+                    assert_eq!(offset, 2);
+                    assert!(matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { .. }
+                        }
+                    ));
+                }
+                other => panic!("expected Offset {{X, +2}} amount, got {other:?}"),
+            }
+        }
+        other => panic!("expected DealDamage, got {other:?}"),
+    }
+}
+
+#[test]
 fn effect_damage_to_each_opponent_uses_player_scope() {
     let e = parse_effect("~ deals 1 damage to each opponent");
     assert!(matches!(
