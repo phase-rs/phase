@@ -1065,6 +1065,17 @@ pub(crate) fn can_pay(
             if !cost.is_payable(state, payer, source_id) {
                 return false;
             }
+            // CR 118.12a: disjunctive activation costs resolve via
+            // `ActivationCostOneOfChoice`, but each branch must still pass the
+            // same activation affordability authority (is_payable + dry-run) as a
+            // deterministic cost. `is_payable` alone does not catch tapped-source
+            // `{T}` legs — shard-style `OneOf([Composite([Mana, Tap]), …])` would
+            // otherwise surface as legal when every branch needs an untapped source.
+            if let AbilityCost::OneOf { costs } = cost {
+                return costs
+                    .iter()
+                    .any(|branch| can_pay(state, payer, source_id, branch, scope));
+            }
             // CR 701.67a: A bare Waterbend cost has no deterministic component
             // to dry-run — its affordability is fully answered by `is_payable`'s
             // auto-tap check above. Gate on the bare `Waterbend` *shape*, not the
@@ -1786,6 +1797,41 @@ mod tests {
         );
     }
 
+    /// HIGH-1 regression (CR 118.12a + CR 118.3): shard-style
+    /// `OneOf([Composite([Mana, Tap]), …])` must route each branch through the
+    /// activation dry-run, not `is_payable` alone. The Tap arm is unconditionally
+    /// true in `is_payable`, so a tapped source must be `can_pay == false`.
+    #[test]
+    fn one_of_tap_branches_respects_tapped_source() {
+        use crate::parser::oracle_cost::parse_oracle_cost;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Granite Shard", 0, 0)
+            .as_artifact()
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Red, src, false, vec![]),
+            ],
+        );
+        let cost = parse_oracle_cost("{3}, {T} or {R}, {T}");
+
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "untapped source with mana → OneOf tap branches payable"
+        );
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+        assert!(
+            !can_pay_activation(&scenario.state, src, &cost),
+            "tapped source → OneOf tap branches must be unpayable"
+        );
+    }
     /// HIGH-1 regression (CR 701.67a + CR 118.3): a `Composite[Waterbend, {T}]`
     /// (Avatar TLA "Waterbend [cost], {T}: …") must NOT skip the dry run just
     /// because the `payment_class` fold reports `InteractiveMana` for the

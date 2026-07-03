@@ -869,6 +869,86 @@ where
     None
 }
 
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
+/// together with the byte offset where that match began.
+pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_last_at_word_boundaries_with_offset`] but only retains matches
+/// whose offset passes `accept_offset`.
+pub fn scan_last_valid_at_word_boundaries_with_offset<'a, O, F, P>(
+    text: &'a str,
+    mut combinator: F,
+    mut accept_offset: P,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+    P: FnMut(usize) -> bool,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            if accept_offset(offset) {
+                last = Some((offset, val, rest));
+            }
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match.
+///
+/// Use for terminal riders ("... if <condition>", "... as long as <condition>")
+/// where an earlier `as if` phrase must not steal the gate.
+pub fn scan_last_at_word_boundaries<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((val, rest));
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    last
+}
+
 /// Check whether `phrase` appears at any word boundary in `text`.
 ///
 /// More precise than `str::contains()` — matches complete phrases at word
@@ -1185,6 +1265,44 @@ mod tests {
         let result = scan_preceded("the creature enters", |i| {
             tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_picks_terminal_if_gate() {
+        let (_, tail) = scan_last_at_word_boundaries(
+            "you may cast as if they had flash if you control a zombie",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "you control a zombie");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_picks_terminal_if_gate() {
+        let (_, _, tail) = scan_last_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule if ten or more lands are on the battlefield",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "ten or more lands are on the battlefield");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_skips_as_if() {
+        let result = scan_last_valid_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+            |if_offset| {
+                let Some(start) = if_offset.checked_sub(3) else {
+                    return true;
+                };
+                !"you can't play lands as if there were no rule".is_char_boundary(start)
+                    || tag::<_, _, OracleError<'_>>("as ")
+                        .parse(&"you can't play lands as if there were no rule"[start..if_offset])
+                        .is_err()
+            },
+        );
         assert!(result.is_none());
     }
 

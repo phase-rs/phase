@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 159,
+      "date": "2026-07-02",
+      "title": "Split attackers across multiple defenders",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Regenerate now works — the card named after its own keyword action correctly regenerates its target\n• Role Reversal exchanges control of two permanents that share a permanent type\n• Coastal Wizard (and Lady Sun) can now return themselves plus another target creature to hand\n• Bound in Gold now shuts off the enchanted permanent's activated abilities and stops it attacking or blocking\n• Tinfoil Helm now grants +2/+2 along with its full protection-from list\n\n🛠️ Cards That Now Work Right\n• Hama Pashar no longer doubles dungeon-room triggers\n• Eidolon of Countless Battles now scales both its power and toughness from the same count\n• Valakut Fireboar switches its power and toughness when it attacks\n• Multani's Presence now triggers when you counter your own spell\n• Molecule Man's miracle now works on your first draw of the turn\n• Wrenn and Realmbreaker's emblem now lets you play lands and cast permanent spells from your graveyard\n• Orvar now copies the permanent you targeted instead of copying itself\n• Isochron Scepter can now cast the copy of its imprinted spell\n• Zenith Chronicler now draws on your first multicolored spell each turn\n• Intimidation Tactics now exiles the chosen card from the target's hand\n• Mindskinner now mills the right amount when its combat damage is prevented\n• For the Ancestors now digs for cards of the chosen creature type\n• Kraken of the Straits now stops low-power creatures from blocking it\n• Savor the Moment now correctly skips your untap step that turn\n• Bloodthorn Flail's either-or equip cost now works\n• Nahiri, the Lithomancer no longer freezes the game when you have no Equipment to attach\n• A batch of conditional-restriction and cost-reduction parser fixes (Rock Jockey, Wirecat, Hour of Revelation, Lashwhip Predator, and more)\n\n⚔️ Combat & Gameplay\n• You can now split your attackers across multiple defenders — attack several planeswalkers, battles, or players at once\n\n🖥️ Interface\n• New hand organizing controls — sort and filter your hand\n• Board HUD polish — the priority indicator now sits on the Hand row with a per-reason glyph (attack / block / target / pay …) tinted to the waiting player's seat color, plus new lands/support collapse controls on the board and in Preferences\n• Consolidated the mobile action dock so bottom controls no longer overlap your hand and piles\n• Mana symbols and card backs now load reliably again after a service-worker caching regression\n• More game data is now cached for offline play\n\n🤖 AI\n• Faster AI turns from a search-performance overhaul — per-game session caching, a transposition table with iterative deepening, and determinized sampling (play is unchanged, just quicker)",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522275112370311288"
+    },
+    {
       "id": 158,
       "date": "2026-07-01",
       "title": "Make mana on an opponent's turn",

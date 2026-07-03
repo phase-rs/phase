@@ -11051,6 +11051,124 @@ mod tests {
         );
     }
 
+    /// CR 122.1f + CR 109.4 + CR 115.1: `QuantityRef::TargetControllerCounter`
+    /// reads the poison counters on the controller of the ability's first object
+    /// target — "if its controller is poisoned" (Corrupted Resolve) — never the
+    /// ability's own controller. Discriminating: the caster (P0) is heavily
+    /// poisoned while the countered spell's controller (P1) is not, so a
+    /// controller-scoped misread would return a nonzero count.
+    #[test]
+    fn target_controller_poison_reads_object_target_controller_not_caster() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        let stack_id = ObjectId(77);
+        let source_id = ObjectId(12);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Stacked Spell".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        // Corrupted Resolve cast by P0 (controller), targeting P1's stacked spell.
+        let corrupted_resolve = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
+        let poisoned_check = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: PlayerCounterKind::Poison,
+            },
+        };
+
+        // Caster P0 heavily poisoned; target controller P1 not — must read P1 → 0.
+        state.players[0].poison_counters = 9;
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &corrupted_resolve,
+            ),
+            0,
+            "reads the target spell's controller (P1=0), not the caster (P0=9)"
+        );
+
+        // Poison P1: "its controller is poisoned" now reads >= 1.
+        state.players[1].poison_counters = 1;
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &corrupted_resolve,
+            ),
+            1,
+            "poisoning the target's controller (P1) flips the read to 1"
+        );
+    }
+
+    /// CR 810.10a + CR 810.10d + CR 810.5: In Two-Headed Giant, "its controller
+    /// is poisoned" reads the target controller's TEAM poison total, not their
+    /// individual counters. Discriminating: the target's controller (P0) has 0
+    /// individual poison, but their teammate (P1) carries the team's 1 poison —
+    /// the team is poisoned, so the read must be >= 1. A per-player read (the
+    /// pre-fix behavior) would return P0's individual 0 and mis-resolve the
+    /// counter's condition to false.
+    #[test]
+    fn target_controller_poison_reads_team_total_in_two_headed_giant() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::format::FormatConfig;
+        use crate::types::player::PlayerCounterKind;
+
+        // 2HG teams: {P0, P1} and {P2, P3}.
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let stack_id = ObjectId(77);
+        let source_id = ObjectId(12);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Stacked Spell".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        // The target's controller (P0) has 0 individual poison; the team's
+        // poison lives entirely on teammate P1.
+        state.players[0].poison_counters = 0;
+        state.players[1].poison_counters = 1;
+
+        let ability = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
+        let poisoned_check = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: PlayerCounterKind::Poison,
+            },
+        };
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &ability,
+            ),
+            1,
+            "2HG: reads the target controller's TEAM poison (P0=0 + teammate P1=1), not P0's individual 0"
+        );
+    }
+
     /// CR 108.3 + CR 608.2c: "its owner" refers to an object target's owner,
     /// not a companion player target that happens to precede it.
     #[test]

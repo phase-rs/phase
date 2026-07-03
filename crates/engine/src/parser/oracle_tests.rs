@@ -7941,6 +7941,132 @@ fn conditional_modal_max_reuses_static_condition_parser() {
 }
 
 #[test]
+fn cairn_wanderer_distributes_graveyard_keyword_gate_per_keyword() {
+    use crate::types::ability::{
+        ContinuousModification, Effect, FilterProp, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::zones::Zone;
+
+    // CR 611.3a + CR 702: Cairn Wanderer grants each listed keyword ONLY while a
+    // creature card WITH that keyword is in a graveyard — an independent per-keyword
+    // conditional continuous static. The "The same is true for <list>" tail must
+    // distribute the modeled flying grant across every listed keyword, each with its
+    // OWN keyword swapped into both the grant and the graveyard-presence gate.
+    let r = parse(
+        "Changeling (This card is every creature type.)\nAs long as a creature card with flying is in a graveyard, this creature has flying. The same is true for fear, first strike, double strike, deathtouch, haste, landwalk, lifelink, protection, reach, trample, shroud, and vigilance.",
+        "Cairn Wanderer",
+        &[Keyword::Changeling],
+        &["Creature"],
+        &["Shapeshifter"],
+    );
+
+    // 11 gated grants: the modeled "flying" plus the 10 continuation keywords that
+    // resolve to a real Keyword. The unqualified `landwalk` / `protection` entries
+    // resolve to Keyword::Unknown (no quality/subtype to type) and are NOT cloned into
+    // inert statics — they surface as an explicit Unimplemented residual instead
+    // (coverage-honesty; asserted below), so the card is not falsely marked supported.
+    assert_eq!(
+        r.statics.len(),
+        11,
+        "expected one gated static per parameter-free keyword, got {:#?}",
+        r.statics
+    );
+
+    let grant_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        def.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+    };
+    let gate_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        match def.condition.as_ref()? {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(typed)),
+            } => typed.properties.iter().find_map(|p| match p {
+                FilterProp::WithKeyword { value } => Some(value.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    };
+
+    // Spot-check the two the spec calls out: flying gates on flying, trample on
+    // trample — proving the gate keyword is swapped PER static, not left on flying.
+    for kw in [Keyword::Flying, Keyword::Trample] {
+        let def = r
+            .statics
+            .iter()
+            .find(|d| grant_keyword(d) == Some(kw.clone()))
+            .unwrap_or_else(|| panic!("no static granting {kw:?}"));
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        } = def.condition.as_ref().expect("gated")
+        else {
+            panic!(
+                "expected typed IsPresent gate for {kw:?}, got {:?}",
+                def.condition
+            );
+        };
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|t| t == &TypeFilter::Creature),
+            "{kw:?} gate must carry the Creature card-type filter"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "{kw:?} gate must carry InZone(Graveyard)"
+        );
+        assert_eq!(
+            gate_keyword(def),
+            Some(kw.clone()),
+            "{kw:?} grant must gate on a graveyard card with {kw:?} (per-keyword gate)"
+        );
+    }
+
+    // Every gated static grants exactly the keyword it gates on.
+    for def in &r.statics {
+        assert_eq!(
+            grant_keyword(def),
+            gate_keyword(def),
+            "each static's granted keyword must equal its gate keyword: {def:#?}"
+        );
+    }
+
+    // Coverage-honesty: NO static may grant Keyword::Unknown — an inert
+    // AddKeyword(Unknown) would still read as Continuous-mode "supported" in
+    // game/coverage.rs, letting the card be marked supported while a clause does
+    // nothing. The unqualified `landwalk` / `protection` continuation clauses must
+    // instead surface as an explicit Unimplemented residual (a loud unsupported gap).
+    for def in &r.statics {
+        assert!(
+            !matches!(grant_keyword(def), Some(Keyword::Unknown(_))),
+            "no gated static may grant Keyword::Unknown, got {def:#?}"
+        );
+    }
+    let residual = r
+        .abilities
+        .iter()
+        .find_map(|a| match &*a.effect {
+            Effect::Unimplemented {
+                description: Some(d),
+                ..
+            } => Some(d.to_lowercase()),
+            _ => None,
+        })
+        .expect("unqualified landwalk/protection must surface as an Unimplemented residual");
+    assert!(
+        residual.contains("landwalk") && residual.contains("protection"),
+        "the Unimplemented residual must name the unqualified keywords, got {residual:?}"
+    );
+}
+
+#[test]
 fn conditional_modal_max_supports_compound_presence_conditions() {
     let r = parse(
             "Choose one. If you control an artifact and an enchantment as you cast this spell, you may choose both instead.\n• Exile target creature or planeswalker.\n• Return target creature or planeswalker card from your graveyard to your hand.",
@@ -13051,6 +13177,88 @@ fn viral_spawning_corrupted_line_parses_as_conditional_flashback_static() {
     );
 }
 
+#[test]
+fn ixhel_corrupted_end_step_trigger_parses_poison_scoped_exile() {
+    use crate::types::ability::{
+        AbilityKind, Comparator, Effect, PlayerFilter, PlayerRelation, QuantityExpr,
+    };
+    use crate::types::player::PlayerCounterKind;
+
+    let def = parse_effect_chain(
+        "each opponent who has three or more poison counters exiles the top card of their library face down",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } => {
+            assert!(matches!(player, TargetFilter::ScopedPlayer));
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            assert!(
+                face_down,
+                "face down qualifier must lower to ExileTop.face_down=true"
+            );
+        }
+        other => panic!("expected ExileTop from poison-scoped clause, got {other:?}"),
+    }
+    match def.player_scope {
+        Some(PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        }) => {
+            assert_eq!(relation, PlayerRelation::Opponent);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(
+                *attr,
+                QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }
+            );
+        }
+        other => panic!("expected PlayerAttribute poison scope, got {other:?}"),
+    }
+}
+
+#[test]
+fn ixhel_full_oracle_trigger_carries_poison_player_scope() {
+    use crate::types::ability::{Effect, PlayerFilter, PlayerRelation};
+    use crate::types::triggers::TriggerMode;
+
+    let result = parse(
+        "Flying, vigilance, toxic 2\nCorrupted — At the beginning of your end step, each opponent who has three or more poison counters exiles the top card of their library face down. You may look at and play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
+        "Ixhel, Scion of Atraxa",
+        &[],
+        &["Creature"],
+        &["Phyrexian", "Angel"],
+    );
+    assert_eq!(result.triggers.len(), 1);
+    let trigger = &result.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    let execute = trigger.execute.as_ref().expect("execute");
+    assert!(
+        matches!(&*execute.effect, Effect::ExileTop { .. }),
+        "trigger effect must be ExileTop, got {:?}",
+        execute.effect
+    );
+    assert!(
+        matches!(
+            execute.player_scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                ..
+            })
+        ),
+        "full-card parse must carry poison-scoped player filter, got {:?}",
+        execute.player_scope
+    );
+}
+
 // ── Each player/opponent iteration ────────────────────────────────
 
 #[test]
@@ -13349,7 +13557,7 @@ fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
     assert!(filter
         .properties
         .iter()
-        .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
+        .any(|prop| matches!(prop, FilterProp::AttackedThisTurn { .. })));
     assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         r.statics[0].active_zones,
@@ -13511,6 +13719,8 @@ fn spell_cost_reduction_for_creatures_that_attacked_preserves_damage_effect() {
 
 #[test]
 fn negative_self_casting_restriction_stays_metadata() {
+    use crate::types::statics::StaticMode;
+
     let r = parse(
             "You can't cast Rock Jockey if you've played a land this turn.\nYou can't play lands if Rock Jockey was cast this turn.",
             "Rock Jockey",
@@ -13526,6 +13736,19 @@ fn negative_self_casting_restriction_stays_metadata() {
                 condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
             }),
         }]
+    );
+    assert!(
+        r.statics.iter().any(|d| {
+            matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && matches!(
+                    d.condition,
+                    Some(StaticCondition::And { ref conditions })
+                        if conditions.contains(&StaticCondition::WasCast { zone: None })
+                            && conditions.contains(&StaticCondition::SourceEnteredThisTurn)
+                )
+        }),
+        "Rock Jockey's gated CantPlayLand static must survive full-card dispatch, got statics={:?}",
+        r.statics
     );
     assert!(
         r.abilities

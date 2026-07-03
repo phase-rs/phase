@@ -742,6 +742,7 @@ mod tests {
         ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
         TargetFilter, TypeFilter,
     };
+    use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
 
@@ -1732,6 +1733,115 @@ mod tests {
                 }
             }
             other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
+    /// creature is attacking, " gates the {B}{B} alternative casting cost on a
+    /// color-filtered attacker presence check (not a bare/count one).
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
+            "Nemesis Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::White
+                            }
+                        )),
+                        "expected HasColor(White) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => {
+                panic!("expected QuantityComparison GE 1 white attacking creature, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 508.1 + CR 702.9 + CR 118.9: Slingbow Trap — leading "If a black
+    /// creature with flying is attacking, " stacks a color filter and a
+    /// keyword filter onto the {G} alternative casting cost's gate.
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_and_keyword_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a black creature with flying is attacking, you may pay {G} rather than pay this spell's mana cost.",
+            "Slingbow Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::Black
+                            }
+                        )),
+                        "expected HasColor(Black) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying
+                            }
+                        )),
+                        "expected WithKeyword(Flying) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison GE 1 black flying attacking creature, got {other:?}"
+            ),
         }
     }
 

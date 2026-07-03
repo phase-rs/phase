@@ -489,6 +489,12 @@ def parse_event_datetime(value: str | None) -> datetime | None:
     return parsed
 
 
+def timestamp_after(candidate: str | None, baseline: str | None) -> bool:
+    candidate_dt = parse_event_datetime(candidate)
+    baseline_dt = parse_event_datetime(baseline)
+    return candidate_dt is not None and baseline_dt is not None and candidate_dt > baseline_dt
+
+
 def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> list[dict[str, Any]]:
     if days is None:
         return events
@@ -1513,6 +1519,13 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event = packet.get("local_current_event") or {}
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
+    local_event_timestamp = local_event.get("timestamp")
+    author_login = pr.get("author_login")
+    author_followup_after_local_event = any(
+        comment.get("author") == author_login
+        and timestamp_after(comment.get("createdAt"), local_event_timestamp)
+        for comment in pr.get("comments", [])
+    )
     author_policy = packet.get("author_policy", {})
     local_block_event = local_outcome != "ci_failed" and local_event_type in {
         "review_blocked",
@@ -1551,6 +1564,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
+    elif (local_event_type == "held" or local_outcome in HOLD_STATES) and author_followup_after_local_event:
+        action = "review"
+        reason = "author_followup_after_local_hold"
+    elif local_event_type == "held" or local_outcome in HOLD_STATES:
+        action = "hold_ci"
+        reason = "local_hold_current_head"
     elif local_block_event or local_block_outcome:
         action = "blocked"
         reason = "local_block_current_head"
@@ -1619,7 +1638,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     return recommendation
 
 
-def parse_diff_comment_state(comments: list[dict[str, Any]]) -> dict[str, Any]:
+def parse_diff_comment_state(
+    comments: list[dict[str, Any]], trusted_authors: set[str]
+) -> dict[str, Any]:
     """Classify the parse-diff sticky comment from FULL comment bodies.
 
     Must run on raw (un-excerpted) comments — compact_pr_view truncates bodies to
@@ -1628,7 +1649,7 @@ def parse_diff_comment_state(comments: list[dict[str, Any]]) -> dict[str, Any]:
     """
     for comment in comments:
         author_login = (comment.get("author") or {}).get("login")
-        if author_login != "github-actions":
+        if author_login not in trusted_authors:
             continue
         body = comment.get("body") or ""
         if not body.lstrip().startswith(PARSE_DIFF_MARKER):
@@ -1664,7 +1685,9 @@ def make_packet(
     checks = status_summary(pr.get("statusCheckRollup", []))
     # Classify the parse-diff sticky comment from raw bodies, before compact_pr_view
     # excerpts them to 300 chars and would drop the marker substrings.
-    parse_diff = parse_diff_comment_state(pr.get("comments", []))
+    parse_diff = parse_diff_comment_state(
+        pr.get("comments", []), {"github-actions", acting_login}
+    )
     compact_pr = compact_pr_view(pr, acting_login)
     author_policy = {
         "frontend_review_allowed": frontend_review_allowed(

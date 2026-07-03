@@ -44,6 +44,11 @@ path = "src/bin/ai_gate.rs"
 test = false
 
 [[bin]]
+name = "ai-perf-gate"
+path = "src/bin/ai_perf_gate.rs"
+test = false
+
+[[bin]]
 name = "legal-actions-bench"
 path = "src/bin/legal_actions_bench.rs"
 test = false
