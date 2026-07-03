@@ -2122,7 +2122,11 @@ fn strip_represented_replacement_instead_sentences(
     fn antecedent_clause_start(sentence: &str) -> usize {
         let em_dash_pos = sentence.rfind("— ").map(|i| i + "— ".len());
         let newline_pos = sentence.rfind('\n').map(|i| i + 1);
-        em_dash_pos.into_iter().chain(newline_pos).max().unwrap_or(0)
+        em_dash_pos
+            .into_iter()
+            .chain(newline_pos)
+            .max()
+            .unwrap_or(0)
     }
 
     // Structural shape check per condition (b): after skipping any leading
@@ -6560,9 +6564,12 @@ mod detect_condition_if_replacement_exemption_tests {
     fn compound_replacement_with_unrepresented_second_instead_sentence_is_flagged() {
         let represented_sentence =
             "If an opponent would gain life, that player loses that much life instead.";
-        let unrepresented_sentence =
-            "If a player would sacrifice a permanent, exile it instead.";
-        let text = format!("{represented_sentence} {unrepresented_sentence}");
+        let unrepresented_sentence = "If a player would sacrifice a permanent, exile it instead.";
+        // A neutral leading sentence keeps the unrepresented "if" clause off
+        // byte offset 0 of the cleaned text: the detector's bare-" if " scan
+        // (like every marker scan in this file) requires a preceding space,
+        // which sentence-initial text at offset 0 never has.
+        let text = format!("You gain 1 life. {represented_sentence} {unrepresented_sentence}");
         let parsed = parsed_with_one_replacement_description(represented_sentence);
 
         let cleaned = text.to_ascii_lowercase();
@@ -6605,7 +6612,8 @@ mod detect_condition_if_replacement_exemption_tests {
     /// while an unrepresented one survives untouched.
     #[test]
     fn strip_helper_only_removes_sentences_backed_by_a_parsed_replacement() {
-        let represented = "if an opponent would gain life, that player loses that much life instead";
+        let represented =
+            "if an opponent would gain life, that player loses that much life instead";
         let unrepresented = "if a player would sacrifice a permanent, exile it instead";
         let combined = format!("{represented}. {unrepresented}.");
         let parsed = parsed_with_one_replacement_description(&format!("{represented}."));
