@@ -534,6 +534,7 @@ fn parse_object_vote_block(
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
     let outcome_template = Box::new(AbilityDefinition::new(kind, exile));
 
