@@ -5164,7 +5164,7 @@ fn parse_shared_quality_reference<'a>(
         alt((tag::<_, _, OracleError<'_>>("or "), tag(", or "))).parse(rest_trimmed)
     {
         let (filter2, rest2) = parse_target(after_or);
-        if !matches!(filter2, TargetFilter::Any) && rest2.trim().is_empty() {
+        if !matches!(filter2, TargetFilter::Any) {
             return Ok((
                 rest2,
                 TargetFilter::Or {
@@ -5175,14 +5175,7 @@ fn parse_shared_quality_reference<'a>(
         // Fall through: only accept the first leg if the disjunction tail didn't parse.
         let _ = sep;
     }
-    if rest.trim().is_empty() {
-        Ok((rest, filter))
-    } else {
-        Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )))
-    }
+    Ok((rest, filter))
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the

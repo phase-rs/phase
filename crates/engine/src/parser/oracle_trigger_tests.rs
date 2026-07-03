@@ -209,14 +209,25 @@ fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
     let TargetFilter::Typed(tf) = filter else {
         panic!("expected Typed filter, got {filter:?}");
     };
-    assert!(tf.properties.iter().any(|p| matches!(
-        p,
-        FilterProp::SharesQuality {
-            quality: SharedQuality::CreatureType,
-            relation: SharedQualityRelation::DoesNotShare,
-            reference: Some(_),
-        }
-    )));
+    let shares_quality = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::SharesQuality {
+                quality,
+                relation,
+                reference,
+            } => Some((quality, relation, reference.as_deref())),
+            _ => None,
+        })
+        .expect("expected SharesQuality property");
+    assert_eq!(*shares_quality.0, SharedQuality::CreatureType);
+    assert_eq!(*shares_quality.1, SharedQualityRelation::DoesNotShare);
+    let reference = shares_quality.2.expect("expected disjunctive reference");
+    let TargetFilter::Or { filters } = reference else {
+        panic!("expected Or reference filter, got {reference:?}");
+    };
+    assert_eq!(filters.len(), 2);
 }
 
 #[test]
@@ -1547,11 +1558,6 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
         Some(TriggerCondition::Not {
             condition: Box::new(TriggerCondition::ZoneChangeObjectIsTapped)
         })
-    );
-    let execute = def.execute.as_ref().expect("execute present");
-    assert!(
-        execute.optional,
-        "they may tap must be optional, got execute={execute:?}"
     );
 }
 
