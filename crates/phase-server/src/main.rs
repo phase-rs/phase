@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::{Request, State, WebSocketUpgrade};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
@@ -498,6 +499,16 @@ struct Cli {
     /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+
+    /// Bearer token that gates the administrative `/admin/*` HTTP endpoints
+    /// (draft inspection and force-delete). These routes reach the server
+    /// through the same reverse proxy that serves `/ws`, so they are internet-
+    /// reachable in a typical deployment. When this is unset the admin routes
+    /// are not mounted at all (requests return 404) — the secure default.
+    /// Provide the value only via this environment variable at runtime; never
+    /// hardcode or commit it.
+    #[arg(long, env = "PHASE_ADMIN_TOKEN")]
+    admin_token: Option<String>,
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -1130,35 +1141,56 @@ async fn main() {
         info!(public_url = %url, "advertising public URL for join-code sharing");
     }
 
-    let app = Router::new()
+    // Public, client-facing HTTP surface. `/p2p-draft-backup*` is part of the
+    // normal P2P draft flow (the host adapter stores and restores backups), so
+    // it stays open; only the administrative `/admin/*` routes are gated below.
+    let mut app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
-        .route("/admin/drafts", get(admin::admin_list_drafts))
-        .route(
-            "/admin/drafts/{code}",
-            get(admin::admin_get_draft).delete(admin::admin_delete_draft),
-        )
         .route("/p2p-draft-backup", post(admin::p2p_backup_store))
         .route(
             "/p2p-draft-backup/{code}",
             get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        )
-        .layer(cors)
-        .with_state(AppState {
-            sessions: state,
-            draft_sessions,
-            draft_pools,
-            connections,
-            db,
-            lobby,
-            lobby_subscribers,
-            player_count,
-            game_db,
-            draft_spectators,
-            game_spectators,
-            mode,
-            public_url: advertised_public_url,
-        });
+        );
+
+    // Administrative endpoints (draft enumeration, inspection, force-delete)
+    // are destructive and information-disclosing, and reachable through the
+    // same reverse proxy as `/ws`. Mount them only when an admin token is
+    // configured, behind a bearer-auth guard. Without a token they are absent
+    // entirely (404) — fail closed rather than expose them unauthenticated.
+    match cli.admin_token.as_deref().map(str::trim) {
+        Some(token) if !token.is_empty() => {
+            let expected: Arc<str> = Arc::from(token);
+            let admin_routes = Router::new()
+                .route("/admin/drafts", get(admin::admin_list_drafts))
+                .route(
+                    "/admin/drafts/{code}",
+                    get(admin::admin_get_draft).delete(admin::admin_delete_draft),
+                )
+                .layer(from_fn_with_state(expected, require_admin_auth));
+            app = app.merge(admin_routes);
+            info!("admin HTTP endpoints enabled (bearer-token authenticated)");
+        }
+        _ => {
+            info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)");
+        }
+    }
+
+    let app = app.layer(cors).with_state(AppState {
+        sessions: state,
+        draft_sessions,
+        draft_pools,
+        connections,
+        db,
+        lobby,
+        lobby_subscribers,
+        player_count,
+        game_db,
+        draft_spectators,
+        game_spectators,
+        mode,
+        public_url: advertised_public_url,
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
@@ -1240,6 +1272,97 @@ async fn shutdown_signal() {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Constant-time byte comparison so admin-token validation does not leak the
+/// expected token through response timing. Returns `false` immediately on a
+/// length mismatch (token length is not itself sensitive here).
+fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in presented.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Decide whether an `Authorization` header value authorizes an admin request.
+/// Pure so the trust decision is unit-testable without a live server: the
+/// header must be exactly `Bearer <token>` where `<token>` (after trimming)
+/// matches `expected` in constant time. A missing or malformed header, or any
+/// scheme other than `Bearer`, is unauthorized.
+fn admin_request_authorized(auth_header: Option<&str>, expected: &str) -> bool {
+    match auth_header
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+    {
+        Some(token) => tokens_match(token.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
+}
+
+/// Auth guard for the administrative `/admin/*` routes.
+///
+/// Requires an `Authorization: Bearer <token>` header matching the configured
+/// admin token; any other request is rejected with `401 Unauthorized` before
+/// the handler (which can enumerate, inspect, or force-delete drafts and their
+/// live games) runs. The expected token is injected as middleware state via
+/// [`from_fn_with_state`], so it never appears in the router's shared
+/// [`AppState`].
+async fn require_admin_auth(
+    State(expected): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let auth_header = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    if admin_request_authorized(auth_header, &expected) {
+        next.run(request).await
+    } else {
+        (http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
+}
+
+#[cfg(test)]
+mod admin_auth_tests {
+    use super::{admin_request_authorized, tokens_match};
+
+    const TOKEN: &str = "s3cr3t-admin-token";
+
+    #[test]
+    fn tokens_match_is_exact() {
+        assert!(tokens_match(b"abc", b"abc"));
+        assert!(!tokens_match(b"abc", b"abd"));
+        assert!(!tokens_match(b"abc", b"ab")); // length mismatch
+        assert!(!tokens_match(b"", b"x"));
+        assert!(tokens_match(b"", b""));
+    }
+
+    #[test]
+    fn authorized_only_with_matching_bearer_token() {
+        let ok = format!("Bearer {TOKEN}");
+        assert!(admin_request_authorized(Some(&ok), TOKEN));
+        // Surrounding whitespace on the token is tolerated.
+        let padded = format!("Bearer   {TOKEN}  ");
+        assert!(admin_request_authorized(Some(&padded), TOKEN));
+    }
+
+    #[test]
+    fn rejects_missing_wrong_or_malformed_header() {
+        assert!(!admin_request_authorized(None, TOKEN));
+        assert!(!admin_request_authorized(Some(""), TOKEN));
+        assert!(!admin_request_authorized(Some("Bearer wrong-token"), TOKEN));
+        // Wrong scheme.
+        let basic = format!("Basic {TOKEN}");
+        assert!(!admin_request_authorized(Some(&basic), TOKEN));
+        // Bare token without the Bearer scheme prefix.
+        assert!(!admin_request_authorized(Some(TOKEN), TOKEN));
+    }
 }
 
 /// Validate an operator-supplied public URL at the system boundary. It must
