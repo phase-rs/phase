@@ -162,22 +162,32 @@ pub(crate) fn check_standalone_augment_permanents(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
 ) {
-    let standalone: Vec<ObjectId> = state
-        .battlefield
+    let standalone: Vec<ObjectId> = battlefield_snapshot
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
-                obj.keywords
-                    .iter()
-                    .any(|keyword| matches!(keyword, Keyword::Augment))
+                obj.zone == Zone::Battlefield
+                    && obj.is_phased_in()
+                    && obj
+                        .keywords
+                        .iter()
+                        .any(|keyword| matches!(keyword, Keyword::Augment))
                     && obj.merged_components.is_empty()
             })
         })
         .collect();
 
     for object_id in standalone {
+        if !state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
+        {
+            continue;
+        }
         zones::move_to_zone(state, object_id, Zone::Graveyard, events);
         *any_performed = true;
     }

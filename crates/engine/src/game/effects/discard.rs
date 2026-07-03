@@ -141,8 +141,13 @@ pub fn resolve(
         } => {
             let (inner, up_to) = count.peel_up_to();
             (
-                // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
-                resolve_quantity_with_targets(state, inner, ability) as u32,
+                // CR 107.1b: a calculation that would yield a negative number
+                // uses zero instead. Clamp before the `as u32` cast — a
+                // subtractive count ("discard cards equal to A minus B" when
+                // B > A) would otherwise wrap to ~4 billion and let the player
+                // discard their whole hand. Ability context also resolves X
+                // against the caster's chosen value. Mirrors `draw.rs`.
+                resolve_quantity_with_targets(state, inner, ability).max(0) as u32,
                 up_to,
                 unless_filter.clone(),
                 target.clone(),
@@ -534,6 +539,7 @@ mod tests {
                 )],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         replacement
@@ -561,6 +567,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -622,6 +629,88 @@ mod tests {
         assert_eq!(state.objects[&card].discarded_turn, None);
     }
 
+    /// CR 107.1b: a discard count that resolves negative must clamp to 0, not
+    /// wrap through the `as u32` cast to ~4 billion. "Discard up to (cards in
+    /// your hand − cards in an opponent's hand)" with the opponent holding more
+    /// cards yields a negative count; the player must be offered a discard of 0,
+    /// never their whole hand. This mirrors the clamp `draw.rs` already applies
+    /// for the analogous Mr. Foxglove subtractive-draw shape. Revert-probe:
+    /// without the `.max(0)` the presented count is `u32::MAX - 1`.
+    #[test]
+    fn discard_negative_count_clamps_to_zero() {
+        use crate::types::ability::{
+            AggregateFunction, CardSelectionMode, PlayerScope, QuantityRef,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        // Caster (P0) hand: 1 card. Opponent (P1) hand: 3 cards.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Hand,
+        );
+        for i in 0..3u64 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                "Theirs".into(),
+                Zone::Hand,
+            );
+        }
+
+        // count = up to (HandSize{You} − HandSize{Opponent}) = 1 − 3 = −2.
+        let count = QuantityExpr::up_to(QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    }),
+                },
+            ],
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count,
+                target: TargetFilter::Controller,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DiscardChoice { count, player, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *count,
+                    0,
+                    "CR 107.1b: a negative discard count must clamp to 0, not wrap to {}",
+                    u32::MAX - 1
+                );
+            }
+            other => panic!("expected a DiscardChoice of up-to-0, got {other:?}"),
+        }
+    }
+
     /// D1 double-consult guard: the madness class (a Discard-level definition
     /// lowering hand → exile) still works and is not re-applied. The discarded
     /// card ends in exile via the madness redirect, with no Moved present, and
@@ -653,6 +742,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -786,6 +876,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state

@@ -427,6 +427,7 @@ fn make_step_4_ability() -> ResolvedAbility {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![],
         ObjectId(9000),

@@ -108,6 +108,7 @@ export function HudPlate({
     <Component
       type={onClick ? "button" : undefined}
       onClick={onClick}
+      data-hud-plate=""
       className={`group relative inline-flex max-w-full items-center border backdrop-blur-xl transition-all duration-200 ${plateChrome} ${TONE_CLASSES[tone]}${activeRing} ${
         onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
       }`}
@@ -178,7 +179,7 @@ export function HudPlate({
         </div>
       </div>
       {trailing ? (
-        <div className={trailingClass}>
+        <div className={trailingClass} data-hud-plate-trailing="">
           {trailing}
         </div>
       ) : null}

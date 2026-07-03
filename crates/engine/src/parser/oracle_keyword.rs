@@ -35,6 +35,25 @@ use crate::types::zones::Zone;
 /// Plate) or "each color with the most votes" (Council Guardian) carry
 /// additional qualifiers and pass through unchanged for a future dynamic
 /// handler.
+///
+/// CR 702.16i: also expands a bare comma-list continuation — after a
+/// "protection from A" prefix, subsequent list members that are neither
+/// "from …"-prefixed continuations nor genuine trailing keywords (e.g. Tinfoil
+/// Helm's "protection from aliens, birds, …, and hybrid mana", or a color list
+/// "protection from white, blue, red") each become their own protection entry.
+/// A genuine trailing keyword (Akroma's "vigilance") resets the prefix and
+/// passes through unexpanded.
+fn protection_prefix(i: &str) -> nom::IResult<&str, &'static str, OracleError<'_>> {
+    // (prefix_with_space, emit_prefix_no_space) — strip the prefix+space,
+    // emit the prefix without space. Shared by the prefix branch and the
+    // fast-path guard so both recognize the same set.
+    alt((
+        value("protection from", tag("protection from ")),
+        value("hexproof from", tag("hexproof from ")),
+    ))
+    .parse(i)
+}
+
 pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
     // Fast path: skip allocation when no expansion is needed
     if !parts.iter().any(|p| {
@@ -47,7 +66,11 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             || tag::<_, _, OracleError<'_>>("and from ")
                 .parse(l.as_str())
                 .is_ok()
-    }) {
+    }) && !(parts.len() > 1
+        && parts
+            .iter()
+            .any(|p| protection_prefix(&p.to_ascii_lowercase()).is_ok()))
+    {
         return parts.iter().map(|&p| Cow::Borrowed(p)).collect();
     }
 
@@ -59,17 +82,7 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         let lower = part.to_ascii_lowercase();
 
         // Check for "protection from X and from Y" or "hexproof from X and from Y"
-        // (prefix_with_space, emit_prefix_no_space) — strip the prefix+space, emit prefix without space
-        let prefix_match: Option<&str> = alt((
-            value(
-                "protection from",
-                tag::<_, _, OracleError<'_>>("protection from "),
-            ),
-            value("hexproof from", tag("hexproof from ")),
-        ))
-        .parse(lower.as_str())
-        .ok()
-        .map(|(_, v)| v);
+        let prefix_match: Option<&str> = protection_prefix(lower.as_str()).ok().map(|(_, v)| v);
 
         if let Some(prefix) = prefix_match {
             // Strip "protection from " or "hexproof from " (prefix + space)
@@ -86,9 +99,23 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             if let Ok((rest, _)) =
                 alt((tag::<_, _, OracleError<'_>>("and from "), tag("from "))).parse(lower.as_str())
             {
-                // ", and from Zombies" or ", from Werewolves" — continuation
+                // CR 702.16g: ", and from Zombies" or ", from Werewolves" —
+                // an explicit "from"-prefixed continuation of the prior prefix.
                 push_quality_entry(&mut expanded, pfx, rest);
+            } else if is_bare_protection_quality(&lower) {
+                // CR 702.16i: bare comma-list member — a simple subtype/color/
+                // quality noun phrase that continues the shorthand list
+                // ("protection from aliens, birds, …" or "protection from white,
+                // blue, red"). Each such member behaves as its own separate
+                // protection ability.
+                push_quality_entry(&mut expanded, pfx, &lower);
             } else {
+                // Anything that is NOT a bare quality — a genuine trailing
+                // keyword (Akroma's "vigilance"), a verb-clause restriction rider
+                // ("and can't be blocked by …"), or a leaked relative clause from
+                // a stripped trailing sentence ("equipment you control that are
+                // already attached to it") — ends the protection list and passes
+                // through unexpanded for the downstream clause splitter.
                 active_prefix = None;
                 expanded.push(Cow::Borrowed(part));
             }
@@ -97,6 +124,83 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         }
     }
     expanded
+}
+
+/// CR 702.16i + CR 702.16a: Positive gate for a bare protection-list
+/// continuation member. Per CR 702.16i a "protection from each [set]" member is
+/// a *characteristic, quality, or player* — in practice a color ("white"), a
+/// single subtype/type word ("birds", "aliens"), or a short bounded noun phrase
+/// ("hybrid mana"). It is NEVER:
+///   - a genuine non-protection keyword (Akroma's trailing "vigilance") —
+///     these must reset the list;
+///   - a verb-clause restriction rider ("can't be blocked by …") from a
+///     compound grant line — these must reset so the downstream clause
+///     splitter handles them;
+///   - a leaked relative clause from a stripped trailing sentence
+///     ("equipment you control that are already attached to it").
+///
+/// So a member qualifies as a bare quality iff it is a short (1–2 word) noun
+/// phrase, contains no clause-connective/relative markers, and is either a
+/// recognized creature/type subtype OR does not map to a concrete non-protection
+/// keyword. A recognized subtype ALWAYS qualifies (subtype precedence), so a
+/// token that happens to be both a subtype and a keyword name still continues
+/// the list rather than resetting it. WUBRG colors and Tinfoil subtypes
+/// (aliens/birds/eldrazi/lizards/mutants/robots/yetis) satisfy this; "hybrid
+/// mana" (2 words) also qualifies; the failing riders/leaks above do not.
+fn is_bare_protection_quality(word: &str) -> bool {
+    let trimmed = word.trim().trim_end_matches(['.', ',', ';']).trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // At most a two-word noun phrase. Longer phrases are qualified clauses /
+    // leaked prose, not bare qualities (CR 702.16i members are atomic).
+    let word_count = trimmed.split_whitespace().count();
+    if word_count > 2 {
+        return false;
+    }
+    // Clause-connective / relative / possessive markers never appear in a bare
+    // quality — their presence signals a leaked clause, not a quality.
+    if trimmed.split_whitespace().any(|w| {
+        matches!(
+            w,
+            "that" | "which" | "who" | "you" | "your" | "with" | "of" | "this" | "already" | "and"
+        )
+    }) {
+        return false;
+    }
+    // CR 702.16i + CR 205.3 (205.3m creature / 205.3g artifact / ... subtypes):
+    // a recognized subtype is always a protection
+    // *quality*, even when the token happens to collide with a keyword name.
+    // Some tokens are simultaneously a keyword and a subtype (a shifting overlap
+    // as MTGJSON's card-type vocabulary and the keyword set both grow — e.g. a
+    // creature type that shares a spelling with a keyword ability). Protection
+    // "from <subtype>" is the intended reading, so the subtype classification
+    // must take precedence over the keyword-reset check below; otherwise a bare
+    // list like "protection from white, <subtype>, …" would wrongly reset and
+    // drop the subtype member. `is_subtype_word` is the canonical single-token
+    // subtype recognizer (the same vocabulary `game::keywords`'s
+    // `source_subtype_matches_protection_quality` resolves against); it only
+    // accepts atomic tokens, so gate on the single-word case and let the
+    // multi-word "hybrid mana" quality fall through to the keyword guard.
+    if word_count == 1 && crate::parser::oracle_util::is_subtype_word(trimmed) {
+        return true;
+    }
+    // A concrete non-protection keyword (Akroma's "vigilance", "first strike",
+    // "flying") resets the list. `map_keyword` maps unrecognized words to `None`,
+    // so colors and subtypes (which are not keywords) pass this guard.
+    !matches!(
+        super::oracle_static::map_keyword(trimmed),
+        Some(kw) if !matches!(kw, Keyword::Unknown(_)) && !is_protection_or_hexproof(&kw)
+    )
+}
+
+/// CR 702.16 / CR 702.11: Recognize a protection- or hexproof-family keyword.
+/// A protection/hexproof result must NOT reset the active protection list.
+fn is_protection_or_hexproof(kw: &Keyword) -> bool {
+    matches!(
+        kw,
+        Keyword::Protection(_) | Keyword::Hexproof | Keyword::HexproofFrom(_)
+    )
 }
 
 /// Push one "<prefix> <quality>" entry — or 5 WUBRG entries when the quality
@@ -2623,6 +2727,185 @@ mod tests {
     }
 
     // --- expand_protection_parts tests ---
+
+    /// CR 702.16i: a bare comma-separated color list continues the "protection
+    /// from" prefix. Building-block test with synthetic split input (the real
+    /// Swords use "protection from red and from blue" — the already-working
+    /// "and from" path — so this exercises the new bare-list branch directly).
+    #[test]
+    fn expand_protection_bare_color_list_continues_prefix() {
+        let expanded = expand_protection_parts(&["protection from white", "blue", "red"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert!(
+            entries.contains(&"protection from white"),
+            "got {entries:?}"
+        );
+        assert!(entries.contains(&"protection from blue"), "got {entries:?}");
+        assert!(entries.contains(&"protection from red"), "got {entries:?}");
+        assert_eq!(
+            entries.len(),
+            3,
+            "expected exactly three entries, got {entries:?}"
+        );
+    }
+
+    /// CR 702.16i + CR 702.16a: Tinfoil Helm — a bare comma-list of subtypes and
+    /// "hybrid mana" all continue the "protection from" prefix into eight
+    /// separate protection entries. The subtype/quality tokens are non-keywords
+    /// (map_keyword → None) so they do NOT reset the list.
+    #[test]
+    fn expand_protection_tinfoil_bare_subtype_list() {
+        // Caller (`split_keyword_list`) has already split on ", and "/", "/" and ",
+        // so the Oxford-comma "and " is consumed and each element is a clean token.
+        let expanded = expand_protection_parts(&[
+            "protection from aliens",
+            "birds",
+            "eldrazi",
+            "lizards",
+            "mutants",
+            "robots",
+            "yetis",
+            "hybrid mana",
+        ]);
+        let protection_entries = expanded
+            .iter()
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            .filter(|c| c.as_ref().starts_with("protection from "))
+            .count();
+        assert_eq!(
+            protection_entries, 8,
+            "expected eight protection entries, got {:?}",
+            expanded
+        );
+    }
+
+    /// CR 702.16i: a genuine trailing keyword (Akroma's "vigilance") ends the
+    /// protection list and passes through unexpanded — it must NOT become
+    /// "protection vigilance". Synthetic input, robust regardless of the caller
+    /// split path.
+    #[test]
+    fn expand_protection_trailing_keyword_resets() {
+        let expanded =
+            expand_protection_parts(&["protection from black", "protection from red", "vigilance"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(
+            entries,
+            vec!["protection from black", "protection from red", "vigilance"],
+            "vigilance must reset the list, not become a protection quality"
+        );
+    }
+
+    /// CR 702.16i: a multi-word trailing keyword ("first strike") also resets.
+    #[test]
+    fn expand_protection_trailing_multiword_keyword_resets() {
+        let expanded = expand_protection_parts(&["protection from black", "first strike"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(entries, vec!["protection from black", "first strike"]);
+    }
+
+    /// CR 702.16i: a genuine single-word keyword that is NOT a creature subtype
+    /// ("haste") still resets the list — subtype precedence must not weaken the
+    /// keyword-reset path for non-subtype keywords.
+    #[test]
+    fn expand_protection_trailing_haste_keyword_resets() {
+        let expanded = expand_protection_parts(&["protection from white", "haste"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(
+            entries,
+            vec!["protection from white", "haste"],
+            "haste is a keyword, not a subtype, so it must reset the list"
+        );
+        assert!(!crate::parser::oracle_util::is_subtype_word("haste"));
+    }
+
+    /// CR 702.16i + CR 205.3 (205.3m creature subtypes): subtype precedence — a recognized creature subtype
+    /// is always classified as a bare protection *quality* and continues the
+    /// list, even for a token that also collides with a keyword name. This is the
+    /// invariant the subtype-precedence branch guarantees: for every recognized
+    /// single-word subtype, `is_bare_protection_quality` returns true regardless
+    /// of what `map_keyword` would return for that same token. Reverting the
+    /// subtype-precedence branch would break this for any subtype that is also a
+    /// keyword name (a latent overlap between the growing MTGJSON subtype
+    /// vocabulary and the keyword set).
+    #[test]
+    fn bare_protection_quality_subtype_precedence_over_keyword_collision() {
+        use crate::parser::oracle_util::is_subtype_word;
+
+        // Real singular subtypes continue the list (never reset), exercising the
+        // subtype-precedence branch directly. `is_subtype_word` matches the
+        // singular head, so use singular tokens here.
+        for subtype in ["alien", "sliver", "cleric", "dragon"] {
+            assert!(
+                is_subtype_word(subtype),
+                "{subtype} must be a recognized subtype token"
+            );
+            assert!(
+                is_bare_protection_quality(subtype),
+                "{subtype} is a recognized subtype and must be a protection quality"
+            );
+        }
+
+        // Invariant: whenever a single-word token is a recognized subtype, it is
+        // a bare quality — independent of its keyword status. This is what makes
+        // "protection from <color>, <subtype-that-is-also-a-keyword>, …" continue
+        // rather than reset. (No such collision exists in the current vocabulary,
+        // so this asserts the guarantee holds for the whole subtype class rather
+        // than a single hand-picked token.)
+        for token in ["merfolk", "wall", "assassin", "advisor"] {
+            if is_subtype_word(token) {
+                assert!(
+                    is_bare_protection_quality(token),
+                    "recognized subtype {token} must always be a protection quality"
+                );
+            }
+        }
+    }
+
+    /// CR 702.16i: subtype-and-quality members expand into individual protection
+    /// entries alongside colors and never reset, mirroring the Tinfoil Helm class
+    /// with a leading color prefix. Regression companion to the subtype-precedence
+    /// unit test above at the `expand_protection_parts` seam.
+    #[test]
+    fn expand_protection_color_then_subtype_list_all_continue() {
+        let expanded =
+            expand_protection_parts(&["protection from white", "sliver", "cleric", "hybrid mana"]);
+        let protection_entries = expanded
+            .iter()
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            .filter(|c| c.as_ref().starts_with("protection from "))
+            .count();
+        assert_eq!(
+            protection_entries, 4,
+            "color + two subtypes + hybrid mana must all expand as protection, got {expanded:?}"
+        );
+    }
+
+    /// CR 702.16i: a compound rider — "hexproof from that color … and can't be
+    /// blocked by creatures of that color" — must NOT swallow the "can't be
+    /// blocked …" restriction as a bogus hexproof quality. The verb-clause guard
+    /// resets the active prefix so the restriction passes through for the
+    /// downstream clause splitter (regression guard for the block-restriction
+    /// grant path).
+    #[test]
+    fn expand_protection_verb_clause_rider_resets() {
+        let expanded = expand_protection_parts(&[
+            "hexproof from that color until end of turn",
+            "can't be blocked by creatures of that color this turn",
+        ]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert!(
+            entries.contains(&"can't be blocked by creatures of that color this turn"),
+            "restriction rider must pass through unexpanded, got {entries:?}"
+        );
+        let swallowed = entries.iter().any(|e| {
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            e.contains("can't be blocked") && e.starts_with("hexproof from ")
+        });
+        assert!(
+            !swallowed,
+            "restriction must not be swallowed as a hexproof quality, got {entries:?}"
+        );
+    }
 
     #[test]
     fn expand_protection_baneslayer_pattern() {

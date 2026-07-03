@@ -10,7 +10,7 @@ command -v brotli >/dev/null || { echo "ERROR: brotli required (brew install bro
 
 PROJECT_NAME="${1:-phase-rs}"
 R2_BUCKET="phase-rs-data"
-R2_PUBLIC="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+R2_PUBLIC="https://data.phase-rs.dev"
 
 export CARD_DATA_URL="${CARD_DATA_URL:-$R2_PUBLIC/card-data.json}"
 export COVERAGE_DATA_URL="${COVERAGE_DATA_URL:-$R2_PUBLIC/coverage-data.json}"

@@ -77,7 +77,8 @@
     "priorityTooltip": "Passe a prioridade. Se a pilha estiver vazia, isso avança pela janela de prioridade atual. Atalho: Espaço.",
     "pass": "Passar",
     "passToEndTooltip": "Passe automaticamente até a etapa final, a menos que uma escolha, parada ou o Controle Total interrompa. Atalho: Enter.",
-    "autoPassing": "Passando Automaticamente até a Etapa Final..."
+    "autoPassing": "Passando Automaticamente até a Etapa Final...",
+    "resolvingStack": "Resolvendo a Pilha..."
   },
   "board": {
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
@@ -152,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Recolher linha",
+      "auto": "Automático",
+      "on": "Sempre ativado",
+      "off": "Sempre desativado"
     }
   },
   "permanent": {
@@ -173,6 +180,10 @@
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Escolher",
+    "fanConfirm": "Confirmar ({{count}})",
+    "viewAttachments_one": "Ver carta anexada",
+    "viewAttachments_other": "Ver {{count}} cartas anexadas",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -184,7 +195,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Manter"
     }
   },
   "player": {
@@ -215,7 +227,26 @@
     "you": "Você",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
-    "restoreDialogTitle": "Restaurar diálogo de alvo de ataque"
+    "restoreDialogTitle": "Restaurar diálogo de alvo de ataque",
+    "distribute": "Distribuir",
+    "attackersColumn": "Atacantes",
+    "unassigned": "Não atribuídos",
+    "assignedBadge": "Atribuído",
+    "allAssigned": "Todos os atacantes atribuídos",
+    "unassignedRemaining_one": "{{count}} não atribuído",
+    "unassignedRemaining_other": "{{count}} não atribuídos",
+    "evenSplitAll": "Dividir Todos Igualmente",
+    "resetAssignments": "Redefinir",
+    "allHere": "Todos Aqui",
+    "spread": "Espalhar",
+    "spreadEvenly": "Espalhar Igualmente",
+    "assignOne": "Atribuir um a {{label}}",
+    "removeOne": "Remover um de {{label}}",
+    "assignAllHere": "Enviar todos para {{label}}",
+    "assignRemaining_one": "Atribuir mais {{count}}",
+    "assignRemaining_other": "Atribuir mais {{count}}",
+    "confirmDistribute_one": "Declarar {{count}} Atacante",
+    "confirmDistribute_other": "Declarar {{count}} Atacantes"
   },
   "fullControl": {
     "on": "Controle Total Ativado",
@@ -451,7 +482,9 @@
     "viewFullHand_other": "Ver mão completa ({{count}} cartas)",
     "handLabel": "Mão {{count}}",
     "handTitle": "Mão ({{count}})",
-    "cardBack": "Verso da carta"
+    "cardBack": "Verso da carta",
+    "organizeLabel": "Organizar mão",
+    "reorderPausedHint": "Arrastar para reordenar está pausado enquanto a mão está ordenada ou filtrada."
   },
   "opponentHud": {
     "ally": "Aliado",
@@ -1051,10 +1084,19 @@
       "subtitleManaValueUpTo_other": "Escolha até {{count}} cartas dentro do limite de valor de mana"
     },
     "searchPartition": {
-      "title": "Escolher Cartas para o Campo de Batalha",
-      "subtitle_one": "Escolha {{count}} carta para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "subtitle_other": "Escolha {{count}} cartas para colocar no campo de batalha{{tapped}}; o restante vai para sua mão",
-      "tapped": " viradas"
+      "title": "Escolher Cartas",
+      "subtitle_one": "Escolha {{count}} carta para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "subtitle_other": "Escolha {{count}} cartas para colocar {{primary}}{{tapped}}; o restante fica {{rest}}",
+      "tapped": " viradas",
+      "zones": {
+        "Library": "na sua biblioteca",
+        "Hand": "na sua mão",
+        "Battlefield": "no campo de batalha",
+        "Graveyard": "no seu cemitério",
+        "Stack": "na pilha",
+        "Exile": "no exílio",
+        "Command": "na zona de comando"
+      }
     },
     "outsideGame": {
       "title": "Escolher do Sideboard",
@@ -1260,6 +1302,12 @@
       "optCmc": "Valor de mana",
       "optType": "Tipo",
       "optColor": "Cor",
+      "filterLabel": "Mostrar",
+      "filterNone": "Todas",
+      "filterPlayable": "Jogáveis",
+      "filterCreatures": "Criaturas",
+      "filterLands": "Terrenos",
+      "filterNonland": "Não-terreno",
       "counterDiscard": "Descartar {{selected}} de {{cap}}",
       "counterKeep": "Manter {{selected}} de {{cap}}",
       "keepInstead": "Manter em vez disso",
@@ -1490,16 +1538,20 @@
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Descobrir",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Conjurar do cemitério",
     "title": "Conjurar {{name}}?",
     "subtitleCascade": "Cascata exilou {{name}} (valor de mana abaixo de {{sourceMv}}). Conjure-a sem pagar seu custo de mana, ou recuse e embaralhe todas as {{total}} cartas exiladas no fundo de seu grimório.",
     "subtitleDiscover": "Descobrir exilou {{name}}. Conjure-a sem pagar seu custo de mana, ou coloque-a em sua mão e embaralhe as outras {{missCount}} cartas exiladas no fundo de seu grimório.",
     "subtitleRipple": "Ripple revelou {{name}}. Conjure-a sem pagar seu custo de mana, ou recuse e coloque todas as {{total}} cartas reveladas no fundo de seu grimório em ordem aleatória.",
+    "subtitleGraveyardPaid": "Conjure {{name}} de um cemitério pagando seu custo de mana — mana de qualquer tipo pode ser gasto. Ou recuse e deixe-a no cemitério.",
     "castNamed": "Conjurar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
+    "castPaidSuffix": "(pague seu custo de mana — mana de qualquer tipo pode ser gasto)",
     "putIntoHand": "Colocar na mão",
     "decline": "Recusar",
     "discoverDeclineSuffix": "(colocar o restante no fundo)",
-    "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)"
+    "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)",
+    "graveyardPaidDeclineSuffix": "(deixá-la no cemitério)"
   },
   "freeCastWindow": {
     "eyebrow": "Conjuração grátis",
@@ -1849,7 +1901,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Manter"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1859,14 +1912,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: poder {{selected}} / {{max}} ou menos"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirmar ({{selected}}/{{max}} de poder)"
   },
   "planechase": {
     "active": "Active plane",
@@ -1886,8 +1941,8 @@
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",
-    "waitingFor": "Waiting for {{player}}",
-    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
       "declareAttackers": "declaring attackers",
       "declareBlockers": "declaring blockers",

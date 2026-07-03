@@ -437,6 +437,12 @@ function boardChoicePrompt(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.prompt.totalPowerAtMost", {
+        action,
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -485,6 +491,11 @@ function boardChoiceConfirmLabel(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.confirmPowerAtMost", {
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -503,6 +514,7 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-700 hover:bg-sky-600";
   }
 }

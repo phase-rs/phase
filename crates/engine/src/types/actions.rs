@@ -543,6 +543,13 @@ pub enum GameAction {
     DiscoverChoice {
         choice: CastChoice,
     },
+    /// CR 608.2g + CR 609.4b: Accept/decline a during-resolution PAID cast of a
+    /// graveyard card (Quistis Trepe, Tinybones the Pickpocket). On accept the
+    /// caster pays the card's real printed cost with any-type mana; on decline
+    /// the card stays in the graveyard.
+    GraveyardPaidCastChoice {
+        choice: CastChoice,
+    },
     /// CR 702.85a: Choose to cast the cascaded card without paying its mana cost.
     CascadeChoice {
         choice: CastChoice,
@@ -649,6 +656,13 @@ pub enum GameAction {
     /// `WaitingFor::CategoryChoice::categories`. `None` = no permanent of that type.
     SelectCategoryPermanents {
         choices: Vec<Option<ObjectId>>,
+    },
+    /// CR 107.1c + CR 701.21a: Answer to `WaitingFor::KeepWithinTotalPowerChoice`
+    /// (Slaughter the Strong) — the subset of eligible creatures to keep. Every id
+    /// must be in the prompt's `eligible` set and their combined power must not
+    /// exceed `cap`; the rest are sacrificed.
+    ChooseKeptCreatures {
+        kept: Vec<ObjectId>,
     },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
@@ -1334,6 +1348,7 @@ impl GameAction {
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
+            | GameAction::GraveyardPaidCastChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::RippleChoice { .. }
             | GameAction::FreeCastWindowChoice { .. }
@@ -1355,6 +1370,7 @@ impl GameAction {
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
+            | GameAction::ChooseKeptCreatures { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }

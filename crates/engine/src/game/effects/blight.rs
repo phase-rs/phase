@@ -87,6 +87,7 @@ pub fn resolve(
         count_param: count,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
 
     Ok(())

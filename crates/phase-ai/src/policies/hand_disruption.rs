@@ -322,6 +322,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert!(HandDisruptionPolicy.score(&ctx) < 0.0);
@@ -473,6 +474,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };
@@ -597,6 +599,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };
@@ -688,6 +691,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };

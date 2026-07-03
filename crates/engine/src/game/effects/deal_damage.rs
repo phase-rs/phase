@@ -1986,8 +1986,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChosenAttribute, ContinuousModification, ControllerRef, Duration, FilterProp, ObjectScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
+        DamageChannel, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -3846,6 +3847,109 @@ mod tests {
         } else {
             panic!("expected DamageDealt event");
         }
+    }
+
+    /// CR 120.10 + CR 120.6: the Torch the Witness / Orbital Plunge class —
+    /// "deals N damage to target creature. If excess damage was dealt this way,
+    /// <follow-up>". Drives the full chain through `resolve_ability_chain` so the
+    /// `last_effect_excess_amount` stamping and the
+    /// `PreviousEffectAmount { channel: Excess }` eval are both exercised.
+    ///
+    /// This is the Excess-vs-Total *discriminating* test the channel exists for:
+    /// the overkill leg fixes total != excess (6 vs 2) so a Total-summing resolver
+    /// would put the WRONG number (6) in the excess query; the exact-lethal leg
+    /// (excess 0, total 4) is where the channels DIVERGE on the GT-0 gate — Excess
+    /// declines the follow-up, but a Total fallback (the reverted bug) would
+    /// wrongly fire it (4 > 0). Reverting the channel to `Total` flips the
+    /// exact-lethal assertion.
+    #[test]
+    fn deal_damage_excess_channel_sums_excess_not_total_and_gates_followup() {
+        use crate::types::ability::{ManaContribution, ManaProduction};
+        use crate::types::mana::{ManaColor, ManaType};
+
+        // Returns (resolution-end state, red mana produced by the gated follow-up).
+        fn run(amount: u32, toughness: i32) -> (GameState, usize) {
+            let mut state = GameState::new_two_player(42);
+            let target_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Ogre".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&target_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.toughness = Some(toughness);
+            }
+            let mut ability = make_ability(amount, vec![TargetRef::Object(target_id)]);
+            let mut followup = ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            followup.condition = Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Excess,
+            });
+            ability.sub_ability = Some(Box::new(followup));
+
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .unwrap();
+            let red = state.players[0].mana_pool.count_color(ManaType::Red);
+            (state, red)
+        }
+
+        // Overkill: 6 damage to a 4-toughness creature → total 6, excess 2.
+        let (overkill, overkill_red) = run(6, 4);
+        assert_eq!(
+            overkill.last_effect_excess_amount,
+            Some(2),
+            "Excess channel must sum per-event excess (6-4=2), NOT the marked total"
+        );
+        assert_eq!(
+            overkill.last_effect_amount,
+            Some(6),
+            "Total channel sums marked damage (6)"
+        );
+        assert_ne!(
+            overkill.last_effect_excess_amount, overkill.last_effect_amount,
+            "fixture is discriminating: a Total-summing resolver yields 6, not the excess 2"
+        );
+        assert_eq!(
+            overkill_red, 1,
+            "excess>0 → the excess-gated follow-up fires"
+        );
+
+        // Exact lethal: 4 damage to a 4-toughness creature → total 4, excess 0.
+        let (lethal, lethal_red) = run(4, 4);
+        assert_eq!(
+            lethal.last_effect_excess_amount, None,
+            "zero excess → the excess channel is empty"
+        );
+        assert_eq!(
+            lethal.last_effect_amount,
+            Some(4),
+            "total channel still carries the marked 4"
+        );
+        assert_eq!(
+            lethal_red, 0,
+            "excess==0 → follow-up declines; a Total-channel fallback (the reverted bug) \
+             would WRONGLY fire here because total 4 > 0"
+        );
     }
 
     #[test]

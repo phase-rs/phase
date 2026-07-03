@@ -158,6 +158,7 @@ pub fn resolve(
         effect_enter_with_counters,
         effect_conditional_enter_with_counters,
         face_down_profile,
+        effect_enters_modified_if,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -171,6 +172,7 @@ pub fn resolve(
             enter_with_counters,
             conditional_enter_with_counters,
             face_down_profile,
+            enters_modified_if,
             ..
         } => {
             // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
@@ -209,6 +211,7 @@ pub fn resolve(
                 resolved_counters,
                 conditional_enter_with_counters.clone(),
                 face_down_profile.clone(),
+                enters_modified_if.clone(),
             )
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
@@ -247,13 +250,26 @@ pub fn resolve(
                     .get(&parent)
                     .is_some_and(|obj| obj.zone == Zone::Hand)
                 {
-                    exile_tracked_set_library_only = true;
-                    effective_target_filter = crate::game::targeting::resolve_tracked_set_sentinel(
+                    let tracked_filter = crate::game::targeting::resolve_tracked_set_sentinel(
                         state,
                         TargetFilter::TrackedSet {
                             id: crate::types::identifiers::TrackedSetId(0),
                         },
                     );
+                    // Dig tails (Expressive Iteration) keep looked-at cards in a
+                    // tracked set with library members — "exile one of them" must
+                    // not re-exile the card already put in hand. RevealHand ->
+                    // "exile that card" also binds ParentTarget in hand but has
+                    // no library members in the tracked set and must exile the
+                    // chosen hand card directly.
+                    let has_library_member = tracked_set_member_zones(state, &tracked_filter)
+                        .is_some_and(|zones| zones.contains(&Zone::Library));
+                    if has_library_member {
+                        exile_tracked_set_library_only = true;
+                        effective_target_filter = tracked_filter;
+                    } else if origin.is_none() {
+                        origin = Some(Zone::Hand);
+                    }
                 }
             }
         }
@@ -462,6 +478,15 @@ pub fn resolve(
                 &effect_enter_with_counters,
                 &effect_conditional_enter_with_counters,
             );
+            // CR 614.12: gate the tapped/attacking riders on the chosen object's type.
+            let (eff_tapped, eff_attacking) = effective_enter_mods(
+                state,
+                chosen,
+                ability.source_id,
+                effect_enter_tapped,
+                effect_enters_attacking,
+                effect_enters_modified_if.as_ref(),
+            );
             // CR 110.2a: `enters_under_player` was resolved once at resolver
             // entry — pass it straight through (no per-branch re-resolution).
             match execute_zone_move(
@@ -472,7 +497,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.duration.as_ref(),
                 effect_enter_transformed,
-                effect_enter_tapped,
+                eff_tapped,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
@@ -482,7 +507,7 @@ pub fn resolve(
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if effect_enters_attacking && dest_zone == Zone::Battlefield {
+                    if eff_attacking && dest_zone == Zone::Battlefield {
                         let controller = state
                             .objects
                             .get(&chosen)
@@ -535,6 +560,15 @@ pub fn resolve(
                 &effect_enter_with_counters,
                 &effect_conditional_enter_with_counters,
             );
+            // CR 614.12: gate the tapped/attacking riders on the chosen object's type.
+            let (eff_tapped, eff_attacking) = effective_enter_mods(
+                state,
+                chosen,
+                ability.source_id,
+                effect_enter_tapped,
+                effect_enters_attacking,
+                effect_enters_modified_if.as_ref(),
+            );
             // CR 110.2a: pre-resolved controller override (single-eligible
             // branch). No per-branch re-resolution.
             match execute_zone_move(
@@ -545,7 +579,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.duration.as_ref(),
                 effect_enter_transformed,
-                effect_enter_tapped,
+                eff_tapped,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
@@ -555,7 +589,7 @@ pub fn resolve(
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if effect_enters_attacking && dest_zone == Zone::Battlefield {
+                    if eff_attacking && dest_zone == Zone::Battlefield {
                         let controller = state
                             .objects
                             .get(&chosen)
@@ -625,6 +659,10 @@ pub fn resolve(
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            // CR 614.12: carry the moved-object type gate across the
+            // `EffectZoneChoice` round-trip so it is evaluated against the
+            // chosen object on resume (Summoner's Grimoire).
+            enters_modified_if: effect_enters_modified_if.clone(),
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -646,6 +684,7 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_profile: face_down_profile.clone(),
         library_placement: None,
+        enters_modified_if: effect_enters_modified_if,
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
@@ -744,6 +783,9 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        // CR 614.12: preserve the moved-object type gate across a
+                        // further as-enters / replacement pause.
+                        enters_modified_if: ctx.enters_modified_if.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -780,6 +822,9 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        // CR 614.12: preserve the moved-object type gate across a
+                        // further as-enters / replacement pause.
+                        enters_modified_if: ctx.enters_modified_if.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 608.2c: this object is paused mid-move on a replacement choice
@@ -915,6 +960,41 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// CR 401.4 + CR 701.24a: When `Some`, suppresses auto-shuffle and places
     /// each object at the specified library position.
     pub library_placement: Option<LibraryPosition>,
+    /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+    /// moved object's type (Summoner's Grimoire). `None` = apply
+    /// unconditionally. Carried so the gate survives the `EffectZoneChoice`
+    /// pick pause and is evaluated per chosen object in `process_one_zone_move`.
+    pub enters_modified_if: Option<TargetFilter>,
+}
+
+/// CR 614.12 + CR 614.12a: Resolve the effective enter-modifiers for one moved
+/// object. The riders (`base_tapped`, `base_attacking`) apply only when `gate`
+/// is `None` (unconditional) or the chosen object matches the gate filter;
+/// otherwise the object enters normally `(Unspecified, false)`.
+///
+/// The object is still in its origin zone here — the choice is made before it
+/// enters (CR 614.12a) — and a card-type filter is stable from hand to
+/// battlefield, so this pre-move `matches_target_filter` check equals the
+/// as-it-would-exist-on-battlefield check (CR 614.12).
+pub(crate) fn effective_enter_mods(
+    state: &GameState,
+    obj_id: ObjectId,
+    source_id: ObjectId,
+    base_tapped: EtbTapState,
+    base_attacking: bool,
+    gate: Option<&TargetFilter>,
+) -> (EtbTapState, bool) {
+    match gate {
+        None => (base_tapped, base_attacking),
+        Some(filter) => {
+            let ctx = crate::game::filter::FilterContext::from_source(state, source_id);
+            if crate::game::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+                (base_tapped, base_attacking)
+            } else {
+                (EtbTapState::Unspecified, false)
+            }
+        }
+    }
 }
 
 /// Move one object through the full zone-change pipeline used by the
@@ -971,6 +1051,15 @@ pub(crate) fn process_one_zone_move(
     // (Yedora's dies trigger, target `TriggeringSource`) turns the returned
     // permanent face down with the effect's characteristics. `None` keeps the
     // normal face-up entry for every non-face-down move.
+    // CR 614.12: gate the tapped/attacking riders on this chosen object's type.
+    let (eff_tapped, eff_attacking) = effective_enter_mods(
+        state,
+        obj_id,
+        ctx.source_id,
+        ctx.enter_tapped,
+        ctx.enters_attacking,
+        ctx.enters_modified_if.as_ref(),
+    );
     let result = execute_zone_move(
         state,
         obj_id,
@@ -979,7 +1068,7 @@ pub(crate) fn process_one_zone_move(
         ctx.source_id,
         ctx.duration.as_ref(),
         ctx.enter_transformed,
-        ctx.enter_tapped,
+        eff_tapped,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.face_down_profile.as_ref(),
@@ -990,7 +1079,7 @@ pub(crate) fn process_one_zone_move(
 
     if let ZoneMoveResult::Done = result {
         // CR 508.4: Place on battlefield attacking (not declared as attacker).
-        if ctx.enters_attacking && ctx.destination == Zone::Battlefield {
+        if eff_attacking && ctx.destination == Zone::Battlefield {
             let controller = state
                 .objects
                 .get(&obj_id)
@@ -1374,6 +1463,8 @@ pub fn resolve_all(
                         moved_count: Some(moved_count),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: effect_library_position.clone(),
+                        // CR 614.12: mass zone moves carry no moved-object type gate.
+                        enters_modified_if: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 608.2c: record the replacement-paused member as in-flight (with
@@ -1421,6 +1512,8 @@ pub fn resolve_all(
                         // face down.
                         face_down_profile: face_down_profile.clone(),
                         library_placement: effect_library_position.clone(),
+                        // CR 614.12: mass zone moves carry no moved-object type gate.
+                        enters_modified_if: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -1536,6 +1629,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1567,6 +1661,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1608,6 +1703,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id), TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -1651,6 +1747,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1733,6 +1830,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(entering)],
             ObjectId(100),
@@ -1761,6 +1859,78 @@ mod tests {
                 .copied(),
             None,
             "the Other-scoped static must not grant the source itself a counter"
+        );
+    }
+
+    /// CR 122.1 + CR 614.1c + CR 608.2c: `Effect::ChangeZone.conditional_enter_with_counters`
+    /// gates entry-time counters on the moved object's type ("if you put an artifact
+    /// onto the battlefield this way, put two +1/+1 counters on it" — Oviya). The
+    /// artifact matches the `Typed(Artifact)` filter and enters with 2 counters; a
+    /// non-artifact creature put the SAME way matches nothing and enters with 0.
+    /// Drives the real `resolve()` seam (change_zone.rs single-object move →
+    /// `enter_with_counters_for_object`). REVERT: removing the filter gate makes the
+    /// non-artifact arm receive 2 counters, flipping the negative assertion.
+    #[test]
+    fn conditional_enter_with_counters_gates_on_moved_object_type() {
+        fn put_with_artifact_gate(core: CoreType) -> u32 {
+            let mut state = GameState::new_two_player(42);
+            let entering = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Card".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&entering)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core);
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        CounterType::Plus1Plus1,
+                        QuantityExpr::Fixed { value: 2 },
+                    )],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![TargetRef::Object(entering)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(state.battlefield.contains(&entering));
+            state.objects[&entering]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Artifact),
+            2,
+            "artifact put this way enters with two +1/+1 counters"
+        );
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Creature),
+            0,
+            "non-artifact creature put the same way enters with zero counters (REVERT flips this)"
         );
     }
 
@@ -1806,6 +1976,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(entering)],
             ObjectId(100),
@@ -1875,6 +2046,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1944,6 +2116,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -2016,6 +2189,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -2138,6 +2312,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(aura_id), TargetRef::Object(other_card)],
             ObjectId(100),
@@ -2349,6 +2524,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -2444,6 +2620,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -2473,6 +2650,174 @@ mod tests {
                 assert!(!cards.contains(&island));
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 614.12: `effective_enter_mods` applies the tapped/attacking riders
+    /// only when the moved object matches the gate filter (Summoner's Grimoire's
+    /// "if that card is an enchantment card"). Direct, revert-failing unit test:
+    /// reverting the gate (applying riders unconditionally) flips the
+    /// non-enchantment assertion from `(Unspecified, false)` to `(Tapped, true)`.
+    #[test]
+    fn effective_enter_mods_gates_riders_on_moved_object_type() {
+        let mut state = GameState::new_two_player(42);
+        let ench = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aura Creature".to_string(),
+            Zone::Hand,
+        );
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        {
+            let o = state.objects.get_mut(&ench).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.core_types.push(CoreType::Enchantment);
+        }
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let gate = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Enchantment],
+            controller: None,
+            properties: vec![],
+        });
+        let src = ObjectId(100);
+        // Enchantment moved object -> base riders apply.
+        assert_eq!(
+            effective_enter_mods(
+                &state,
+                ench,
+                src,
+                crate::types::zones::EtbTapState::Tapped,
+                true,
+                Some(&gate),
+            ),
+            (crate::types::zones::EtbTapState::Tapped, true),
+        );
+        // Non-enchantment moved object -> riders suppressed (CR 614.12).
+        assert_eq!(
+            effective_enter_mods(
+                &state,
+                plain,
+                src,
+                crate::types::zones::EtbTapState::Tapped,
+                true,
+                Some(&gate),
+            ),
+            (crate::types::zones::EtbTapState::Unspecified, false),
+        );
+        // No gate -> riders apply unconditionally (Stangg / Shark Shredder).
+        assert_eq!(
+            effective_enter_mods(
+                &state,
+                plain,
+                src,
+                crate::types::zones::EtbTapState::Tapped,
+                true,
+                None,
+            ),
+            (crate::types::zones::EtbTapState::Tapped, true),
+        );
+    }
+
+    /// CR 614.12 (production-path, revert-failing): drive the real
+    /// `EffectZoneChoice` resume route — resolve → pause → `SelectCards` through
+    /// `apply_as_current` → `process_one_zone_move`. The `enters_modified_if`
+    /// gate must survive the pick pause (carried on `WaitingFor::EffectZoneChoice`
+    /// → ctx) and tap only a matching (enchantment) moved object. Reverting the
+    /// gate taps the plain creature too, failing the `false` case.
+    #[test]
+    fn enters_modified_if_gates_tapped_through_choice_resume() {
+        for (is_enchantment, expect_tapped) in [(true, true), (false, false)] {
+            let mut state = GameState::new_two_player(42);
+            // CR 508.4: a creature put onto the battlefield attacking joins
+            // `combat.attackers`; that site only mutates combat when one exists,
+            // so the controller's combat must be live for the attacking rider to
+            // be observable (and for its gated outcome to be measurable).
+            state.combat = Some(crate::game::combat::CombatState::default());
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Card".to_string(),
+                Zone::Hand,
+            );
+            {
+                let o = state.objects.get_mut(&card).unwrap();
+                o.card_types.core_types.push(CoreType::Creature);
+                if is_enchantment {
+                    o.card_types.core_types.push(CoreType::Enchantment);
+                }
+            }
+            let gate = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Enchantment],
+                controller: None,
+                properties: vec![],
+            });
+            let mut ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+                    }),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                    enters_attacking: true,
+                    up_to: true,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: Some(gate),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+            ability.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+                "expected interactive EffectZoneChoice pause"
+            );
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![card] }).unwrap();
+            assert!(state.battlefield.contains(&card));
+            assert_eq!(
+                state.objects[&card].tapped, expect_tapped,
+                "enchantment={is_enchantment}: tapped rider must be gated on the moved object's type (CR 614.12)"
+            );
+            // CR 508.4 + CR 614.12: the `enters_attacking` rider is fed by the
+            // same `effective_enter_mods` tuple as `enter_tapped`, so the gate
+            // must suppress the attacking-application site too. "Enters tapped
+            // and attacking" couples both flags, hence `expect_attacking ==
+            // expect_tapped`: attacking for the enchantment, not for the plain
+            // creature. Observe via the authoritative combat-attacker set (the
+            // same accessor `enters_attacking_adds_to_combat` uses).
+            let attacking = state
+                .combat
+                .as_ref()
+                .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == card));
+            assert_eq!(
+                attacking, expect_tapped,
+                "enchantment={is_enchantment}: attacking rider must be gated on the moved object's type (CR 508.4 / CR 614.12)"
+            );
         }
     }
 
@@ -2511,6 +2856,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -2560,6 +2906,7 @@ mod tests {
                 )],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2605,6 +2952,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2642,6 +2990,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -2688,6 +3037,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -2725,6 +3075,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -2804,6 +3155,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2850,6 +3202,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2896,6 +3249,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![], // empty targets — SelfRef means source_id
             source_id,
@@ -3660,6 +4014,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -3716,6 +4071,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -3768,6 +4124,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             obj_id,
@@ -3826,6 +4183,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -3953,6 +4311,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(200),
@@ -4063,6 +4422,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(200),
@@ -4117,6 +4477,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(200),
@@ -4191,6 +4552,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(200),
@@ -4255,6 +4617,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![], // zero targets chosen
             ObjectId(900),
@@ -4311,6 +4674,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![], // zero targets chosen
             ObjectId(900),
@@ -4365,6 +4729,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,
@@ -4541,6 +4906,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: conditional,
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -4664,6 +5030,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: conditional.clone(),
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -4688,6 +5055,7 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
+                enters_modified_if: None,
                 effect_kind: EffectKind::ChangeZone,
             });
         state.resolving_stack_entry = Some(StackEntry {
@@ -4835,6 +5203,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             obj_id,
@@ -4882,6 +5251,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             obj_id,
@@ -4932,6 +5302,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -5025,6 +5396,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -5276,6 +5648,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(opp_creature)],
             ObjectId(999),
@@ -5413,6 +5786,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(g1), TargetRef::Object(g2)],
             ObjectId(500),
@@ -5906,6 +6280,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![TargetRef::Object(seed)],
                 ObjectId(100),
@@ -6018,6 +6393,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![], // Empty targets: search failed to find, no card to put.
             ObjectId(100),
@@ -6568,6 +6944,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: conditional,
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -6626,6 +7003,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -6720,6 +7098,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
             ObjectId(100),
@@ -6836,6 +7215,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: Some(forest_land.clone()),
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
             ObjectId(100),
@@ -7063,6 +7443,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
             ObjectId(100),
@@ -7123,6 +7504,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![
                 TargetRef::Object(s1),
@@ -7192,6 +7574,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![
                 TargetRef::Object(s1),
@@ -7291,6 +7674,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![
                 TargetRef::Object(s1),
@@ -7453,6 +7837,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         let _ = apply_as_current(
@@ -7529,6 +7914,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -7633,6 +8019,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(100),
@@ -7752,6 +8139,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj_id)],
             obj_id,
@@ -7835,6 +8223,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(999),

@@ -325,6 +325,7 @@ fn delayed_return_stamps_exile_origin_for_it_phrasing() {
 #[test]
 fn non_delayed_parent_target_change_zone_not_stamped() {
     let mut prev = Effect::ChangeZone {
+        enters_modified_if: None,
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::ParentTarget,
@@ -379,6 +380,7 @@ fn delayed_return_stamps_non_exile_prior_destination() {
     let inner_return = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            enters_modified_if: None,
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,

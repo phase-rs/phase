@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
+import { getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
 import {
@@ -105,9 +106,10 @@ export function useKeyboardShortcuts(): void {
 
         case "Enter": {
           e.preventDefault();
-          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise set UntilEndOfTurn
-          const playerId = gameState?.active_player ?? 0;
-          const currentAutoPass = gameState?.auto_pass?.[playerId];
+          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise set UntilEndOfTurn.
+          // Read the LOCAL seat's entry — auto_pass is keyed by the player who
+          // armed it, and in multiplayer the local seat is rarely the active player.
+          const currentAutoPass = gameState?.auto_pass?.[getPlayerId()];
           if (currentAutoPass) {
             dispatchAction({ type: "CancelAutoPass" });
           } else {
@@ -157,8 +159,8 @@ export function useKeyboardShortcuts(): void {
 
         case "Escape": {
           e.preventDefault();
-          const escPlayerId = gameState?.active_player ?? 0;
-          if (gameState?.auto_pass?.[escPlayerId]) {
+          // Local seat's own session — see the Enter handler note.
+          if (gameState?.auto_pass?.[getPlayerId()]) {
             dispatchAction({ type: "CancelAutoPass" });
           } else if (waitingFor?.type === "ManaPayment") {
             dispatch({ type: "CancelCast" });

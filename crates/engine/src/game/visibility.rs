@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -16,6 +17,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     let mut filtered = state.clone();
     filtered.pending_begin_game_abilities.clear();
     filtered.resolving_begin_game_abilities = false;
+
+    // Hidden-information + fairness integrity: the game's RNG is a deterministic
+    // ChaCha20 stream seeded from `rng_seed`, and that seed is a serialized field
+    // of `GameState`. Broadcasting it to clients (every `StateUpdate` /
+    // `GameStarted` carries the filtered `GameState`) would let any player
+    // reconstruct the stream and predict every future shuffle, draw, coin flip,
+    // and random selection — including their own and the opponent's hidden
+    // library order, defeating the library redaction below and breaking ranked
+    // integrity. The authoritative engine and on-disk persistence operate on the
+    // UNFILTERED state, so redacting the seed here (and resetting the skipped RNG
+    // handle for good measure) closes the wire leak without affecting
+    // server-side randomness or session restore.
+    filtered.rng_seed = 0;
+    filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
+
     let can_view_private_for_player = |player: PlayerId| {
         player == viewer
             || (player == state.active_player
@@ -628,6 +644,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2: Hand and library are hidden zones. The `options` on a
+    // `CostTypeChoice` (Celestial Reunion's pre-cost "choose a creature type")
+    // is the set of creature types the caster can actually pay for — computed by
+    // `feasible_behold_creature_types` over beholdable cards, which INCLUDE the
+    // caster's hand. Serialized in full, it leaks private hand contents to
+    // opponents (e.g. offering "Goblin" reveals a Goblin is beholdable from hand)
+    // before the behold selection is even made. Redact `options` to empty for
+    // viewers who cannot see the caster's private zones; `choice_type` and
+    // `pending_cast` are public (CR 400.2 — the stack is a public zone), and the
+    // acting player still receives the full list to choose from.
+    if let WaitingFor::CostTypeChoice {
+        player,
+        ref choice_type,
+        ref options,
+        ref pending_cast,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) && !options.is_empty() {
+            filtered.waiting_for = WaitingFor::CostTypeChoice {
+                player,
+                choice_type: choice_type.clone(),
+                options: Vec::new(),
+                pending_cast: pending_cast.clone(),
+            };
+        }
+    }
+
     if let WaitingFor::EffectZoneChoice {
         player,
         ref cards,
@@ -650,6 +693,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         count_param,
         library_position: None,
         is_cost_payment: _,
+        enters_modified_if: _,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) && zone == Zone::Hand {
@@ -677,6 +721,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 count_param,
                 library_position: None,
                 is_cost_payment: false,
+                enters_modified_if: None,
             };
         }
     }
@@ -792,6 +837,131 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
 }
 
+/// Whether `viewer` may see another player's library/hand private zones.
+fn viewer_may_see_player_private_zone(
+    state: &GameState,
+    viewer: PlayerId,
+    player: PlayerId,
+) -> bool {
+    player == viewer
+        || (player == state.active_player
+            && turn_control::viewer_controls_active_turn(state, viewer))
+}
+
+/// Returns a viewer-safe copy of `events` for wire broadcast.
+///
+/// `StateUpdate` / `GameStarted` carry a parallel `events` array alongside the
+/// filtered `GameState`. Unlike the state snapshot, this array was broadcast
+/// verbatim to every seat and spectator — leaking hidden library information
+/// through `GameEvent::CardDrawn` (specific `object_id`) and
+/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
+/// `ZoneChangeRecord` embeds the full card name and type line). The structured
+/// game log already excludes these events; this closes the same hole on the
+/// raw event channel clients also consume.
+pub fn filter_events_for_viewer(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    events
+        .iter()
+        .filter(|event| event_visible_to_viewer(event, state, viewer))
+        .cloned()
+        .collect()
+}
+
+fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerId) -> bool {
+    let can_view_private_for_player = |player: PlayerId| {
+        player == viewer
+            || (player == state.active_player
+                && turn_control::viewer_controls_active_turn(state, viewer))
+    };
+
+    match event {
+        // Individual draws identify the exact library card — only viewers with
+        // private-zone authority for the drawer may see them.
+        GameEvent::CardDrawn { player_id, .. } => can_view_private_for_player(*player_id),
+        GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+            ..
+        } if *from == Some(Zone::Library) => library_zone_change_visible_to_viewer(
+            state,
+            viewer,
+            *object_id,
+            *to,
+            record,
+            &can_view_private_for_player,
+        ),
+        _ => true,
+    }
+}
+
+/// Whether a library-origin `ZoneChanged` event may be sent to `viewer`.
+///
+/// The `ZoneChangeRecord` snapshots the card's real identity at move time, so
+/// face-down manifest/cloak moves and face-down exiles must be gated the same
+/// way `filter_state_for_viewer` gates the post-move object — not by a fixed
+/// destination-zone allowlist.
+fn library_zone_change_visible_to_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    object_id: ObjectId,
+    to: Zone,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    if matches!(to, Zone::Hand | Zone::Library) {
+        return viewer_may_see_player_private_zone(state, viewer, record.owner);
+    }
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    if obj.face_down {
+        match to {
+            Zone::Battlefield | Zone::Stack => {
+                return can_view_private_for_player(obj.controller)
+                    || viewer_may_look_at_face_down(state, object_id, can_view_private_for_player);
+            }
+            Zone::Exile => {
+                return face_down_exile_visible_to_viewer(
+                    state,
+                    object_id,
+                    obj,
+                    can_view_private_for_player,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+/// Mirrors the face-down exile redaction in `filter_state_for_viewer`.
+fn face_down_exile_visible_to_viewer(
+    state: &GameState,
+    object_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    use crate::types::game_state::ExileLinkKind;
+    let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+    let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+        link.exiled_id == object_id
+            && link.kind == ExileLinkKind::HideawayLookable
+            && state
+                .objects
+                .get(&link.source_id)
+                .is_some_and(|src| can_view_private_for_player(src.controller))
+    });
+    foretell_ok || hideaway_lookable_by_viewer
+}
+
 /// CR 708.5: `viewer` may look at face-down permanent `obj_id` they do not
 /// control if they control an active `MayLookAtFaceDown` permission whose
 /// affected filter matches the permanent. The permission has two sources:
@@ -810,20 +980,26 @@ fn viewer_may_look_at_face_down(
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     use crate::types::ability::{ContinuousModification, Duration};
-    use crate::types::statics::StaticMode;
-    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::MayLookAtFaceDown) {
-            continue;
-        }
-        if !can_view_private_for_player(source.controller) {
-            continue;
-        }
-        let Some(filter) = def.affected.as_ref() else {
-            continue;
-        };
-        let ctx = super::filter::FilterContext::from_source(state, source.id);
-        if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
-            return true;
+    use crate::types::statics::{StaticMode, StaticModeKind};
+    // CR 708.5: O(1) presence gate covers ONLY the battlefield-static authority. The
+    // duration-bound `transient_continuous_effects` scan below is a separate authority
+    // the index does not track, so wrap the loop rather than early-returning `false`.
+    if super::functioning_abilities::static_kind_present(state, StaticModeKind::MayLookAtFaceDown) {
+        crate::game::perf_counters::record_static_full_scan(); // counter fires only on real scan
+        for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+            if !matches!(def.mode, StaticMode::MayLookAtFaceDown) {
+                continue;
+            }
+            if !can_view_private_for_player(source.controller) {
+                continue;
+            }
+            let Some(filter) = def.affected.as_ref() else {
+                continue;
+            };
+            let ctx = super::filter::FilterContext::from_source(state, source.id);
+            if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+                return true;
+            }
         }
     }
 
@@ -938,7 +1114,8 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
 /// an opponent has no rules-permission to see, leaving only
 /// the public spine (source_id, controller, timestamp, ability,
 /// condition, target_constraints, subject_match_count, die_result,
-/// may_trigger_origin) needed for the engine to keep running on
+/// may_trigger_origin) plus the public scheduling metadata on the wrapping
+/// context needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
 fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
@@ -952,7 +1129,8 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects).
+/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
@@ -1044,6 +1222,195 @@ mod tests {
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn redacts_rng_seed_from_every_viewer() {
+        // A distinctive non-zero seed so a leak is unmistakable.
+        let state = GameState::new_two_player(0x1234_5678_9abc_def0);
+        assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+
+        // Seat viewers and the non-seat spectator must never see the real seed.
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(u8::MAX)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.rng_seed, 0,
+                "rng_seed must be redacted for viewer {viewer:?}"
+            );
+        }
+
+        // The authoritative source state is untouched by filtering.
+        assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn filters_library_draw_events_for_non_drawer() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Library),
+            Zone::Hand,
+        );
+        record.name = "Secret Card".to_string();
+        record.owner = PlayerId(0);
+
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: PlayerId(0),
+                object_id: ObjectId(99),
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(record),
+            },
+        ];
+
+        let drawer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(drawer.len(), 2);
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent.is_empty());
+    }
+
+    #[test]
+    fn library_draw_events_visible_to_turn_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        let event = GameEvent::CardDrawn {
+            player_id: PlayerId(1),
+            object_id: ObjectId(99),
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+
+        let controller =
+            filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
+        assert_eq!(controller, vec![event]);
+    }
+
+    #[test]
+    fn library_face_down_battlefield_zone_change_hidden_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let _secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+
+        let controller_filtered = filter_events_for_viewer(&events, &state, controller);
+        let lib_to_bf: Vec<_> = controller_filtered
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Some(Zone::Library),
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(lib_to_bf.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = lib_to_bf[0] {
+            assert_eq!(record.name, "Secret Manifest");
+        } else {
+            panic!("expected ZoneChanged");
+        }
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
+
+        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(spectator.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn library_to_exile_reveal_zone_change_stays_public() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let card = create_object(
+            &mut state,
+            CardId(3),
+            owner,
+            "Cascade Card".to_string(),
+            Zone::Exile,
+        );
+
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            card,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record.name = "Cascade Card".to_string();
+        record.owner = owner;
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Library),
+            to: Zone::Exile,
+            record: Box::new(record),
+        }];
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(opponent.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = &opponent[0] {
+            assert_eq!(record.name, "Cascade Card");
+        } else {
+            panic!("expected ZoneChanged");
+        }
+    }
+
+    #[test]
+    fn library_mill_zone_change_stays_public() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(7),
+            Some(Zone::Library),
+            Zone::Graveyard,
+        );
+        record.name = "Milled Card".to_string();
+        record.owner = PlayerId(1);
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        }];
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(opponent.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = &opponent[0] {
+            assert_eq!(record.name, "Milled Card");
+        } else {
+            panic!("expected ZoneChanged");
+        }
     }
 
     #[test]
@@ -1310,6 +1677,113 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Card"),
             "re-drawn card must not inherit prior reveal state — it is a new object per CR 400.7"
+        );
+    }
+
+    /// Unit 2, site #21 (multi-authority): `viewer_may_look_at_face_down` gates ONLY
+    /// its battlefield `MayLookAtFaceDown` scan behind the O(1) presence index (wrap,
+    /// not early-return), and falls through UNCHANGED to the duration-bound
+    /// `transient_continuous_effects` authority the index does not track. Three cases:
+    /// (a) a TCE grant with the index PRECISE-absent still permits the look — proving
+    /// the wrap did not early-`return false` and suppress the TCE (revert-failing);
+    /// (b) neither authority => no look; (c) a battlefield static (index present) falls
+    /// through and permits the look.
+    #[test]
+    fn face_down_look_tce_survives_precise_battlefield_gate() {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::statics::{StaticMode, StaticModeKind};
+
+        // Viewer P0; face-down creature controlled by opponent P1.
+        let mut state = GameState::new_two_player(42);
+        let face_down = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Face Down".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&face_down).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.face_down = true;
+        }
+        // Viewer P0 can see only their own private information.
+        let can_view = |p: PlayerId| p == PlayerId(0);
+        let opp_creature =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+
+        // (b) Neither authority present, index precise => no look.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::MayLookAtFaceDown
+            ),
+            "precondition: no battlefield MayLookAtFaceDown static"
+        );
+        assert!(
+            !viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "no authority => the viewer may not look"
+        );
+
+        // (a) TCE grant (controller P0) with the battlefield index still absent.
+        state.add_transient_continuous_effect(
+            ObjectId(999),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            opp_creature(),
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::MayLookAtFaceDown
+            ),
+            "the TCE authority must NOT flip the battlefield-static presence index"
+        );
+        assert!(
+            viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "TCE-granted look must survive the battlefield-static gate (revert-failing)"
+        );
+
+        // (c) Battlefield static (index present) — presence-positive fall-through.
+        let mut state = GameState::new_two_player(42);
+        let face_down = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Face Down".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&face_down).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.face_down = true;
+        }
+        let looker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Found Footage".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&looker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MayLookAtFaceDown).affected(opp_creature()));
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "a battlefield MayLookAtFaceDown static permits the look on fall-through"
         );
     }
 
