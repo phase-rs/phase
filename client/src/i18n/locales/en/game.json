@@ -77,7 +77,8 @@
     "priorityTooltip": "Pass priority. If the stack is empty, this advances through the current priority window. Shortcut: Space.",
     "pass": "Pass",
     "passToEndTooltip": "Auto-pass until the end step unless a choice, stop, or Full Control interrupts. Shortcut: Enter.",
-    "autoPassing": "Auto-Passing to End Step..."
+    "autoPassing": "Auto-Passing to End Step...",
+    "resolvingStack": "Resolving Stack..."
   },
   "board": {
     "regroupCreatures": "Regroup duplicate creature groups",

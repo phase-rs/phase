@@ -35,9 +35,10 @@ use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
     CreatableToken, CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget,
-    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player,
-    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
-    SearchLibraryAction, Spell, Spells, Target, TokenCopyEffects, TokenFlag,
+    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent,
+    PhasedOutEffect, Player, Players, ReplacementActionWouldEnter,
+    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, Target,
+    TokenCopyEffects, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -2415,6 +2416,52 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     face_down_profile: None,
                     enters_modified_if: None,
                 },
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(return_ability),
+                    uses_tracked_set: false,
+                },
+            ])
+        }
+
+        // CR 702.26a + CR 603.7c: "Phase out target creature until [host]
+        // leaves the battlefield. Tap that creature as it phases in this way."
+        // (Oubliette). Immediate phase-out plus a host-scoped CantPhaseIn lock,
+        // then a delayed PhaseIn (+ optional tap-on-entry) when the host leaves.
+        Action::PhaseOutPermanentUntilWithEffects(perm, expiration, phased_out_effect) => {
+            let target = convert_permanent(perm)?;
+            let condition = expiration_to_delayed_trigger_condition(expiration)?;
+
+            let cant_phase_in = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }])],
+                duration: Some(Duration::UntilHostLeavesPlay),
+                target: Some(TargetFilter::ParentTarget),
+            };
+
+            let mut return_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                },
+            );
+            if matches!(phased_out_effect, PhasedOutEffect::TapAsPhasesIn) {
+                return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::ParentTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )));
+            }
+
+            Ok(vec![
+                Effect::PhaseOut { target },
+                cant_phase_in,
                 Effect::CreateDelayedTrigger {
                     condition,
                     effect: Box::new(return_ability),

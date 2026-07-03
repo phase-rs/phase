@@ -3117,6 +3117,102 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden — "Whenever a creature
+    /// dies, if it had power greater than Drizzt's power, put a number of +1/+1
+    /// counters on Drizzt equal to the difference." End-to-end through the real
+    /// parser: a larger-power creature dying gates the trigger on and puts
+    /// `dyingPower - drizztPower` counters (read from LKI, CR 603.10a); an
+    /// equal/smaller creature fails the gate and adds none. Fails on revert
+    /// (parser leaves the effect Unimplemented / drops the gate → 0 counters).
+    #[test]
+    fn drizzt_difference_counters_from_dying_creature_lki_power() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::triggers::TriggerMode;
+
+        // Parse Drizzt's dies trigger from Oracle text (real pipeline).
+        let parsed = crate::parser::parse_oracle_text(
+            "Double strike\n\
+             Whenever a creature dies, if it had power greater than Drizzt's power, \
+             put a number of +1/+1 counters on Drizzt equal to the difference.",
+            "Drizzt Do'Urden",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Ranger".to_string()],
+        );
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.execute
+                        .as_ref()
+                        .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("Drizzt dies PutCounter trigger not parsed: {parsed:#?}"))
+            .clone();
+
+        // Run the dies scenario with a creature of the given power; return the
+        // number of +1/+1 counters Drizzt ends up with.
+        let run = |dying_power: i32| -> u32 {
+            let mut state = GameState::new_two_player(42);
+
+            let drizzt_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Drizzt Do'Urden".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let d = state.objects.get_mut(&drizzt_id).unwrap();
+                d.power = Some(2);
+                d.toughness = Some(3);
+                d.card_types.core_types.push(CoreType::Creature);
+                d.trigger_definitions.push(dies_trigger.clone());
+            }
+
+            let dying_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Hill Giant".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let g = state.objects.get_mut(&dying_id).unwrap();
+                g.power = Some(dying_power);
+                g.toughness = Some(3);
+                g.card_types.core_types.push(CoreType::Creature);
+            }
+
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, dying_id, Zone::Graveyard, &mut events);
+            process_triggers(&mut state, &events);
+            while !state.stack.is_empty() {
+                let mut resolve_events = Vec::new();
+                resolve_top(&mut state, &mut resolve_events);
+            }
+
+            state.objects[&drizzt_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        // Larger power (5) than Drizzt (2): gate passes, +1/+1 counters = 5 - 2 = 3.
+        assert_eq!(
+            run(5),
+            3,
+            "5-power creature dying should give Drizzt 3 (=5-2) +1/+1 counters"
+        );
+        // Equal power (2): strict GT gate fails, no counters.
+        assert_eq!(run(2), 0, "equal-power creature must not add counters");
+        // Smaller power (1): gate fails, no counters.
+        assert_eq!(run(1), 0, "smaller-power creature must not add counters");
+    }
+
     /// Regression test: MoveCounters must use LKI when the source has changed zones.
     /// Simulates Essence Channeler's "When this creature dies, put its counters on
     /// target creature you control" — the source is in the graveyard with no counters,

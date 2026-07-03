@@ -1,10 +1,11 @@
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 
 /// Resolve the object subjects of a Suspect / Unsuspect effect.
 ///
@@ -80,6 +81,14 @@ fn can_become_suspected(state: &GameState, object_id: ObjectId) -> bool {
     if obj.is_suspected {
         return false;
     }
+    // CR 701.60a: O(1) presence gate — with no CantBecomeSuspected static present the
+    // designation is unprohibited, so return `true`. This gate MUST sit BELOW the CR
+    // 701.60d `is_suspected` early-return above: placing it higher would let the
+    // resolver double-suspect an already-suspected permanent.
+    if !static_kind_present(state, StaticModeKind::CantBecomeSuspected) {
+        return true;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 701.60a: an active `CantBecomeSuspected` static (e.g. Airtight Alibi's
     // "can't become suspected") prohibits the designation even while unsuspected.
     !crate::game::functioning_abilities::game_functioning_statics(state).any(|(src, def)| {
@@ -470,6 +479,109 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::CreatureSuspected { .. })),
             "no CreatureSuspected event when the prohibition gate fires"
+        );
+    }
+
+    /// Unit 2, site #20: `can_become_suspected` gates its O(N) whole-battlefield
+    /// `CantBecomeSuspected` scan behind the O(1) `StaticModePresence` index. Driven
+    /// through the real `resolve` (Suspect) production path on a large board with the
+    /// index precise (post-flush) and zero `CantBecomeSuspected` statics, the
+    /// designation succeeds with ZERO recorded full scans. Reverting the
+    /// `if !static_kind_present(..) { return true }` gate makes the fall-through
+    /// `record_static_full_scan()` fire, flipping the counter. The anchor half proves
+    /// the counter is wired: with a `CantBecomeSuspected` static present the scan runs.
+    #[test]
+    fn suspect_gate_zero_scans() {
+        let mut state = GameState::new_two_player(42);
+        let target = setup_creature(&mut state);
+        for i in 0..600u64 {
+            create_object(
+                &mut state,
+                CardId(2000 + i),
+                PlayerId((i % 2) as u8),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+        }
+        // Flush makes the presence index PRECISE (CantBecomeSuspected absent).
+        evaluate_layers(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::Suspect {
+                target: TargetFilter::Any,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        crate::game::perf_counters::reset();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            state.objects[&target].is_suspected,
+            "unsuspected creature with no prohibition must become suspected"
+        );
+        assert_eq!(
+            scans, 0,
+            "the O(1) presence gate must skip the CantBecomeSuspected scan (revert-failing)"
+        );
+
+        // Non-vacuous anchor: install a CantBecomeSuspected static (source-only, no
+        // affected filter), reflush, and suspect a DIFFERENT creature — the gate
+        // falls through and the scan runs exactly once (finding no match for the
+        // other creature, so the designation still succeeds).
+        let other = create_object(
+            &mut state,
+            CardId(3000),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        let alibi = create_object(
+            &mut state,
+            CardId(3001),
+            PlayerId(0),
+            "Airtight Alibi".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&alibi)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBecomeSuspected));
+        evaluate_layers(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::Suspect {
+                target: TargetFilter::Any,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(other)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        crate::game::perf_counters::reset();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+        assert!(
+            state.objects[&other].is_suspected,
+            "the source-only prohibition does not cover a different creature"
+        );
+        assert_eq!(
+            scans, 1,
+            "present index falls through to exactly one recorded scan"
         );
     }
 

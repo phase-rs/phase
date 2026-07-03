@@ -25,7 +25,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
     CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope,
-    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -1914,6 +1914,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // fresh cache for the next incremental flush's truth-delta consult.
     refresh_static_gate_truth(state);
 
+    // Rebuild the O(1) `StaticModeKind` presence index from the fully-derived board,
+    // immediately after the gate-truth cache and before `layers_dirty = Clean`, so a full
+    // eval always leaves a precise presence index for the next scan-gate consult.
+    refresh_static_mode_presence(state);
+
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
     // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
@@ -1932,6 +1937,229 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 404 + CR 611.3a: Does a `TargetFilter` test membership of a specific
+/// `zone` (a `FilterProp::InZone { zone }`)? Recurses `Or`/`And`/`Not` compounds.
+fn target_filter_reads_zone(filter: &TargetFilter, zone: Zone) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(|f| target_filter_reads_zone(f, zone))
+        }
+        TargetFilter::Not { filter } => target_filter_reads_zone(filter, zone),
+        _ => false,
+    }
+}
+
+/// CR 404 + CR 611.3a: Does a static-ability enabling CONDITION depend on which
+/// objects occupy `zone` — an `IsPresent` (or a negated/compound thereof) whose
+/// filter tests `FilterProp::InZone { zone }`? Tarmogoyf / Cairn Wanderer ("as
+/// long as a creature card with <keyword> is in a graveyard, ~ has <keyword>")
+/// are the canonical cases. Such a gate can flip when `zone` membership changes,
+/// so a zone move into/out of `zone` must re-evaluate layers.
+fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zone) -> bool {
+    match condition {
+        StaticCondition::IsPresent { filter: Some(f) } => target_filter_reads_zone(f, zone),
+        // CR 404 + CR 611.3a: a count/threshold gate whose either operand reads a
+        // zone's card count — Threshold ("fewer than eight cards in your
+        // graveyard"), `GraveyardSize`, `ZoneCardCount { Graveyard }`, or an
+        // `ObjectCount` over a graveyard-scoped filter — flips when that zone's
+        // membership crosses the threshold, so a move into/out of `zone` must
+        // re-evaluate it too. Distinct from the `IsPresent` presence gate above.
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_reads_zone(lhs, zone) || quantity_expr_reads_zone(rhs, zone)
+        }
+        StaticCondition::Not { condition } => {
+            static_condition_reads_zone_membership(condition, zone)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| static_condition_reads_zone_membership(c, zone)),
+        _ => false,
+    }
+}
+
+/// CR 404: Does a `ZoneRef` denote the game `zone`?
+fn zone_ref_denotes_zone(zone_ref: &crate::types::ability::ZoneRef, zone: Zone) -> bool {
+    use crate::types::ability::ZoneRef;
+    matches!(
+        (zone_ref, zone),
+        (ZoneRef::Graveyard, Zone::Graveyard)
+            | (ZoneRef::Exile, Zone::Exile)
+            | (ZoneRef::Library, Zone::Library)
+            | (ZoneRef::Hand, Zone::Hand)
+    )
+}
+
+/// CR 404 + CR 611.3a: Does a `QuantityExpr` read the card count / object
+/// population of `zone`? Mirrors the structural recursion of
+/// `crate::game::quantity::quantity_expr_uses_object_count` so composite/nested
+/// aggregates are classified through the same expression tree.
+fn quantity_expr_reads_zone(expr: &QuantityExpr, zone: Zone) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_reads_zone(qty, zone),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_reads_zone(inner, zone),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(|e| quantity_expr_reads_zone(e, zone))
+        }
+        QuantityExpr::UpTo { max } => quantity_expr_reads_zone(max, zone),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_reads_zone(exponent, zone),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_zone(left, zone) || quantity_expr_reads_zone(right, zone)
+        }
+    }
+}
+
+/// CR 404 + CR 611.3a: Leaf classification for `quantity_expr_reads_zone` — does
+/// a `QuantityRef` read the card count / object population of `zone`? EXHAUSTIVE
+/// and wildcard-free (mirroring `quantity_ref_uses_object_count`) so any future
+/// quantity reference that reads a zone must be classified intentionally rather
+/// than silently under-escalating a zone-membership gate.
+fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    match qty {
+        // Direct graveyard card count (CR 404). `player` scope is irrelevant to
+        // the zone identity — any player's graveyard is still the graveyard.
+        QuantityRef::GraveyardSize { .. } => zone == Zone::Graveyard,
+        // Zone-parameterized card counts.
+        QuantityRef::ZoneCardCount {
+            zone: zone_ref,
+            filter,
+            ..
+        } => {
+            zone_ref_denotes_zone(zone_ref, zone)
+                || filter
+                    .as_ref()
+                    .is_some_and(|f| target_filter_reads_zone(f, zone))
+        }
+        QuantityRef::TargetZoneCardCount { zone: zone_ref } => {
+            zone_ref_denotes_zone(zone_ref, zone)
+        }
+        // Filter-based object counts read `zone` iff their filter is zone-scoped
+        // (an `ObjectCount` filter can carry `FilterProp::InZone { zone }`).
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::Aggregate { filter, .. } => target_filter_reads_zone(filter, zone),
+        // Distinct card types read `zone` only when sourced from that zone's cards
+        // (Tarmogoyf: card types among cards in all graveyards).
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        // Everything else reads player-level state, single-object state, battle-
+        // field-only population, history records, choices, or tracked sets — none
+        // depend on `zone` membership. Enumerated explicitly (no wildcard) so a
+        // future zone-reading variant is forced through this classification.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::CostXPaid
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::KickerCount
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. } => false,
+    }
+}
+
+/// CR 611.3a: Is any ACTIVE static-ability continuous effect gated on membership
+/// of `zone`? Consulted at the zone-change seam (`zones::move_to_zone`) so a card
+/// entering or leaving `zone` re-evaluates layers ONLY when a matching gate is
+/// live. This keeps routine off-battlefield churn (deaths, mill, discard) cheap
+/// in the common case where no `zone`-membership-gated static exists. Scans the
+/// static-effect-source index — O(generators), not O(zone).
+pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Zone) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .condition
+                    .as_ref()
+                    .is_some_and(|c| static_condition_reads_zone_membership(c, zone))
+        }) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
@@ -1970,6 +2198,12 @@ pub fn flush_layers(state: &mut GameState) {
             if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
                 apply_layers_incremental(state, prepared);
+                // Rebuild the presence index so the incremental arm leaves a PRECISE index
+                // (not a conservative superset). The incremental path is already
+                // O(battlefield): `prepare_incremental_flush` unconditionally calls
+                // `StaticSourceIndex::rebuild_from_state`, so a full presence rebuild here is
+                // DRY, matches the sibling-cache convention, and adds no asymptotic cost.
+                refresh_static_mode_presence(state);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
                 }
@@ -2278,6 +2512,19 @@ fn refresh_static_gate_truth(state: &mut GameState) {
         }
     });
     state.static_gate_truth = next;
+}
+
+/// Rebuild the O(1) `StaticModeKind` presence index wholesale from the same
+/// `game_functioning_statics` iterator its consumers would otherwise scan, so the index is
+/// exactly `.any(|(_, d)| d.mode.kind() == kind)` for every kind — no false negatives. The
+/// fold accumulates into a local `StaticModePresence` first (the iterator borrows `state`),
+/// then assigns.
+fn refresh_static_mode_presence(state: &mut GameState) {
+    let mut presence = crate::types::statics::StaticModePresence::empty();
+    for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+        presence.insert(def.mode.kind());
+    }
+    state.static_mode_presence = presence;
 }
 
 /// CR 613.1: Continuous effects are applied in layers to determine object characteristics.
@@ -7376,6 +7623,96 @@ mod tests {
 
         state.objects.get_mut(&aura).unwrap().attached_to = Some(artifact.into());
         assert!(!evaluate_condition(&state, &condition, PlayerId(0), aura));
+    }
+
+    /// CR 611.3a + CR 702: End-to-end runtime proof for the Cairn Wanderer
+    /// graveyard-keyword static (issue #4774). Drives the real layer pipeline
+    /// (`evaluate_layers` + `has_keyword`), not just the parsed AST: the
+    /// conditional grant `~ has Flying as long as a creature card with Flying is in
+    /// a graveyard` must apply ONLY while such a card is present, and must
+    /// re-evaluate as the graveyard changes. This fails on revert of the
+    /// graveyard-presence gate — the pre-fix `Unrecognized`→always-true condition
+    /// would keep Flying even with an empty graveyard.
+    #[test]
+    fn cairn_graveyard_keyword_static_grants_flying_only_while_flyer_in_graveyard() {
+        let mut state = setup();
+
+        let cairn = make_creature(&mut state, "Cairn Wanderer", 4, 4, PlayerId(0));
+        let gate = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            ))),
+        };
+        let cairn_static = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(gate);
+        state
+            .objects
+            .get_mut(&cairn)
+            .unwrap()
+            .static_definitions
+            .push(cairn_static);
+
+        // Empty graveyard → gate unsatisfied → Cairn must NOT have Flying.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "no flying creature card in a graveyard → conditional grant must not apply"
+        );
+
+        // A flying creature CARD in a graveyard → gate satisfied → Cairn gains Flying.
+        let gy_flyer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_flyer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_keywords.push(Keyword::Flying);
+            obj.keywords.push(Keyword::Flying);
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "a flying creature card in a graveyard → conditional grant must apply"
+        );
+
+        // Remove it → gate unsatisfied again → grant falls away (CR 611.3a re-eval).
+        state.objects.get_mut(&gy_flyer).unwrap().zone = Zone::Exile;
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "removing the flyer from the graveyard must drop the conditional Flying grant"
+        );
     }
 
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
@@ -15828,6 +16165,124 @@ mod tests {
         assert_eq!(
             ctrl.name, "Secret Bear",
             "the controller still sees the real back-face identity"
+        );
+    }
+
+    // ── StaticModePresence refresh tests (Verification Matrix D/F) ──
+
+    /// Test D — incremental-arm refresh. A battlefield entrant carrying an `IgnoreHexproof`
+    /// static (a non-`Continuous` static, so the flush takes the incremental fast path) must
+    /// still leave the presence index PRECISE. Advisory A: establish a precise presence=false
+    /// baseline via a FULL flush FIRST, so assertion (2) cannot pass vacuously.
+    #[test]
+    fn incremental_flush_refreshes_static_mode_presence() {
+        use crate::types::statics::StaticModeKind;
+        let mut state = setup();
+        // Baseline: full flush with NO IgnoreHexproof static => precise presence = false.
+        evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "baseline: no IgnoreHexproof static means presence is precisely false"
+        );
+
+        // Entrant carries an object-scoped IgnoreHexproof static (mode != Continuous => the
+        // incremental fast path handles it, no full escalation).
+        let entrant = make_creature(&mut state, "Nowhere to Run", 2, 2, PlayerId(0));
+        state.objects.get_mut(&entrant).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::IgnoreHexproof).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                )),
+            ]
+            .into();
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        // (1) Branch proof: the incremental arm ran (NOT a Full escalation).
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "must take the incremental arm, not escalate"
+        );
+        assert_eq!(counters.layers_full_eval, 0, "must not escalate to full");
+        // (2) Revert guard: presence now reports IgnoreHexproof present. Removing the
+        //     Step 4c refresh_static_mode_presence call leaves this stale-false.
+        assert!(
+            crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "incremental flush must refresh the presence index"
+        );
+        // (3) A kind absent from the board still reports false — the incremental arm builds a
+        //     PRECISE index, not a conservative all-present one.
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "incremental refresh must remain precise for absent kinds"
+        );
+    }
+
+    /// Test F — building-block equivalence (the Unit 2/3 contract). After a full flush on a
+    /// mixed board (a phased-out static, plus plain battlefield statics of distinct kinds),
+    /// the presence index must equal `game_functioning_statics().any(kind == K)` for EVERY
+    /// kind. `StaticModePresence: PartialEq` compares the whole discriminant array, so a
+    /// single `assert_eq!` IS the "for every K" check.
+    #[test]
+    fn static_mode_presence_equals_functioning_statics_fold() {
+        use crate::types::statics::{StaticModeKind, StaticModePresence};
+        let mut state = setup();
+        // Plain battlefield statics of two distinct kinds.
+        let a = make_creature(&mut state, "Ignore Hexproof Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&a).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&b).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+        // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
+        // game_functioning_statics, so its kind must NOT appear in presence.
+        let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&phased).unwrap();
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::Shroud)].into();
+            obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        }
+
+        evaluate_layers(&mut state);
+
+        // Whole-array equivalence: recompute from the same iterator the consumers scan.
+        let mut expected = StaticModePresence::empty();
+        for (_, def) in crate::game::functioning_abilities::game_functioning_statics(&state) {
+            expected.insert(def.mode.kind());
+        }
+        assert_eq!(
+            expected, state.static_mode_presence,
+            "presence index must equal the game_functioning_statics fold for every kind"
+        );
+        // Explicit spot-checks of the interesting scopings.
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::IgnoreHexproof
+        ));
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::CantBeTargeted
+        ));
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "phased-out static (CR 702.26b) must not appear in presence"
         );
     }
 }

@@ -12,10 +12,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Effect, FilterProp, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -23,11 +23,12 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
@@ -39,21 +40,23 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
-    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
-    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
-    is_enters_with_counter_replacement_line, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    is_alternative_keyword_cost_pattern, is_as_enters_becomes_choice_pattern,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern,
+    is_collect_evidence_alt_cost_pattern, is_compound_turn_limit, is_defiler_cost_pattern,
+    is_enters_tapped_cant_untap_compound, is_enters_with_counter_replacement_line,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::dispatch_line_nom;
+use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
-    try_parse_temporal_delayed_trigger_ability,
+    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
@@ -70,7 +73,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
+    parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -1144,6 +1148,145 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
+/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
+/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
+/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
+fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        reconcile_host_bound_phase_outs_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            reconcile_host_bound_phase_outs_in_ability(execute);
+        }
+    }
+}
+
+fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
+    let should_upgrade = matches!(*def.effect, Effect::PhaseOut { .. })
+        && def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()));
+    if should_upgrade {
+        upgrade_host_bound_phase_out_at_head(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        reconcile_host_bound_phase_outs_in_ability(sub);
+    }
+}
+
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
+    if is_host_bound_phase_in_tap_rider_node(def) {
+        return true;
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()))
+}
+
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
+    let Effect::PhaseOut { target } = *def.effect.clone() else {
+        return;
+    };
+
+    let (tail, removed_rider) = remove_host_bound_tap_rider_from_chain(def.sub_ability.take());
+    if !removed_rider {
+        def.sub_ability = tail;
+        return;
+    }
+
+    let cant_phase_in = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }])],
+        duration: Some(Duration::UntilHostLeavesPlay),
+        target: Some(TargetFilter::ParentTarget),
+    };
+
+    let mut return_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseIn {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )));
+
+    let mut delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            effect: Box::new(return_ability),
+            uses_tracked_set: false,
+        },
+    );
+    delayed.sub_ability = tail;
+
+    let mut lock = AbilityDefinition::new(AbilityKind::Spell, cant_phase_in);
+    lock.sub_ability = Some(Box::new(delayed));
+
+    *def.effect = Effect::PhaseOut { target };
+    def.sub_ability = Some(Box::new(lock));
+}
+
+/// Remove only the host-bound tap rider node, preserving any intervening siblings.
+fn remove_host_bound_tap_rider_from_chain(
+    chain: Option<Box<AbilityDefinition>>,
+) -> (Option<Box<AbilityDefinition>>, bool) {
+    let Some(mut node) = chain else {
+        return (None, false);
+    };
+
+    if is_host_bound_phase_in_tap_rider_node(&node) {
+        return (node.sub_ability.take(), true);
+    }
+
+    if let Some(sub) = node.sub_ability.take() {
+        let (new_sub, found) = remove_host_bound_tap_rider_from_chain(Some(sub));
+        node.sub_ability = new_sub;
+        if found {
+            return (Some(node), true);
+        }
+    }
+
+    (Some(node), false)
+}
+
+fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition) -> bool {
+    if !matches!(
+        def.effect.as_ref(),
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return false;
+    }
+    def.description
+        .as_deref()
+        .is_some_and(host_bound_phase_in_tap_phrase)
+}
+
+fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    scan_contains(&lower, "as it phases in this way")
+        || scan_contains(&lower, "as that creature phases in this way")
+        || scan_contains(&lower, "as that permanent phases in this way")
+}
+
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     if types.iter().any(|card_type| card_type == "Creature") {
         Some(ChosenSubtypeKind::CreatureType)
@@ -1233,6 +1376,91 @@ where
     }
 
     false
+}
+
+/// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
+/// continuation across a graveyard-keyword-gated static grant (Cairn Wanderer).
+///
+/// The modeled sentence "As long as a creature card with <kw> is in a graveyard,
+/// this creature has <kw>" parses to ONE gated `StaticDefinition` (grant
+/// `AddKeyword { kw }` gated on `IsPresent(<kw>-card in a graveyard)`). Each
+/// keyword in the trailing list clones that template, swapping BOTH the granted
+/// keyword and the gate condition's `WithKeyword`, so each keyword is granted
+/// independently — only while a creature card WITH that keyword is in a graveyard
+/// (CR 611.3a per-keyword conditional continuous static). This is the plain-
+/// `StaticDefinition` analogue of `attach_same_is_true_keywords` (which operates
+/// on the trigger path's `GenericEffect`), reusing the same keyword-list parser
+/// (`try_parse_same_is_true_continuation`) and keyword-rewrite building block
+/// (`rewrite_condition_keyword`) so it covers the whole class, not one card.
+///
+/// Returns `false` (leaving the line for the generic dispatch) when the modeled
+/// sentence, the keyword list, or the gated template cannot be recovered. Any
+/// continuation keyword that resolves to `Keyword::Unknown` (unqualified
+/// `protection` / `landwalk`) is emitted as an explicit `Unimplemented` residual
+/// rather than an inert `AddKeyword(Unknown)` static, so it stays a loud
+/// unsupported gap in coverage instead of silently reading as supported.
+fn push_graveyard_keyword_same_is_true_tail(
+    result: &mut ParsedAbilities,
+    line: &str,
+    lower: &str,
+) -> bool {
+    let Some((modeled_sentence, tail)) =
+        split_same_is_true_static_tail(line, lower, parse_graveyard_keyword_grant_sentence)
+    else {
+        return false;
+    };
+    // No cant-cast gate applies to a graveyard-keyword grant, so the raw-line /
+    // card-name gate params are None (matching the other non-cant-cast callers).
+    let mut statics =
+        parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None);
+    // The modeled sentence must yield exactly the gated keyword grant to clone.
+    let Some(template) = statics.first().cloned() else {
+        return false;
+    };
+    // CR 611.3a: only distribute a genuinely gated grant. If the modeled sentence
+    // ever parsed without its graveyard-presence condition, fall through to the
+    // generic path rather than cloning an UNGATED grant per keyword — that would
+    // reintroduce the unconditional over-grant this distribution exists to remove.
+    if template.condition.is_none() {
+        return false;
+    }
+    let Some(keywords) = try_parse_same_is_true_continuation(tail) else {
+        return false;
+    };
+    // CR 611.3a coverage-honesty: a continuation keyword that resolves to
+    // `Keyword::Unknown` (an unqualified `protection` / `landwalk` — those keyword
+    // abilities require a quality/subtype that a bare continuation clause does not
+    // supply) is NOT semantically modeled. Cloning it into an
+    // `AddKeyword(Keyword::Unknown(_))` static would still read as Continuous-mode
+    // "supported" in `game/coverage.rs` (which checks static mode + child
+    // grant-abilities/triggers, not the granted keyword's identity), letting the
+    // card become coverage-supported while that clause does nothing. Keep those as
+    // an explicit `Unimplemented` residual so they remain a loud unsupported gap.
+    let mut unqualified: Vec<String> = Vec::new();
+    for keyword in &keywords {
+        if let Keyword::Unknown(name) = keyword {
+            unqualified.push(name.clone());
+            continue;
+        }
+        let mut new_def = template.clone();
+        for modification in &mut new_def.modifications {
+            if let ContinuousModification::AddKeyword { keyword: kw } = modification {
+                *kw = keyword.clone();
+            }
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_condition_keyword(condition, keyword);
+        }
+        statics.push(new_def);
+    }
+    result.statics.extend(statics);
+    if !unqualified.is_empty() {
+        result.abilities.push(make_unimplemented(&format!(
+            "the same is true for {}",
+            unqualified.join(", ")
+        )));
+    }
+    true
 }
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
@@ -2428,6 +2656,15 @@ pub(crate) fn parse_oracle_ir(
         // Normalize card self-references for static parsing (replace card name with ~).
         let static_line = normalize_self_refs_for_static(&line, card_name);
         let static_line_lower = static_line.to_lowercase();
+        // CR 611.3a + CR 702: "As long as a creature card with <kw> is in a
+        // graveyard, this creature has <kw>. The same is true for <keyword list>."
+        // (Cairn Wanderer) — distribute the gated grant per keyword before the
+        // chosen/every-type same-is-true arms (which gap the tail) or the generic
+        // static path (which mis-tokenizes the keyword list) can claim the line.
+        if push_graveyard_keyword_same_is_true_tail(&mut result, &static_line, &static_line_lower) {
+            i += 1;
+            continue;
+        }
         if push_same_is_true_static_tail(
             &mut result,
             &static_line,
@@ -3469,6 +3706,21 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
+            // CR 208.2b + CR 614.1c + CR 614.12a: modal "As ~ enters, it becomes
+            // your choice of [P/T profiles]" as-enters replacement (Primal Plasma,
+            // Primal Clay, Corrupted Shapeshifter, Aquamorph Entity). This is a
+            // single-sentence replacement line with NO bullet block, so the
+            // Priority-1 `OracleBlockAst::AsEntersAnchorWordModal` block parser
+            // never fires — it must be lowered here. [G2] It MUST run BEFORE the
+            // generic `parse_replacement_sentence_sequence` / `parse_replacement_line`
+            // parsers so those don't claim the "becomes your choice of" line as a
+            // plain choice/animate and drop the per-mode gated statics.
+            if is_as_enters_becomes_choice_pattern(&lower)
+                && lower_as_enters_becomes_choice_modal(&line, &mut result)
+            {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -4072,6 +4324,7 @@ pub(crate) fn parse_oracle_ir(
 
     reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
+    reconcile_host_bound_phase_outs(&mut result);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

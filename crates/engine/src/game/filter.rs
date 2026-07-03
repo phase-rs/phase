@@ -4761,19 +4761,40 @@ fn object_shares_quality_with_reference_filter(
         recipient_id: source.recipient_id,
         scoped_iteration_player: None,
     };
+    // CR 109.2 + CR 205.3m: a bare type reference such as "a creature you
+    // control" or "a creature card in your graveyard" denotes an object in the
+    // zone that reference implies — a permanent on the battlefield or a card in
+    // the named zone — never a spell on the stack. A creature spell being cast
+    // (Volo, Guide to Monsters; Menagerie Curator) is itself on the stack, and
+    // any sibling creature spell on the stack is likewise not a "creature you
+    // control" permanent. Excluding stack objects from the reference scan keeps
+    // any same-type spell (the one under test AND its siblings) from
+    // self-satisfying the "shares a creature type" test; stack-scoped references
+    // (TriggeringSource / ParentTarget) are resolved by the branches above, so
+    // this scan only ever backs bare permanent/card references. Battlefield- and
+    // graveyard-to-object comparisons keep their existing self-inclusive
+    // semantics.
     state.objects.keys().copied().any(|reference_id| {
-        filter_inner(state, reference_id, reference_filter, &ctx)
-            && state
-                .objects
-                .get(&reference_id)
-                .is_some_and(|reference_obj| {
-                    let values = object_shared_quality_values(
-                        reference_obj,
-                        quality,
-                        &state.all_creature_types,
-                    );
-                    object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
-                })
+        state
+            .objects
+            .get(&reference_id)
+            .is_some_and(|reference_obj| {
+                reference_obj.zone != Zone::Stack
+                    && filter_inner(state, reference_id, reference_filter, &ctx)
+                    && {
+                        let values = object_shared_quality_values(
+                            reference_obj,
+                            quality,
+                            &state.all_creature_types,
+                        );
+                        object_shares_quality_values(
+                            obj,
+                            quality,
+                            &values,
+                            &state.all_creature_types,
+                        )
+                    }
+            })
     })
 }
 
@@ -7195,6 +7216,92 @@ mod tests {
         assert!(!matches_target_filter(&state, plains, &filter, source));
         assert!(!matches_target_filter(&state, island, &filter, source));
         assert!(matches_target_filter(&state, mountain, &filter, source));
+    }
+
+    /// CR 109.2 + CR 205.3m (issue #4962 review): a bare "a creature you
+    /// control" shared-quality reference means a permanent on the battlefield,
+    /// never a spell on the stack. A *sibling* creature spell on the stack that
+    /// shares a creature type must NOT satisfy the reference, or Volo, Guide to
+    /// Monsters / Menagerie Curator would wrongly treat the cast spell as
+    /// sharing a type and skip the copy. This exercises the runtime filter
+    /// (`matches_target_filter` → `object_shares_quality_with_reference_filter`)
+    /// with the sibling on the stack (must not block) and the SAME object moved
+    /// to the battlefield (must block) — proving the zone axis decides, not
+    /// merely excluding the object under test.
+    #[test]
+    fn shares_quality_reference_ignores_sibling_creature_spell_on_stack() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Goblin".to_string()];
+        let source = add_creature(&mut state, PlayerId(0), "Volo, Guide to Monsters");
+
+        // The creature spell under test — a Goblin on the stack being cast.
+        let cast_spell = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Cast Goblin".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&cast_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        // A sibling creature spell of the SAME type, also on the stack.
+        let sibling_spell = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Sibling Goblin".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&sibling_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        // Volo's disjunctive reference: "a creature you control OR a creature
+        // card in your graveyard".
+        let reference = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+            ],
+        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(Box::new(reference)),
+                relation: SharedQualityRelation::DoesNotShare,
+            },
+        ]));
+
+        // CR 109.2: the sibling Goblin is a spell on the stack, not a "creature
+        // you control" permanent, so it does not block — the cast spell still
+        // matches the "doesn't share a creature type" filter.
+        assert!(
+            matches_target_filter(&state, cast_spell, &filter, source),
+            "a sibling creature spell on the stack must not satisfy a bare \
+             'creature you control' reference (CR 109.2)"
+        );
+
+        // Move the same sibling onto the battlefield: now it IS a creature you
+        // control, so the cast spell shares a creature type and no longer
+        // matches the negated reference.
+        state.objects.get_mut(&sibling_spell).unwrap().zone = Zone::Battlefield;
+        assert!(
+            !matches_target_filter(&state, cast_spell, &filter, source),
+            "a same-type creature you control on the battlefield must satisfy \
+             the reference and block the 'doesn't share' filter"
+        );
     }
 
     #[test]

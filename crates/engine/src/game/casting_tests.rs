@@ -8437,6 +8437,8 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
                 amount: 1,
                 minimum_mana: None,
                 dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Subtype("Food".to_string())],
@@ -8488,6 +8490,217 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     assert!(
         state.stack.iter().any(|entry| entry.source_id == food),
         "Food activation should reach the stack after paying the reduced cost"
+    );
+}
+
+#[test]
+fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
+    // CR 601.2f + CR 605.1a: A "cost {2} less to activate that aren't mana
+    // abilities" static (Zirda, the Dawnwaker) must discount a NON-mana activated
+    // ability but leave a MANA ability's cost untouched. Both abilities share the
+    // same "{2}, {T}" cost; with no mana available, the discounted non-mana
+    // ability ({2}→{0}) is activatable while the exempt mana ability (still {2})
+    // is not — proving the `ActivationExemption::ManaAbilities` runtime skip.
+    let mut state = setup_game_at_main_phase();
+    let zirda = create_object(
+        &mut state,
+        CardId(760),
+        PlayerId(0),
+        "Zirda, the Dawnwaker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&zirda)
+        .unwrap()
+        .static_definitions
+        .push(
+            // CR 602.2 + CR 605.1a: Zirda is ACTIVATOR-scoped ("abilities you
+            // activate") — keyed on the static's controller activating, not on a
+            // source filter — and carries the mana-ability exemption.
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                activator: Some(crate::types::ability::PlayerFilter::Controller),
+            }),
+        );
+
+    let rock = create_object(
+        &mut state,
+        CardId(761),
+        PlayerId(0),
+        "Two-Ability Rock".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let cost = || AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        // Ability 0: a MANA ability ("{2}, {T}: Add {C}") — exempt, cost stays {2}.
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(cost()),
+        );
+        // Ability 1: a NON-mana ability ("{2}, {T}: You gain 1 life") — discounted to {0}.
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(cost()),
+        );
+    }
+
+    // No mana available for either activation.
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), rock, 0),
+        "the mana ability must NOT be discounted (exempt) — its {{2}} is unpayable with no mana"
+    );
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), rock, 1),
+        "the non-mana ability must be discounted {{2}}->{{0}} and be activatable with no mana"
+    );
+}
+
+/// CR 602.2: A "abilities you activate cost {N} less" static (Zirda, the
+/// Dawnwaker) is ACTIVATOR-scoped — the discount keys off *who activates* the
+/// ability (the static's controller), NOT who controls the ability's source.
+///
+/// Discriminating: the ability lives on a permanent Zirda's controller (P0) owns,
+/// but its `activator_filter = All` makes it legally activatable by the opponent
+/// (P1) too (CR 602.2). Driving the production seam `apply_cost_reduction` with
+/// each activator in turn:
+///   - P0 (Zirda's controller) activates → discounted {3} -> {1}.
+///   - P1 (opponent) activates the SAME ability on P0's own permanent → NOT
+///     discounted, stays {3}.
+///
+/// A source-controller-scoped implementation (the reverted bug — an `affected`
+/// filter of `card().controller(You)`) would wrongly discount P1's activation
+/// because the source is controlled by P0. Only an activator-scoped gate keeps
+/// the P1 cost at {3}.
+#[test]
+fn activated_ability_cost_reduction_you_activate_keys_off_activator_not_source_controller() {
+    let mut state = setup_game_at_main_phase();
+    let zirda = create_object(
+        &mut state,
+        CardId(760),
+        PlayerId(0),
+        "Zirda, the Dawnwaker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&zirda)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            // CR 602.2: activator-scoped to the static's controller ("you"),
+            // with no `affected` source filter.
+            activator: Some(crate::types::ability::PlayerFilter::Controller),
+        }));
+
+    // A permanent P0 controls, carrying an activated ability that ANY player may
+    // activate (CR 602.2 exception via `activator_filter = All`).
+    let source = create_object(
+        &mut state,
+        CardId(761),
+        PlayerId(0),
+        "Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+
+    let make_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(3),
+        });
+        def.activator_filter = Some(crate::types::ability::PlayerFilter::All);
+        def
+    };
+    let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        other => panic!("expected a plain mana cost, got {other:?}"),
+    };
+
+    // P0 (Zirda's controller) activating → discounted {3} -> {1}.
+    let mut def_p0 = make_def();
+    apply_cost_reduction(&state, &mut def_p0, PlayerId(0), source);
+    assert_eq!(
+        generic_of(&def_p0),
+        1,
+        "the static's controller activating must be discounted {{3}} -> {{1}}"
+    );
+
+    // P1 (opponent) activating the SAME ability on P0's permanent → NOT discounted.
+    let mut def_p1 = make_def();
+    apply_cost_reduction(&state, &mut def_p1, PlayerId(1), source);
+    assert_eq!(
+        generic_of(&def_p1),
+        3,
+        "an opponent activating an ability on the static controller's own permanent \
+         must NOT be discounted — the discount keys off the activator, not the source \
+         controller (source-controller scoping would wrongly yield {{1}})"
+    );
+
+    // Mirror direction: an ability on an OPPONENT's (P1's) permanent that P0 may
+    // activate (activator_filter = All). P0 activating it → discounted {3} -> {1},
+    // even though P0 does not control the source. The reverted source-controller
+    // bug (`affected = card().controller(You)`) would have WRONGLY left this at
+    // {3} because the source is controlled by P1 — the opposite failure direction.
+    let opp_source = create_object(
+        &mut state,
+        CardId(762),
+        PlayerId(1),
+        "Opponent's Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+    let mut def_p0_on_opp = make_def();
+    apply_cost_reduction(&state, &mut def_p0_on_opp, PlayerId(0), opp_source);
+    assert_eq!(
+        generic_of(&def_p0_on_opp),
+        1,
+        "the static's controller activating an ability on an OPPONENT's permanent \
+         must still be discounted {{3}} -> {{1}} — activator scope, not source \
+         controller (source-controller scoping would wrongly yield {{3}})"
     );
 }
 
@@ -8588,6 +8801,8 @@ fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
                 amount: 2,
                 minimum_mana: Some(1),
                 dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -15272,6 +15487,10 @@ fn only_once_each_turn_without_modify_limit_static_avoids_exact_scan() {
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
 
+    // Flush makes the `StaticModePresence` index PRECISE (no ModifyActivationLimit static).
+    // Production reaches activation legality post-flush; the pre-flush `all_present` default
+    // would conservatively fall through to the exact per-candidate static scan.
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
@@ -15291,6 +15510,7 @@ fn only_once_each_turn_without_modify_limit_static_avoids_exact_scan() {
     );
     handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events).unwrap();
 
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let untagged_second =
         handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events);
@@ -15330,6 +15550,10 @@ fn priority_activation_candidates_share_activation_restriction_static_gate() {
         ),
     ];
 
+    // Flush makes the presence index PRECISE (no ModifyActivationLimit static). Production
+    // reaches candidate production post-flush; the pre-flush `all_present` default would
+    // conservatively fall through to the exact per-candidate static scan.
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let actions = crate::ai_support::candidate_actions_broad(&state);
     let offered = actions
@@ -15372,6 +15596,8 @@ fn only_once_without_modify_limit_static_avoids_exact_scan() {
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
 
+    // Flush makes the presence index PRECISE (no ModifyActivationLimit static).
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
@@ -22913,6 +23139,77 @@ fn spell_matches_cost_filter_fail_closed_for_unrecognized_variants() {
         &TargetFilter::SelfRef,
         source_id,
     ));
+}
+
+/// CR 601.2f: a *filtered* one-shot cost reduction ("the next [type] spell you
+/// cast this turn costs {N} less" — Kadena, Slinking Sorcerer) must be consumed
+/// once the matching spell is cast, not left to discount every matching spell
+/// for the rest of the turn. The consumer previously removed only *unfiltered*
+/// entries. Revert-probe: with the old `spell_filter.is_none()` predicate the
+/// filtered entry survives and the length-0 assertion below fails.
+#[test]
+fn consume_filtered_pending_cost_reduction_removes_the_matching_entry() {
+    use crate::types::game_state::PendingSpellCostReduction;
+
+    let mut state = GameState::new_two_player(1);
+    // A creature spell cast by P0.
+    let spell = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Creature Spell".to_string(),
+        Zone::Stack,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    // 1. A filtered (creature-spell) reduction that matches is consumed.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(0),
+            amount: 2,
+            spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert!(
+        state.pending_spell_cost_reductions.is_empty(),
+        "a matching filtered reduction must be consumed (previously it persisted \
+         and re-discounted every creature spell for the rest of the turn)"
+    );
+
+    // 2. Regression: an unfiltered reduction is still consumed.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(0),
+            amount: 1,
+            spell_filter: None,
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert!(
+        state.pending_spell_cost_reductions.is_empty(),
+        "an unfiltered reduction is still consumed"
+    );
+
+    // 3. Precision: a reduction belonging to a different player is NOT consumed
+    //    by this player's cast.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(1),
+            amount: 2,
+            spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert_eq!(
+        state.pending_spell_cost_reductions.len(),
+        1,
+        "another player's reduction must not be consumed by P0's cast"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -30985,6 +31282,10 @@ mod loyalty_gate {
         );
         set_opponent_combat_priority(&mut state);
 
+        // Flush makes the presence index PRECISE (no ActivateAsInstant static). Production
+        // reaches activation legality post-flush; the pre-flush `all_present` default would
+        // conservatively fall through to the exact permission scan.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         assert!(
             !can_activate_ability_now(&state, PlayerId(0), pw, 0),
@@ -36122,6 +36423,8 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::permanent()
@@ -36246,6 +36549,8 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::HasChosenName)]
         .into();
@@ -36367,6 +36672,8 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
             dynamic_count: Some(QuantityRef::Power {
                 scope: ObjectScope::Source,
             }),
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
@@ -36635,6 +36942,8 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                 dynamic_count: Some(QuantityRef::Power {
                     scope: ObjectScope::Source,
                 }),
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -37176,6 +37485,8 @@ fn plot_special_action_ignores_generic_activated_ability_cost_modifiers() {
             amount: 1,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
     };
     let doc_axis = || {
@@ -37400,6 +37711,8 @@ fn firion_reduces_self_equip_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::SelfRef)]
         .into();
@@ -39923,5 +40236,154 @@ fn heal_draws_on_the_next_turns_upkeep() {
         p0.hand.len(),
         1,
         "Heal must draw exactly one card on the next turn's upkeep"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ravenous Trap alternative-cost gate (CR 118.9 + CR 601.2b + CR 404.1 +
+// CR 109.5). "If an opponent had three or more cards put into their graveyard
+// from anywhere this turn, you may pay {0} rather than pay this spell's mana
+// cost." Drives the real cast-cost pipeline
+// (`payable_spell_alternative_cost_details` → `restrictions::evaluate_condition`
+// → `resolve_quantity_scoped` over `zone_changes_this_turn`), binding the
+// parsed `Owned { Opponent }` gate against each record's `owner`.
+// ---------------------------------------------------------------------------
+
+/// Build a Ravenous Trap in `player`'s hand carrying the REAL parsed alt-cost
+/// casting option (so the runtime tests bind directly to the parser output, not
+/// a hand-rolled condition). Base printed cost is {2}{B} so the {0} alt-cost is
+/// distinguishable.
+fn create_ravenous_trap_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let option = crate::parser::oracle_casting::parse_spell_casting_option_line(
+        "If an opponent had three or more cards put into their graveyard from anywhere this turn, you may pay {0} rather than pay this spell's mana cost.",
+        "Ravenous Trap",
+    )
+    .expect("Ravenous Trap alt-cost line must parse");
+
+    let obj_id = create_object(
+        state,
+        CardId(9500),
+        player,
+        "Ravenous Trap".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Instant);
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 2,
+    };
+    Arc::make_mut(&mut obj.abilities).clear();
+    Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+        "Exile target player's graveyard.",
+        AbilityKind::Spell,
+    ));
+    obj.casting_options.push(option);
+    obj_id
+}
+
+/// Push `count` "card put into `owner`'s graveyard from anywhere this turn"
+/// zone-change records (from hand → graveyard, nontoken) so the gate's
+/// `ZoneChangeCountThisTurn { to: Graveyard, filter: Owned{..} + NonToken }`
+/// resolver counts them.
+fn push_cards_to_graveyard_this_turn(state: &mut GameState, owner: PlayerId, count: usize) {
+    for i in 0..count {
+        state
+            .zone_changes_this_turn
+            .push(crate::types::game_state::ZoneChangeRecord {
+                name: format!("Milled Card {i}"),
+                core_types: vec![CoreType::Creature],
+                mana_value: 1,
+                controller: owner,
+                owner,
+                is_token: false,
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    ObjectId(40_000 + i as u64),
+                    Some(Zone::Hand),
+                    Zone::Graveyard,
+                )
+            });
+    }
+}
+
+fn ravenous_trap_offered_cost(
+    state: &GameState,
+    player: PlayerId,
+    trap: ObjectId,
+) -> Option<AbilityCost> {
+    crate::game::casting_costs::payable_spell_alternative_cost_details(state, player, trap)
+        .map(|details| details.cost)
+}
+
+/// R-a: fewer than three opponent-owned cards to a graveyard this turn → the
+/// alt-cost gate is unmet, so no free-cast option is offered.
+#[test]
+fn ravenous_trap_alt_cost_not_offered_below_threshold() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(1), 2);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        None,
+        "two opponent-owned cards is below the GE-3 gate; alt-cost must not be offered"
+    );
+}
+
+/// R-b: three or more opponent-owned cards to a graveyard this turn → alt-cost
+/// offered and the spell is castable for {0}.
+#[test]
+fn ravenous_trap_alt_cost_offered_at_threshold() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(1), 3);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            },
+        }),
+        "three opponent-owned cards meets the GE-3 gate; {{0}} alt-cost must be offered"
+    );
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), trap),
+        "with the alt-cost payable for {{0}}, Ravenous Trap must be castable with no mana"
+    );
+}
+
+/// R-c: the owner-vs-controller discriminator. Three CASTER-owned cards (zero
+/// opponent-owned) went to a graveyard this turn. Because a card goes to its
+/// OWNER's graveyard (CR 404.1) and the gate scopes by `Owned { Opponent }`,
+/// the gate must stay unmet — the alt-cost is NOT offered. This is the hostile
+/// fixture that would pass if the filter used control (or `You`) instead of
+/// opponent ownership.
+#[test]
+fn ravenous_trap_alt_cost_owner_not_controller_discriminator() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(0), 3);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        None,
+        "caster-owned cards must not satisfy the opponent-owned gate (CR 404.1 owner scope)"
+    );
+}
+
+/// R-d: a still-unsupported leading-if predicate ("If the sky is green, …")
+/// keeps dropping the whole casting option — the generalization must not have
+/// widened the leading-if acceptance surface for unrelated predicates.
+#[test]
+fn unsupported_leading_if_predicate_still_drops_option() {
+    let option = crate::parser::oracle_casting::parse_spell_casting_option_line(
+        "If the sky is green, you may pay {0} rather than pay this spell's mana cost.",
+        "Not A Real Trap",
+    );
+    assert!(
+        option.is_none(),
+        "an unrecognized leading-if predicate must still drop the alt-cost option, got {option:?}"
     );
 }
