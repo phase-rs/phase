@@ -37868,3 +37868,35 @@ fn ents_fury_keeps_cost_paid_object_scope() {
         "Ent's Fury must keep Power{{CostPaidObject}} GE 4, got {condition:?}"
     );
 }
+
+/// #4921 / CR 118.12a: "[Effect] unless that player has [~] deal N damage to
+/// them" (Skullscorch) — the targeted player may have the source deal the damage
+/// instead of taking the primary effect. Mirrors the `its controller has …`
+/// forms, but the payer is the targeted player itself (`TargetFilter::Player`),
+/// not an object's controller.
+#[test]
+fn unless_that_player_has_source_deal_damage() {
+    let def = parse_effect_chain(
+        "Target player discards two cards at random unless that player has ~ deal 4 damage to them.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Discard { .. }),
+        "primary effect must be a Discard, got {:?}",
+        def.effect
+    );
+    let unless_pay = def
+        .unless_pay
+        .expect("the `that player has … deal N damage` unless must attach");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+    assert_eq!(
+        unless_pay.cost,
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Player,
+                damage_source: None,
+            }),
+        }
+    );
+}

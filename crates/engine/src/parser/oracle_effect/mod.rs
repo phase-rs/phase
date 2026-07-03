@@ -24028,8 +24028,17 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     ))
     .parse(after_unless)
     .ok()?;
+    parse_have_deal_damage_to_them_cost(rest)
+}
+
+/// CR 118.12a: the shared `"[~] deal N damage to them"` tail of an
+/// unless-have-deal-damage cost — the `"<who> has "` prefix is consumed by the
+/// caller (`its controller has …`, `that player has …`, etc.). The damage is
+/// dealt to the payer (`TargetFilter::Player`); the caller selects which player
+/// pays via `UnlessPayModifier::payer`.
+fn parse_have_deal_damage_to_them_cost(after_has: &str) -> Option<AbilityCost> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>(" deal ")
-        .parse(rest)
+        .parse(after_has)
         .ok()?;
     // `take_until` leaves the matched delimiter on the input (" deal N ...").
     let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
@@ -24096,6 +24105,29 @@ fn extract_resolution_unless_pay_modifier(
                 Some(UnlessPayModifier {
                     cost,
                     payer: TargetFilter::AllPlayers,
+                }),
+            );
+        }
+    }
+
+    // CR 118.12a: "[Effect] unless that player has [~] deal N damage to them"
+    // (Skullscorch) — the TARGETED player may have the source deal the damage
+    // instead of taking the primary effect, so the payer is that player
+    // (`TargetFilter::Player`), unlike the object-controller forms below whose
+    // payer resolves through `ParentTargetController`. Checked before the generic
+    // "unless " scan so the player-have-deal shape is not misclassified.
+    if let Some((before_unless, _, after_unless_lower)) =
+        nom_primitives::scan_preceded(&lower, |i| {
+            tag::<_, _, OracleError<'_>>("unless that player has ").parse(i)
+        })
+    {
+        if let Some(cost) = parse_have_deal_damage_to_them_cost(after_unless_lower) {
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::Player,
                 }),
             );
         }
