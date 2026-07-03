@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::combinator::{all_consuming, map, map_res, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -4027,8 +4027,12 @@ fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, 
     let (rest, _) = tag(" you").parse(rest)?;
     let (rest, _) = opt(tag(" already")).parse(rest)?;
     let (rest, _) = tag(" control with ").parse(rest)?;
-    let (rest, keyword_name) = parse_keyword_name(rest)?;
-    let keyword: Keyword = keyword_name.parse().unwrap();
+    // Map the parsed keyword name through `Keyword`'s `FromStr` with `map_res`
+    // so an unconvertible name fails the parse (a nom error) rather than
+    // panicking — every `KEYWORDS` entry converts, so this is a graceful guard,
+    // not an expected failure path.
+    let (rest, keyword) =
+        map_res(parse_keyword_name, |s: &str| s.parse::<Keyword>()).parse(rest)?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
