@@ -8,11 +8,16 @@
 //!    must LOSE 3 life instead (leaving them with -3 from before).
 //! 2. P0 (controller) casting a "You gain 3 life" spell must gain 3 life normally.
 //! 3. Without Plague Drone in play, the same spell gains life normally.
+//!
+//! A fourth test asserts the parsed AST shape directly (parser-level coverage,
+//! not just runtime behavior) — see `plague_drone_parses_as_gain_life_replacement`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::replacements::ReplacementEvent;
 use engine::types::Phase;
 use engine::types::PlayerId;
 
@@ -55,16 +60,13 @@ fn plague_drone_converts_opponent_lifegain_to_life_loss() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // P0 controls Plague Drone
-    let drone = scenario.add_creature_from_oracle(P0, "Plague Drone", 3, 3, PLAGUE_DRONE);
-    let drone_id = drone.id();
+    scenario.add_creature_from_oracle(P0, "Plague Drone", 3, 3, PLAGUE_DRONE);
     // P1 (opponent of P0) has a gain-life instant spell in hand
     let spell = scenario
         .add_spell_to_hand_from_oracle(P1, "Test Lifegain", true, "You gain 3 life.")
         .id();
 
     let mut runner = scenario.build();
-
-
     let before = runner.life(P1);
 
     cast_and_resolve(&mut runner, P1, spell);
@@ -117,5 +119,51 @@ fn without_drone_opponent_gains_life_normally() {
         runner.life(P1),
         before + 3,
         "without Plague Drone, the opponent must gain life normally"
+    );
+}
+
+/// Parser-level coverage: pin down the parsed AST shape for Plague Drone's
+/// replacement rather than only exercising it through runtime behavior, so a
+/// refactor that silently changes representation (e.g. regressing the
+/// life-loss body to an `Unimplemented` no-op that another code path papers
+/// over) is caught at the parser level first.
+#[test]
+fn plague_drone_parses_as_gain_life_replacement() {
+    let parsed = parse_oracle_text(
+        PLAGUE_DRONE,
+        "Plague Drone",
+        &[],
+        &["Creature".to_string()],
+        &["Phyrexian".to_string(), "Insect".to_string()],
+    );
+
+    assert_eq!(
+        parsed.replacements.len(),
+        1,
+        "Plague Drone must parse into exactly one replacement definition; got: {:?}",
+        parsed.replacements
+    );
+
+    assert!(
+        matches!(parsed.replacements[0].event, ReplacementEvent::GainLife),
+        "Plague Drone's replacement must be keyed on the GainLife event; got: {:?}",
+        parsed.replacements[0].event
+    );
+
+    let json = serde_json::to_string(&parsed).expect("ParsedAbilities must serialize");
+
+    assert!(
+        json.contains("GainLife"),
+        "serialized AST must contain the GainLife event marker; json: {json}"
+    );
+    assert!(
+        json.contains("LoseLife"),
+        "the replacement's execute body must lower to a structured life-loss \
+         effect (CR 614.6 conversion), not an opaque fallback; json: {json}"
+    );
+    assert!(
+        !json.contains("Unimplemented"),
+        "Plague Drone must not fall back to an Unimplemented effect anywhere \
+         in its parsed AST; json: {json}"
     );
 }
