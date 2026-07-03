@@ -157,7 +157,11 @@ describe("dispatchResolveAll progress", () => {
       } as never,
     });
 
-    await dispatchResolveAll(0, []);
+    // A NON-empty seat list pins the `!adapter.resolveAll` half of the
+    // fallback gate on its own: even when a caller claims AI seats exist
+    // (draft-match vs a human would, if its pairing were misread), a
+    // transport with no batch drain must still take the auto-yield path.
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
 
     // Arena semantics: yield THIS seat's priority windows via the engine's
     // auto-pass session — never a host-driven batch drain over human seats.

@@ -7,6 +7,7 @@ import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
@@ -377,21 +378,28 @@ export function ActionButton() {
               aria-busy={isResolvingAll}
               onClick={() => {
                 const { gameState: gs, gameMode } = useGameStore.getState();
-                // Only claim seats as AI-driven when an AI actually drives them
-                // ("ai" always; "draft-match" when the opponent is an AI — the
-                // vs-human case has no batch resolveAll, so the list is ignored).
-                // In "local" hotseat every seat is a human: an empty list makes
-                // dispatchResolveAll fall back to the per-seat engine auto-yield
-                // instead of handing the users' seats to the AI (#4978).
-                const aiDriven = gameMode === "ai" || gameMode === "draft-match";
-                const playerCount = gs?.players?.length ?? 2;
-                const aiSeats = usePreferencesStore.getState().aiSeats;
-                const seats = aiDriven
-                  ? Array.from({ length: playerCount - 1 }, (_, i) => ({
-                      playerId: i + 1,
-                      difficulty: aiSeats[i]?.difficulty ?? "Medium",
-                    }))
-                  : [];
+                // Only claim seats as AI-driven when an AI actually drives them,
+                // mirroring the controller each mode installs. "ai": every
+                // non-local seat (same prefs sourcing as scheduleBatchResolve).
+                // Draft matches: only a Bot pairing has an AI seat, and it uses
+                // the same binding installMatchRuntime gives the live controller.
+                // Everything else — "local" hotseat above all (#4978) — gets an
+                // empty list so dispatchResolveAll falls back to the per-seat
+                // engine auto-yield instead of handing human seats to the AI.
+                let seats: { playerId: number; difficulty: string }[] = [];
+                if (gameMode === "ai") {
+                  const playerCount = gs?.players?.length ?? 2;
+                  const aiSeats = usePreferencesStore.getState().aiSeats;
+                  seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+                    playerId: i + 1,
+                    difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                  }));
+                } else if (
+                  gameMode === "draft-match" &&
+                  useMultiplayerDraftStore.getState().matchPairing?.type === "Bot"
+                ) {
+                  seats = [DRAFT_BOT_AI_SEAT];
+                }
                 dispatchResolveAll(playerId, seats);
               }}
               aria-describedby={resolveAllTooltipId}

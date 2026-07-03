@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameState, WaitingFor } from "../../../adapter/types";
 import { dispatchAction, dispatchResolveAll } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
 import { ActionButton } from "../ActionButton";
@@ -102,6 +103,7 @@ describe("ActionButton", () => {
       combatClickHandler: null,
     });
     useMultiplayerStore.setState({ actionPending: false });
+    useMultiplayerDraftStore.setState({ matchPairing: null });
   });
 
   afterEach(() => {
@@ -228,6 +230,60 @@ describe("ActionButton", () => {
     expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
       { playerId: 1, difficulty: "Medium" },
     ]);
+  });
+
+  it("uses the live controller's bot seat binding for a Bot draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "Bot" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [DRAFT_BOT_AI_SEAT]);
+  });
+
+  it("claims no AI seats for a vs-human draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "HumanHost" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
   });
 
   it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {
