@@ -715,14 +715,15 @@ export async function dispatchResolveAll(
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (!adapter.resolveAll) {
-    // Multiplayer transports have no batch drain: the other seats are humans,
-    // and CR 117.4 entitles each of them to their own priority window before
-    // anything resolves — the engine must not pass on their behalf. Arena-style
-    // "Resolve All" instead: an engine-side auto-yield for THIS seat only
-    // (AutoPassMode::UntilStackEmpty), which auto-passes whenever this player
-    // receives priority and clears itself when the stack empties or grows
-    // (an opponent responded).
+  if (!adapter.resolveAll || aiSeats.length === 0) {
+    // No batch drain (multiplayer transports), or no AI deciders for the other
+    // seats (local hotseat — every seat is a human, #4978): those seats are
+    // humans, and CR 117.4 entitles each of them to their own priority window
+    // before anything resolves — the engine must not pass on their behalf.
+    // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
+    // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
+    // this player receives priority and clears itself when the stack empties
+    // or grows (an opponent responded).
     await dispatchAction(
       { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
       requester,

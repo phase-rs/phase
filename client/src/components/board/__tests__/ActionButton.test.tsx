@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
-import { dispatchAction } from "../../../game/dispatch.ts";
+import { dispatchAction, dispatchResolveAll } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
@@ -174,6 +174,60 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
+    useGameStore.setState({
+      gameMode: "local",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
+  it("builds the AI seat list for Resolve All when the other seats are AI-driven", () => {
+    useGameStore.setState({
+      gameMode: "ai",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
+      { playerId: 1, difficulty: "Medium" },
+    ]);
   });
 
   it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {

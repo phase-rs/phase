@@ -376,12 +376,22 @@ export function ActionButton() {
               disabled={actionBlocked}
               aria-busy={isResolvingAll}
               onClick={() => {
-                const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
+                const { gameState: gs, gameMode } = useGameStore.getState();
+                // Only claim seats as AI-driven when an AI actually drives them
+                // ("ai" always; "draft-match" when the opponent is an AI — the
+                // vs-human case has no batch resolveAll, so the list is ignored).
+                // In "local" hotseat every seat is a human: an empty list makes
+                // dispatchResolveAll fall back to the per-seat engine auto-yield
+                // instead of handing the users' seats to the AI (#4978).
+                const aiDriven = gameMode === "ai" || gameMode === "draft-match";
+                const playerCount = gs?.players?.length ?? 2;
                 const aiSeats = usePreferencesStore.getState().aiSeats;
-                const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-                  playerId: i + 1,
-                  difficulty: aiSeats[i]?.difficulty ?? "Medium",
-                }));
+                const seats = aiDriven
+                  ? Array.from({ length: playerCount - 1 }, (_, i) => ({
+                      playerId: i + 1,
+                      difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                    }))
+                  : [];
                 dispatchResolveAll(playerId, seats);
               }}
               aria-describedby={resolveAllTooltipId}
