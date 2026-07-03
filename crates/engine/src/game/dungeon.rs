@@ -320,14 +320,12 @@ pub fn room_effects(
             });
             (ability, vec![])
         }
-        // 4: Lost Level — "Destroy target creature of an opponent's choice"
+        // 4: Lost Level — "Scry 2"
         (DungeonId::DungeonOfTheMadMage, 4) => (
             simple(
-                Effect::Unimplemented {
-                    name: "Room: Lost Level".to_string(),
-                    description: Some(
-                        "Destroy target creature of an opponent's choice".to_string(),
-                    ),
+                Effect::Scry {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
                 },
                 source_id,
                 controller,
@@ -1541,6 +1539,23 @@ mod tests {
             }),
             "Fungi Cavern's -4/-0 lasts until your next turn, not end of turn"
         );
+    }
+
+    /// Oracle fidelity: Dungeon of the Mad Mage "Lost Level" is "Scry 2". It was
+    /// stubbed as `Effect::Unimplemented` with fabricated text ("Destroy target
+    /// creature of an opponent's choice"), so venturing into it did nothing.
+    /// Revert-probe: the old stub is not `Effect::Scry`.
+    #[test]
+    fn mad_mage_lost_level_is_scry_two() {
+        let (ability, _) =
+            room_effects(DungeonId::DungeonOfTheMadMage, 4, ObjectId(1), PlayerId(0));
+        match &ability.effect {
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            } => {}
+            other => panic!("expected 'Scry 2' targeting the controller, got {other:?}"),
+        }
     }
 
     #[test]
