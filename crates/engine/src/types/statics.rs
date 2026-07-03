@@ -1971,6 +1971,8 @@ pub enum StaticModeKind {
     UntapsDuringEachOtherPlayersUntapStep,
     MaxUntapPerType,
     EntersWithAdditionalCounters,
+    ProtectionDoesntRemoveThisAura,
+    ProtectionDoesntRemoveControlledAttachments,
     Other,
 }
 
@@ -2114,6 +2116,12 @@ impl StaticMode {
             StaticMode::MaxUntapPerType { .. } => StaticModeKind::MaxUntapPerType,
             StaticMode::EntersWithAdditionalCounters { .. } => {
                 StaticModeKind::EntersWithAdditionalCounters
+            }
+            StaticMode::ProtectionDoesntRemoveThisAura => {
+                StaticModeKind::ProtectionDoesntRemoveThisAura
+            }
+            StaticMode::ProtectionDoesntRemoveControlledAttachments => {
+                StaticModeKind::ProtectionDoesntRemoveControlledAttachments
             }
             StaticMode::Other(..) => StaticModeKind::Other,
         }
