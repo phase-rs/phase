@@ -1177,20 +1177,20 @@ async fn main() {
     }
 
     let app = app.layer(cors).with_state(AppState {
-            sessions: state,
-            draft_sessions,
-            draft_pools,
-            connections,
-            db,
-            lobby,
-            lobby_subscribers,
-            player_count,
-            game_db,
-            draft_spectators,
-            game_spectators,
-            mode,
-            public_url: advertised_public_url,
-        });
+        sessions: state,
+        draft_sessions,
+        draft_pools,
+        connections,
+        db,
+        lobby,
+        lobby_subscribers,
+        player_count,
+        game_db,
+        draft_spectators,
+        game_spectators,
+        mode,
+        public_url: advertised_public_url,
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
