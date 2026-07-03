@@ -727,10 +727,10 @@ fn attachment_exempt_from_protection(
     // Fail-closed: every protection quality currently on the host that matches
     // the attachment must be covered by an exempting granting effect. A baked
     // quality with no such source (e.g. a transient grant) is non-exempt.
-    let all_matching_covered = host.keywords.iter().all(|kw| match kw {
-        Keyword::Protection(pt) if matches_attachment(pt) => exempted.iter().any(|e| e == pt),
-        _ => true,
-    });
+    let matching_on_host = crate::game::keywords::protection_targets_matching(host, attachment);
+    let all_matching_covered = matching_on_host
+        .iter()
+        .all(|pt| exempted.iter().any(|e| e == pt));
 
     all_matching_covered && !exempted.is_empty()
 }

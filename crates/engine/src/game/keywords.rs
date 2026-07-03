@@ -392,6 +392,29 @@ pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> boo
     false
 }
 
+/// CR 702.16: Collect every protection target on `protected` (its post-layer
+/// keyword set) whose quality matches `source` — i.e. the protection instances
+/// that would prevent `source` from being attached to / interacting with it.
+///
+/// This is the object-scoped authority for reading an object's protection
+/// instances; callers must not iterate `protected.keywords` themselves.
+pub fn protection_targets_matching(
+    protected: &GameObject,
+    source: &GameObject,
+) -> Vec<ProtectionTarget> {
+    // allow-raw-authority: this IS the object-scoped protection-instance authority
+    protected
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Protection(pt) if source_matches_protection_target(pt, protected, source) => {
+                Some(pt.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn source_matches_protection_target(
     protection: &ProtectionTarget,
     protected: &GameObject,
