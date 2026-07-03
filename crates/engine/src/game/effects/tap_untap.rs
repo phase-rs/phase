@@ -232,15 +232,26 @@ fn prompt_resolution_tap_untap_choice(
         Ok(bounds) => bounds,
         // CR 608.2b + CR 601.2c (issue #4961): `resolve_multi_target_bounds`
         // errors when the eligible pool is smaller than the selection's required
-        // minimum. With zero eligible permanents the required tap/untap choice is
-        // vacuously impossible, so resolve it here — the single reachable
+        // minimum. With zero eligible permanents that required tap/untap choice
+        // is vacuously impossible, so resolve it here — the single reachable
         // no-candidate point — as a clean no-op. This keeps a resolution-time
         // `EffectZoneChoice` from ever being built over an empty pool (which is
-        // the shape that wedges the game). A non-empty-but-under-filled pool is
-        // left to the normal target path (`return false`) so partial selections
-        // keep their existing behavior.
+        // the shape that wedges the game).
+        //
+        // But `resolve_multi_target_bounds` also errors *earlier* when the
+        // target count still needs a resolved quantity (an unresolved `X` /
+        // named-choice count, returned before the legal-target-count check).
+        // That is not a no-candidate situation and must NOT be silently treated
+        // as resolved — re-check the exact predicate and let it fall through to
+        // the normal target path (`return false`) so the unresolved-choice
+        // failure is preserved. A non-empty-but-under-filled pool likewise falls
+        // through so partial selections keep their existing behavior.
         Err(_) => {
-            if eligible.is_empty() {
+            if eligible.is_empty()
+                && !crate::game::ability_utils::multi_target_needs_quantity_choice(
+                    state, ability, spec,
+                )
+            {
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id: ability.source_id,
@@ -818,6 +829,71 @@ mod tests {
             }
             other => panic!("expected an EffectZoneChoice prompt, got {other:?}"),
         }
+    }
+
+    /// Issue #4961 (matthewevans review): the no-candidate no-op must be scoped
+    /// to the "not enough legal targets" empty-pool case. `resolve_multi_target_bounds`
+    /// *also* errors earlier — before the legal-target-count check — when the
+    /// target count still needs a resolved quantity (an unresolved `X`). That
+    /// unresolved-quantity error must NOT be swallowed as a resolved no-op even
+    /// when the pool is empty; it has to fall through to the normal target path
+    /// (`return false`) so the unresolved choice is preserved rather than
+    /// silently treated as done.
+    #[test]
+    fn tap_untap_choice_with_unresolved_x_count_is_not_treated_as_resolved() {
+        use crate::types::ability::{ControllerRef, QuantityExpr, QuantityRef};
+
+        let mut state = GameState::new_two_player(4961);
+        let target = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .subtype("Zombie".to_string())
+                .controller(ControllerRef::You),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: target.clone(),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        // "tap X target creatures you control" with X not yet chosen: the count
+        // is an unresolved variable, so bounds resolution fails on the quantity
+        // gate rather than the empty-pool gate — even though no Zombie exists.
+        ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability.chosen_x = None;
+
+        let mut events = Vec::new();
+        let handled = prompt_resolution_tap_untap_choice(
+            &mut state,
+            &ability,
+            &target,
+            EffectKind::Tap,
+            &mut events,
+        );
+
+        assert!(
+            !handled,
+            "unresolved-quantity error must not be handled as a no-op resolution"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EffectResolved { .. })),
+            "unresolved-quantity path must not emit a resolved event, got {events:?}"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "unresolved-quantity path must not install a zone choice, got {:?}",
+            state.waiting_for
+        );
     }
 
     #[test]
