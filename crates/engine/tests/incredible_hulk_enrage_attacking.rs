@@ -62,6 +62,7 @@ fn damage_ability(source: ObjectId, target: ObjectId, amount: i32) -> ResolvedAb
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target)],
         source,

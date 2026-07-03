@@ -2415,6 +2415,7 @@ mod tests {
                 amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )]);
 
@@ -3358,6 +3359,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let ability = ResolvedAbility::new(effect, Vec::new(), fanatic_id, PlayerId(0));
         let mut pending_cast = PendingCast::new(fanatic_id, CardId(100), ability, ManaCost::zero());
@@ -3550,6 +3552,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3614,6 +3617,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3660,6 +3664,7 @@ mod tests {
                         ],
                     },
                     damage_source: None,
+                    excess: None,
                 },
             ));
         state
@@ -3673,6 +3678,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let (decision, candidate) = make_target_selection_ctx(
             &state,
@@ -3712,6 +3718,7 @@ mod tests {
             },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         };
         let config = AiConfig::default();
 

@@ -111,6 +111,13 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    // CR 120.4a: capture the excess-redirect rider BEFORE `continue_replacement`
+    // consumes the pending record, so the Damage resume arm can restore it onto
+    // the ctx it rebuilds from the source (which cannot re-derive the rider).
+    let parked_excess_recipient = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.excess_recipient);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -216,14 +223,18 @@ pub(super) fn handle_replacement_choice(
                     is_combat,
                     ..
                 } => {
-                    let ctx = DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                        let controller = state
-                            .objects
-                            .get(&source_id)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(state.active_player);
-                        DamageContext::fallback(source_id, controller)
-                    });
+                    let mut ctx =
+                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                            let controller = state
+                                .objects
+                                .get(&source_id)
+                                .map(|obj| obj.controller)
+                                .unwrap_or(state.active_player);
+                            DamageContext::fallback(source_id, controller)
+                        });
+                    // CR 120.4a: restore the excess-redirect rider dropped by the
+                    // source-derived ctx rebuild, so the resumed hit still redirects.
+                    ctx.excess_recipient = parked_excess_recipient;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -2218,6 +2229,7 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
             may_cost_paid: false,
             may_cost_remaining: None,
         });

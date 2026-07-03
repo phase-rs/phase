@@ -3055,6 +3055,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     damage_source: None,
+                    excess: None,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -3101,6 +3102,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     damage_source: None,
+                    excess: None,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

@@ -84,6 +84,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             amount,
             target,
             damage_source: _,
+            excess: _,
         } => Effect::DamageAll {
             amount,
             target,
@@ -215,6 +216,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 4 },
             target: creature_filter(),
             damage_source: None,
+            excess: None,
         });
         transform_ability_def(&mut def);
         assert!(matches!(*def.effect, Effect::DamageAll { .. }));

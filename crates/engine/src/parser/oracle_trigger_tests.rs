@@ -13466,6 +13466,7 @@ fn trigger_etb_from_graveyard_flayer() {
             amount,
             target,
             damage_source,
+            excess: _,
         } => {
             assert_eq!(*target, TargetFilter::Any);
             assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
@@ -13501,6 +13502,7 @@ fn pyrogoyf_etb_damage_uses_entering_lhurgoyf_as_damage_source() {
             amount,
             target,
             damage_source,
+            excess: _,
         } => {
             assert_eq!(*target, TargetFilter::Any);
             assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));

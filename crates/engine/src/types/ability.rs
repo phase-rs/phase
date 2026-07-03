@@ -7907,6 +7907,17 @@ pub enum DamageSource {
     EachTarget,
 }
 
+/// CR 120.4a: Where excess damage (damage in excess of what would be lethal /
+/// past loyalty / past defense) is redirected when an effect that deals damage
+/// carries an excess-redirect rider ("Excess damage is dealt to that creature's
+/// controller instead").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ExcessRecipient {
+    /// CR 120.4a: excess is dealt to the damaged permanent's controller.
+    TargetController,
+}
+
 /// CR 120.3: Source characteristics captured before applying an already-replaced
 /// damage event. Used only by internal continuations that resume Phase C damage
 /// application after a nested replacement choice.
@@ -7920,6 +7931,10 @@ pub struct DamageContextSnapshot {
     pub has_wither: bool,
     pub has_infect: bool,
     pub combat_damage_poison: u32,
+    /// CR 120.4a: carry the excess-redirect rider across a replacement-pause
+    /// resume so remaining post-replacement damage still redirects correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excess_recipient: Option<ExcessRecipient>,
 }
 
 /// A single conjured card entry: card source + quantity.
@@ -8279,6 +8294,10 @@ pub enum Effect {
         /// CR 120.3: Override damage source. None = ability source (default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source: Option<DamageSource>,
+        /// CR 120.4a: Trailing excess-redirect rider ("Excess damage is dealt to
+        /// that creature's controller instead"). None = no redirect (default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excess: Option<ExcessRecipient>,
     },
     /// CR 120.3 + CR 120.4b: Internal continuation for applying a damage event
     /// that has already passed through replacement/prevention selection. This
@@ -18489,6 +18508,7 @@ mod tests {
             amount: fixed(5),
             target: default_target_filter_any(),
             damage_source: None,
+            excess: None,
         };
         assert_eq!(damage.count_expr(), Some(&fixed(5)));
 
@@ -18968,6 +18988,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -18994,6 +19015,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(1),
@@ -19244,6 +19266,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Mana {

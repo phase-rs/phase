@@ -881,6 +881,7 @@ mod lethality_tests {
             amount: QuantityExpr::Fixed { value },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 

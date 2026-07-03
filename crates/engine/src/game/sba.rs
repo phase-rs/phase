@@ -3381,6 +3381,7 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -3448,6 +3449,7 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
             may_cost_paid: false,
             may_cost_remaining: None,
         });

@@ -11,8 +11,8 @@ use crate::game::quantity::{
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageContextSnapshot, DamageSource, Effect, EffectError, EffectKind, PlayerFilter,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    DamageContextSnapshot, DamageSource, Effect, EffectError, EffectKind, ExcessRecipient,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -35,6 +35,10 @@ pub(crate) struct DamageContext {
     pub(crate) has_wither: bool,
     pub(crate) has_infect: bool,
     pub(crate) combat_damage_poison: u32,
+    /// CR 120.4a: excess-redirect rider, attached in `resolve()` from
+    /// `Effect::DealDamage { excess }`. `None` for combat damage and for every
+    /// path that does not parse this rider.
+    pub(crate) excess_recipient: Option<ExcessRecipient>,
 }
 
 fn player_context_target(
@@ -128,6 +132,8 @@ impl DamageContext {
             // sibling effective-keyword flags above rather than reading printed
             // `obj.keywords` directly.
             combat_damage_poison: keywords::effective_total_toxic_value(state, source_id),
+            // CR 120.4a: attached later in `resolve()` from the effect's rider.
+            excess_recipient: None,
         })
     }
 
@@ -144,6 +150,8 @@ impl DamageContext {
             has_wither: false,
             has_infect: false,
             combat_damage_poison: 0,
+            // CR 120.4a: no excess redirect on the source-gone fallback path.
+            excess_recipient: None,
         }
     }
 }
@@ -159,6 +167,8 @@ impl From<DamageContextSnapshot> for DamageContext {
             has_wither: snapshot.has_wither,
             has_infect: snapshot.has_infect,
             combat_damage_poison: snapshot.combat_damage_poison,
+            // CR 120.4a: restore the excess-redirect rider on resume.
+            excess_recipient: snapshot.excess_recipient,
         }
     }
 }
@@ -174,6 +184,8 @@ impl From<&DamageContext> for DamageContextSnapshot {
             has_wither: ctx.has_wither,
             has_infect: ctx.has_infect,
             combat_damage_poison: ctx.combat_damage_poison,
+            // CR 120.4a: preserve the excess-redirect rider into the snapshot.
+            excess_recipient: ctx.excess_recipient,
         }
     }
 }
@@ -338,6 +350,13 @@ pub(crate) fn apply_damage_to_target(
             // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            }
+            // CR 120.4a: stash the excess-redirect rider on the parked replacement
+            // so the resume (`handle_replacement_choice`, which rebuilds the ctx
+            // from the source and cannot re-derive the effect rider) still
+            // redirects the excess to the creature's controller.
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.excess_recipient = ctx.excess_recipient;
             }
             Ok(DamageResult::NeedsChoice)
         }
@@ -559,10 +578,45 @@ pub(crate) fn apply_damage_after_replacement(
         TargetRef::Player(_) => 0,
     };
 
+    // CR 120.4a: an excess-redirect rider modifies the damage event so that only
+    // the lethal portion is dealt to the permanent and the excess is dealt to its
+    // controller *instead* (redirected below), NOT on top. Without this, a 4-damage
+    // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
+    // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
+    // (4 total). Reduce the primary hit to the lethal portion for the creature's
+    // marked damage, DamageDealt event, and damage record; lifelink and the return
+    // value keep `actual_amount` because the total damage dealt is unchanged.
+    // CR 120.4a "that creature's controller": the rider only redirects when the
+    // damaged permanent is a creature (real class cards all read "target creature").
+    let redirect_excess = if is_creature
+        && matches!(
+            (ctx.excess_recipient, &t),
+            (
+                Some(ExcessRecipient::TargetController),
+                TargetRef::Object(_)
+            )
+        ) {
+        excess
+    } else {
+        0
+    };
+    let primary_amount = actual_amount.saturating_sub(redirect_excess);
+    if redirect_excess > 0 {
+        if let TargetRef::Object(obj_id) = &t {
+            // Only the marked-damage path over-marks above; wither/infect deal
+            // -1/-1 counters instead (no excess-redirect card uses them).
+            if !ctx.has_wither && !ctx.has_infect {
+                if let Some(o) = state.objects.get_mut(obj_id) {
+                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
+                }
+            }
+        }
+    }
+
     events.push(GameEvent::DamageDealt {
         source_id: ctx.source_id,
         target: t.clone(),
-        amount: actual_amount,
+        amount: primary_amount,
         is_combat,
         excess,
     });
@@ -588,7 +642,9 @@ pub(crate) fn apply_damage_after_replacement(
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
-            amount: actual_amount,
+            // CR 120.4a: the permanent was dealt only the lethal portion; the
+            // excess is recorded against the controller by the redirect below.
+            amount: primary_amount,
             is_combat,
             // CR 120.10: Record excess so "was dealt excess damage this turn"
             // intervening-if conditions can query without re-computing lethal.
@@ -649,6 +705,50 @@ pub(crate) fn apply_damage_after_replacement(
         return DamageResult::NeedsChoice;
     }
 
+    // CR 120.4a: redirect the excess to the damaged permanent's controller.
+    // `excess` is the amount past what would be lethal / past loyalty / past
+    // defense, accounting for marked damage (CR 120.6), deathtouch (CR 702.2c),
+    // and multi-type greatest amount (CR 120.10). The permanent above was already
+    // reduced to its lethal portion (`primary_amount`), so this deals the excess
+    // *instead* — the two together sum to `actual_amount`, never more. Redirect
+    // only for object targets carrying the rider.
+    if let (Some(ExcessRecipient::TargetController), TargetRef::Object(obj_id)) =
+        (ctx.excess_recipient, t)
+    {
+        if redirect_excess > 0 {
+            if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
+                // CR 120.7: the source of the redirected damage is the same object
+                // that dealt the primary damage, so reuse `ctx` (same source_id,
+                // controller, keywords). Clear `excess_recipient` on the redirect
+                // sub-event: a player target has excess 0 anyway, and this is a
+                // re-entrancy guard against any future re-derivation.
+                let redirect_ctx = DamageContext {
+                    excess_recipient: None,
+                    ..*ctx
+                };
+                // Route through the same non-combat single-target pipeline the
+                // primary player-damage path uses (gate + CR 614/615 replacement).
+                // A replacement pause here (e.g. a life-loss replacement on the
+                // controller) propagates NeedsChoice; the primary damage has
+                // already been fully applied, so no double-application occurs.
+                match apply_damage_to_target(
+                    state,
+                    &redirect_ctx,
+                    TargetRef::Player(controller),
+                    redirect_excess,
+                    false,
+                    events,
+                ) {
+                    Ok(DamageResult::Applied(_)) => {}
+                    Ok(DamageResult::NeedsChoice) => return DamageResult::NeedsChoice,
+                    // A redirect gate failure must not corrupt the primary result;
+                    // treat it as no redirect applied (primary damage stands).
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
     DamageResult::Applied(actual_amount)
 }
 
@@ -670,6 +770,12 @@ fn build_remaining_damage_node(
             },
             target: TargetFilter::Any,
             damage_source: None,
+            // CR 120.4a: every current excess-redirect class member (Flame Spill,
+            // Gandalf's Sanction, Ravenous Tyrannosaurus) is single-target, so a
+            // remaining-target resume node never carries an outstanding primary
+            // hit whose excess still needs redirecting. `None` is correct here;
+            // multi-target excess redirect is out of scope for this class.
+            excess: None,
         },
         vec![target],
         damage_source_id,
@@ -817,6 +923,7 @@ pub fn resolve(
                 amount,
                 damage_source,
                 target,
+                excess: _,
             } => (
                 resolve_quantity_with_targets(state, amount, ability).max(0) as u32,
                 *damage_source,
@@ -839,7 +946,7 @@ pub fn resolve(
     }
 
     // CR 120.3: Determine damage source.
-    let ctx = match damage_source {
+    let mut ctx = match damage_source {
         // "Target creature deals damage..." — the first resolved object target
         // is the damage source, not the ability source.
         Some(DamageSource::Target) => ability
@@ -867,6 +974,13 @@ pub fn resolve(
             unreachable!("EachTarget handled by resolve_each_target_power_damage")
         }
     };
+
+    // CR 120.4a: attach the excess-redirect rider parsed onto this DealDamage so
+    // `apply_damage_after_replacement` can redirect excess to the target's
+    // controller. Inert for combat damage (that path builds its own contexts).
+    if let Effect::DealDamage { excess, .. } = &ability.effect {
+        ctx.excess_recipient = *excess;
+    }
 
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
     //
@@ -2005,6 +2119,7 @@ mod tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             targets,
             ObjectId(100),
@@ -2144,6 +2259,7 @@ mod tests {
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: Some(DamageSource::EachTarget),
+                excess: None,
             },
             vec![
                 TargetRef::Object(source_a),
@@ -2526,6 +2642,7 @@ mod tests {
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: Some(DamageSource::Target),
+                excess: None,
             },
             vec![TargetRef::Object(source), TargetRef::Object(recipient)],
             ObjectId(100),
@@ -2586,6 +2703,7 @@ mod tests {
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: Some(DamageSource::Target),
+                excess: None,
             },
             vec![TargetRef::Object(source), TargetRef::Object(recipient)],
             ObjectId(100),
@@ -2654,6 +2772,7 @@ mod tests {
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: Some(DamageSource::Target),
+                excess: None,
             },
             vec![TargetRef::Object(source), TargetRef::Object(recipient)],
             ObjectId(100),
@@ -3364,6 +3483,7 @@ mod tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             targets,
             source_id,
@@ -3413,6 +3533,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: Some(DamageSource::TriggeringSource),
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ability_source,
@@ -3460,6 +3581,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             star_athlete,
@@ -3512,6 +3634,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(chosen)],
             star_athlete,

@@ -11280,6 +11280,7 @@ pub mod tests {
                     amount: QuantityExpr::Fixed { value: 4 },
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     damage_source: None,
+                    excess: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::unlimited(1));
@@ -11411,6 +11412,7 @@ pub mod tests {
                     amount: QuantityExpr::Fixed { value: 4 },
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     damage_source: None,
+                    excess: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(2, 2));

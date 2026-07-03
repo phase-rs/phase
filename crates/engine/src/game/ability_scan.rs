@@ -323,6 +323,7 @@ fn scan_effect(x: &Effect) -> Axes {
             amount,
             target,
             damage_source: _,
+            excess: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount));

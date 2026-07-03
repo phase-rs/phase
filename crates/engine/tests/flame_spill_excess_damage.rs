@@ -1,0 +1,247 @@
+//! CR 120.4a — "Excess damage is dealt to that creature's controller instead."
+//!
+//! Flame Spill deals 4 damage to a target creature and redirects the *excess*
+//! (damage past what would be lethal, CR 120.6) to that creature's controller.
+//! These tests drive the real cast pipeline (`GameScenario` +
+//! `cast(..).resolve()` + `CastOutcome` deltas) and would fail if the excess
+//! redirect were removed (T1) or bound to the wrong player (T2). Class members:
+//! Flame Spill, Gandalf's Sanction, Ravenous Tyrannosaurus. Ram Through's
+//! trample-conditional form is deferred to `Effect::Unimplemented` (T8).
+
+use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
+use engine::parser::parse_oracle_text;
+use engine::types::ability::{
+    AbilityDefinition, DamageContextSnapshot, Effect, ExcessRecipient, TargetRef,
+};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. \
+Excess damage is dealt to that creature's controller instead.";
+
+// Ram Through: the excess redirect is gated on a controlled-source trample check
+// we do not model, so the whole conditional rider must be deferred (honest red),
+// NOT absorbed unconditionally (which would be rules-wrong for a non-trample
+// source).
+const RAM_THROUGH: &str = "Target creature you control deals damage equal to its power \
+to target creature you don't control. If the creature you control has trample, excess \
+damage is dealt to that creature's controller instead.";
+
+/// Build a scenario, add a power-2 target creature with the given toughness and
+/// optional pre-marked damage (controlled by `victim`), cast a free Flame Spill
+/// at it, and return the outcome plus the creature id.
+fn cast_flame_spill_at(victim: PlayerId, toughness: i32, premark: u32) -> (CastOutcome, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature = {
+        let mut c = scenario.add_creature(victim, "Victim", 2, toughness);
+        if premark > 0 {
+            c.with_damage_marked(premark);
+        }
+        c.id()
+    };
+
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Flame Spill", false, FLAME_SPILL);
+        b.with_mana_cost(ManaCost::generic(0));
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+    (outcome, creature)
+}
+
+/// T1 — primary claim, revert-proof: excess redirects to the damaged creature's
+/// controller. 4 damage to a toughness-2 creature → lethal 2, excess 2 → the
+/// controller loses 2. If the redirect is removed, this life delta is 0.
+#[test]
+fn t1_excess_redirects_to_creatures_controller() {
+    let (outcome, creature) = cast_flame_spill_at(P0, 2, 0);
+    outcome.assert_life_delta(P0, -2);
+    // Reach-guard: the creature took lethal damage and died, proving the damage
+    // actually resolved (so -2 is a genuine redirect, not a parse short-circuit).
+    outcome.assert_zone(&[creature], Zone::Graveyard);
+}
+
+/// T2 — multi-authority provenance: the recipient is the *creature's* controller
+/// (P1), not the caster (P0). Discriminates a naive `ability.controller` bug.
+#[test]
+fn t2_excess_goes_to_creatures_controller_not_caster() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 2, 0);
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(P0, 0);
+    outcome.assert_zone(&[creature], Zone::Graveyard);
+}
+
+/// T3 — CR 120.6: excess uses live marked damage, not raw toughness. A
+/// toughness-3 creature with 1 damage already marked has lethal 2, so 4 damage
+/// yields excess 2.
+#[test]
+fn t3_excess_accounts_for_marked_damage() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 3, 1);
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_zone(&[creature], Zone::Graveyard);
+}
+
+/// T4 — exactly-lethal → zero excess → no redirect (paired negative). The
+/// creature dying is the reach-guard proving 4 damage DID land, so the zero life
+/// delta is a real zero-excess result, not a vacuous parse failure.
+#[test]
+fn t4_exactly_lethal_has_no_excess() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 4, 0);
+    outcome.assert_life_delta(P1, 0);
+    outcome.assert_zone(&[creature], Zone::Graveyard);
+}
+
+/// T5 — overkill: a toughness-1 creature takes 4, lethal 1, excess 3.
+#[test]
+fn t5_overkill_redirects_all_excess() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 1, 0);
+    outcome.assert_life_delta(P1, -3);
+    outcome.assert_zone(&[creature], Zone::Graveyard);
+}
+
+/// T10 — CR 120.4a "instead": the creature is dealt only the LETHAL portion, and
+/// the excess is redirected rather than added on top. This discriminates the
+/// over-marking that T1–T5 miss (their controller delta is identical whether the
+/// creature is dealt 2 or 4). 4 damage to a 2-toughness creature → the creature's
+/// recorded damage is 2 (lethal), the controller's is 2 (excess); total dealt is
+/// 4, never 6. Reverting the lethal-reduction makes the creature record 4 and the
+/// total 6, failing this test.
+#[test]
+fn t10_creature_dealt_only_lethal_not_full_amount() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 2, 0);
+    let records = &outcome.state().damage_dealt_this_turn;
+    let to_creature: u32 = records
+        .iter()
+        .filter(|r| r.target == TargetRef::Object(creature))
+        .map(|r| r.amount)
+        .sum();
+    let to_controller: u32 = records
+        .iter()
+        .filter(|r| r.target == TargetRef::Player(P1))
+        .map(|r| r.amount)
+        .sum();
+    assert_eq!(
+        to_creature, 2,
+        "the creature must be dealt only the lethal 2, not the full 4 — excess is redirected, not additive"
+    );
+    assert_eq!(to_controller, 2, "the controller takes the excess 2");
+    assert_eq!(
+        to_creature + to_controller,
+        4,
+        "total damage dealt = actual_amount (4), never actual_amount + excess (6)"
+    );
+}
+
+/// Collect every effect in an ability's `sub_ability` chain.
+fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+    out.push(&def.effect);
+    if let Some(sub) = &def.sub_ability {
+        collect_effects(sub, out);
+    }
+}
+
+fn parse_effects(oracle: &str, name: &str) -> Vec<Effect> {
+    let types = ["Sorcery".to_string()];
+    let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+    let mut refs: Vec<&Effect> = Vec::new();
+    for ab in &parsed.abilities {
+        collect_effects(ab, &mut refs);
+    }
+    refs.into_iter().cloned().collect()
+}
+
+/// T8 — SHAPE: Flame Spill absorbs the rider onto its `DealDamage` with zero
+/// residual `Unimplemented` (fully supported); Ram Through's conditional form is
+/// NOT absorbed and stays `Unimplemented` (honest red), proving the guard.
+#[test]
+fn t8_shape_flame_spill_absorbs_ram_through_defers() {
+    let fs = parse_effects(FLAME_SPILL, "Flame Spill");
+    let fs_damage: Vec<&Effect> = fs
+        .iter()
+        .filter(|e| matches!(e, Effect::DealDamage { .. }))
+        .collect();
+    assert_eq!(
+        fs_damage.len(),
+        1,
+        "Flame Spill should parse to exactly one DealDamage effect: {fs:?}"
+    );
+    assert!(
+        matches!(
+            fs_damage[0],
+            Effect::DealDamage {
+                excess: Some(ExcessRecipient::TargetController),
+                ..
+            }
+        ),
+        "the excess rider must be absorbed onto Flame Spill's DealDamage: {fs:?}"
+    );
+    assert!(
+        !fs.iter().any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Flame Spill must have no Unimplemented residue (fully supported): {fs:?}"
+    );
+
+    // Ram Through: the trample-conditional rider must NOT be absorbed onto the
+    // DealDamage (the `!has trample` / `!if ` guards defer it).
+    let rt = parse_effects(RAM_THROUGH, "Ram Through");
+    assert!(
+        rt.iter().all(|e| !matches!(
+            e,
+            Effect::DealDamage {
+                excess: Some(_),
+                ..
+            }
+        )),
+        "Ram Through's CONDITIONAL excess must not be absorbed unconditionally: {rt:?}"
+    );
+    // Coverage-honesty: the deferred conditional rider must leave an Unimplemented
+    // marker somewhere in the parse (not be silently dropped). Checked on the full
+    // parse Debug so it is robust to whether the residue lands as an effect, a
+    // sub-ability, or a swallowed-clause warning.
+    let rt_parsed = parse_oracle_text(
+        RAM_THROUGH,
+        "Ram Through",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        format!("{rt_parsed:?}").contains("Unimplemented"),
+        "Ram Through's deferred excess rider must remain honestly Unimplemented"
+    );
+}
+
+/// T9 — the excess rider must survive a replacement-pause resume. When the
+/// primary hit pauses on a replacement choice, the real damage lands later via
+/// `resolve_post_replacement`, which rebuilds the `DamageContext` from a
+/// serialized `DamageContextSnapshot`. If the snapshot dropped
+/// `excess_recipient`, the redirect would silently vanish on resume. This locks
+/// the serialized carry-through (the `From` impls + serde). A full in-harness
+/// replacement pause is not staged here; the carry-through is the material fix.
+#[test]
+fn t9_snapshot_carries_excess_recipient_across_resume() {
+    let snap = DamageContextSnapshot {
+        source_id: ObjectId(1),
+        controller: P0,
+        source_is_creature: true,
+        has_deathtouch: false,
+        has_lifelink: false,
+        has_wither: false,
+        has_infect: false,
+        combat_damage_poison: 0,
+        excess_recipient: Some(ExcessRecipient::TargetController),
+    };
+    let json = serde_json::to_string(&snap).expect("snapshot serializes");
+    let back: DamageContextSnapshot = serde_json::from_str(&json).expect("snapshot deserializes");
+    assert_eq!(
+        back.excess_recipient,
+        Some(ExcessRecipient::TargetController),
+        "the excess-redirect rider must survive the snapshot round-trip"
+    );
+}

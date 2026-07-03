@@ -7494,6 +7494,14 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
+    /// that creature's controller instead") across a damage replacement *choice*
+    /// pause. The resume in `handle_replacement_choice` rebuilds the
+    /// `DamageContext` from the source (which cannot re-derive an effect rider),
+    /// so it restores this onto the ctx to keep redirecting the excess. `None`
+    /// for every parked event that is not an excess-redirect damage hit.
+    #[serde(default)]
+    pub excess_recipient: Option<crate::types::ability::ExcessRecipient>,
     /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
     /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with more than one eligible land surfaces a

@@ -7575,6 +7575,7 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 damage_source: None,
+                excess: _,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
@@ -7634,6 +7635,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }
             }
         }

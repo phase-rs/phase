@@ -1305,6 +1305,7 @@ mod tests {
         let damage = ResolvedAbility::new(
             Effect::DealDamage {
                 damage_source: None,
+                excess: None,
                 target: TargetFilter::Any,
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
