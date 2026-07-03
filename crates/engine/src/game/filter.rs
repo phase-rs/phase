@@ -4761,8 +4761,16 @@ fn object_shares_quality_with_reference_filter(
         recipient_id: source.recipient_id,
         scoped_iteration_player: None,
     };
+    // CR 205.3m + CR 109.1: a creature spell being cast is on the stack, not a
+    // "creature you control" permanent. When the object under test is that
+    // stack spell, exclude it from its own shared-quality reference so it can't
+    // self-satisfy (Volo, Guide to Monsters would otherwise never copy — the
+    // spell trivially shares every creature type with itself). Battlefield-to-
+    // battlefield comparisons keep their existing self-inclusive semantics.
+    let exclude_self = obj.zone == Zone::Stack;
     state.objects.keys().copied().any(|reference_id| {
-        filter_inner(state, reference_id, reference_filter, &ctx)
+        (!exclude_self || reference_id != obj.id)
+            && filter_inner(state, reference_id, reference_filter, &ctx)
             && state
                 .objects
                 .get(&reference_id)
