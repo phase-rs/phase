@@ -26,7 +26,7 @@ mapfile -t CODES < <(
   jq -r '(reduce .data[].code as $code ({}; .[$code] = true)) as $known_codes
     | .data[]
     | select(.tokenSetCode != null and .tokenSetCode != "")
-    | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | sort -u | tr -d '\r'
+    | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | sort -u
 )
 
 if [ "${#CODES[@]}" -eq 0 ]; then

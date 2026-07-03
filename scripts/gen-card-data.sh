@@ -231,11 +231,7 @@ fi
 # so old WASM bundles continue resolving their own old hashed URL even after
 # new deploys publish new card-data. This makes WASM/card-data schema drift
 # across deploys structurally impossible.
-if command -v shasum &>/dev/null; then
-  DATA_HASH=$(shasum -a 256 "$OUTPUT" | awk '{print substr($1, 1, 16)}')
-else
-  DATA_HASH=$(sha256sum "$OUTPUT" | awk '{print substr($1, 1, 16)}')
-fi
+DATA_HASH=$(shasum -a 256 "$OUTPUT" | awk '{print substr($1, 1, 16)}')
 HASHED_OUTPUT="${OUTPUT_DIR}/card-data-${DATA_HASH}.json"
 # Prune older hashed copies from this directory so local public/ doesn't grow
 # unbounded across regenerations. Deploy targets (R2) keep their own history.
