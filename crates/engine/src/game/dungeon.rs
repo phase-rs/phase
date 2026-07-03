@@ -203,15 +203,15 @@ pub fn room_effects(
             simple(treasure_token(), source_id, controller),
             vec![],
         ),
-        // 3: Storeroom — "Put a +1/+1 counter on target creature you control"
+        // 3: Storeroom — "Put a +1/+1 counter on target creature"
+        // (any creature; the Oracle text is unrestricted, matching the sibling
+        // counter-rooms Undercity "Forge" / "Throne of the Dead Three").
         (DungeonId::LostMineOfPhandelver, 3) => (
             simple(
                 Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(1),
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
                 },
                 source_id,
                 controller,
@@ -237,7 +237,9 @@ pub fn room_effects(
             )));
             (lose, vec![])
         }
-        // 5: Fungi Cavern — "Target creature gets -4/-0 until end of turn"
+        // 5: Fungi Cavern — "Target creature gets -4/-0 until your next turn"
+        // CR 514.2 + CR 611.2a: the debuff persists until the *beginning* of the
+        // controller's next turn, not just end of turn.
         (DungeonId::LostMineOfPhandelver, 5) => (
             ResolvedAbility::new(
                 Effect::Pump {
@@ -249,7 +251,9 @@ pub fn room_effects(
                 source_id,
                 controller,
             )
-            .duration(Duration::UntilEndOfTurn),
+            .duration(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
             vec![],
         ),
         // 6: Temple of Dumathoin — "Draw a card"
@@ -316,14 +320,12 @@ pub fn room_effects(
             });
             (ability, vec![])
         }
-        // 4: Lost Level — "Destroy target creature of an opponent's choice"
+        // 4: Lost Level — "Scry 2"
         (DungeonId::DungeonOfTheMadMage, 4) => (
             simple(
-                Effect::Unimplemented {
-                    name: "Room: Lost Level".to_string(),
-                    description: Some(
-                        "Destroy target creature of an opponent's choice".to_string(),
-                    ),
+                Effect::Scry {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
                 },
                 source_id,
                 controller,
@@ -1495,6 +1497,65 @@ mod tests {
         assert_eq!(next_rooms(DungeonId::LostMineOfPhandelver, 3), &[6]);
         // Temple of Dumathoin has 0 exits (bottommost)
         assert!(next_rooms(DungeonId::LostMineOfPhandelver, 6).is_empty());
+    }
+
+    /// Oracle fidelity: Lost Mine of Phandelver "Storeroom" is "Put a +1/+1
+    /// counter on target creature" — ANY creature, no controller restriction
+    /// (matching the sibling unrestricted counter-rooms). Revert-probe: the old
+    /// `.controller(You)` sets `tf.controller = Some(You)`.
+    #[test]
+    fn lost_mine_storeroom_targets_any_creature() {
+        let (ability, _) =
+            room_effects(DungeonId::LostMineOfPhandelver, 3, ObjectId(1), PlayerId(0));
+        match &ability.effect {
+            Effect::PutCounter {
+                target: TargetFilter::Typed(tf),
+                counter_type,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert!(
+                    tf.controller.is_none(),
+                    "Storeroom targets ANY creature (Oracle: 'target creature'), got controller {:?}",
+                    tf.controller
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
+    /// Oracle fidelity: Lost Mine of Phandelver "Fungi Cavern" is "-4/-0 until
+    /// your next turn" (CR 514.2 + CR 611.2a) — the debuff persists to the
+    /// controller's next turn, not just end of turn. Revert-probe: the old
+    /// `Duration::UntilEndOfTurn`.
+    #[test]
+    fn lost_mine_fungi_cavern_lasts_until_your_next_turn() {
+        let (ability, _) =
+            room_effects(DungeonId::LostMineOfPhandelver, 5, ObjectId(1), PlayerId(0));
+        assert_eq!(
+            ability.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
+            "Fungi Cavern's -4/-0 lasts until your next turn, not end of turn"
+        );
+    }
+
+    /// Oracle fidelity: Dungeon of the Mad Mage "Lost Level" is "Scry 2". It was
+    /// stubbed as `Effect::Unimplemented` with fabricated text ("Destroy target
+    /// creature of an opponent's choice"), so venturing into it did nothing.
+    /// Revert-probe: the old stub is not `Effect::Scry`.
+    #[test]
+    fn mad_mage_lost_level_is_scry_two() {
+        let (ability, _) =
+            room_effects(DungeonId::DungeonOfTheMadMage, 4, ObjectId(1), PlayerId(0));
+        match &ability.effect {
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            } => {}
+            other => panic!("expected 'Scry 2' targeting the controller, got {other:?}"),
+        }
     }
 
     #[test]

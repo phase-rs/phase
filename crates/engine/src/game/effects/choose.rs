@@ -3,7 +3,7 @@ use rand::Rng;
 use crate::game::players;
 use crate::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetSelectionMode,
+    SeatDirection, TargetSelectionMode,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -219,6 +219,34 @@ pub(crate) fn bind_named_choice(
                     )
                 })
                 .collect(),
+            // CR 607.2d + CR 508.1c: The directional "choose left or right"
+            // prompt (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
+            // Tactician) arrives as a two-option `ChoiceType::Labeled`. Hijack
+            // ONLY the exact 2-option {left, right} set (case-insensitive, both
+            // present) into a typed `ChosenAttribute::Direction` so the CR
+            // 508.1c gate can read the seat direction. A Labeled choice that
+            // merely includes "Left" among other options (e.g.
+            // ["Left", "Center", "Right"]) is NOT a directional choice — it
+            // falls through to the generic `Label` path below.
+            ChoiceType::Labeled { options }
+                if options.len() == 2
+                    && options
+                        .iter()
+                        .all(|o| SeatDirection::from_choice_label(o).is_some())
+                    && options.iter().any(|o| {
+                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Left)
+                    })
+                    && options.iter().any(|o| {
+                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Right)
+                    }) =>
+            {
+                match SeatDirection::from_choice_label(choice) {
+                    Some(dir) => vec![ChosenAttribute::Direction(dir)],
+                    None => ChosenAttribute::from_choice(choice_type.clone(), choice)
+                        .into_iter()
+                        .collect(),
+                }
+            }
             _ => ChosenAttribute::from_choice(choice_type.clone(), choice)
                 .into_iter()
                 .collect(),
@@ -240,6 +268,17 @@ pub(crate) fn bind_named_choice(
                 if matches!(choice_type, ChoiceType::Keyword { .. }) {
                     obj.chosen_attributes
                         .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
+                }
+                // CR 607.2d "the last chosen direction": a re-choice (Mystic
+                // Barrier's upkeep re-selection) REPLACES the prior direction.
+                // Clear only `ChosenAttribute::Direction`, mirroring the Keyword
+                // retain above, so exactly one direction (the last) survives.
+                if attrs
+                    .iter()
+                    .any(|a| matches!(a, ChosenAttribute::Direction(_)))
+                {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Direction(_)));
                 }
                 for attr in attrs {
                     obj.chosen_attributes.push(attr);
@@ -1127,5 +1166,105 @@ mod tests {
             "the FIRST choice (First Strike) must NO LONGER be granted — a keyword \
              choice represents the current answer set, not an accumulation"
         );
+    }
+
+    /// Create a bare battlefield object to receive a bound choice.
+    #[cfg(test)]
+    fn seed_source(state: &mut GameState) -> ObjectId {
+        use crate::types::identifiers::CardId;
+        crate::game::zones::create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Pramikon, Sky Rampart".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        )
+    }
+
+    /// CR 607.2d: The {Left,Right} hijack fires ONLY for the exact 2-option
+    /// {left,right} set. A Labeled prompt that merely INCLUDES "Left" among other
+    /// options (["Left","Center","Right"]) is an ordinary anchor-word Label, not
+    /// a direction — it must persist as a `Label` and `chosen_direction()` stays
+    /// `None`. Revert the `options.len() == 2` guard → this stores a Direction.
+    #[test]
+    fn labeled_three_options_including_left_stays_a_label() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Center".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
+
+        let obj = &state.objects[&src];
+        assert_eq!(
+            obj.chosen_direction(),
+            None,
+            "a 3-option labeled choice must NOT be hijacked into a Direction"
+        );
+        assert_eq!(
+            obj.chosen_label(),
+            Some("Left"),
+            "it must persist as an ordinary anchor-word Label"
+        );
+        // Sanity: SeatDirection typing still recognises the token in isolation.
+        assert_eq!(
+            SeatDirection::from_choice_label("Left"),
+            Some(SeatDirection::Left)
+        );
+    }
+
+    /// CR 607.2d: The exact 2-option {left,right} set is hijacked into a typed
+    /// `Direction` (case-insensitive), and NO `Label` is stored. Revert the
+    /// hijack branch → this stores a `Label` and `chosen_direction()` is `None`.
+    #[test]
+    fn labeled_left_right_binds_direction_not_label() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        // Lowercase answer proves case-insensitive typing via from_choice_label.
+        bind_named_choice(&mut state, &choice_type, "left", Some(src));
+
+        let obj = &state.objects[&src];
+        assert_eq!(obj.chosen_direction(), Some(SeatDirection::Left));
+        assert_eq!(
+            obj.chosen_label(),
+            None,
+            "the directional choice must NOT also leave a Label"
+        );
+    }
+
+    /// CR 607.2d "the last chosen direction": re-choosing Right after Left leaves
+    /// exactly one `Direction(Right)` — the prior direction is cleared. Revert the
+    /// Direction retain-clear → both directions accumulate and the count is 2.
+    #[test]
+    fn rechoosing_direction_replaces_prior() {
+        use crate::types::ability::{ChosenAttribute, SeatDirection};
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
+        bind_named_choice(&mut state, &choice_type, "Right", Some(src));
+
+        let obj = &state.objects[&src];
+        let directions: Vec<_> = obj
+            .chosen_attributes
+            .iter()
+            .filter(|a| matches!(a, ChosenAttribute::Direction(_)))
+            .collect();
+        assert_eq!(
+            directions.len(),
+            1,
+            "exactly one Direction must survive a re-choice, got {directions:?}"
+        );
+        assert_eq!(obj.chosen_direction(), Some(SeatDirection::Right));
     }
 }

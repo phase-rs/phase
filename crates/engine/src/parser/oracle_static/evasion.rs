@@ -257,6 +257,33 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
     Some(mode)
 }
 
+/// CR 508.1c: The directional attack restriction (Pramikon, Sky Rampart;
+/// Mystic Barrier; Teyo, Geometric Tactician): "Each player may attack only the
+/// nearest opponent in the [last] chosen direction and planeswalkers controlled
+/// by that opponent." The `opt(tag("last "))` tolerates both the base wording
+/// ("the chosen direction") and Mystic Barrier's re-choosable phrasing ("the
+/// last chosen direction"). The chosen direction is bound separately by the
+/// linked "choose left or right" ability (CR 607.2d); this static is the nullary
+/// marker read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+pub(crate) fn parse_attack_only_neighbor_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("each player may attack only the nearest opponent in the ")
+            .parse(lower)
+            .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("last "))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "chosen direction and planeswalkers controlled by that opponent",
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(StaticMode::AttackOnlyNeighbor)
+}
+
 pub(crate) fn parse_compound_subject_rule_static(
     text: &str,
     lower: &str,
