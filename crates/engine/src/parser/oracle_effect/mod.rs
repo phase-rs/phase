@@ -19333,6 +19333,40 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
 }
 
+/// CR 122.1 + CR 603.4 + CR 603.10a: The deferred count placeholder emitted for
+/// a bare anaphoric "the difference" whose two operands live on the trigger's
+/// hoisted intervening-if comparison rather than the effect clause ("Whenever a
+/// creature dies, if it had power greater than ~'s power, put a number of +1/+1
+/// counters on ~ equal to the difference" — Drizzt Do'Urden). The put-counter
+/// parser cannot see the comparison operands, so it emits this placeholder and
+/// the trigger-level difference binding in `lower_trigger_ir` (oracle_trigger.rs)
+/// replaces it with the `QuantityExpr::Difference` of the condition's two
+/// operands (alongside the sibling draw/lose bindings). Left unbound
+/// (a card with the anaphor but no comparison), a `Variable` ref resolves to 0
+/// in `quantity::resolve_ref`, so the effect is inert rather than wrong.
+pub(crate) const DIFFERENCE_ANAPHOR_VARIABLE: &str = "difference";
+
+/// Construct the deferred "the difference" count placeholder (see
+/// [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+pub(crate) fn difference_anaphor_placeholder() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: DIFFERENCE_ANAPHOR_VARIABLE.to_string(),
+        },
+    }
+}
+
+/// True when `expr` is the deferred "the difference" count placeholder awaiting
+/// a trigger-level bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
+    matches!(
+        expr,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == DIFFERENCE_ANAPHOR_VARIABLE
+    )
+}
+
 /// True when a trigger's intervening-if references the controller gaining life
 /// this turn (Lathiel / Ocelot Pride class).
 pub(crate) fn trigger_condition_references_controller_life_gained(

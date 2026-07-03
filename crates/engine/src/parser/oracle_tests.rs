@@ -17500,3 +17500,206 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
         } if name == "fellowship"
     ));
 }
+
+/// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden's dies trigger — "Whenever
+/// a creature dies, if it had power greater than Drizzt's power, put a number of
+/// +1/+1 counters on Drizzt equal to the difference." The bare anaphoric "the
+/// difference" has no operands in its own clause; they live on the
+/// intervening-if comparison. The trigger must (1) carry the comparison as its
+/// gate and (2) resolve the count to `QuantityExpr::Difference` of the two power
+/// operands — NOT leave the effect `Unimplemented`.
+#[test]
+fn drizzt_dies_trigger_puts_difference_counters_gated_by_power_comparison() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+    use crate::types::counter::CounterType;
+
+    let r = parse(
+        "Double strike\n\
+         When Drizzt enters, create Guenhwyvar, a legendary 4/1 green Cat creature token with trample.\n\
+         Whenever a creature dies, if it had power greater than Drizzt's power, put a number of +1/+1 counters on Drizzt equal to the difference.",
+        "Drizzt Do'Urden",
+        &[],
+        &["Creature"],
+        &["Elf", "Ranger"],
+    );
+
+    // Locate the dies trigger (the one whose body puts counters).
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+        })
+        .unwrap_or_else(|| panic!("no dies PutCounter trigger parsed: {r:#?}"));
+
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "dies trigger body must not be Unimplemented: {execute:#?}"
+    );
+
+    // (1) Effect: PutCounter of +1/+1 counters on ~ with a Difference count over
+    // the dying creature's (EventSource, LKI) power and the source's power.
+    match &*execute.effect {
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Difference { left, right },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*target, TargetFilter::SelfRef, "counters go on ~ (Drizzt)");
+            assert_eq!(
+                **left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+                "left operand is the dying creature's (LKI) power"
+            );
+            assert_eq!(
+                **right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+                "right operand is the source's power"
+            );
+        }
+        other => panic!("expected PutCounter with Difference count, got {other:#?}"),
+    }
+
+    // (2) Intervening-if gate: the trigger only fires when the dying creature's
+    // power exceeded the source's power.
+    fn find_power_gt(cond: &TriggerCondition) -> Option<(&QuantityExpr, &QuantityExpr)> {
+        match cond {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            } => Some((lhs, rhs)),
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().find_map(find_power_gt)
+            }
+            _ => None,
+        }
+    }
+    let condition = dies
+        .condition
+        .as_ref()
+        .unwrap_or_else(|| panic!("dies trigger must carry the power-comparison gate: {dies:#?}"));
+    let (lhs, rhs) = find_power_gt(condition)
+        .unwrap_or_else(|| panic!("gate must be a GT power comparison: {condition:#?}"));
+    assert_eq!(
+        *lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        }
+    );
+    assert_eq!(
+        *rhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }
+    );
+}
+
+/// CR 122.1 coverage-honesty: a "put ... counters equal to the difference" whose
+/// enclosing trigger has NO "if it had <stat> greater than ~'s <stat>"
+/// comparison has nothing to bind the anaphor to. It must surface as a loud
+/// `Unimplemented` residual (mirroring the draw/lose difference siblings), NOT a
+/// silently-zero `PutCounter` that would read as coverage-supported. Fails on
+/// revert of the unbound-placeholder guard in `lower_trigger_ir`.
+#[test]
+fn difference_counter_anaphor_without_comparison_stays_unimplemented() {
+    let r = parse(
+        "Whenever a creature dies, put a number of +1/+1 counters on ~ equal to the difference.",
+        "Test Card",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no dies trigger parsed: {r:#?}"));
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !matches!(&*execute.effect, Effect::PutCounter { .. }),
+        "an unbindable 'the difference' must not survive as a silently-zero PutCounter: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "an unbindable difference anaphor must be a loud Unimplemented residual: {execute:#?}"
+    );
+}
+
+/// CR 122.1 + CR 603.4: Conformer Shuriken class — the "equal to the difference"
+/// put-counter sits under a CLAUSE-LEVEL conditional continuation (a
+/// `sub_ability`), not the trigger's hoisted intervening-if, so there is no
+/// `QuantityComparison` on `def.condition` to bind against. The deferred
+/// placeholder is nested one level below the top-level effect, where the
+/// top-level-only `count_expr_mut` guard cannot see it. The recursive resolver
+/// must still downgrade it to an honest Unimplemented so the card does NOT
+/// appear falsely supported (no surviving `PutCounter { Variable{"difference"} }`
+/// anywhere in the tree).
+#[test]
+fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
+    use crate::types::ability::QuantityRef;
+
+    fn surviving_difference_placeholder(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let here = matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } | Effect::PutCounterAll {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } if name == "difference"
+        );
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(surviving_difference_placeholder)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(surviving_difference_placeholder)
+    }
+
+    let r = parse(
+        "Whenever this creature attacks, tap target creature defending player controls. \
+         If that creature has power greater than this creature's power, put a number of \
+         +1/+1 counters on this creature equal to the difference.",
+        "Conformer Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let trig = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no attacks trigger parsed: {r:#?}"));
+    let execute = trig.execute.as_ref().expect("trigger has a body");
+
+    assert!(
+        !surviving_difference_placeholder(execute),
+        "nested unbindable 'the difference' must not survive as a PutCounter placeholder: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
+    );
+}
