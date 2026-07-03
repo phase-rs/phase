@@ -713,6 +713,21 @@ pub fn move_to_zone(
         crate::game::layers::mark_layers_full(state);
     }
 
+    // CR 404 + CR 611.3a: A card entering or leaving a graveyard changes
+    // graveyard population, which can flip a static condition gated on graveyard
+    // membership (Tarmogoyf, Cairn Wanderer: "as long as a creature card with
+    // <keyword> is in a graveyard, ~ has <keyword>"). The incremental layer path
+    // is battlefield-entry scoped and the hand/battlefield mark above does not
+    // cover graveyard moves (mill, discard, a death that lands in the graveyard),
+    // so re-evaluate layers on a graveyard membership change — but only when such
+    // a static is actually live, so routine graveyard churn stays cheap when no
+    // graveyard-gated static exists.
+    if (to == Zone::Graveyard || from == Zone::Graveyard)
+        && crate::game::layers::any_active_static_reads_zone_membership(state, Zone::Graveyard)
+    {
+        crate::game::layers::mark_layers_full(state);
+    }
+
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
     // the opposite day/night designation transform immediately. Runs after
     // battlefield-entry bookkeeping but before the ZoneChanged event is emitted
@@ -1331,6 +1346,202 @@ mod tests {
         assert!(
             state.layers_dirty.is_dirty(),
             "hand-zone continuous effects must re-evaluate when a hand card departs"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof for the graveyard-gated static
+    /// invalidation seam (issue #4774). A flying creature card milled from the
+    /// library into a graveyard via the normal `move_to_zone` path — with NO
+    /// manual `mark_layers_full` — must dirty layers so Cairn Wanderer's "~ has
+    /// flying as long as a creature card with flying is in a graveyard"
+    /// re-evaluates and the grant applies. Library→Graveyard deliberately avoids
+    /// the pre-existing hand/battlefield invalidation, so this exercises the new
+    /// graveyard seam specifically; it fails on revert of that seam.
+    #[test]
+    fn graveyard_arrival_reevaluates_graveyard_gated_static_via_zone_move() {
+        let cairn_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+                )),
+            });
+
+        let mut state = setup();
+        let cairn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cairn Wanderer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&cairn).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(cairn_static.clone());
+            o.base_static_definitions = Arc::new(vec![cairn_static]);
+        }
+
+        // A flying creature card in the library (to be milled into the graveyard).
+        let flyer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&flyer).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.base_keywords.push(Keyword::Flying);
+            o.keywords.push(Keyword::Flying);
+        }
+
+        // Baseline: empty graveyard → Cairn has no Flying; layers clean after eval.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&cairn].has_keyword(&Keyword::Flying));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // PRODUCTION PATH: mill the flyer Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, flyer, Zone::Graveyard, &mut events);
+
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a flying creature card entering a graveyard must dirty layers for Cairn's graveyard-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&cairn].has_keyword(&Keyword::Flying),
+            "after the flyer reaches the graveyard via move_to_zone, Cairn gains Flying without a manual mark_full"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: the graveyard invalidation is SCOPED — with no active
+    /// graveyard-membership-gated static, a card entering a graveyard must NOT
+    /// dirty layers, so routine graveyard churn (deaths, mill, discard) stays
+    /// cheap and this is not a blanket per-graveyard-move full re-eval.
+    #[test]
+    fn graveyard_arrival_does_not_dirty_layers_without_graveyard_gated_static() {
+        let mut state = setup();
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&bear).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "graveyard arrival must NOT dirty layers when no graveyard-membership-gated static is active"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof that the graveyard invalidation
+    /// also covers COUNT/threshold gates, not just `IsPresent`. A static gated on
+    /// `QuantityComparison(GraveyardSize >= 1)` must re-evaluate when a card is
+    /// milled into the graveyard via the normal `move_to_zone` path (no manual
+    /// `mark_full`). Fails on revert of the `QuantityComparison`/`QuantityRef`
+    /// branch of the zone-read detector.
+    #[test]
+    fn graveyard_count_gated_static_reevaluates_via_zone_move() {
+        let count_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }])
+            .condition(crate::types::ability::StaticCondition::QuantityComparison {
+                lhs: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::GraveyardSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            });
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard-count source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(count_static.clone());
+            o.base_static_definitions = Arc::new(vec![count_static]);
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Milled card".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        // Baseline: empty graveyard → count gate unsatisfied → no Trample.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&source].has_keyword(&Keyword::Trample));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // Production path: mill a card Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a card entering a graveyard must dirty layers for a GraveyardSize-count-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&source].has_keyword(&Keyword::Trample),
+            "with one card in the graveyard the count gate is satisfied and the grant applies"
         );
     }
 

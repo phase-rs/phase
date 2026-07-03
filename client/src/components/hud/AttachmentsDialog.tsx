@@ -66,7 +66,12 @@ export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Prop
     >
       <div className="flex flex-wrap content-start justify-center gap-3 px-4 py-4 lg:px-6 lg:py-5">
         {attachmentIds.map((id) => (
-          <DialogAttachmentCard key={id} objectId={id} widthPx={ATTACHMENT_W_PX} />
+          <DialogAttachmentCard
+            key={id}
+            objectId={id}
+            widthPx={ATTACHMENT_W_PX}
+            onDismiss={onClose}
+          />
         ))}
       </div>
     </DialogShell>

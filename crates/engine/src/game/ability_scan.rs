@@ -1534,6 +1534,11 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc = acc.or(scan_count_scope(scope));
             acc
         }
+        // CR 122.1f + CR 115.1: the target's controller's player-counter total.
+        // Target-relative (the chosen object target) and player-counter-
+        // projected; conservatively depends on all axes (over-approximation is
+        // always safe — it only forces an extra re-scan, never a stale read).
+        QuantityRef::TargetControllerCounter { kind: _ } => Axes::CONSERVATIVE,
         QuantityRef::Variable { name: _ } => Axes::NONE,
         QuantityRef::Power { scope, .. } => {
             let mut acc = Axes {

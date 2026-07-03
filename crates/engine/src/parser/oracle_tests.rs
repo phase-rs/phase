@@ -838,6 +838,56 @@ fn as_foretold_free_cast_line_is_unsupported() {
     );
 }
 
+/// CR 509.1c (issue #4949): Ochran Assassin's printed "All creatures able to
+/// block ~ do so" is a PERMANENT forced-block ("lure") static, not a one-shot
+/// effect. It must land as a `StaticMode::MustBeBlockedByAll` in `r.statics`
+/// (affected = the source itself), with NO leftover one-shot `GenericEffect`
+/// ability — that form has no trigger/cost and never resolves, so the lure never
+/// applies. Revert-discriminating: before the fix the line misclassifies to the
+/// effect parser and `r.statics` carries no MustBeBlockedByAll. Same printed line
+/// fixes Breaker of Armies / Prized Unicorn / Lure as a class.
+#[test]
+fn ochran_assassin_forced_block_is_permanent_static() {
+    use crate::types::ability::TargetFilter;
+    let r = parse(
+        "Deathtouch\nAll creatures able to block Ochran Assassin do so.",
+        "Ochran Assassin",
+        &[Keyword::Deathtouch],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::SelfRef),
+        "the lure must affect the source creature itself"
+    );
+
+    // No leftover one-shot GenericEffect ability carrying MustBeBlockedByAll — that
+    // form never resolves (the pre-fix bug).
+    assert!(
+        !r.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities
+                    .iter()
+                    .any(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        )),
+        "no one-shot GenericEffect MustBeBlockedByAll ability should remain, got {:?}",
+        r.abilities
+    );
+}
+
 /// Cavernous Maw (std BATCH 12): the `{2}` activated ability animates the
 /// land into a 3/3 Elemental creature, and the confirmatory "It's still a
 /// Cave land" sentence (CR 205.1b, CR 305.7) must NOT remain
@@ -7941,6 +7991,132 @@ fn conditional_modal_max_reuses_static_condition_parser() {
 }
 
 #[test]
+fn cairn_wanderer_distributes_graveyard_keyword_gate_per_keyword() {
+    use crate::types::ability::{
+        ContinuousModification, Effect, FilterProp, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::zones::Zone;
+
+    // CR 611.3a + CR 702: Cairn Wanderer grants each listed keyword ONLY while a
+    // creature card WITH that keyword is in a graveyard — an independent per-keyword
+    // conditional continuous static. The "The same is true for <list>" tail must
+    // distribute the modeled flying grant across every listed keyword, each with its
+    // OWN keyword swapped into both the grant and the graveyard-presence gate.
+    let r = parse(
+        "Changeling (This card is every creature type.)\nAs long as a creature card with flying is in a graveyard, this creature has flying. The same is true for fear, first strike, double strike, deathtouch, haste, landwalk, lifelink, protection, reach, trample, shroud, and vigilance.",
+        "Cairn Wanderer",
+        &[Keyword::Changeling],
+        &["Creature"],
+        &["Shapeshifter"],
+    );
+
+    // 11 gated grants: the modeled "flying" plus the 10 continuation keywords that
+    // resolve to a real Keyword. The unqualified `landwalk` / `protection` entries
+    // resolve to Keyword::Unknown (no quality/subtype to type) and are NOT cloned into
+    // inert statics — they surface as an explicit Unimplemented residual instead
+    // (coverage-honesty; asserted below), so the card is not falsely marked supported.
+    assert_eq!(
+        r.statics.len(),
+        11,
+        "expected one gated static per parameter-free keyword, got {:#?}",
+        r.statics
+    );
+
+    let grant_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        def.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+    };
+    let gate_keyword = |def: &StaticDefinition| -> Option<Keyword> {
+        match def.condition.as_ref()? {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(typed)),
+            } => typed.properties.iter().find_map(|p| match p {
+                FilterProp::WithKeyword { value } => Some(value.clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    };
+
+    // Spot-check the two the spec calls out: flying gates on flying, trample on
+    // trample — proving the gate keyword is swapped PER static, not left on flying.
+    for kw in [Keyword::Flying, Keyword::Trample] {
+        let def = r
+            .statics
+            .iter()
+            .find(|d| grant_keyword(d) == Some(kw.clone()))
+            .unwrap_or_else(|| panic!("no static granting {kw:?}"));
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        } = def.condition.as_ref().expect("gated")
+        else {
+            panic!(
+                "expected typed IsPresent gate for {kw:?}, got {:?}",
+                def.condition
+            );
+        };
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|t| t == &TypeFilter::Creature),
+            "{kw:?} gate must carry the Creature card-type filter"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "{kw:?} gate must carry InZone(Graveyard)"
+        );
+        assert_eq!(
+            gate_keyword(def),
+            Some(kw.clone()),
+            "{kw:?} grant must gate on a graveyard card with {kw:?} (per-keyword gate)"
+        );
+    }
+
+    // Every gated static grants exactly the keyword it gates on.
+    for def in &r.statics {
+        assert_eq!(
+            grant_keyword(def),
+            gate_keyword(def),
+            "each static's granted keyword must equal its gate keyword: {def:#?}"
+        );
+    }
+
+    // Coverage-honesty: NO static may grant Keyword::Unknown — an inert
+    // AddKeyword(Unknown) would still read as Continuous-mode "supported" in
+    // game/coverage.rs, letting the card be marked supported while a clause does
+    // nothing. The unqualified `landwalk` / `protection` continuation clauses must
+    // instead surface as an explicit Unimplemented residual (a loud unsupported gap).
+    for def in &r.statics {
+        assert!(
+            !matches!(grant_keyword(def), Some(Keyword::Unknown(_))),
+            "no gated static may grant Keyword::Unknown, got {def:#?}"
+        );
+    }
+    let residual = r
+        .abilities
+        .iter()
+        .find_map(|a| match &*a.effect {
+            Effect::Unimplemented {
+                description: Some(d),
+                ..
+            } => Some(d.to_lowercase()),
+            _ => None,
+        })
+        .expect("unqualified landwalk/protection must surface as an Unimplemented residual");
+    assert!(
+        residual.contains("landwalk") && residual.contains("protection"),
+        "the Unimplemented residual must name the unqualified keywords, got {residual:?}"
+    );
+}
+
+#[test]
 fn conditional_modal_max_supports_compound_presence_conditions() {
     let r = parse(
             "Choose one. If you control an artifact and an enchantment as you cast this spell, you may choose both instead.\n• Exile target creature or planeswalker.\n• Return target creature or planeswalker card from your graveyard to your hand.",
@@ -13593,6 +13769,8 @@ fn spell_cost_reduction_for_creatures_that_attacked_preserves_damage_effect() {
 
 #[test]
 fn negative_self_casting_restriction_stays_metadata() {
+    use crate::types::statics::StaticMode;
+
     let r = parse(
             "You can't cast Rock Jockey if you've played a land this turn.\nYou can't play lands if Rock Jockey was cast this turn.",
             "Rock Jockey",
@@ -13608,6 +13786,19 @@ fn negative_self_casting_restriction_stays_metadata() {
                 condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
             }),
         }]
+    );
+    assert!(
+        r.statics.iter().any(|d| {
+            matches!(&d.mode, StaticMode::Other(n) if n == "CantPlayLand")
+                && matches!(
+                    d.condition,
+                    Some(StaticCondition::And { ref conditions })
+                        if conditions.contains(&StaticCondition::WasCast { zone: None })
+                            && conditions.contains(&StaticCondition::SourceEnteredThisTurn)
+                )
+        }),
+        "Rock Jockey's gated CantPlayLand static must survive full-card dispatch, got statics={:?}",
+        r.statics
     );
     assert!(
         r.abilities

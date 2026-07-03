@@ -1102,6 +1102,31 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
+    // CR 108.3 + CR 404.1: an opponent's graveyard as a target resolves to a
+    // card in that graveyard. This more-specific possessive phrase MUST be tried
+    // before the bare opponent-player references below: the un-bounded
+    // `tag("an opponent")` arm would otherwise match the "an opponent" prefix of
+    // "an opponent's graveyard" and return a bare Opponent-player filter, leaving
+    // "'s graveyard" as an unconsumed remainder. The no-"an" sibling
+    // ("opponent's graveyard") is unaffected either way (no opponent-player tag
+    // matches "opponent's"), so both possessive forms now agree.
+    for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+            return (
+                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
+    }
+
     // CR 115.1 + CR 102.2: Opponent player references — "each opponent",
     // "opponents", and the bare "an opponent" form used by postnominal
     // random-selection patterns (Zaffai — "an opponent chosen at random")
@@ -1127,23 +1152,6 @@ pub fn parse_target_with_syntax<'a>(
         .parse(input)
     }) {
         return (filter, rest, syntax);
-    }
-
-    for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
-            return (
-                TargetFilter::Typed(TypedFilter::card().properties(vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InZone {
-                        zone: Zone::Graveyard,
-                    },
-                ])),
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
-        }
     }
 
     // CR 610.3 / CR 406.6: "each card exiled with this <type>" is a linked-
@@ -13470,6 +13478,40 @@ mod tests {
             ]))
         );
         assert_eq!(rest, "");
+    }
+
+    /// Regression: the "an" possessive form must agree with the no-"an" sibling
+    /// above. Before the graveyard branch was ordered ahead of the opponent-
+    /// player references, the un-bounded `tag("an opponent")` arm matched the
+    /// "an opponent" prefix of "an opponent's graveyard" and returned a bare
+    /// Opponent-player filter, leaving "'s graveyard" as an unconsumed remainder.
+    #[test]
+    fn parse_target_an_opponents_graveyard_is_graveyard_filter() {
+        let (filter, rest) = parse_target("an opponent's graveyard");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]))
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// Guard: reordering the graveyard branch above the opponent-player arm must
+    /// not disturb the bare "an opponent" player reference (Zaffai — "an opponent
+    /// chosen at random"), which contains no "graveyard" token.
+    #[test]
+    fn parse_target_bare_an_opponent_still_player() {
+        let (filter, _rest) = parse_target("an opponent chosen at random");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
     }
 
     #[test]

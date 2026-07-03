@@ -483,6 +483,14 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 509.1c: A printed permanent forced-block ("lure") static, "All creatures
+    // able to block <self/enchanted creature> do so" (Ochran Assassin, Breaker of
+    // Armies, Lure), routes to the static parser — NOT the one-shot spell form
+    // "… target creature this turn do so", which stays an effect.
+    if super::oracle_static::is_forced_block_static_candidate(lower) {
+        return true;
+    }
+
     if STATIC_CONTAINS_PATTERNS
         .iter()
         .any(|pattern| scan_contains(lower, pattern))

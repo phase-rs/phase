@@ -139,7 +139,9 @@ pub(crate) use cost_mod::{
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
     parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
-pub(crate) use evasion::{classify_block_exception, is_extra_blockers_static_candidate};
+pub(crate) use evasion::{
+    classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
+};
 pub(crate) use grammar::map_keyword;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,

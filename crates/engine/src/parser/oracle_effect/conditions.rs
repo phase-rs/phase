@@ -2648,6 +2648,48 @@ fn parse_mana_spent_vs_mana_value_target_condition(
     ))
 }
 
+/// CR 122.1f + CR 109.4 + CR 608.2c: "if its controller is poisoned" on a
+/// targeted spell effect — a player is "poisoned" iff they have one or more
+/// poison counters (CR 122.1f), and "its controller" anaphors to the controller
+/// of the ability's first object target (the countered spell). Corrupted
+/// Resolve. Mirrors `parse_no_mana_spent_to_cast_target_condition_text`: reuses
+/// `QuantityCheck` over an existing `QuantityRef` building block rather than a
+/// bespoke condition variant, the poison threshold `>= 1` expressing "poisoned".
+fn parse_target_controller_poisoned_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_target_controller_poisoned_condition).parse(input)
+    })
+}
+
+fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = (
+        // Possessive subject anaphoring the object target: "its" (Corrupted
+        // Resolve) and the demonstrative "that/this/the spell's" variants.
+        alt((
+            tag("its "),
+            tag("that spell's "),
+            tag("this spell's "),
+            tag("the spell's "),
+        )),
+        tag("controller is poisoned"),
+    )
+        .parse(input)?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TargetControllerCounter {
+                    kind: crate::types::player::PlayerCounterKind::Poison,
+                },
+            },
+            // CR 122.1f: "poisoned" == one or more poison counters.
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
@@ -2660,6 +2702,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_mana_spent_vs_mana_value_target_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_target_controller_poisoned_condition_text(text) {
         return Some(condition);
     }
 
@@ -5961,6 +6007,49 @@ mod tests {
         );
         assert_eq!(text, "Counter target spell");
         assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
+    }
+
+    /// CR 122.1f + CR 109.4 + CR 608.2c: Corrupted Resolve — "counter target
+    /// spell if its controller is poisoned" lowers the trailing condition to a
+    /// `QuantityCheck` over the target controller's poison counters (>= 1 ==
+    /// "poisoned"), and the counter body is stripped.
+    #[test]
+    fn parse_controller_is_poisoned_target_condition_reads_target_controller_poison() {
+        use crate::types::player::PlayerCounterKind;
+
+        let expected = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TargetControllerCounter {
+                    kind: PlayerCounterKind::Poison,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+
+        assert_eq!(
+            parse_target_controller_poisoned_condition_text("its controller is poisoned"),
+            Some(expected.clone())
+        );
+        // CR 608.2c demonstrative-subject variants reach the same shape.
+        assert_eq!(
+            parse_target_controller_poisoned_condition_text("that spell's controller is poisoned"),
+            Some(expected.clone())
+        );
+
+        // Full clause: condition peeled, the counter body remains for the
+        // downstream `Effect::Counter` parse (mirrors the Nix suffix path).
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target spell if its controller is poisoned",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target spell");
+        assert_eq!(cond, Some(expected));
+
+        // Negative: an unrelated "its controller ..." predicate must not match.
+        let unrelated =
+            parse_target_controller_poisoned_condition_text("its controller controls a Swamp");
+        assert!(unrelated.is_none());
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

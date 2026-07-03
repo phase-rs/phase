@@ -304,6 +304,8 @@ export const PermanentCard = memo(function PermanentCard({
     : [];
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
+  const dismissPreview = useUiStore((s) => s.dismissPreview);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   // On compact-height (landscape phones), use a subtler 12° rotation:
@@ -503,6 +505,13 @@ export const PermanentCard = memo(function PermanentCard({
     // to activate Equip and reattach it. Stop the bubble so the attachment's
     // own intent (target / activate / select) wins cleanly.
     if (obj.attached_to !== null) e.stopPropagation();
+    // A permanent and its attachments are each independently clickable in place
+    // — the host by its face, an attached Equipment/Aura by its right-edge peek
+    // (CR 301.5 / 303.4: an attachment is its own legal object). We deliberately
+    // do NOT hijack an ambiguous click into the AttachmentFan here: direct
+    // targeting must always work. When the peek is an awkward click target the
+    // player can open the fan explicitly via the "⧉" badge instead of being
+    // forced through it.
     // A PayCost TapCreatures prompt is mid-cost resolution — check before combat
     // mode so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForBoardChoice && boardChoice) {
@@ -873,6 +882,52 @@ export const PermanentCard = memo(function PermanentCard({
           aria-hidden
           className="pointer-events-none absolute inset-[-4px] z-40 rounded-xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
         />
+      )}
+
+      {/* View-attachments affordance. Attached permanents (Equipment / Aura /
+          Fortification) render only as a narrow right-edge peek behind their
+          host, so their own click/hover handlers — including an Equipment's
+          re-Equip activation (CR 301.5: the Equipment is an independent object
+          and activation source) — are hard to reach. This badge opens the
+          AttachmentsDialog for the host, where each attachment is shown at full
+          size and is independently interactive (target-select / activate). Only
+          the host carries attachments, so it never appears on the peeked cards
+          themselves. Revealed on hover on pointer devices; always shown on
+          touch (no hover) since the dialog is the only reliable reach there.
+
+          Mirrors GroupedPermanent's expand/collapse badge — a circular corner
+          affordance sticking out past the card. Placed top-LEFT so it clears
+          the right-edge attachment peeks and the `hiddenAttachments` +N badge.
+
+          Two interaction traps this must sidestep, both from the host motion.div:
+          1. `useLongPress` calls `setPointerCapture` on pointerdown, which would
+             capture the pointer to the host and retarget this button's click to
+             the host (firing card selection, not the badge). Stopping pointerdown
+             propagation keeps capture from ever engaging — the same reason the
+             group badge works: it lives OUTSIDE the capturing element.
+          2. The hover preview (CardPreview `z-[100]`) paints above the dialog
+             (`z-50`); clearing it on click makes the opened dialog visible. */}
+      {obj.attachments.length > 0 && (isHovered || isInHoveredAttachmentTree || isInspected || isSelected || !canHover) && (
+        <button
+          type="button"
+          aria-label={t("permanent.viewAttachments", { count: obj.attachments.length })}
+          title={t("permanent.viewAttachments", { count: obj.attachments.length })}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            // dismissPreview (not inspectObject(null), which only schedules a
+            // deferred 50ms clear) tears the preview down synchronously so the
+            // z-[100] preview never veils the fan.
+            dismissPreview();
+            setAttachmentFanHost(objectId);
+          }}
+          className="absolute -left-3 -top-3 z-40 flex h-6 min-w-6 items-center justify-center gap-0.5 rounded-full bg-black px-1.5 text-[11px] font-extrabold leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
+        >
+          <span aria-hidden className="text-[12px] leading-none">⧉</span>
+          {obj.attachments.length > 1 && (
+            <span className="tabular-nums">{obj.attachments.length}</span>
+          )}
+        </button>
       )}
     </motion.div>
   );

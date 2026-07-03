@@ -7304,6 +7304,60 @@ mod tests {
         assert!(validate_blockers(&state, &[(blocker_a, attacker), (blocker_b, attacker)]).is_ok());
     }
 
+    /// CR 509.1c (issue #4949): END-TO-END proof that the PARSED Ochran Assassin
+    /// forced-block static enforces at combat. We parse the printed "All creatures
+    /// able to block Ochran Assassin do so" line via `parse_oracle_text`, install
+    /// the resulting static on the attacker, and drive real block-declaration
+    /// validation. Revert-discriminating: before the parser fix the line
+    /// misclassifies to a one-shot effect, so `parse_oracle_text` yields NO
+    /// `MustBeBlockedByAll` static and the `.expect(...)` below fails.
+    #[test]
+    fn parsed_ochran_assassin_lure_forces_every_able_blocker() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Deathtouch\nAll creatures able to block Ochran Assassin do so.",
+            "Ochran Assassin",
+            &["Deathtouch".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Assassin".to_string()],
+        );
+        let lure = parsed
+            .statics
+            .into_iter()
+            .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+            .expect(
+                "parser must produce a permanent MustBeBlockedByAll static for Ochran Assassin",
+            );
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ochran Assassin", 1, 1);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(lure);
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Elf", 1, 1);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // The parsed lure forces EVERY able blocker onto Ochran.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "no blockers must be illegal under the parsed lure"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker_a, attacker)]).is_err(),
+            "leaving one able blocker idle must be illegal"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker_a, attacker), (blocker_b, attacker)]).is_ok(),
+            "assigning every able blocker must be legal"
+        );
+    }
+
     #[test]
     fn must_be_blocked_by_all_exempts_unable_blockers() {
         // CR 509.1c "able to": a tapped creature carries no block requirement, so

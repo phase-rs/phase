@@ -32,71 +32,20 @@ import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
+import { fanGeometry } from "../card/fanGeometry.ts";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
 
-// Horizontal overlap between adjacent hand cards. Negative margin pulls each
-// card leftward over the previous one. Tightens continuously as the hand grows
-// so a Commander-sized hand (up to ~20 cards) still fits on screen.
-//
-// The margin is a fraction of `--hand-card-w` — the SAME basis the cards are
-// rendered at (CardImage below). Using the base `--card-w` here while the cards
-// render at `--hand-card-w` (1.14–1.4× larger) left the real overlap off by the
-// scale factor, so the fan spread ~40% wider than the formula intends and the
-// error compounded with hand size, pushing the fan off-center to the right.
-function getHandOverlap(handSize: number): string {
-  if (handSize <= 5) return "calc(var(--hand-card-w) * -0.25)";
-  if (handSize <= 7) return "calc(var(--hand-card-w) * -0.45)";
-  // For 8+ cards: target total width ≈ 4× card width.
-  // First card occupies 1w; remaining (n-1) each contribute (1 + overlap)w.
-  // (n-1)(1 + overlap) = 3  =>  overlap = 3/(n-1) - 1, clamped to [-0.85, -0.6].
-  const overlap = Math.max(-0.85, Math.min(-0.6, 3 / (handSize - 1) - 1));
-  return `calc(var(--hand-card-w) * ${overlap})`;
-}
-
-// Quadratic arc lift coefficient. Scales down as the hand grows so the parabola
-// stays inside the hand band instead of pushing edge cards off-screen.
-function getArcCoefficient(handSize: number): number {
-  if (handSize <= 7) return 6;
-  // Keep max arc lift (at the edges) roughly constant at ~54px.
-  const maxDist = (handSize - 1) / 2;
-  return 54 / (maxDist * maxDist);
-}
-
-// Geometry for the WHOLE displayed row — hand cards plus the castable exile
-// (left) and graveyard (right) "wings" — as one fan. Overlap, per-card tilt and
-// arc are all sized by the TOTAL number of displayed cards, so a 3-card hand
-// shown alongside 13 graveyard delve-candidates tucks into the same tight,
-// angle-clamped arc a 16-card hand would, instead of inheriting the loose
-// 3-card spacing and spilling off-screen with near-sideways edge cards.
-//
-// `k` is a card's absolute position across the row: exile cards occupy [0, E),
-// hand cards [E, E + H), graveyard cards [E + H, N). When there are no wings
-// (N === H, E === 0) a hand card at index i sits at k === i, so the hand keeps
-// its familiar standalone fan; wings only ever shift the shared center, never
-// the hand's reorder bookkeeping (index/handSize stay hand-local).
-function fanGeometry(totalCards: number) {
-  const center = (totalCards - 1) / 2;
-  // Size the SHAPE (tilt + arc) from at least two cards so a lone card / wing
-  // still fans (a raw delta of 0 would render flat).
-  const shape = Math.max(2, totalCards);
-  const delta = Math.min(6, 36 / (shape - 1));
-  const arcCoeff = getArcCoefficient(shape);
-  // Downward parabola (edges drop, center rides highest), clamped at the row's
-  // own edges so the outermost cards rest level with the band instead of sinking
-  // below it and clipping.
-  const edgeLift = center * center * arcCoeff;
-  return {
-    overlap: getHandOverlap(totalCards),
-    rotation: (k: number) => (k - center) * delta,
-    arc: (k: number) => {
-      const d = k - center;
-      return Math.min(d * d * arcCoeff, edgeLift);
-    },
-  };
-}
+// The whole-row fan geometry — the overlap / tilt / arc that lays hand cards
+// (plus the castable exile / graveyard "wings") out as one held hand — now
+// lives in the shared `card/fanGeometry` module so the attachment fan curves
+// identically. `k` is a card's absolute position across the row: exile cards
+// occupy [0, E), hand cards [E, E + H), graveyard [E + H, N). With no wings
+// (E === 0, N === H) a hand card at index i sits at k === i, so the hand keeps
+// its familiar standalone fan; wings only shift the shared center, never the
+// hand's reorder bookkeeping (index/handSize stay hand-local).
 
 // Rendered size (px) of the bouncing drop-arrow's square box. Fixed (not
 // card-relative) so the imperative center / above-slot offsets stay exact in px.
