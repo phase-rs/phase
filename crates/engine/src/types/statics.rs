@@ -1955,6 +1955,7 @@ pub enum StaticModeKind {
     PayLifeAsColoredMana,
     StepEndUnspentMana,
     CanAttackWithDefender,
+    AttackOnlyNeighbor,
     IgnoreLandwalkForBlocking,
     CanActivateAbilitiesAsThoughHaste,
     CanBlockShadow,
@@ -2090,6 +2091,7 @@ impl StaticMode {
             StaticMode::PayLifeAsColoredMana { .. } => StaticModeKind::PayLifeAsColoredMana,
             StaticMode::StepEndUnspentMana { .. } => StaticModeKind::StepEndUnspentMana,
             StaticMode::CanAttackWithDefender => StaticModeKind::CanAttackWithDefender,
+            StaticMode::AttackOnlyNeighbor => StaticModeKind::AttackOnlyNeighbor,
             StaticMode::IgnoreLandwalkForBlocking { .. } => {
                 StaticModeKind::IgnoreLandwalkForBlocking
             }

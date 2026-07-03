@@ -761,20 +761,26 @@ fn viewer_may_look_at_face_down(
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     use crate::types::ability::{ContinuousModification, Duration};
-    use crate::types::statics::StaticMode;
-    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::MayLookAtFaceDown) {
-            continue;
-        }
-        if !can_view_private_for_player(source.controller) {
-            continue;
-        }
-        let Some(filter) = def.affected.as_ref() else {
-            continue;
-        };
-        let ctx = super::filter::FilterContext::from_source(state, source.id);
-        if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
-            return true;
+    use crate::types::statics::{StaticMode, StaticModeKind};
+    // CR 708.5: O(1) presence gate covers ONLY the battlefield-static authority. The
+    // duration-bound `transient_continuous_effects` scan below is a separate authority
+    // the index does not track, so wrap the loop rather than early-returning `false`.
+    if super::functioning_abilities::static_kind_present(state, StaticModeKind::MayLookAtFaceDown) {
+        crate::game::perf_counters::record_static_full_scan(); // counter fires only on real scan
+        for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+            if !matches!(def.mode, StaticMode::MayLookAtFaceDown) {
+                continue;
+            }
+            if !can_view_private_for_player(source.controller) {
+                continue;
+            }
+            let Some(filter) = def.affected.as_ref() else {
+                continue;
+            };
+            let ctx = super::filter::FilterContext::from_source(state, source.id);
+            if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+                return true;
+            }
         }
     }
 
@@ -1261,6 +1267,113 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Card"),
             "re-drawn card must not inherit prior reveal state — it is a new object per CR 400.7"
+        );
+    }
+
+    /// Unit 2, site #21 (multi-authority): `viewer_may_look_at_face_down` gates ONLY
+    /// its battlefield `MayLookAtFaceDown` scan behind the O(1) presence index (wrap,
+    /// not early-return), and falls through UNCHANGED to the duration-bound
+    /// `transient_continuous_effects` authority the index does not track. Three cases:
+    /// (a) a TCE grant with the index PRECISE-absent still permits the look — proving
+    /// the wrap did not early-`return false` and suppress the TCE (revert-failing);
+    /// (b) neither authority => no look; (c) a battlefield static (index present) falls
+    /// through and permits the look.
+    #[test]
+    fn face_down_look_tce_survives_precise_battlefield_gate() {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::statics::{StaticMode, StaticModeKind};
+
+        // Viewer P0; face-down creature controlled by opponent P1.
+        let mut state = GameState::new_two_player(42);
+        let face_down = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Face Down".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&face_down).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.face_down = true;
+        }
+        // Viewer P0 can see only their own private information.
+        let can_view = |p: PlayerId| p == PlayerId(0);
+        let opp_creature =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+
+        // (b) Neither authority present, index precise => no look.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::MayLookAtFaceDown
+            ),
+            "precondition: no battlefield MayLookAtFaceDown static"
+        );
+        assert!(
+            !viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "no authority => the viewer may not look"
+        );
+
+        // (a) TCE grant (controller P0) with the battlefield index still absent.
+        state.add_transient_continuous_effect(
+            ObjectId(999),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            opp_creature(),
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::MayLookAtFaceDown
+            ),
+            "the TCE authority must NOT flip the battlefield-static presence index"
+        );
+        assert!(
+            viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "TCE-granted look must survive the battlefield-static gate (revert-failing)"
+        );
+
+        // (c) Battlefield static (index present) — presence-positive fall-through.
+        let mut state = GameState::new_two_player(42);
+        let face_down = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Face Down".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&face_down).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.face_down = true;
+        }
+        let looker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Found Footage".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&looker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MayLookAtFaceDown).affected(opp_creature()));
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            viewer_may_look_at_face_down(&state, face_down, &can_view),
+            "a battlefield MayLookAtFaceDown static permits the look on fall-through"
         );
     }
 

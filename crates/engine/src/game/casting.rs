@@ -24,7 +24,7 @@ use crate::types::player::PlayerId;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
     CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
-    ProhibitionScope, StaticMode,
+    ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -41,7 +41,7 @@ use super::ability_utils::{
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
-use super::functioning_abilities::active_static_definitions;
+use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
 use super::priority;
@@ -5726,6 +5726,11 @@ fn collect_battlefield_cost_modifiers(
     // a reduction's `saturating_sub` floor can never clamp generic to 0 ahead of a
     // later increase (which would overcharge the spell, order-dependently).
     let mut collected = Vec::new();
+    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost modifiers.
+    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+        return collected;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
         let source_controller = src_obj.controller;
@@ -5851,6 +5856,11 @@ pub(super) fn collect_imposed_additional_cast_costs(
     use crate::types::ability::ControllerRef;
 
     let mut costs = Vec::new();
+    // CR 604.1: O(1) presence gate — no ImposeAdditionalCost static means no imposed costs.
+    if !static_kind_present(state, StaticModeKind::ImposeAdditionalCost) {
+        return costs;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
         let source_controller = src_obj.controller;
@@ -5973,6 +5983,11 @@ fn apply_cost_floor_inner(
     target_sensitive_only: bool,
     mana_cost: &mut ManaCost,
 ) {
+    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost floor to apply.
+    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+        return;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_functioning_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
         let bf_id = bf_obj.id;
@@ -14513,6 +14528,11 @@ fn apply_static_activated_ability_cost_reduction(
     player: PlayerId,
     source_id: ObjectId,
 ) {
+    // CR 604.1: O(1) presence gate — no ReduceAbilityCost static means no reduction.
+    if !static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
+        return;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 601.2f: A `ReduceAbilityCost` static keyed on a keyword (e.g. "power-up")
     // also reduces a tagged activated ability whose tag matches that keyword
     // (Hulk reduces other creatures' power-up abilities). Read the activating
@@ -14752,6 +14772,11 @@ fn is_blocked_from_casting_from_zone(
     }
 
     let object_id = obj.id;
+    // CR 604.1: O(1) presence gate — no CantCastFrom static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantCastFrom) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCastFrom { ref who } = def.mode else {
@@ -14802,6 +14827,11 @@ pub(super) fn is_blocked_by_cant_be_activated(
     activating_source_id: ObjectId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantBeActivated static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantBeActivated) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let bf_id = bf_obj.id;
@@ -14896,6 +14926,11 @@ fn evaluate_casting_prohibition_condition(
 /// E.g., Dosan, the Falling Leaf (`who=AllPlayers, when=NotDuringAffectedPlayersTurn`):
 ///   each player can only cast on their own turn.
 fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
+    // CR 604.1: O(1) presence gate — no CantCastDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantCastDuring) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCastDuring { ref who, ref when } = def.mode else {
@@ -14932,6 +14967,11 @@ pub(super) fn is_blocked_by_cant_activate_during(
     activator: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantActivateDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantActivateDuring) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantActivateDuring {
@@ -14970,6 +15010,11 @@ fn is_blocked_by_cant_be_cast(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantBeCast static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantBeCast) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`
     // — including the per-static `condition` check; no inline duplication needed.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
@@ -15063,6 +15108,11 @@ fn is_blocked_by_per_turn_cast_limit(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no PerTurnCastLimit static means no limit.
+    if !static_kind_present(state, StaticModeKind::PerTurnCastLimit) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         {
