@@ -8,7 +8,7 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
-use super::context::PolicyContext;
+use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
@@ -43,11 +43,10 @@ use super::tutor::TutorPolicy;
 use super::x_cast_gate::XCastGatePolicy;
 use super::x_value::XValuePolicy;
 use crate::cast_facts::cast_facts_for_action;
-use crate::config::AiConfig;
 use crate::decision_kind::classify as classify_decision;
 use crate::features::DeckFeatures;
 use crate::planner::PolicyPrior;
-use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::ai_support::CandidateAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -454,15 +453,7 @@ impl PolicyRegistry {
         self.policies.iter().any(|p| p.id() == id)
     }
 
-    pub fn priors(
-        &self,
-        state: &GameState,
-        decision: &AiDecisionContext,
-        candidates: &[CandidateAction],
-        ai_player: PlayerId,
-        config: &AiConfig,
-        context: &crate::context::AiContext,
-    ) -> Vec<PolicyPrior> {
+    pub fn priors(&self, env: &PriorsEnv<'_>, candidates: &[CandidateAction]) -> Vec<PolicyPrior> {
         if candidates.is_empty() {
             return Vec::new();
         }
@@ -470,15 +461,16 @@ impl PolicyRegistry {
         let raw_scores: Vec<f64> = candidates
             .iter()
             .map(|candidate| {
-                let cast_facts = cast_facts_for_action(state, &candidate.action, ai_player);
+                let cast_facts = cast_facts_for_action(env.state, &candidate.action, env.ai_player);
                 self.score(&PolicyContext {
-                    state,
-                    decision,
+                    state: env.state,
+                    decision: env.decision,
                     candidate,
-                    ai_player,
-                    config,
-                    context,
+                    ai_player: env.ai_player,
+                    config: env.config,
+                    context: env.context,
                     cast_facts,
+                    search_depth: env.search_depth,
                 })
             })
             .collect();
@@ -540,6 +532,8 @@ impl PolicyRegistry {
 #[cfg(test)]
 mod shared_invariant_tests {
     use super::*;
+    use crate::config::AiConfig;
+    use crate::policies::context::SearchDepth;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{GameState, WaitingFor};
@@ -651,14 +645,15 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert_eq!(priors[0].prior, 0.0);
@@ -676,14 +671,15 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert!(priors

@@ -530,6 +530,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_two = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -545,6 +546,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_zero > score_two);
@@ -599,6 +601,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_three = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -614,6 +617,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_three > score_zero);
@@ -651,6 +655,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_large = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -668,6 +673,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_large > score_small);

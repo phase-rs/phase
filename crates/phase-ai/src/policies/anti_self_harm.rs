@@ -1243,6 +1243,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1282,6 +1283,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1320,6 +1322,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1338,6 +1341,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1410,6 +1414,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1427,6 +1432,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1475,6 +1481,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1492,6 +1499,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1522,6 +1530,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1538,6 +1547,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1574,6 +1584,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1591,6 +1602,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1626,6 +1638,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1643,6 +1656,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1680,6 +1694,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_self = AntiSelfHarmPolicy.score(&ctx_self);
 
@@ -1700,6 +1715,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1771,6 +1787,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
@@ -1789,6 +1806,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -1860,6 +1878,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
@@ -1878,6 +1897,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -2063,6 +2083,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2125,6 +2146,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2223,6 +2245,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2286,6 +2309,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2348,6 +2372,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2410,6 +2435,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2474,6 +2500,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2537,6 +2564,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2599,6 +2627,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2749,6 +2778,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2775,6 +2805,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2815,6 +2846,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2945,6 +2977,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3103,6 +3136,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3206,6 +3240,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3258,6 +3293,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3372,6 +3408,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let creature_score = AntiSelfHarmPolicy.score(&creature_ctx);
 
@@ -3393,6 +3430,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let token_score = AntiSelfHarmPolicy.score(&token_ctx);
 
@@ -3478,6 +3516,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let effects = ctx.effects();
@@ -3558,6 +3597,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict_self = AntiSelfHarmPolicy.verdict(&ctx_self);
 
@@ -3579,6 +3619,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3600,6 +3641,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_player = AntiSelfHarmPolicy.score(&ctx_player);
 
@@ -3650,6 +3692,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -3668,6 +3711,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3719,6 +3763,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_creature = AntiSelfHarmPolicy.score(&ctx_creature);
 
@@ -3737,6 +3782,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_face = AntiSelfHarmPolicy.score(&ctx_face);
 
@@ -3783,6 +3829,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
 
@@ -3842,6 +3889,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
         assert!(
@@ -3885,6 +3933,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let lowest_score = AntiSelfHarmPolicy.score(&ctx_lowest);
 
@@ -3905,6 +3954,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let other_score = AntiSelfHarmPolicy.score(&ctx_other);
 
@@ -3953,6 +4003,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -3969,6 +4020,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -4305,6 +4357,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -4349,6 +4402,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdicts = crate::policies::registry::PolicyRegistry::shared().verdicts(&ctx);

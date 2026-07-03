@@ -185,6 +185,14 @@ fn no_op_at_x_zero(
 }
 
 fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+    // Perf: the board-wide `max_x_value` affordability sweep below only needs to
+    // be correct at the committed decision. In beam/rollout lookahead an X=0 cast
+    // is already dominated by its resulting-state eval, so scoring it neutral there
+    // costs nothing and removes the per-node sweep that regressed large boards.
+    if !ctx.at_root() {
+        return None;
+    }
+
     let state = ctx.state;
     let (ability, object_id, x_manacost, is_spell): (
         &AbilityDefinition,
@@ -227,25 +235,32 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         _ => return None,
     };
 
-    // Reach-guard: only gate when the ONLY affordable X is 0. `max_x_value`
-    // already caps X to what the caster can legally pay (CR 601.2b/f), so
-    // max ≥ 1 means the ramp path (`XValuePolicy`) handles it — don't gate.
-    // Checked after the cheap `{X}`-shard short-circuit above so we skip the
-    // affordability sweep for non-{X} candidates.
-    if max_x_value(state, ctx.ai_player, x_manacost, Some(object_id)) != 0 {
-        return None;
-    }
-
+    // Card-local payoff walk FIRST (no board sweep): if the payoff is not a
+    // guaranteed no-op at X=0 (a fixed meaningful residual, or it does not scale
+    // with X), the gate can never fire — skip the affordability sweep entirely.
+    // AND is commutative, so ordering the cheap card-local predicate before the
+    // board-wide sweep cannot change any verdict; it only spares the sweep.
     let (effects, object_level_x) = payoff_effects_and_x_ref(ctx, object_id, ability, is_spell);
-    no_op_at_x_zero(
+    if !no_op_at_x_zero(
         state,
         ctx.ai_player,
         object_id,
         ability,
         &effects,
         object_level_x,
-    )
-    .then(|| PolicyReason::new("x_cast_zero_no_op").with_fact("max_x", 0))
+    ) {
+        return None;
+    }
+
+    // Board-wide affordability sweep LAST, only for genuine no-op-at-X=0 payoffs
+    // at the root. `max_x_value` already caps X to what the caster can legally
+    // pay (CR 601.2b/f), so max ≥ 1 means the ramp path (`XValuePolicy`) handles
+    // it — don't gate.
+    if max_x_value(state, ctx.ai_player, x_manacost, Some(object_id)) != 0 {
+        return None;
+    }
+
+    Some(PolicyReason::new("x_cast_zero_no_op").with_fact("max_x", 0))
 }
 
 #[cfg(test)]
@@ -254,6 +269,7 @@ mod tests {
     use crate::cast_facts::cast_facts_for_object;
     use crate::config::AiConfig;
     use crate::context::AiContext;
+    use crate::policies::context::SearchDepth;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -513,7 +529,7 @@ mod tests {
                 tactical_class: TacticalClass::Ability,
             },
         };
-        verdict_for(state, candidate)
+        verdict_for(state, candidate, SearchDepth::Root)
     }
 
     fn verdict_for_cast(state: &GameState, object_id: ObjectId, card_id: CardId) -> PolicyVerdict {
@@ -529,7 +545,7 @@ mod tests {
                 tactical_class: TacticalClass::Spell,
             },
         };
-        verdict_for(state, candidate)
+        verdict_for(state, candidate, SearchDepth::Root)
     }
 
     /// Like [`verdict_for_cast`] but populates the `PolicyContext::cast_facts`
@@ -569,11 +585,37 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: Some(facts),
+            search_depth: SearchDepth::Root,
         };
         XCastGatePolicy.verdict(&ctx)
     }
 
-    fn verdict_for(state: &GameState, candidate: CandidateAction) -> PolicyVerdict {
+    /// Activation verdict at a caller-chosen search depth — lets a test drive the
+    /// identical fixture at both `Root` and `Lookahead` to prove the depth guard
+    /// is the sole cause of a verdict flip.
+    fn verdict_for_activate_at(
+        state: &GameState,
+        source_id: ObjectId,
+        search_depth: SearchDepth,
+    ) -> PolicyVerdict {
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata {
+                actor: Some(AI),
+                tactical_class: TacticalClass::Ability,
+            },
+        };
+        verdict_for(state, candidate, search_depth)
+    }
+
+    fn verdict_for(
+        state: &GameState,
+        candidate: CandidateAction,
+        search_depth: SearchDepth,
+    ) -> PolicyVerdict {
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
         let decision = AiDecisionContext {
@@ -588,6 +630,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth,
         };
         XCastGatePolicy.verdict(&ctx)
     }
@@ -621,6 +664,28 @@ mod tests {
         let mut state = base_state();
         let source = activated_source(&mut state, "Helix Pinnacle", helix_ability());
         assert_reject(&verdict_for_activate(&state, source), "x_cast_zero_no_op");
+    }
+
+    #[test]
+    fn helix_pinnacle_lookahead_returns_neutral() {
+        // The fix, discriminating: the IDENTICAL zero-mana Helix fixture that
+        // `helix_pinnacle_max_x_zero_rejected` rejects at `Root` must return a
+        // neutral (non-reject) verdict at `Lookahead`. Same inputs, opposite
+        // verdicts, differing ONLY in `search_depth` — so the depth guard is the
+        // sole cause. Reverting the `if !ctx.at_root() { return None; }` first line
+        // of `gate_rejects` makes this reject (the board sweep runs, max_x=0, the
+        // PutCounter-X payoff is a no-op) → `assert_not_reject` fails.
+        //
+        // Non-vacuous: the paired Root-reject test proves the fixture reaches the
+        // real gate arm (genuine {X} no-op payoff), so neutrality here is caused by
+        // depth, not by an upstream short-circuit (non-{X} cost, wrong action, etc.).
+        let mut state = base_state();
+        let source = activated_source(&mut state, "Helix Pinnacle", helix_ability());
+        assert_not_reject(&verdict_for_activate_at(
+            &state,
+            source,
+            SearchDepth::Lookahead,
+        ));
     }
 
     #[test]

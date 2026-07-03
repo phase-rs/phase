@@ -172,6 +172,7 @@ fn ctx<'a>(
         config,
         context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     }
 }
 

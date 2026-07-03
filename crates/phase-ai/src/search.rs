@@ -30,7 +30,7 @@ use crate::planner::{
     apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
     RankedCandidate, SearchBudget,
 };
-use crate::policies::context::PolicyContext;
+use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
@@ -603,6 +603,8 @@ pub fn emit_trace_for_candidate(
         config,
         context,
         cast_facts,
+        // The decision trace reflects the committed (root) decision.
+        search_depth: SearchDepth::Root,
     };
     let verdicts = policies.verdicts(&policy_ctx);
 
@@ -1783,7 +1785,13 @@ fn score_candidates_core(
         let mut ranked: Vec<RankedCandidate> = gated
             .iter()
             .map(|g| {
-                let tactical = services.tactical_score(state, &ctx, &g.candidate, ai_player);
+                let tactical = services.tactical_score(
+                    state,
+                    &ctx,
+                    &g.candidate,
+                    ai_player,
+                    SearchDepth::Root,
+                );
                 RankedCandidate {
                     candidate: g.candidate.clone(),
                     score: tactical + g.penalty,
@@ -1883,8 +1891,13 @@ fn score_candidates_core(
         let mut out: Vec<_> = gated
             .into_iter()
             .map(|candidate| {
-                let score = services.tactical_score(state, &ctx, &candidate.candidate, ai_player)
-                    + candidate.penalty;
+                let score = services.tactical_score(
+                    state,
+                    &ctx,
+                    &candidate.candidate,
+                    ai_player,
+                    SearchDepth::Root,
+                ) + candidate.penalty;
                 (candidate.candidate.action, score)
             })
             .collect();
@@ -2914,6 +2927,97 @@ mod tests {
         let via_wrapper = score_candidates_with_session(&state, PlayerId(0), &config, &session);
         let via_core = score_candidates_core(&state, PlayerId(0), &config, &session, None);
         assert_eq!(via_wrapper, via_core);
+    }
+
+    /// Battlefield permanent carrying a single Helix-shape `{X}` activated
+    /// ability ("{X}: put X tower counters on ~" — scales with X, a no-op at
+    /// X=0). Returns the source ObjectId; the sole ability is index 0.
+    fn add_helix_x_ability(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = add_creature(state, owner, 1, 1);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("tower".to_string()),
+                count: QuantityExpr::Ref {
+                    qty: engine::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+        );
+        ability.cost = Some(engine::types::ability::AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+        });
+        *Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities) = vec![ability];
+        id
+    }
+
+    fn activate_score(scored: &[(GameAction, f64)], source: ObjectId) -> Option<f64> {
+        scored.iter().find_map(|(action, score)| match action {
+            GameAction::ActivateAbility { source_id, .. } if *source_id == source => Some(*score),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn xcast_zero_no_op_not_committed_at_root() {
+        // Claim C (end-to-end, discriminating): at the real committed-decision
+        // seam (`score_candidates_core`), a Helix-shape {X} activation whose only
+        // affordable X is 0 (zero mana) must NOT be the committed argmax. The root
+        // gate scores it `NEG_INFINITY`, so `Pass` (always a Priority candidate)
+        // outranks it. Reverting the Root gate lets the X=0 activation score finite
+        // and possibly win → the "not finite / not argmax" assertions flip.
+        let mut state = make_state();
+        let source = add_helix_x_ability(&mut state, PlayerId(0)); // zero mana → max X = 0
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        // Non-vacuous reach-guard: the activation candidate is actually present in
+        // the scored set (candidate generation produced the X=0 activation — the
+        // exact commitment the gate exists to stop), so the assertion below is not
+        // silently satisfied by an absent candidate.
+        let score = activate_score(&scored, source)
+            .expect("the {X}=0 activation must be an enumerated, scored candidate");
+        assert!(
+            !score.is_finite(),
+            "root gate must reject the X=0 no-op activation (got finite score {score})"
+        );
+
+        // It is therefore not the argmax — some other action (Pass) wins.
+        let best = scored
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
+            .map(|(action, _)| action.clone());
+        assert!(
+            !matches!(best, Some(GameAction::ActivateAbility { source_id, .. }) if source_id == source),
+            "the X=0 no-op activation must not be the committed decision"
+        );
+    }
+
+    #[test]
+    fn xcast_affordable_activation_committed_at_root() {
+        // Reach-guard sibling (non-vacuous): the IDENTICAL Helix fixture with
+        // enough mana for X >= 1 lets the gate stand down, so the activation scores
+        // FINITE and is a legitimate candidate. Proves the refusal above is
+        // affordability-driven, not a blanket suppression of the activation.
+        let mut state = make_state();
+        let source = add_helix_x_ability(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1); // max X = 1
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        let score = activate_score(&scored, source)
+            .expect("the {X} activation must be an enumerated, scored candidate");
+        assert!(
+            score.is_finite(),
+            "with X >= 1 affordable the gate stands down; activation must score finite"
+        );
     }
 
     #[test]
@@ -4028,6 +4132,7 @@ mod tests {
             config: &AiConfig::default(),
             context: &crate::context::AiContext::empty(&AiConfig::default().weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let opp_score = policies.score(&PolicyContext {
             state: &state,
@@ -4037,6 +4142,7 @@ mod tests {
             config: &AiConfig::default(),
             context: &crate::context::AiContext::empty(&AiConfig::default().weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         assert!(self_score < opp_score);
         assert!(self_score < -50.0);

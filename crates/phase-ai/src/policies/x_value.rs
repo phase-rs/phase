@@ -273,6 +273,7 @@ mod tests {
             config,
             context: ai_context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 
@@ -360,14 +361,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()
@@ -480,14 +482,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()
@@ -528,14 +531,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()
