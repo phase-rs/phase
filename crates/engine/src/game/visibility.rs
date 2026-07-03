@@ -1063,7 +1063,8 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
 /// an opponent has no rules-permission to see, leaving only
 /// the public spine (source_id, controller, timestamp, ability,
 /// condition, target_constraints, subject_match_count, die_result,
-/// may_trigger_origin) needed for the engine to keep running on
+/// may_trigger_origin) plus the public scheduling metadata on the wrapping
+/// context needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
 fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
@@ -1077,7 +1078,8 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects).
+/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
