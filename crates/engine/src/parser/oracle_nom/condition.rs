@@ -465,6 +465,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
+        parse_exiled_this_way_count,
         parse_unless_pay_condition,
     ))
     .parse(input)
@@ -491,6 +492,42 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
     // CR 608.2c: "this way" scopes to objects moved by this resolution.
     let (rest, _) = take_until(" onto the battlefield this way").parse(rest)?;
     let (rest, _) = tag(" onto the battlefield this way").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 608.2c: "you exiled <N> or more/or fewer card[s] this way" — a
+/// resolution-context comparison over how many cards the immediately preceding
+/// per-card-type exile placed into the chain tracked set (Portent of Calamity:
+/// "You may cast a spell from among the exiled cards without paying its mana
+/// cost if you exiled four or more cards this way").
+///
+/// `resolve_for_each_category` rebinds a FRESH empty chain tracked set and each
+/// exile extends it with the chosen card, so every member of the set is a card
+/// exiled this way — `QuantityRef::TrackedSetSize` (an unfiltered member count)
+/// reads the exile count directly. `ChangeZoneAll` (the intervening "put the
+/// rest into your graveyard") never republishes, so the exile set is still the
+/// most-recent tracked set when the following cast clause's gate is evaluated.
+/// The exile resume uses the cause-less `publish_tracked_set`, so a
+/// `caused_by`-bound count would read nothing — the whole-set count is correct.
+/// The noun ("card[s]") only consumes text; the count is unfiltered.
+fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you exiled ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, comparator) = alt((
+        value(Comparator::GE, tag(" or more ")),
+        value(Comparator::LE, tag(" or fewer ")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -2834,8 +2871,17 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
-        // CR 508.1: "a[n] [filter] creature is attacking[ you]" → IsPresent(filter + attacking)
+        // CR 508.1: "a[n] [filter] creature is attacking[ you]" → IsPresent(filter + Attacking).
+        // Upstream #4918 generalized the former bare "a creature is attacking you" literal over the
+        // filter axis while keeping the defender-scoped "attacking you" form, so it subsumes batch-3's
+        // parse_creature_attacking_you (dropped — its "a creature is attacking you" behavior is
+        // reproduced here). Tried FIRST so the defender-scoped "attacking you" form keeps priority.
         parse_filtered_creature_is_attacking,
+        // CR 508.1 + CR 509.1: "a/an <type> is attacking [or blocking]" → IsPresent(type + combat
+        // state). Retained for the "[or blocking]" predicate that the attacking-only filtered form
+        // above does not cover; tried after it so filtered owns the attacking/defender form (the
+        // attacking case here yields the identical IsPresent, so filtered simply reaches it first).
+        parse_a_type_is_in_combat,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -3093,6 +3139,42 @@ fn parse_filtered_creature_is_attacking(input: &str) -> OracleResult<'_, StaticC
         after,
         StaticCondition::IsPresent {
             filter: Some(filter),
+        },
+    ))
+}
+
+/// CR 508.1 + CR 509.1: existential "a/an <type> is attacking [or blocking]" —
+/// true when at least one permanent matching `<type>` is in the named combat
+/// state (Charging Hooligan: "If a Rat is attacking, ..."). Complements
+/// `parse_filtered_creature_is_attacking` (which owns the attacking / "attacking
+/// you" defender form): this arm uniquely adds the `is blocking` predicate over
+/// the same type axis (via `parse_type_phrase`, so any subtype/core type works).
+/// The attacking case overlaps that combinator and yields the identical
+/// `IsPresent`; it is registered first, so this arm is reached for the blocking form.
+/// No controller restriction — a matching attacker/blocker controlled by any
+/// player qualifies. The singular article requirement rejects the plural count
+/// form ("creatures are attacking"), which `parse_creatures_are_attacking_count_ge`
+/// owns.
+fn parse_a_type_is_in_combat(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Require a singular article; `parse_type_phrase` strips it itself.
+    nom::combinator::peek(alt((tag("a "), tag("an "))).map(|_| ())).parse(input)?;
+    let (filter, remainder) = parse_type_phrase(input);
+    let TargetFilter::Typed(mut typed) = filter else {
+        return Err(oracle_err(input));
+    };
+    let (rest, prop) = alt((
+        value(
+            FilterProp::Attacking { defender: None },
+            tag("is attacking"),
+        ),
+        value(FilterProp::Blocking, tag("is blocking")),
+    ))
+    .parse(remainder.trim_start())?;
+    typed.properties.push(prop);
+    Ok((
+        rest,
+        StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
         },
     ))
 }
@@ -4098,6 +4180,13 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_youve_life_history_condition,
         parse_youve_combat_history_condition,
         parse_youve_player_action_history_condition,
+        // CR 603.4 + CR 608.2c: "you've done all four this turn" — back-references
+        // the four bend verbs in Avatar Aang's trigger head; `>= 4` means every
+        // distinct bend type was performed this turn.
+        value(
+            make_quantity_ge(QuantityRef::BendTypesThisTurn, 4),
+            tag("done all four this turn"),
+        ),
         // CR 305.1 + CR 305.2a: "you've played a land [this turn]" — present-
         // perfect land-play history. Shares `parse_played_a_land_this_turn_body`
         // with the simple-past / "you have" dispatcher. Backs intervening-if
@@ -7074,6 +7163,10 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     let (rest, _) = alt((
         value((), tag::<_, _, OracleError<'_>>("at least one ")),
         value((), tag("one or more ")),
+        // CR 608.2c: "another <type> … this way" (Arid Archway) — do NOT consume
+        // "another "; `parse_type_phrase` maps it to `FilterProp::Another` so the
+        // returned-this-way subject excludes the source.
+        value((), nom::combinator::peek(tag("another "))),
         parse_article,
     ))
     .parse(input)?;
@@ -7088,6 +7181,14 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
             nom::error::ErrorKind::Fail,
         )));
     }
+
+    // CR 608.2c + CR 205: Disjunctive subject — "a permanent you controlled or a
+    // token was destroyed this way" (Break the Spell). A single shared verb
+    // ("was destroyed this way") governs both article-led type filters, so the
+    // top-level condition disjunction cannot split it; fold each " or <article>
+    // <type>" continuation into an `Or` filter. Mirrors the elided-verb loop in
+    // `parse_you_control_a`.
+    let (filter, after_filter) = fold_this_way_subject_disjunction(filter, after_filter);
 
     // `parse_type_phrase` returns a slice of `rest`; trim any leading whitespace
     // it left between the type phrase and the tense verb so the next `tag`
@@ -7241,6 +7342,174 @@ pub fn parse_you_sacrifice_this_way_clause(input: &str) -> OracleResult<'_, (Tar
     Ok((rest, (filter, false)))
 }
 
+/// CR 608.2c + CR 205: Fold trailing " or <article/another> <type>" segments that
+/// share the leading clause's single verb into an `Or` filter. `remainder` is the
+/// slice immediately after the first parsed type phrase (untrimmed). Returns the
+/// combined filter and the slice positioned at the shared verb. A quantifier-led
+/// or bare RHS is left untouched for the caller's verb match.
+fn fold_this_way_subject_disjunction(first: TargetFilter, remainder: &str) -> (TargetFilter, &str) {
+    let mut filters = vec![first];
+    let mut cursor = remainder;
+    loop {
+        let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(cursor) else {
+            break;
+        };
+        // Require an article/"another"-led RHS so a standalone-condition disjunct
+        // ("… or a spell was warped this turn") is left for other dispatchers.
+        if nom::combinator::peek(alt((
+            tag::<_, _, OracleError<'_>>("a "),
+            tag("an "),
+            tag("another "),
+        )))
+        .parse(after_or)
+        .is_err()
+        {
+            break;
+        }
+        let (next_filter, next_remainder) = parse_type_phrase(after_or);
+        if matches!(next_filter, TargetFilter::Any) {
+            break;
+        }
+        filters.push(next_filter);
+        cursor = next_remainder;
+    }
+    let combined = if filters.len() == 1 {
+        filters.pop().expect("one filter")
+    } else {
+        TargetFilter::Or { filters }
+    };
+    (combined, cursor)
+}
+
+/// CR 400.7 + CR 608.2c: Parse "you put [quantifier] [type] into your hand this
+/// way" — active-voice reflexive gate created by a preceding "put … into your
+/// hand" instruction (Town Greeter: "put a Town card into your hand this way";
+/// Nashi, Searcher in the Dark: "put no cards into your hand this way"). The
+/// put-into-hand move publishes the moved cards into
+/// `state.last_zone_changed_ids`, so the existential form maps to
+/// `ZoneChangedThisWay` and the "no cards" form to a `TrackedSetSize == 0` check.
+pub fn parse_you_put_into_hand_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    // CR 608.2c: "no cards … this way" — the tracked put-set is empty.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("no cards into your hand this way").parse(rest)
+    {
+        return Ok((
+            rest,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
+    let (rest, _) = alt((
+        value((), tag("at least one ")),
+        value((), tag("one or more ")),
+        value(
+            (),
+            nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))),
+        ),
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("into your hand this way").parse(after_filter.trim_start())?;
+    Ok((rest, AbilityCondition::ZoneChangedThisWay { filter }))
+}
+
+/// CR 400.7 + CR 608.2c: Parse "returned [quantifier] [type] to your hand this
+/// way" — the passive/elided-subject bounce gate (Cache Grab's disjunct:
+/// "returned a Squirrel card to your hand this way"). Returns the matched type
+/// filter; the bounce publishes the moved cards into `state.last_zone_changed_ids`.
+pub fn parse_returned_to_hand_this_way_clause(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("returned ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag("at least one ")),
+        value((), tag("one or more ")),
+        value(
+            (),
+            nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))),
+        ),
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("to your hand this way").parse(after_filter.trim_start())?;
+    Ok((rest, filter))
+}
+
+/// CR 608.2c: Parse "you control [article] [type] or returned
+/// [article] [type] to your hand this way" — the mixed disjunction of a
+/// battlefield-presence gate and a bounce-this-way gate (Cache Grab: "If you
+/// control a Squirrel or returned a Squirrel card to your hand this way, …").
+/// The two disjuncts read different authorities (live battlefield vs. the
+/// resolution-local moved set), so they compose as an `AbilityCondition::Or`
+/// rather than a single filter.
+pub fn parse_you_control_or_returned_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(rest)?;
+    let (control_filter, after) = parse_type_phrase(rest);
+    if matches!(control_filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = alt((tag(" or "), tag("or "))).parse(after.trim_start())?;
+    let (rest, returned_filter) = parse_returned_to_hand_this_way_clause(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::Or {
+            conditions: vec![
+                AbilityCondition::ControllerControlsMatching {
+                    filter: inject_controller_you(control_filter),
+                },
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: returned_filter,
+                },
+            ],
+        },
+    ))
+}
+
+/// CR 121 + CR 608.2c + CR 609.3: Parse "you draw [one or more] card[s] this
+/// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
+/// X cards … If you draw one or more cards this way, discard two cards"). Reads
+/// the amount moved by the immediately preceding draw effect in the sub-ability
+/// chain via `QuantityRef::PreviousEffectAmount`.
+pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you draw ").parse(input)?;
+    let (rest, _) = alt((tag("one or more "), tag("at least one "))).parse(rest)?;
+    let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
 /// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
@@ -7320,6 +7589,30 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// CR 603.4 + CR 608.2c: Avatar Aang's intervening-if "you've done all four
+    /// this turn" parses to a distinct-bend-count comparison (`>= 4`).
+    #[test]
+    fn parse_youve_done_all_four_this_turn_is_bend_count_ge_four() {
+        let (rest, cond) =
+            parse_condition("if you've done all four this turn").expect("must parse");
+        assert_eq!(
+            rest, "",
+            "condition should be fully consumed, remainder {rest:?}"
+        );
+        match cond {
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => {
+                assert_eq!(qty, QuantityRef::BendTypesThisTurn);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(value, 4);
+            }
+            other => panic!("expected QuantityComparison BendTypesThisTurn>=4, got {other:?}"),
+        }
+    }
 
     /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
     /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
@@ -14977,6 +15270,50 @@ mod tests {
             }
             other => panic!("expected Or, got {other:?}"),
         }
+    }
+
+    /// CR 608.2c: Portent of Calamity — "you exiled four or more cards this way"
+    /// maps to a `TrackedSetSize >= 4` resolution-context comparison. Reverting
+    /// `parse_exiled_this_way_count` drops this arm, so `parse_inner_condition`
+    /// no longer consumes the fragment and the whole condition is lost.
+    #[test]
+    fn parse_inner_condition_exiled_n_or_more_this_way() {
+        let (rest, c) = parse_inner_condition("you exiled four or more cards this way").unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        assert!(
+            matches!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                }
+            ),
+            "got {c:?}"
+        );
+    }
+
+    /// The mirror "or fewer" form maps to the `LE` comparator (class coverage —
+    /// same idiom, opposite bound).
+    #[test]
+    fn parse_inner_condition_exiled_n_or_fewer_this_way() {
+        let (rest, c) = parse_inner_condition("you exiled two or fewer cards this way").unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        assert!(
+            matches!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
+                    comparator: Comparator::LE,
+                    rhs: QuantityExpr::Fixed { value: 2 },
+                }
+            ),
+            "got {c:?}"
+        );
     }
 
     /// "it has the greatest power or is tied for greatest power among" — the

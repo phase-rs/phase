@@ -24,21 +24,17 @@
 //! Krasis), and counters-X (Reinforce X, Helix Pinnacle) all share this shape
 //! and all want a non-zero X when affordable.
 
-use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, Effect, QuantityRef, ResolvedAbility,
-    StaticDefinition,
-};
+use engine::types::ability::ResolvedAbility;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
-use engine::types::statics::{HandSizeModification, StaticMode};
 
 use crate::features::DeckFeatures;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::x_reference::{effect_references_x, spell_object_references_x};
 
 pub struct XValuePolicy;
 
@@ -123,237 +119,6 @@ fn ability_references_x(ability: &ResolvedAbility) -> bool {
     false
 }
 
-/// True when the spell-object-on-stack's printed triggers or replacement
-/// effects reference X. Covers X-cost creature spells whose X is consumed by
-/// cast triggers or ETB replacements rather than the resolving spell effect
-/// itself — Hydroid Krasis ("when you cast this spell, you gain X life and
-/// draw X cards" + "enters as an X/X"), Genesis Hydra ("when you cast … look
-/// at the top X cards"), Hooded Hydra / Hangarback Walker (ETB-with-X-counter
-/// replacement on the creature itself). Without this, the AI would still pick
-/// X=0 for the entire Hydra / X-counter-ETB class because their X reference
-/// is structurally outside the resolving spell ability.
-fn spell_object_references_x(state: &GameState, object_id: ObjectId) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    // Spell-cast triggers / dies / etc. on the stack object.
-    for trigger in obj.trigger_definitions.iter_unchecked() {
-        if let Some(exec) = &trigger.execute {
-            if ability_definition_references_x(exec) {
-                return true;
-            }
-        }
-    }
-    // ETB-X-counter and similar self-replacements stamped on the spell
-    // object (consumed when the permanent enters the battlefield).
-    for replacement in obj.replacement_definitions.iter_unchecked() {
-        if let Some(exec) = &replacement.execute {
-            if ability_definition_references_x(exec) {
-                return true;
-            }
-        }
-    }
-    // The printed abilities themselves may reference X via repeat_for /
-    // sub_ability chains (rare but cheap to scan).
-    for ability in obj.abilities.iter() {
-        if ability_definition_references_x(ability) {
-            return true;
-        }
-    }
-    // X-cost creatures can carry their payoff as static definitions instead
-    // of spell/trigger/replacement effects, e.g. dynamic P/T or granted
-    // ability/static payloads. Scan both live and printed baselines: live
-    // definitions may be layer-filtered, while base definitions are the
-    // authoritative printed shape for the stack object.
-    for static_def in obj.static_definitions.iter_unchecked() {
-        if static_definition_references_x(static_def) {
-            return true;
-        }
-    }
-    for static_def in obj.base_static_definitions.iter() {
-        if static_definition_references_x(static_def) {
-            return true;
-        }
-    }
-    false
-}
-
-fn ability_definition_references_x(ability: &AbilityDefinition) -> bool {
-    if effect_references_x(&ability.effect) {
-        return true;
-    }
-    if let Some(expr) = &ability.repeat_for {
-        if expr.contains_x() {
-            return true;
-        }
-    }
-    if let Some(sub) = &ability.sub_ability {
-        if ability_definition_references_x(sub) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = &ability.else_ability {
-        if ability_definition_references_x(else_branch) {
-            return true;
-        }
-    }
-    false
-}
-
-fn static_definition_references_x(static_def: &StaticDefinition) -> bool {
-    static_mode_references_x(&static_def.mode)
-        || static_def
-            .modifications
-            .iter()
-            .any(continuous_modification_references_x)
-}
-
-fn static_mode_references_x(mode: &StaticMode) -> bool {
-    match mode {
-        StaticMode::MaximumHandSize {
-            modification: HandSizeModification::EqualTo(expr),
-        } => expr.contains_x(),
-        StaticMode::ModifyCost {
-            dynamic_count: Some(qty),
-            ..
-        }
-        | StaticMode::ReduceAbilityCost {
-            dynamic_count: Some(qty),
-            ..
-        } => quantity_ref_references_x(qty),
-        _ => false,
-    }
-}
-
-fn continuous_modification_references_x(modification: &ContinuousModification) -> bool {
-    match modification {
-        ContinuousModification::CopyValues { values, .. } => {
-            values.abilities.iter().any(ability_definition_references_x)
-                || values
-                    .trigger_definitions
-                    .iter()
-                    .any(trigger_definition_references_x)
-                || values
-                    .replacement_definitions
-                    .iter()
-                    .any(replacement_definition_references_x)
-                || values
-                    .static_definitions
-                    .iter()
-                    .any(static_definition_references_x)
-        }
-        ContinuousModification::GrantAbility { definition } => {
-            ability_definition_references_x(definition)
-        }
-        ContinuousModification::GrantTrigger { trigger } => {
-            trigger_definition_references_x(trigger)
-        }
-        ContinuousModification::GrantStaticAbility { definition } => {
-            static_definition_references_x(definition)
-        }
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. }
-        | ContinuousModification::AddCounterOnEnter { count: value, .. } => value.contains_x(),
-        ContinuousModification::SetName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => false,
-    }
-}
-
-fn trigger_definition_references_x(trigger: &engine::types::ability::TriggerDefinition) -> bool {
-    trigger
-        .execute
-        .as_ref()
-        .is_some_and(|exec| ability_definition_references_x(exec))
-}
-
-fn replacement_definition_references_x(
-    replacement: &engine::types::ability::ReplacementDefinition,
-) -> bool {
-    replacement
-        .execute
-        .as_ref()
-        .is_some_and(|exec| ability_definition_references_x(exec))
-}
-
-fn quantity_ref_references_x(qty: &QuantityRef) -> bool {
-    matches!(qty, QuantityRef::Variable { name } if name == "X")
-}
-
-/// Walk every `QuantityExpr` reachable from `effect` and return true if any
-/// resolves through `QuantityRef::Variable { name: "X" }`. Delegates the
-/// per-expression test to `QuantityExpr::contains_x`, the engine's single
-/// authority, so the AI scores X exactly as the engine evaluates it.
-fn effect_references_x(effect: &Effect) -> bool {
-    match effect {
-        Effect::DealDamage { amount, .. }
-        | Effect::DamageAll { amount, .. }
-        | Effect::DamageEachPlayer { amount, .. }
-        | Effect::GainLife { amount, .. }
-        | Effect::LoseLife { amount, .. } => amount.contains_x(),
-        Effect::Draw { count, .. }
-        | Effect::Mill { count, .. }
-        | Effect::Discard { count, .. }
-        | Effect::Scry { count, .. }
-        | Effect::Surveil { count, .. }
-        | Effect::Sacrifice { count, .. }
-        | Effect::Dig { count, .. }
-        | Effect::ExileTop { count, .. }
-        | Effect::PutAtLibraryPosition { count, .. }
-        | Effect::PutCounter { count, .. }
-        | Effect::PutCounterAll { count, .. }
-        | Effect::CopyTokenOf { count, .. }
-        | Effect::SearchLibrary { count, .. } => count.contains_x(),
-        Effect::Token {
-            count,
-            enter_with_counters,
-            ..
-        } => count.contains_x() || enter_with_counters.iter().any(|(_, qty)| qty.contains_x()),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,7 +126,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::{
-        Effect as AbilityEffect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+        ContinuousModification, Effect as AbilityEffect, QuantityExpr, QuantityRef,
+        ResolvedAbility, StaticDefinition, TargetFilter,
     };
     use engine::types::game_state::{CastPaymentMode, PendingCast};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -507,6 +273,7 @@ mod tests {
             config,
             context: ai_context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 
@@ -594,14 +361,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()
@@ -714,14 +482,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()
@@ -762,14 +531,15 @@ mod tests {
             })
             .collect();
 
-        let priors = PolicyRegistry::shared().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &ai_context,
-        );
+        let env = crate::policies::context::PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            search_depth: crate::policies::context::SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
 
         let prior_zero = priors
             .iter()

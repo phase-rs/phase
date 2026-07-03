@@ -17557,7 +17557,7 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
     assert!(matches!(
         &*execute.effect,
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         }

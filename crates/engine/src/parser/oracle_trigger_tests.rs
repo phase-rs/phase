@@ -199,6 +199,38 @@ fn assert_owned_by_opponent(filter: &TargetFilter) {
 }
 
 #[test]
+fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TargetFilter};
+
+    let filter = parse_post_spell_modifier(
+        "that doesn't share a creature type with a creature you control or a creature card in your graveyard",
+    )
+    .expect("expected SharesQuality post-spell modifier");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    let shares_quality = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::SharesQuality {
+                quality,
+                relation,
+                reference,
+            } => Some((quality, relation, reference.as_deref())),
+            _ => None,
+        })
+        .expect("expected SharesQuality property");
+    assert_eq!(*shares_quality.0, SharedQuality::CreatureType);
+    assert_eq!(*shares_quality.1, SharedQualityRelation::DoesNotShare);
+    let reference = shares_quality.2.expect("expected disjunctive reference");
+    let TargetFilter::Or { filters } = reference else {
+        panic!("expected Or reference filter, got {reference:?}");
+    };
+    assert_eq!(filters.len(), 2);
+}
+
+#[test]
 fn parse_post_spell_modifier_cast_origin_from_nonhand() {
     // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
     // cast-capable zones except the hand.

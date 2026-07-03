@@ -4702,6 +4702,22 @@ fn dispatch_deferred_triggers_in_order(
 /// static, then clones matching pending triggers an additional time. The
 /// `TriggerCause` predicate restricts which spawning events qualify
 /// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
+/// CR 603.2d: True when `filter` references the doubler's own source object —
+/// directly (`SelfRef`) or transitively through an `Or`/`And`/`Not` composition
+/// (e.g. Cloud's "Cloud or an Equipment attached to it"). Mirrors the parser-side
+/// `filter_references_self` in `oracle_trigger.rs`; used to decide whether a
+/// trigger doubler may double its own triggered abilities.
+fn filter_references_self(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_references_self)
+        }
+        TargetFilter::Not { filter } => filter_references_self(filter),
+        _ => false,
+    }
+}
+
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating so a
     // phased-out doubler no longer doubles triggers.
@@ -4732,8 +4748,15 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
             if trigger.controller != *doubler_controller {
                 continue;
             }
-            // Self-exclusion: don't double triggers from the doubler itself entering
-            if trigger.source_id == *doubler_id {
+            // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
+            // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
+            // OTHER permanents. The carve-out: when the doubler's `affected` filter
+            // references the source itself (`~`, e.g. Cloud's "a triggered ability
+            // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
+            // triggered abilities eligible, so skip the exclusion and let the
+            // `affected` match below decide.
+            let affected_references_self = affected.as_ref().is_some_and(filter_references_self);
+            if !affected_references_self && trigger.source_id == *doubler_id {
                 continue;
             }
             // CR 603.2d: Check the cause predicate against the spawning event.
@@ -6779,6 +6802,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
@@ -10314,6 +10338,7 @@ pub mod tests {
                 chosen_attributes: Vec::new(),
                 counters,
                 tapped: false,
+                is_suspected: false,
             },
         );
 

@@ -244,6 +244,15 @@ pub struct LKISnapshot {
     /// `tapped = false`.
     #[serde(default)]
     pub tapped: bool,
+    /// CR 701.60b + CR 608.2c: Suspected status as it last existed in the public
+    /// zone. Suspected is a battlefield-only status reset on any zone change
+    /// (`GameObject::is_suspected` clears when the object moves), so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner) must
+    /// read this captured value via `FilterProp::Suspected` (LKI). The snapshot
+    /// is taken at cost payment, before the sacrifice zone-change resets the flag.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
@@ -514,6 +523,14 @@ pub struct ZoneChangeRecord {
     /// within the same turn for batched trigger replay guards (issue #3866).
     #[serde(default)]
     pub turn_zone_change_index: usize,
+    /// CR 701.60b + CR 608.2c: Suspected status as of the zone change. Suspected
+    /// is a battlefield-only status reset on any zone change, so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner)
+    /// evaluated via the LKI snapshot synthesized in
+    /// `matches_target_filter_on_lki_snapshot` must read this captured value.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -616,6 +633,7 @@ impl ZoneChangeRecord {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            is_suspected: false,
         }
     }
 }
@@ -3976,6 +3994,18 @@ pub enum WaitingFor {
         costs: Vec<AbilityCost>,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 601.2b + CR 701.4a: The player must choose a value (creature type for
+    /// Celestial Reunion) as part of paying a `Behold { type_choice: Some(_) }`
+    /// additional cost, before the behold selection. The chosen value is written
+    /// as a `ChosenAttribute` on the spell object; cost payment then resumes the
+    /// behold step. `options` is the feasible set (types with >= count beholdable
+    /// creatures), so an unpayable type is never offered.
+    CostTypeChoice {
+        player: PlayerId,
+        choice_type: crate::types::ability::ChoiceType,
+        options: Vec<String>,
+        pending_cast: Box<PendingCast>,
+    },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
     BlightChoice {
         player: PlayerId,
@@ -4654,6 +4684,7 @@ impl WaitingFor {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
+            WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
@@ -4780,6 +4811,7 @@ impl WaitingFor {
             | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
+            | WaitingFor::CostTypeChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
@@ -4885,6 +4917,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
@@ -4917,6 +4950,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {

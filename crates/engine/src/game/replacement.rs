@@ -6830,7 +6830,7 @@ mod tests {
         let choose = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: crate::types::ability::ChoiceType::CreatureType,
+                choice_type: crate::types::ability::ChoiceType::creature_type(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },

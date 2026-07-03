@@ -1923,6 +1923,40 @@ pub(crate) fn handle_blight_choice(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2b + CR 701.4a: Record the creature type chosen for a pre-choice
+/// behold cost and resume behold payment. The chosen type is written onto the
+/// spell object's `chosen_attributes` (the slot every "choose a creature type"
+/// card uses), so the behold `filter`'s `IsChosenCreatureType` leg scopes "of
+/// that type"; `finish_pending_cost_or_cast` then re-runs the behold cost
+/// stashed in `additional_cost_flow`, which now finds the chosen type set and
+/// proceeds to the behold selection.
+pub(crate) fn handle_cost_type_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    options: &[String],
+    choice: &str,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !options.iter().any(|o| o == choice) {
+        return Err(EngineError::InvalidAction(format!(
+            "Chosen creature type '{choice}' is not an offered option"
+        )));
+    }
+    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CreatureType(
+                choice.to_string(),
+            ));
+    }
+    // The behold cost was stashed in `additional_cost_flow` when the choice was
+    // raised; resume it now (the object carries the chosen type, so the behold
+    // dispatch proceeds past the type prompt to the behold selection).
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 208.1 + CR 601.2f: A single creature's contribution toward an aggregate
 /// total-power tap cost (Crew/Saddle/Teamwork). Reads the creature's CURRENT,
 /// layer-evaluated power (`GameObject::power`, the post-continuous-effects value
@@ -4217,7 +4251,42 @@ fn pay_additional_cost_with_source(
             count,
             ref filter,
             action,
+            ref type_choice,
         } => {
+            // CR 601.2b + CR 701.4a: a pre-choice behold ("choose a creature type
+            // and behold N of that type") first prompts for the type unless it was
+            // already chosen (provenance already written on the spell object). The
+            // behold cost is stashed in `additional_cost_flow` so the choice
+            // handler can resume it via `finish_pending_cost_or_cast`.
+            if let Some(ct) = type_choice {
+                let already_chosen = state.objects.get(&pending.object_id).is_some_and(|o| {
+                    o.chosen_attributes.iter().any(|a| {
+                        matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_))
+                    })
+                });
+                if !already_chosen {
+                    let options = super::filter::feasible_behold_creature_types(
+                        state,
+                        player,
+                        pending.object_id,
+                        filter,
+                        count,
+                    );
+                    if options.is_empty() {
+                        return Err(EngineError::ActionNotAllowed(
+                            "No creature type is feasible to behold".to_string(),
+                        ));
+                    }
+                    let mut pending = pending;
+                    pending.additional_cost_flow = Some(AdditionalCost::Required(cost.clone()));
+                    return Ok(WaitingFor::CostTypeChoice {
+                        player,
+                        choice_type: ct.clone(),
+                        options,
+                        pending_cast: Box::new(pending),
+                    });
+                }
+            }
             let choices = eligible_behold_choices(state, player, pending.object_id, filter);
             if choices.len() < count as usize {
                 return Err(EngineError::ActionNotAllowed(

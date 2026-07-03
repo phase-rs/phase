@@ -5244,6 +5244,32 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     !matches!(filter, TargetFilter::Any | TargetFilter::None)
 }
 
+/// CR 122.1 + CR 614.1c + CR 608.2c: returns true when `sentence` is a
+/// moved-object put-onto-battlefield-this-way conditional whose counter payoff
+/// is represented by `Effect::ChangeZone.conditional_enter_with_counters`
+/// ("If you put an artifact onto the battlefield this way, put two +1/+1 counters
+/// on it" — Oviya, Automech Artisan). Shared with the `Condition_If` swallow
+/// detector so the represented clause can be located and stripped text-scoped,
+/// reusing the same `parse_you_put_onto_battlefield_this_way_clause` combinator
+/// that produced the gate — not a verbatim Oracle-string match. Mirrors
+/// `is_moved_object_enters_modifier_clause`: it keys on the put-this-way condition
+/// AND a "counter" payoff tail so it drops only the represented clause.
+pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Ok((body, _)) =
+        crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
+            after_if,
+        )
+    else {
+        return false;
+    };
+    nom_primitives::scan_contains(body, "counter")
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,

@@ -174,6 +174,9 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
                 // this captured value instead of the live (now-absent) object.
                 tapped: obj.tapped,
+                // CR 701.60b: Capture suspected status at zone exit for
+                // "was suspected" look-back riders.
+                is_suspected: obj.is_suspected,
             };
             state.lki_cache.insert(object_id, lki);
         }

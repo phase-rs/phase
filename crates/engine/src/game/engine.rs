@@ -2264,6 +2264,32 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
+        // behold cost; record it and resume behold payment.
+        (
+            WaitingFor::CostTypeChoice {
+                player,
+                options,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseOption { choice },
+        ) => casting_costs::handle_cost_type_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            options,
+            &choice,
+            &mut events,
+        )?,
+        (
+            WaitingFor::CostTypeChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {

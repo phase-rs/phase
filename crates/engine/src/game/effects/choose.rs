@@ -290,7 +290,7 @@ pub(crate) fn bind_named_choice(
                 if matches!(
                     choice_type,
                     ChoiceType::CardName
-                        | ChoiceType::CreatureType
+                        | ChoiceType::CreatureType { .. }
                         | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
@@ -396,8 +396,14 @@ fn compute_options(
 ) -> Vec<String> {
     match choice_type {
         // CR 205.3m: Creature types are shared between creature and kindred cards.
-        ChoiceType::CreatureType => {
-            if state.all_creature_types.is_empty() {
+        // A non-empty `options` restricts the offered set to an explicit
+        // Oracle-listed candidate list (A Killer Among Us' "secretly choose
+        // Human, Merfolk, or Goblin"), preserving source order; empty ⇒ all
+        // creature types (Morophon / Changeling).
+        ChoiceType::CreatureType { options } => {
+            if !options.is_empty() {
+                options.clone()
+            } else if state.all_creature_types.is_empty() {
                 to_strings(FALLBACK_CREATURE_TYPES)
             } else {
                 let mut types = state.all_creature_types.clone();
@@ -587,7 +593,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
 
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -599,7 +605,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
-                assert_eq!(*choice_type, ChoiceType::CreatureType);
+                assert_eq!(*choice_type, ChoiceType::creature_type());
                 assert!(options.contains(&"Elf".to_string()));
                 assert!(options.contains(&"Goblin".to_string()));
             }
@@ -728,7 +734,7 @@ mod tests {
     fn choose_creature_type_with_empty_all_types_uses_fallback() {
         let mut state = GameState::new_two_player(42);
         // all_creature_types is empty by default
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
