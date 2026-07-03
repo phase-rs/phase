@@ -16037,6 +16037,36 @@ fn static_subject_are_supertype_adds_and_removes() {
         }]
     );
 
+    // CR 205.4a: the path is general over the full standard supertype set, not
+    // just legendary/basic/snow — "world" and "ongoing" resolve through the same
+    // shared `parse_supertype_word` token and the generic AddSupertype/
+    // RemoveSupertype runtime (no per-supertype special-casing).
+    assert_eq!(
+        parse_static_line("All enchantments are world.")
+            .unwrap()
+            .modifications,
+        vec![ContinuousModification::AddSupertype {
+            supertype: Supertype::World
+        }]
+    );
+    assert_eq!(
+        parse_static_line("All permanents are ongoing.")
+            .unwrap()
+            .modifications,
+        vec![ContinuousModification::AddSupertype {
+            supertype: Supertype::Ongoing
+        }]
+    );
+    // Removal negation is likewise general across the set.
+    assert_eq!(
+        parse_static_line("All enchantments are no longer world.")
+            .unwrap()
+            .modifications,
+        vec![ContinuousModification::RemoveSupertype {
+            supertype: Supertype::World
+        }]
+    );
+
     // Color sibling is unchanged (disjoint predicate — no regression).
     assert_eq!(
         parse_static_line("All creatures are white.")

@@ -1419,7 +1419,8 @@ pub(crate) fn parse_subject_is_color(
 ///
 /// Reuses the shared subject grammar (`parse_continuous_subject_filter`, which
 /// handles "All"/"Each", "nonland permanents", controller suffixes), the shared
-/// `parse_supertype_word` token (legendary/basic/snow), and the existing
+/// `parse_supertype_word` token (the full CR 205.4a set: legendary/basic/snow/
+/// world/ongoing), and the existing
 /// `ContinuousModification::AddSupertype`/`RemoveSupertype` runtime (applied at
 /// Layer 4 in `game/layers.rs`) — no new variant or runtime. Dispatched after the
 /// color/land-type branches; the supertype predicate is disjoint from color and
@@ -1442,6 +1443,21 @@ pub(crate) fn parse_subject_is_supertype(
     // CR 604.3: a self-referential line would be a CDA, not a Layer-4 static.
     if matches!(affected, TargetFilter::SelfRef) {
         return None;
+    }
+    // CR 613 dispatch ownership: the attached "Enchanted/Equipped [type] is
+    // [supertype]" Aura/Equipment form is owned by the predicate seam
+    // (`parse_supertype_grant` via `parse_continuous_gets_has` — Glittering Frost,
+    // In Bolas's Clutches). Decline an attached-subject filter here so this general
+    // "[subject] is/are [supertype]" static path owns only the standalone-subject
+    // form and never double-handles an attached-subject grant.
+    if let TargetFilter::Typed(ref tf) = affected {
+        if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::EnchantedBy | FilterProp::EquippedBy))
+        {
+            return None;
+        }
     }
 
     // CR 205.4b: an object can gain or lose a supertype ("When an object gains or
