@@ -1979,22 +1979,32 @@ fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Opti
     tp.original.get(start..start + lower_sub.len())
 }
 
+fn parse_attached_combat_subject_nom(input: &str) -> OracleResult<'_, TargetFilter> {
+    all_consuming(alt((
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted permanent"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted creature"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted land"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            tag("equipped creature"),
+        ),
+    )))
+    .parse(input)
+}
+
 fn is_attached_combat_subject(subject: &str) -> Option<TargetFilter> {
-    match subject.trim() {
-        "enchanted creature" => Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
-        )),
-        "enchanted permanent" => Some(TargetFilter::Typed(
-            TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
-        )),
-        "enchanted land" => Some(TargetFilter::Typed(
-            TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
-        )),
-        "equipped creature" => Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
-        )),
-        _ => None,
-    }
+    parse_attached_combat_subject_nom(subject.trim())
+        .ok()
+        .map(|(_, filter)| filter)
 }
 
 fn dual_gated_combat_affected(subject_lower: &str) -> Option<TargetFilter> {
