@@ -558,6 +558,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
 
+    // CR 508.1c: The directional attack restriction (Pramikon, Sky Rampart;
+    // Mystic Barrier; Teyo, Geometric Tactician).
+    if let Some(mode) = parse_attack_only_neighbor_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
+    }
+
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
         return defs.into_iter().next();
     }
@@ -2520,6 +2526,11 @@ pub(crate) fn parse_static_line_inner(
                         filter: TargetFilter::Typed(TypedFilter::card()),
                     },
                 });
+            // CR 602.2: "abilities you activate" is ACTIVATOR-scoped — the discount
+            // keys off who activates the ability (the static's controller, "you"),
+            // not who controls the ability's source. Emit the activator axis rather
+            // than a `controller(You)` source filter, which mis-scoped abilities on
+            // permanents another player controls but this player may activate.
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     mode: CostModifyMode::Reduce,
@@ -2527,10 +2538,9 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                     dynamic_count,
+                    exemption: ActivationExemption::None,
+                    activator: Some(PlayerFilter::Controller),
                 })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::card().controller(ControllerRef::You),
-                ))
                 .description(text.to_string()),
             );
         }
@@ -2563,6 +2573,10 @@ pub(crate) fn parse_static_line_inner(
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 dynamic_count: None,
+                exemption: ActivationExemption::None,
+                // Source-scoped ("abilities of <subject>"): scope is the `affected`
+                // filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2611,6 +2625,10 @@ pub(crate) fn parse_static_line_inner(
                 amount,
                 minimum_mana,
                 dynamic_count: None,
+                exemption: ActivationExemption::None,
+                // Source-scoped ("<subject>'s <keyword> abilities"): scope is the
+                // `affected` filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2663,6 +2681,10 @@ pub(crate) fn parse_static_line_inner(
                 amount,
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 dynamic_count: None,
+                exemption: ActivationExemption::None,
+                // Source-scoped ("[Enchanted/Equipped] <type>'s activated
+                // abilities"): scope is the `affected` filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2733,11 +2755,82 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana,
                     dynamic_count,
+                    exemption: ActivationExemption::None,
+                    // Source-scoped ("Activated abilities of <filter>"): scope is
+                    // the `affected` filter below; no activator gate.
+                    activator: None,
                 })
                 .affected(affected)
                 .description(text.to_string()),
             );
         }
+    }
+
+    // --- "Activated abilities cost {N} less/more to activate [unless they're mana abilities]" (global)
+    // --- "Abilities you activate [that aren't mana abilities] cost {N} less/more to activate" (activator) ---
+    // CR 601.2f + CR 118.7 + CR 605.1a: Unscoped (Suppression Field: "Activated
+    // abilities cost {2} more to activate unless they're mana abilities") or
+    // activator-scoped (Zirda, the Dawnwaker: "Abilities you activate that aren't
+    // mana abilities cost {2} less to activate") activated-ability cost modifier.
+    // The scoped "Activated abilities OF <subject>" form is owned by the branch
+    // above; this handles the two subjects that carry no "of <subject>" filter.
+    // `keyword == "activated"` matches every activated ability at runtime; the
+    // optional mana-ability exemption (prefix "that aren't mana abilities" or
+    // suffix "unless they're mana abilities") is enforced there via
+    // `ActivationExemption::ManaAbilities`. CR 602.2: the global form (Suppression
+    // Field) leaves both scopes open (`activator = None`, `affected = None`); the
+    // "abilities you activate" form is ACTIVATOR-scoped, not source-scoped, so it
+    // sets `activator = Some(PlayerFilter::Controller)` ("you" = the static's
+    // controller) and leaves `affected = None` — the discount keys off who
+    // activates the ability, never who controls its source.
+    if let Some(((activator, exemption, amount, mode), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, (activator, prefix_exempt)) = alt((
+                map(
+                    (
+                        tag("abilities you activate"),
+                        opt(tag(" that aren't mana abilities")),
+                    ),
+                    |(_, exempt): (&str, Option<&str>)| {
+                        (Some(PlayerFilter::Controller), exempt.is_some())
+                    },
+                ),
+                value((None::<PlayerFilter>, false), tag("activated abilities")),
+            ))
+            .parse(i)?;
+            let (i, _) = tag(" cost {").parse(i)?;
+            let (i, amount) = nom_primitives::parse_number(i)?;
+            let (i, _) = tag("} ").parse(i)?;
+            let (i, mode) = alt((
+                value(CostModifyMode::Reduce, tag("less to activate")),
+                value(CostModifyMode::Raise, tag("more to activate")),
+            ))
+            .parse(i)?;
+            let (i, suffix_exempt) = opt(tag(" unless they're mana abilities")).parse(i)?;
+            let exemption = if prefix_exempt || suffix_exempt.is_some() {
+                ActivationExemption::ManaAbilities
+            } else {
+                ActivationExemption::None
+            };
+            Ok((i, (activator, exemption, amount, mode)))
+        })
+    {
+        // CR 118.7: a one-mana floor only applies to reductions.
+        let minimum_mana = matches!(mode, CostModifyMode::Reduce)
+            .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
+            .flatten();
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption,
+                activator,
+            })
+            .description(text.to_string()),
+        );
     }
 
     // --- CR 116.2 + CR 118.7a: special-action (plot/unlock) cost reduction ---

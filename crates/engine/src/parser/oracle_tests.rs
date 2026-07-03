@@ -5798,6 +5798,81 @@ fn spell_casting_option_parses_trap_alternative_cost() {
     ));
 }
 
+// CR 118.9 + CR 601.2b + CR 404.1 + CR 109.5: Ravenous Trap — the leading
+// "If an opponent had three or more cards put into their graveyard from
+// anywhere this turn" gate now decomposes into a typed
+// `ParsedCondition::QuantityComparison` (opponent-owned nontoken cards → any
+// graveyard, GE 3), so the {0} alternative cost is offered when the gate holds.
+// The alt-cost line must be consumed as a casting option (not leak into the
+// ability list as a `PayCost`/"pay" effect); the sole ability is the
+// graveyard-exile effect.
+#[test]
+fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
+    let r = parse(
+        "If an opponent had three or more cards put into their graveyard from anywhere this turn, you may pay {0} rather than pay this spell's mana cost.\nExile target player's graveyard.",
+        "Ravenous Trap",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(
+        r.casting_options[0].cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            },
+        })
+    );
+    match r.casting_options[0].condition.as_ref() {
+        Some(crate::types::ability::ParsedCondition::QuantityComparison {
+            lhs:
+                crate::types::ability::QuantityExpr::Ref {
+                    qty:
+                        crate::types::ability::QuantityRef::ZoneChangeCountThisTurn {
+                            from: None,
+                            to: Some(Zone::Graveyard),
+                            filter: TargetFilter::Typed(filter),
+                        },
+                },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+        }) => {
+            assert!(
+                filter.properties.iter().any(|p| matches!(
+                    p,
+                    crate::types::ability::FilterProp::Owned {
+                        controller: crate::types::ability::ControllerRef::Opponent
+                    }
+                )),
+                "expected Owned(Opponent) filter, got {filter:?}"
+            );
+        }
+        other => panic!("expected opponent-graveyard QuantityComparison GE 3, got {other:?}"),
+    }
+    // The sole ability is the graveyard-exile, not a leaked pay effect.
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        !matches!(*r.abilities[0].effect, Effect::PayCost { .. }),
+        "alt-cost must not leak into abilities as a PayCost effect, got {:?}",
+        r.abilities[0].effect
+    );
+    assert!(
+        !matches!(
+            *r.abilities[0].effect,
+            Effect::Unimplemented { ref name, .. } if name == "pay"
+        ),
+        "alt-cost must not leak into abilities as an unimplemented pay effect, got {:?}",
+        r.abilities[0].effect
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_composite_alternative_cost() {
     let r = parse(
