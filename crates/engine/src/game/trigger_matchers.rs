@@ -3725,23 +3725,48 @@ pub(super) fn match_ring_tempts_you(
 /// Fires when a clash occurs and either clashing player matches `valid_target`.
 /// "Whenever you clash" sets `valid_target = Controller`; a generic "whenever
 /// a player clashes" leaves `valid_target` unset to match any clash.
+///
+/// CR 701.30d + CR 603.4: when the trigger carries a required clash outcome
+/// (`clash_result`, set for "...and win" cards like Sylvan Echoes), the win
+/// requirement is checked HERE, when the event occurs — so a lost or tied clash
+/// never creates a pending (no-op) trigger. The outcome is resolved from the
+/// ability's controller's perspective via `ClashResult::for_player`, the same
+/// source of truth used by resolution-time "if you won" gating
+/// (`event_outcome_was_won_by_controller`), so matching and resolution agree.
 pub(super) fn match_clash(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    match event {
-        GameEvent::Clash {
-            controller,
-            opponent,
-            ..
-        } => {
-            valid_player_matches(trigger, state, *controller, source_id)
-                || valid_player_matches(trigger, state, *opponent, source_id)
-        }
-        _ => false,
+    let GameEvent::Clash {
+        controller,
+        opponent,
+        result,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    // Either clashing player must satisfy `valid_target` ("you clash" → the
+    // source's controller; a bare "a player clashes" → any player).
+    if !(valid_player_matches(trigger, state, *controller, source_id)
+        || valid_player_matches(trigger, state, *opponent, source_id))
+    {
+        return false;
     }
+    // CR 701.30d: an "...and win" trigger only fires when the ABILITY's
+    // controller won the clash. `None` (plain "you clash") fires on any outcome.
+    if let Some(required) = trigger.clash_result {
+        let Some(ability_controller) = state.objects.get(&source_id).map(|obj| obj.controller)
+        else {
+            return false;
+        };
+        if result.for_player(*controller, *opponent, ability_controller) != Some(required) {
+            return false;
+        }
+    }
+    true
 }
 
 /// CR 701.38: Match vote-resolved events.
@@ -4508,7 +4533,7 @@ mod tests {
         TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::events::{GameEvent, ManaTapState, PlayerActionKind};
+    use crate::types::events::{ClashResult, GameEvent, ManaTapState, PlayerActionKind};
     use crate::types::game_state::{
         CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
@@ -13438,6 +13463,112 @@ mod tests {
         assert!(
             match_clash(&event2, &trigger, source, &state),
             "clash trigger must fire when controller is the opponent participant"
+        );
+    }
+
+    /// CR 701.30d + CR 603.4: "Whenever you clash AND WIN" (Sylvan Echoes) carries
+    /// the win requirement into MATCHING via `clash_result = Some(Won)`. A lost or
+    /// tied clash must NOT match, so no pending (no-op) trigger is ever placed on
+    /// the stack — the win requirement is checked when the event occurs, not at
+    /// resolution. Only a clash the source's controller WON matches (and the
+    /// trigger's plain optional draw then resolves). Mirrors
+    /// `clash_trigger_fires_for_controller` but for the win-gated shape.
+    #[test]
+    fn clash_and_win_trigger_only_matches_on_controller_win() {
+        let mut state = setup();
+        // Sylvan Echoes is controlled by P0.
+        let source = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Sylvan Echoes".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Clashed);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.clash_result = Some(ClashResult::Won);
+
+        let clash =
+            |controller: PlayerId, opponent: PlayerId, result: ClashResult| GameEvent::Clash {
+                controller,
+                opponent,
+                controller_mana_value: None,
+                opponent_mana_value: None,
+                result,
+            };
+
+        // P0 initiated and WON — the only case that creates a pending trigger.
+        assert!(
+            match_clash(
+                &clash(PlayerId(0), PlayerId(1), ClashResult::Won),
+                &trigger,
+                source,
+                &state
+            ),
+            "must match when the controller (P0) won the clash they initiated"
+        );
+        // P0 was the chosen opponent and WON (controller P1 lost) — still a win
+        // for P0, so it matches.
+        assert!(
+            match_clash(
+                &clash(PlayerId(1), PlayerId(0), ClashResult::Lost),
+                &trigger,
+                source,
+                &state
+            ),
+            "must match when the controller (P0) won as the opponent participant"
+        );
+
+        // P0 LOST — no pending trigger.
+        assert!(
+            !match_clash(
+                &clash(PlayerId(0), PlayerId(1), ClashResult::Lost),
+                &trigger,
+                source,
+                &state
+            ),
+            "must NOT match a clash the controller lost"
+        );
+        assert!(
+            !match_clash(
+                &clash(PlayerId(1), PlayerId(0), ClashResult::Won),
+                &trigger,
+                source,
+                &state
+            ),
+            "must NOT match when the controller lost as the opponent participant"
+        );
+        // TIED — no pending trigger for either seating.
+        assert!(
+            !match_clash(
+                &clash(PlayerId(0), PlayerId(1), ClashResult::Tied),
+                &trigger,
+                source,
+                &state
+            ),
+            "must NOT match a tied clash"
+        );
+        assert!(
+            !match_clash(
+                &clash(PlayerId(1), PlayerId(0), ClashResult::Tied),
+                &trigger,
+                source,
+                &state
+            ),
+            "must NOT match a tied clash regardless of seating"
+        );
+
+        // Regression: the plain "you clash" shape (clash_result = None) still
+        // fires on any outcome, including a loss.
+        trigger.clash_result = None;
+        assert!(
+            match_clash(
+                &clash(PlayerId(1), PlayerId(0), ClashResult::Won),
+                &trigger,
+                source,
+                &state
+            ),
+            "a plain clash trigger must still fire on any outcome"
         );
     }
 

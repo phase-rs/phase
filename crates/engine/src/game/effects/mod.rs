@@ -8210,16 +8210,18 @@ fn scoped_player_matches_filter(
 
 fn event_outcome_was_won_by_controller(event: &GameEvent, controller: PlayerId) -> bool {
     match event {
+        // CR 701.30d: reuse the shared controller-relative clash-outcome
+        // resolution so resolution-time "if you won" gating and trigger-matching
+        // (`match_clash`) agree on who won.
         GameEvent::Clash {
             controller: clash_controller,
             opponent,
             result,
             ..
-        } => match result {
-            crate::types::events::ClashResult::Won => *clash_controller == controller,
-            crate::types::events::ClashResult::Lost => *opponent == controller,
-            crate::types::events::ClashResult::Tied => false,
-        },
+        } => {
+            result.for_player(*clash_controller, *opponent, controller)
+                == Some(crate::types::events::ClashResult::Won)
+        }
         GameEvent::CoinFlipped { player_id, won } => *player_id == controller && *won,
         _ => false,
     }
