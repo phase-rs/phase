@@ -1400,13 +1400,26 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             }
         }
     } else if let Some(keyword_text) = extract_keyword_clause(&unquoted_text) {
+        // CR 702.16n/p (issue #4964): a trailing SBA-exemption sentence must be
+        // peeled from the keyword clause BEFORE `split_keyword_list`, because the
+        // "Auras and Equipment you control" form (Benevolent Blessing) carries an
+        // inner " and " that would otherwise fracture the sentence into bogus
+        // keyword legs. Gate the peel on a *recognized* exemption
+        // (`parse_protection_attachment_exemption_trailing`), NOT on the mere
+        // presence of "doesn't remove": an unrecognized "... doesn't remove
+        // Auras." tail (Spectra Ward) must stay glued so its "protection from
+        // each color" keyword keeps its existing single-grant lowering instead of
+        // being cleaned into the five-color fan-out. This PR adds exemption
+        // statics; it must not alter Spectra Ward's protection parse.
         let (keyword_only, trailing_exemption) =
             match super::oracle_nom::bridge::split_once_on_lower(
                 keyword_text,
                 &keyword_text.to_lowercase(),
                 ". ",
             ) {
-                Some((first, rest)) if trailing_mentions_protection_attachment_exemption(rest) => {
+                Some((first, rest))
+                    if parse_protection_attachment_exemption_trailing(rest).is_some() =>
+                {
                     (first, Some(rest.trim()))
                 }
                 _ => (keyword_text, None),
@@ -1581,11 +1594,6 @@ pub(crate) fn push_grant_clause_modifications(
             }
         }
     }
-}
-
-fn trailing_mentions_protection_attachment_exemption(text: &str) -> bool {
-    nom_primitives::scan_contains(text, "doesn't remove")
-        || nom_primitives::scan_contains(text, "does not remove")
 }
 
 fn parse_protection_attachment_exemption_trailing(text: &str) -> Option<StaticMode> {

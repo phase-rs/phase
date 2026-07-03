@@ -22039,20 +22039,22 @@ fn protection_chosen_color_duration_form_glory() {
     );
 }
 
-/// CR 702.16 (issue #4964 review): the Benevolent Blessing trailing-prose
-/// exemption splitter must NOT touch sibling protection grants that have no
-/// SBA-exemption sentence. Spectra Ward ("Enchanted creature gets +2/+2 and has
-/// protection from the color of your choice.") must still lower to exactly ONE
-/// `Protection(ChosenColor)` — not a duplicated/expanded set. (fail-if-reverted)
-#[test]
-fn spectra_ward_chosen_color_not_duplicated_by_exemption_splitter() {
-    use crate::types::keywords::{Keyword, ProtectionTarget};
+/// Aggregate every `ContinuousModification` from every `StaticDefinition` the
+/// production static-line parser (`parse_static_line_multi`, which strips
+/// reminder text exactly as the card-data export does) produces for `line`.
+/// This mirrors the parse-tree the `coverage-parse-diff` sticky is built from,
+/// so these tests would fail on the sticky's reported regressions — unlike a
+/// bare `parse_continuous_modifications` fragment which skips reminder-stripping.
+fn production_line_modifications(line: &str) -> Vec<ContinuousModification> {
+    parse_static_line_multi(line)
+        .into_iter()
+        .flat_map(|def| def.modifications)
+        .collect()
+}
 
-    let mods = parse_continuous_modifications(
-        "Enchanted creature gets +2/+2 and has protection from the color of your choice.",
-    );
-    let protection_mods: Vec<_> = mods
-        .iter()
+fn count_protection_grants(mods: &[ContinuousModification]) -> usize {
+    use crate::types::keywords::Keyword;
+    mods.iter()
         .filter(|m| {
             matches!(
                 m,
@@ -22061,20 +22063,31 @@ fn spectra_ward_chosen_color_not_duplicated_by_exemption_splitter() {
                 }
             )
         })
-        .collect();
-    assert_eq!(
-        protection_mods.len(),
-        1,
-        "Spectra Ward must grant exactly one protection, got {mods:?}"
+        .count()
+}
+
+/// CR 702.16 (issue #4964 review): the Benevolent Blessing trailing-prose
+/// exemption splitter must NOT change the parse of a sibling protection grant
+/// whose trailing sentence is NOT a recognized attachment exemption. This uses
+/// Spectra Ward's *production* Oracle line verbatim (MTGJSON `AtomicCards`:
+/// "gets +2/+2 and has protection from each color. This effect doesn't remove
+/// Auras." + reminder) through the production static-line entry — the earlier
+/// fragment test hid the regression because it never exercised the "each color"
+/// fan-out that the exemption peel was inadvertently unblocking. The unrecognized
+/// "... doesn't remove Auras." tail must stay glued so this still lowers to the
+/// same single protection grant as `origin/main` (never the five-color WUBRG
+/// fan-out), and emits NO attachment-exemption static. (fail-if-reverted:
+/// peeling on mere "doesn't remove" reverts this to the fanned-out set.)
+#[test]
+fn spectra_ward_production_line_protection_not_duplicated_by_exemption_splitter() {
+    let mods = production_line_modifications(
+        "Enchanted creature gets +2/+2 and has protection from each color. This effect doesn't remove Auras. (It can't be blocked, targeted, or dealt damage by anything that's white, blue, black, red, or green.)",
     );
-    assert!(
-        matches!(
-            protection_mods[0],
-            ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
-            }
-        ),
-        "expected Protection(ChosenColor), got {mods:?}"
+    assert_eq!(
+        count_protection_grants(&mods),
+        1,
+        "Spectra Ward's production line must keep its single protection grant \
+         (the exemption peel must not unblock the each-color fan-out), got {mods:?}"
     );
     assert!(
         !mods.iter().any(|m| matches!(
@@ -22084,7 +22097,77 @@ fn spectra_ward_chosen_color_not_duplicated_by_exemption_splitter() {
                     | StaticMode::ProtectionDoesntRemoveControlledAttachments,
             }
         )),
-        "Spectra Ward has no attachment exemption, got {mods:?}"
+        "Spectra Ward's \"doesn't remove Auras\" is not a modeled attachment \
+         exemption and must emit no exemption static, got {mods:?}"
+    );
+}
+
+/// CR 702.16p (issue #4964): the *production* Benevolent Blessing line — whose
+/// exemption sentence "This effect doesn't remove Auras and Equipment you
+/// control that are already attached to it." carries an inner " and " — must
+/// peel cleanly to a single `Protection(ChosenColor)` grant plus the
+/// `ProtectionDoesntRemoveControlledAttachments` static. Without the pre-split
+/// peel, `split_keyword_list` fractures the sentence on "Auras and Equipment"
+/// into bogus legs. (This is the card the whole PR exists for.)
+#[test]
+fn benevolent_blessing_production_line_emits_controlled_attachment_exemption() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = production_line_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
+    );
+    assert_eq!(
+        count_protection_grants(&mods),
+        1,
+        "expected exactly one protection grant, got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }
+        )),
+        "expected ProtectionDoesntRemoveControlledAttachments static, got {mods:?}"
+    );
+}
+
+/// CR 702.16n (issue #4964): the *production* Ward of Lights / Floating Shield /
+/// Pentarch Ward line ("... protection from the chosen color. This effect
+/// doesn't remove this Aura.") must lower to a single `Protection(ChosenColor)`
+/// grant plus the source-specific `ProtectionDoesntRemoveThisAura` static.
+#[test]
+fn ward_of_lights_production_line_emits_this_aura_exemption() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = production_line_modifications(
+        "Enchanted creature has protection from the chosen color. This effect doesn't remove this Aura.",
+    );
+    assert_eq!(
+        count_protection_grants(&mods),
+        1,
+        "expected exactly one protection grant, got {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveThisAura,
+            }
+        )),
+        "expected ProtectionDoesntRemoveThisAura static, got {mods:?}"
     );
 }
 
