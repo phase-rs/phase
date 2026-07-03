@@ -148,6 +148,7 @@ fn affinity_for_artifacts_spell_preferred() {
         config: &config,
         context: &context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     };
 
     let (delta, kind) = delta_of(policy().verdict(&ctx));
@@ -181,6 +182,7 @@ fn plain_artifact_nudged() {
         config: &config,
         context: &context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     };
 
     let (delta, kind) = delta_of(policy().verdict(&ctx));
@@ -212,6 +214,7 @@ fn non_artifact_spell_inert() {
         config: &config,
         context: &context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     };
 
     let (delta, kind) = delta_of(policy().verdict(&ctx));

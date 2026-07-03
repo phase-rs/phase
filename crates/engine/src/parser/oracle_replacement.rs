@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{char, multispace1};
+use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
@@ -7021,14 +7021,8 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if nom_primitives::scan_contains(lower, "permanent you control") {
-        def = def.valid_card(TargetFilter::Typed(
-            TypedFilter::permanent().controller(ControllerRef::You),
-        ));
-    } else if nom_primitives::scan_contains(lower, "creature you control") {
-        def = def.valid_card(TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::You),
-        ));
+    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+        def = def.valid_card(valid_card);
     }
     if nom_primitives::scan_contains(lower, "an opponent would put")
         || nom_primitives::scan_contains(lower, "opponent would put")
@@ -7047,6 +7041,57 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     }
 
     Some(def)
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
+    let (_, (), after_anchor) =
+        nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
+    let (filter, rest) = parse_type_phrase(after_anchor);
+    if !is_counter_replacement_object_scope(&filter)
+        || parse_counter_replacement_scope_tail(rest).is_err()
+    {
+        return None;
+    }
+    Some(filter)
+}
+
+fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Not { filter } => is_counter_replacement_object_scope(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(is_counter_replacement_object_scope)
+        }
+        _ => false,
+    }
+}
+
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("counters would be put on "),
+            tag("counter would be put on "),
+            tag("an effect would put one or more counters on "),
+            tag("an effect would put a counter on "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_counter_replacement_scope_tail(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        multispace0,
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(", that many"),
+                tag(", twice that many"),
+                tag(", it puts"),
+            )),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse "Players can't get counters."
@@ -14051,6 +14096,84 @@ mod tests {
         ));
     }
 
+    fn controlled_or_branch_types(valid_card: Option<TargetFilter>) -> Vec<Vec<TypeFilter>> {
+        let Some(TargetFilter::Or { filters }) = valid_card else {
+            panic!("expected controlled Or target filter");
+        };
+        filters
+            .into_iter()
+            .map(|filter| match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    ..
+                }) => type_filters,
+                other => panic!("expected controlled typed branch, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_artifact_or_creature_scope() {
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.",
+            "Ozolith-style test card",
+        )
+        .unwrap();
+
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![vec![TypeFilter::Artifact], vec![TypeFilter::Creature]]
+        );
+    }
+
+    #[test]
+    fn counter_doubling_replacement_comma_type_list_scope() {
+        let def = parse_replacement_line(
+            "If one or more counters would be put on a creature, Spacecraft, or Planet you control, twice that many of each of those kinds of counters are put on it instead.",
+            "Loading Zone",
+        )
+        .unwrap();
+
+        assert_eq!(def.counter_match, None);
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![
+                vec![TypeFilter::Creature],
+                vec![TypeFilter::Subtype("Spacecraft".to_string())],
+                vec![TypeFilter::Subtype("Planet".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_mauhur_scope() {
+        // CR 614.1a + CR 122.1a: Mauhur only changes +1/+1 counters put on
+        // Armies, Goblins, and Orcs you control.
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on an Army, Goblin, or Orc you control, that many plus one +1/+1 counters are put on it instead.",
+            "Mauhur, Uruk-hai Captain",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Plus1Plus1))
+        );
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![
+                vec![TypeFilter::Subtype("Army".to_string())],
+                vec![TypeFilter::Subtype("Goblin".to_string())],
+                vec![TypeFilter::Subtype("Orc".to_string())],
+            ]
+        );
+    }
+
     #[test]
     fn counter_minus_one_replacement_vizier_of_remedies() {
         // CR 614.1a + CR 122.1a: Vizier of Remedies — "-1/-1 counters"
@@ -15546,6 +15669,7 @@ mod tests {
         .expect("halving season");
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(def.valid_card, None);
     }
 
     #[test]

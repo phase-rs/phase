@@ -166,6 +166,13 @@ pub use bracket_estimate::{
     estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
     BracketViolation, CommanderBracketTier,
 };
+// Plumbing: read-only re-export of the X-affordability authority
+// (`max_x_value`) so the `phase-ai` consumer crate can price "the only legal X
+// is 0" without duplicating the cost machinery. `casting_costs` is otherwise
+// `pub(crate)`; this exposes exactly that one function from it. The governing
+// rule annotation lives on the function definition in `casting_costs.rs`, not
+// on this visibility re-export.
+pub use casting_costs::max_x_value;
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
