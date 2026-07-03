@@ -2856,9 +2856,29 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "can block an additional creature" / "can block any number" ---
+    // --- "can block an additional creature [as long as|if <cond>]" / "can block any number" ---
+    // CR 509.1c + CR 611.3a: an extra-blocker grant may carry a trailing "as long
+    // as <cond>" / "if <cond>" gate (Entourage of Trest: "This creature can block
+    // an additional creature each combat as long as you're the monarch"). The bare
+    // form is parsed directly; when a trailing gate is present, peel it so the
+    // condition-free body reaches `parse_extra_blockers_static`, then attach the
+    // parsed condition (IsMonarch, etc.) via `parse_static_condition`.
     if let Some(def) = parse_extra_blockers_static(&text) {
         return Some(def);
+    }
+    if let Some((body_tp, condition_tp)) = tp
+        .split_around(" as long as ")
+        .or_else(|| tp.split_around(" if "))
+    {
+        if let Some(mut def) = parse_extra_blockers_static(body_tp.original) {
+            let condition_text = condition_tp.original.trim().trim_end_matches('.');
+            def.condition = Some(parse_static_condition(condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                },
+            ));
+            return Some(def);
+        }
     }
 
     // --- CR 509.1c: "All creatures able to block <self/enchanted creature> do so"
