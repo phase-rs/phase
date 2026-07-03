@@ -148,8 +148,6 @@ interface PlayerAreaProps {
   onFocus?: () => void;
   /** Whether this compact strip is the currently focused opponent */
   isActive?: boolean;
-  /** Extra content to render in the land column (e.g. undo button) */
-  landColumnExtra?: React.ReactNode;
   /** Override creature groups with pre-sorted list (for blocker alignment) */
   creatureOverride?: GroupedPermanent[];
   battlefieldView?: PlayerBattlefieldView;
@@ -162,7 +160,6 @@ export function PlayerArea({
   mode,
   onFocus,
   isActive,
-  landColumnExtra,
   creatureOverride,
   battlefieldView,
   hud,
@@ -413,21 +410,6 @@ export function PlayerArea({
     </div>
   ) : null;
 
-  const landColumnExtraOverlay = landColumnExtra ? (
-    // The stack anchors at the middle-row bottom and grows upward, so at bottom-0
-    // it rides up over the lowest lands / the collapsed land tile. Drop it into
-    // the outer column's reserved `pb-8` gutter (full, non-compact only — compact
-    // height has no bottom padding to borrow) so it clears the land row.
-    <div
-      className={`pointer-events-none absolute bottom-0 left-2 z-30 ${
-        isCompactHeight ? "" : "translate-y-8"
-      }`}
-      data-testid="land-column-extra"
-    >
-      <div className="pointer-events-auto">{landColumnExtra}</div>
-    </div>
-  ) : null;
-
   return (
     <div
       className={`relative flex min-h-0 min-w-0 flex-1 overflow-visible ${
@@ -451,7 +433,6 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
-              {landColumnExtraOverlay}
             </div>
             <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldZoneOverflow
@@ -474,7 +455,6 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
-              {landColumnExtraOverlay}
             </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
           </>
