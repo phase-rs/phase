@@ -22039,6 +22039,55 @@ fn protection_chosen_color_duration_form_glory() {
     );
 }
 
+/// CR 702.16 (issue #4964 review): the Benevolent Blessing trailing-prose
+/// exemption splitter must NOT touch sibling protection grants that have no
+/// SBA-exemption sentence. Spectra Ward ("Enchanted creature gets +2/+2 and has
+/// protection from the color of your choice.") must still lower to exactly ONE
+/// `Protection(ChosenColor)` — not a duplicated/expanded set. (fail-if-reverted)
+#[test]
+fn spectra_ward_chosen_color_not_duplicated_by_exemption_splitter() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature gets +2/+2 and has protection from the color of your choice.",
+    );
+    let protection_mods: Vec<_> = mods
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_)
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        protection_mods.len(),
+        1,
+        "Spectra Ward must grant exactly one protection, got {mods:?}"
+    );
+    assert!(
+        matches!(
+            protection_mods[0],
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+            }
+        ),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveThisAura
+                    | StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }
+        )),
+        "Spectra Ward has no attachment exemption, got {mods:?}"
+    );
+}
+
 /// No-regression: single-color protection still parses to Color(Red).
 #[test]
 fn protection_single_color_unchanged() {

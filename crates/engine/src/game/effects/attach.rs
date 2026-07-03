@@ -1014,6 +1014,65 @@ mod tests {
         assert!(can_attach_to_object(&state, aura, creature));
     }
 
+    /// CR 702.16n (issue #4964 review): the "this Aura" exemption
+    /// (`ProtectionDoesntRemoveThisAura`, Pentarch Ward class) is
+    /// source-specific — it protects ONLY the Aura that granted it. A second
+    /// controlled Aura attached to the same protected host is still detached by
+    /// protection. Two controlled Auras on one protected host: the granting Aura
+    /// is exempt, the sibling Aura is not.
+    #[test]
+    fn attachment_illegality_this_aura_exemption_is_source_specific() {
+        let mut state = setup();
+
+        // Granting Aura: carries the "doesn't remove this Aura" grant AND is the
+        // aura that supplies the host's protection static.
+        let granting_aura = spawn_with_subtype(&mut state, "Pentarch Ward", "Aura");
+        {
+            let obj = state.objects.get_mut(&granting_aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(crate::types::mana::ManaColor::White);
+            obj.static_definitions
+                .push(StaticDefinition::continuous().modifications(vec![
+                    crate::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::ProtectionDoesntRemoveThisAura,
+                    },
+                ]));
+        }
+
+        // Sibling Aura: same controller, plain white Aura, NO exemption grant.
+        let sibling_aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
+        {
+            let obj = state.objects.get_mut(&sibling_aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(crate::types::mana::ManaColor::White);
+        }
+
+        let creature = spawn_creature(&mut state, "Bear");
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.attachments.push(granting_aura);
+            obj.attachments.push(sibling_aura);
+            obj.keywords
+                .push(crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::Color(
+                        crate::types::mana::ManaColor::White,
+                    ),
+                ));
+            // Host carries the applied "this Aura" static from the granting Aura.
+            obj.static_definitions.push(StaticDefinition::new(
+                StaticMode::ProtectionDoesntRemoveThisAura,
+            ));
+        }
+
+        // Granting Aura is exempt; sibling Aura is still removed by protection.
+        assert_eq!(attachment_illegality(&state, granting_aura, creature), None);
+        assert_eq!(
+            attachment_illegality(&state, sibling_aura, creature),
+            Some(AttachIllegality::Protection),
+            "a sibling controlled Aura must NOT share the source Aura's CR 702.16n exemption"
+        );
+    }
+
     #[test]
     fn attachment_illegality_cant_be_enchanted_blocks_aura() {
         // CR 303.4c: other applicable effects can make an Aura's host illegal.
