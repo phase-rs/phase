@@ -4677,6 +4677,22 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             return player;
         }
     }
+    // CR 603.7c + CR 608.2d: "they may tap that permanent" on zone-change
+    // observer triggers (Charismatic Conqueror) — the entering object's
+    // controller decides whether to tap it, not the ability's controller.
+    if let Effect::SetTapState {
+        target: TargetFilter::TriggeringSource,
+        ..
+    } = &ability.effect
+    {
+        if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::TriggeringSourceController,
+        ) {
+            return player;
+        }
+    }
     if let Effect::Sacrifice { target, .. } = &ability.effect {
         if target_filter_controller_scope(target) == Some(ControllerRef::ParentTargetController) {
             if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
