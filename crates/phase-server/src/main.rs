@@ -1295,17 +1295,19 @@ fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Route
 
 /// Decide whether an `Authorization` header value authorizes an admin request.
 /// Pure so the trust decision is unit-testable without a live server: the
-/// header must be exactly `Bearer <token>` where `<token>` (after trimming)
-/// matches `expected` in constant time. A missing or malformed header, or any
-/// scheme other than `Bearer`, is unauthorized.
+/// scheme must be `Bearer` (case-insensitive per RFC 9110) and the credential
+/// (after trimming) must match `expected` in constant time.
 fn admin_request_authorized(auth_header: Option<&str>, expected: &str) -> bool {
-    match auth_header
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-    {
-        Some(token) => tokens_match(token.as_bytes(), expected.as_bytes()),
-        None => false,
+    let Some(value) = auth_header.map(str::trim) else {
+        return false;
+    };
+    let Some((scheme, credentials)) = value.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return false;
     }
+    tokens_match(credentials.trim().as_bytes(), expected.as_bytes())
 }
 
 /// Auth guard for the administrative `/admin/*` routes.
@@ -7151,6 +7153,8 @@ mod admin_auth_tests {
         assert!(admin_request_authorized(Some(&ok), TOKEN));
         let padded = format!("Bearer   {TOKEN}  ");
         assert!(admin_request_authorized(Some(&padded), TOKEN));
+        assert!(admin_request_authorized(Some(&format!("bearer {TOKEN}")), TOKEN));
+        assert!(admin_request_authorized(Some(&format!("BEARER {TOKEN}")), TOKEN));
     }
 
     #[test]
@@ -7189,6 +7193,10 @@ mod admin_auth_tests {
         let (mut app, _temp) = test_admin_app(Some(TOKEN));
         assert_eq!(
             get_admin_drafts(&mut app, Some(&format!("Bearer {TOKEN}"))).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_admin_drafts(&mut app, Some(&format!("bearer {TOKEN}"))).await,
             StatusCode::OK
         );
     }
