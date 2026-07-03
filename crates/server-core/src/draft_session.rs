@@ -783,13 +783,11 @@ mod tests {
         });
 
         assert_eq!(
-            mgr.join_draft(&code, "Bob".to_string(), None)
-                .unwrap_err(),
+            mgr.join_draft(&code, "Bob".to_string(), None).unwrap_err(),
             "password_required"
         );
         assert_eq!(
-            mgr.join_draft(&code, "Bob".to_string(), Some("wrong"))
-                .unwrap_err(),
+            mgr.join_draft(&code, "Bob".to_string(), Some("wrong")).unwrap_err(),
             "Wrong password"
         );
         assert!(mgr

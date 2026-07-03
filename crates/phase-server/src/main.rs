@@ -916,11 +916,7 @@ async fn main() {
                             let pod_size = ps.config.pod_size;
                             let set_code = ps.config.set_code.clone();
                             let draft_kind = format!("{:?}", ps.config.kind);
-                            let filled = ps
-                                .player_tokens
-                                .iter()
-                                .filter(|t| !t.is_empty())
-                                .count();
+                            let filled = ps.player_tokens.iter().filter(|t| !t.is_empty()).count();
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
                             if let Some(meta) = lobby_meta {
