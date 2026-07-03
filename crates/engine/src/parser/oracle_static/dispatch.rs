@@ -2861,6 +2861,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- CR 509.1c: "All creatures able to block <self/enchanted creature> do so"
+    // — printed permanent forced-block ("lure") static (Ochran Assassin, Breaker
+    // of Armies, Prized Unicorn, Lure). The one-shot "… target creature this turn
+    // do so" spell form is left to `try_parse_mass_forced_block` in the effect
+    // parser. ---
+    if let Some(def) = parse_forced_block_static(&text) {
+        return Some(def);
+    }
+
     // --- "play any number of lands" / counted additional land-drop grants ---
     // The ordinary +1 phrase ("play an additional land") is handled by the
     // rule-static subject/predicate shell so embedded subjects such as

@@ -838,6 +838,56 @@ fn as_foretold_free_cast_line_is_unsupported() {
     );
 }
 
+/// CR 509.1c (issue #4949): Ochran Assassin's printed "All creatures able to
+/// block ~ do so" is a PERMANENT forced-block ("lure") static, not a one-shot
+/// effect. It must land as a `StaticMode::MustBeBlockedByAll` in `r.statics`
+/// (affected = the source itself), with NO leftover one-shot `GenericEffect`
+/// ability — that form has no trigger/cost and never resolves, so the lure never
+/// applies. Revert-discriminating: before the fix the line misclassifies to the
+/// effect parser and `r.statics` carries no MustBeBlockedByAll. Same printed line
+/// fixes Breaker of Armies / Prized Unicorn / Lure as a class.
+#[test]
+fn ochran_assassin_forced_block_is_permanent_static() {
+    use crate::types::ability::TargetFilter;
+    let r = parse(
+        "Deathtouch\nAll creatures able to block Ochran Assassin do so.",
+        "Ochran Assassin",
+        &[Keyword::Deathtouch],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::SelfRef),
+        "the lure must affect the source creature itself"
+    );
+
+    // No leftover one-shot GenericEffect ability carrying MustBeBlockedByAll — that
+    // form never resolves (the pre-fix bug).
+    assert!(
+        !r.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities
+                    .iter()
+                    .any(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        )),
+        "no one-shot GenericEffect MustBeBlockedByAll ability should remain, got {:?}",
+        r.abilities
+    );
+}
+
 /// Cavernous Maw (std BATCH 12): the `{2}` activated ability animates the
 /// land into a 3/3 Elemental creature, and the confirmatory "It's still a
 /// Cave land" sentence (CR 205.1b, CR 305.7) must NOT remain
