@@ -182,7 +182,10 @@ pub(crate) fn benefit_is_trivial(
         .all(|effect| effect_is_trivial(state, ai_player, source_id, ability, effect))
 }
 
-fn effect_is_trivial(
+/// Whether a single effect carries no meaningful immediate advantage. Shared
+/// with the X-cast no-op gate (`x_cast_gate.rs`) for pricing the *non-X*
+/// residual effects of an {X}-cost payoff whose only affordable X is 0.
+pub(crate) fn effect_is_trivial(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,

@@ -57,6 +57,8 @@ mod tempo_curve;
 mod tokens_wide;
 mod tribal_lord_priority;
 pub(crate) mod tutor;
+mod x_cast_gate;
+mod x_reference;
 mod x_value;
 
 #[cfg(test)]

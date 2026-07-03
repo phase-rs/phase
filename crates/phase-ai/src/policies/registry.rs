@@ -40,6 +40,7 @@ use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
 use super::tribal_lord_priority::TribalLordPriorityPolicy;
 use super::tutor::TutorPolicy;
+use super::x_cast_gate::XCastGatePolicy;
 use super::x_value::XValuePolicy;
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::AiConfig;
@@ -124,6 +125,7 @@ pub enum PolicyId {
     ChaliceAvoidance,
     PaymentSelection,
     SeparatePilesTiming,
+    XCastGate,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -331,6 +333,7 @@ impl Default for PolicyRegistry {
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
             Box::new(XValuePolicy),
+            Box::new(XCastGatePolicy),
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
