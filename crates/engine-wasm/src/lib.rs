@@ -1269,7 +1269,12 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
     let ai_difficulty = AiDifficulty::from_label(difficulty);
 
-    with_state(|state| {
+    with_state_mut(|state| {
+        // Freshly-restored states carry `layers_dirty = Full` and a conservative
+        // all-present `static_mode_presence`; flush before read-only candidate
+        // generation so derived state and the presence index are precise
+        // (mirrors `get_legal_actions_js`). No-op when layers are clean.
+        engine::game::layers::flush_layers(state);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
 
@@ -1298,6 +1303,11 @@ pub fn get_ai_scored_candidates(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state_mut(|state| {
+        // Pool workers restore a deserialized state per decision: `layers_dirty =
+        // Full`, presence index conservatively all-present. Flush before scoring so
+        // candidate generation runs on precise derived state (mirrors
+        // `get_legal_actions_js`). No-op when layers are clean.
+        engine::game::layers::flush_layers(state);
         // Re-seed the state RNG so each parallel worker explores different
         // beam-search rollout paths and tie-breaking orders.
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
@@ -1369,6 +1379,10 @@ fn resolve_all_inner(
     max_resolutions: u32,
     rng: &mut impl Rng,
 ) -> BatchResolveResult {
+    // The first AI decision in the fast-forward loop can run before any
+    // `apply()` (which would flush internally); flush up front so it sees
+    // precise derived state + presence index. No-op when layers are clean.
+    engine::game::layers::flush_layers(state);
     let session = ai_session_for(state);
     resolve_all_fast_forward(state, requester, max_resolutions, |state, actor| {
         if let Some(seat) = ai_seats
