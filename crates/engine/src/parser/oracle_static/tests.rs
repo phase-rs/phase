@@ -22964,12 +22964,13 @@ fn static_self_and_enchanted_each_repeated_dynamic_pump() {
     assert!(counts_auras, "the other term must count Auras you control");
 }
 
-/// CR 613.4c + CR 604.3: Radiant, Archangel / Pride of the Clouds — "~ gets
-/// +1/+1 for each other creature on the battlefield with flying." The zone
-/// qualifier ("on the battlefield") and the keyword qualifier ("with flying")
-/// both trail the type word, a combination the "for each" grammar had no
-/// combinator for (only the "the number of ... on the battlefield with
-/// <keyword>" CDA form did); the dynamic pump previously failed to parse.
+/// CR 604.1 + CR 611.3a + CR 613.4c: Radiant, Archangel / Pride of the
+/// Clouds — "~ gets +1/+1 for each other creature on the battlefield with
+/// flying." The zone qualifier ("on the battlefield") and the keyword
+/// qualifier ("with flying") both trail the type word, a combination the
+/// "for each" grammar had no combinator for (only the "the number of ... on
+/// the battlefield with <keyword>" CR 604.3 CDA form did); the dynamic pump
+/// previously failed to parse.
 #[test]
 fn static_self_dynamic_pump_for_each_other_creature_on_battlefield_with_keyword() {
     let def =
