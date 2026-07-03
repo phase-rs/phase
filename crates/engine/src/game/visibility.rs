@@ -796,7 +796,9 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
     match event {
         // Individual draws identify the exact library card — only the drawer.
         GameEvent::CardDrawn { player_id, .. } => *player_id == viewer,
-        GameEvent::ZoneChanged { from, to, record, .. } if *from == Some(Zone::Library) => {
+        GameEvent::ZoneChanged {
+            from, to, record, ..
+        } if *from == Some(Zone::Library) => {
             // Mill, cast, and other public zone changes stay visible to everyone.
             if matches!(*to, Zone::Battlefield | Zone::Stack | Zone::Graveyard) {
                 return true;

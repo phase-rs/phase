@@ -3216,9 +3216,7 @@ async fn handle_client_message(
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: server_core::filter_events_for_player(
-                                            &events,
-                                            &raw_state,
-                                            *pid,
+                                            &events, &raw_state, *pid,
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
@@ -3319,9 +3317,7 @@ async fn handle_client_message(
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: server_core::filter_events_for_player(
-                                            ai_events,
-                                            ai_raw_state,
-                                            *pid,
+                                            ai_events, ai_raw_state, *pid,
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
