@@ -79,6 +79,25 @@ pub(crate) fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
+        // CR 508.6 + CR 102.2 + CR 508.1b: each opponent of the controller who
+        // is attacking the enchanted/defending player this combat (the Commander
+        // 2017 "each opponent attacking that player does the same" curse rider).
+        // The "that player" anchor is the trigger source's AttachedTo host.
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            match crate::game::effects::enchanted_player_anchor(state, source_id) {
+                Some(enchanted) => state
+                    .players
+                    .iter()
+                    .filter(|player| !player.is_eliminated)
+                    .filter(|player| {
+                        player.id != controller
+                            && state.player_attacked_player_this_combat(player.id, enchanted)
+                    })
+                    .map(|player| player.id)
+                    .collect(),
+                None => Vec::new(),
+            }
+        }
         PlayerFilter::All => state
             .players
             .iter()

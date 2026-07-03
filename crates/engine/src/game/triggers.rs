@@ -6458,6 +6458,9 @@ pub(crate) fn check_trigger_condition(
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttacked { .. }
+            // CR 508.6: a set-valued attacking-the-enchanted-player predicate is
+            // likewise set-valued — no single-player "whose turn" semantic.
+            | PlayerFilter::OpponentAttackingEnchantedPlayer
             | PlayerFilter::All
             // CR 608.2c: a set-valued "all players except an anchor" population
             // has no single-player "whose turn" semantic. Fail-closed.
