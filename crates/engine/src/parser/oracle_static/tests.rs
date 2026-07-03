@@ -15982,8 +15982,8 @@ fn static_all_creatures_are_black() {
 /// CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
 /// supertype-defining statics — the supertype sibling of the color path. Adds a
 /// supertype (Leyline of Singularity, Sixth Stage of Magic Design) or removes one
-/// via a "no longer"/"not" negation (Melting). Reuses the shared subject grammar
-/// + `parse_supertype_word` + the existing `AddSupertype`/`RemoveSupertype`
+/// via a "no longer"/"not" negation (Melting). Reuses the shared subject grammar,
+/// `parse_supertype_word`, and the existing `AddSupertype`/`RemoveSupertype`
 /// runtime; the color/land-type paths are unchanged (disjoint predicates).
 #[test]
 fn static_subject_are_supertype_adds_and_removes() {

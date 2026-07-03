@@ -1444,8 +1444,9 @@ pub(crate) fn parse_subject_is_supertype(
         return None;
     }
 
-    // CR 205.4b + CR 707.9b: an optional "no longer"/"not" negation flips this to
-    // a supertype REMOVAL.
+    // CR 205.4b: an object can gain or lose a supertype ("When an object gains or
+    // loses a supertype…") — an optional "no longer"/"not" negation flips this
+    // parse to a supertype REMOVAL.
     let predicate_lower = predicate.to_lowercase();
     let (supertype_input, is_remove) = match opt(alt((
         tag::<_, _, OracleError<'_>>("no longer "),
