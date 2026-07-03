@@ -913,14 +913,16 @@ async fn main() {
                     {
                         Ok(ps) => {
                             let lobby_meta = ps.lobby_meta.clone();
+                            let register_in_lobby = ps.should_register_in_lobby();
                             let pod_size = ps.config.pod_size;
                             let set_code = ps.config.set_code.clone();
                             let draft_kind = format!("{:?}", ps.config.kind);
                             let filled = ps.player_tokens.iter().filter(|t| !t.is_empty()).count();
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
-                            if let Some(meta) = lobby_meta {
-                                lob.register_game(
+                            if register_in_lobby {
+                                if let Some(meta) = lobby_meta {
+                                    lob.register_game(
                                     draft_code,
                                     RegisterGameRequest {
                                         host_name: meta.host_name,
@@ -940,6 +942,7 @@ async fn main() {
                                     },
                                     &SysEnv,
                                 );
+                                }
                             }
                             if let Some(ms) = timer_ms {
                                 info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
@@ -5586,6 +5589,18 @@ async fn handle_client_message(
                 None
             };
 
+            let public_before = if is_start {
+                draft_state
+                    .lock()
+                    .await
+                    .sessions
+                    .get(&draft_code)
+                    .and_then(|s| s.lobby_meta.as_ref())
+                    .is_some_and(|m| m.public)
+            } else {
+                false
+            };
+
             let result = {
                 let mut mgr = draft_state.lock().await;
                 let before_window = mgr.sessions.get(&draft_code).map(|s| {
@@ -5617,6 +5632,25 @@ async fn handle_client_message(
 
             match result {
                 Ok((views, should_rearm_timer)) => {
+                    if is_start {
+                        let removed = {
+                            let mut lob_guard = lobby.lock().await;
+                            let lob = lob_guard.lobby_mut();
+                            let existed = lob.has_game(&draft_code);
+                            lob.unregister_game(&draft_code);
+                            existed
+                        };
+                        if removed && public_before {
+                            broadcast_to_lobby_subscribers(
+                                lobby_subscribers,
+                                ServerMessage::LobbyGameRemoved {
+                                    game_code: draft_code.clone(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
                     broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
 

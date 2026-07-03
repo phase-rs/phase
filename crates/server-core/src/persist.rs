@@ -68,3 +68,11 @@ pub struct PersistedDraftSession {
     pub lobby_meta: Option<PersistedLobbyMeta>,
     pub timer_remaining_ms: Option<u32>,
 }
+
+impl PersistedDraftSession {
+    /// Lobby registration is only valid while the draft is still in the pre-start lobby.
+    pub fn should_register_in_lobby(&self) -> bool {
+        self.lobby_meta.is_some()
+            && self.session.status == draft_core::types::DraftStatus::Lobby
+    }
+}

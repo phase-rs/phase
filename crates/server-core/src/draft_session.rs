@@ -232,6 +232,10 @@ impl DraftSessionManager {
             }
         }
 
+        if session.session.status != DraftStatus::Lobby {
+            return Err("Draft has already started".to_string());
+        }
+
         let seat = session
             .first_open_seat()
             .ok_or_else(|| "Draft is already full".to_string())?;
@@ -294,11 +298,17 @@ impl DraftSessionManager {
         // auto-report), so bot/auto picks are unaffected.
         let action = authorize_client_draft_action(seat, action)?;
 
+        let clears_lobby = matches!(action, DraftAction::StartDraft);
+
         let _deltas = draft_core::session::apply(&mut session.session, action, pack_source)
             .map_err(|e| {
                 warn!(draft = %draft_code, error = %e, "draft action rejected");
                 format!("Draft error: {}", e)
             })?;
+
+        if clears_lobby {
+            session.lobby_meta = None;
+        }
 
         // Broadcast updated view to all connected seats
         let views: Vec<_> = (0..session.player_tokens.len())
@@ -321,11 +331,17 @@ impl DraftSessionManager {
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
 
+        let clears_lobby = matches!(action, DraftAction::StartDraft);
+
         let _deltas = draft_core::session::apply(&mut session.session, action, pack_source)
             .map_err(|e| {
                 warn!(draft = %draft_code, error = %e, "system draft action rejected");
                 format!("Draft error: {}", e)
             })?;
+
+        if clears_lobby {
+            session.lobby_meta = None;
+        }
 
         let views: Vec<_> = (0..session.player_tokens.len())
             .map(|i| session.view_for_seat(i))
@@ -787,12 +803,84 @@ mod tests {
             "password_required"
         );
         assert_eq!(
-            mgr.join_draft(&code, "Bob".to_string(), Some("wrong")).unwrap_err(),
+            mgr.join_draft(&code, "Bob".to_string(), Some("wrong"))
+                .unwrap_err(),
             "Wrong password"
         );
         assert!(mgr
             .join_draft(&code, "Bob".to_string(), Some("secret"))
             .is_ok());
+    }
+
+    #[test]
+    fn join_draft_rejects_after_draft_started() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.sessions.get_mut(&code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+
+        for i in 1..8 {
+            mgr.join_draft(&code, format!("Player {i}"), Some("secret"))
+                .unwrap();
+        }
+
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        mgr.apply_system_action(&code, DraftAction::StartDraft, Some(&source))
+            .unwrap();
+
+        assert!(mgr.sessions[&code].lobby_meta.is_none());
+        assert_eq!(mgr.sessions[&code].session.status, DraftStatus::Drafting);
+
+        let result = mgr.join_draft(&code, "Late".to_string(), Some("secret"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already started"));
+    }
+
+    #[test]
+    fn started_persisted_draft_does_not_register_in_lobby() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.sessions.get_mut(&code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+
+        for i in 1..8 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        mgr.apply_system_action(&code, DraftAction::StartDraft, Some(&source))
+            .unwrap();
+
+        // Simulate legacy persistence that still carried lobby_meta after start.
+        let mut persisted = mgr.sessions[&code].to_persisted();
+        persisted.lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+
+        assert!(!persisted.should_register_in_lobby());
     }
 
     #[test]
