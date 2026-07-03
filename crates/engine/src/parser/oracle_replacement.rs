@@ -3501,6 +3501,35 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
         })
         .or_else(|| {
             // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            // CR 614.1c: the untapped-entry counterpart is templated the same
+            // short-vs-long way as the tapped form above (Vigorous Farming:
+            // "Lands you control enter the battlefield untapped.").
+            stripped
+                .strip_suffix(" enter the battlefield untapped")
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::Plain {
+                            enters_tapped: false,
+                        },
+                    )
+                })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped
+                .strip_suffix(" enters the battlefield untapped")
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::Plain {
+                            enters_tapped: false,
+                        },
+                    )
+                })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
             stripped.strip_suffix(" enter untapped").map(|subject| {
                 (
                     subject,
@@ -12205,6 +12234,55 @@ mod tests {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 614.1c: the untapped-entry counterpart of the tapped-entry short-vs-long
+    // templating gap (see `frozen_aether_enters_the_battlefield_tapped_long_form`
+    // above) — Vigorous Farming prints "Lands you control enter the battlefield
+    // untapped." where the `spelunking_lands_you_control_enter_untapped` test
+    // above uses the short "enter untapped" simplification.
+    #[test]
+    fn vigorous_farming_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Lands you control enter the battlefield untapped.",
+            "Vigorous Farming",
+        )
+        .expect("long-form 'enter the battlefield untapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // The controller-scoped Or-filter shape (mirroring
+    // `frozen_aether_enters_the_battlefield_tapped_long_form`) must also parse
+    // for the untapped long form.
+    #[test]
+    fn opponents_control_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter the battlefield untapped.",
+            "Untapped Aether",
+        )
+        .expect("long-form 'enter the battlefield untapped' with Or-filter subject must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => assert_eq!(filters.len(), 3),
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
         }
     }
 

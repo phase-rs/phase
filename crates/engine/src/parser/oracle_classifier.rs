@@ -724,6 +724,16 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 614.1c: the untapped-entry counterpart is templated the same short-vs-
+    // long way as the tapped form above (Vigorous Farming: "Lands you control
+    // enter the battlefield untapped.").
+    if lower
+        .trim_end_matches('.')
+        .ends_with(" enter the battlefield untapped")
+    {
+        return true;
+    }
+
     // CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
     // is a replacement effect. The "When ~ is turned face up" form is a trigger
     // and stays out of this path, so the lead is required to be "As".
