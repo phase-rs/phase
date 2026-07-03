@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, value, verify};
+use nom::combinator::{opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -755,6 +755,14 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_becomes_in_addition_pattern(lower) {
         return true;
     }
+    // CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+    // [P/T profiles]" as-enters replacement (Primal Plasma / Primal Clay /
+    // Corrupted Shapeshifter / Aquamorph Entity). The self-anchored modal
+    // form is claimed here so the Priority-8 modal-lowering branch fires
+    // before the generic replacement/static parsers.
+    if is_as_enters_becomes_choice_pattern(lower) {
+        return true;
+    }
     // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
     // forms ("Other creatures you control enter with …", "… creatures escape
     // with …") use the bare-verb "enter"/"escape" rather than "enters"/"escapes",
@@ -844,6 +852,55 @@ fn parse_as_enters_becomes_in_addition(input: &str) -> OracleResult<'_, ()> {
 
 pub(crate) fn is_as_enters_becomes_in_addition_pattern(lower: &str) -> bool {
     parse_as_enters_becomes_in_addition(lower).is_ok()
+}
+
+/// CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+/// [P/T profiles]" as-enters replacement recognizer. Mirrors
+/// [`parse_as_enters_becomes_in_addition`] but inverts its self-anchor gate: the
+/// modal-choice form is always self-anchored (the entering creature becomes one
+/// of two-or-more profiles it chooses for itself), so the subject MUST be the
+/// bare `~` anaphor — the exact opposite of the non-self "in addition" subset
+/// template. The "your choice of " pivot plus a required following fixed `<n>/<n>`
+/// power/toughness token distinguishes this modal-P/T class from anchor-word
+/// modals (bullet blocks) and from generic "choose a color" as-enters lines.
+fn parse_as_enters_becomes_choice(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim() != "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes your choice of "),
+        tag(" enters the battlefield, it becomes your choice of "),
+        tag(" enters or is turned face up, it becomes your choice of "),
+    ))
+    .parse(input)?;
+    // Strip an optional leading article so the fixed-P/T peek reaches the token
+    // ("a 3/3 creature" / "5/1"). `opt` never fails, preserving the slice when
+    // absent.
+    let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    // Require a following fixed `<n>/<n>` power/toughness token: the modal
+    // as-enters replacement (CR 208.2b) always lists specific P/T values. This
+    // excludes non-P/T "becomes your choice of" phrasings from claiming the
+    // modal-P/T lowering path.
+    peek(verify(
+        nom_primitives::parse_pt_value,
+        |(power, toughness)| {
+            matches!(
+                (power, toughness),
+                (
+                    crate::types::ability::PtValue::Fixed(_),
+                    crate::types::ability::PtValue::Fixed(_)
+                )
+            )
+        },
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_choice_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_choice(lower).is_ok()
 }
 
 fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {

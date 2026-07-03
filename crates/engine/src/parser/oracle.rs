@@ -39,14 +39,15 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
-    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
-    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
-    is_enters_with_counter_replacement_line, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    is_alternative_keyword_cost_pattern, is_as_enters_becomes_choice_pattern,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern,
+    is_collect_evidence_alt_cost_pattern, is_compound_turn_limit, is_defiler_cost_pattern,
+    is_enters_tapped_cant_untap_compound, is_enters_with_counter_replacement_line,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -71,7 +72,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
+    parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -3564,6 +3566,21 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
+            // CR 208.2b + CR 614.1c + CR 614.12a: modal "As ~ enters, it becomes
+            // your choice of [P/T profiles]" as-enters replacement (Primal Plasma,
+            // Primal Clay, Corrupted Shapeshifter, Aquamorph Entity). This is a
+            // single-sentence replacement line with NO bullet block, so the
+            // Priority-1 `OracleBlockAst::AsEntersAnchorWordModal` block parser
+            // never fires — it must be lowered here. [G2] It MUST run BEFORE the
+            // generic `parse_replacement_sentence_sequence` / `parse_replacement_line`
+            // parsers so those don't claim the "becomes your choice of" line as a
+            // plain choice/animate and drop the per-mode gated statics.
+            if is_as_enters_becomes_choice_pattern(&lower)
+                && lower_as_enters_becomes_choice_modal(&line, &mut result)
+            {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
