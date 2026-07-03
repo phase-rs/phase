@@ -6200,7 +6200,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     restrictions::record_spell_cast_from_zone(state, player, &obj, source_zone, casting_variant);
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
-    super::casting::consume_pending_spell_cost_reduction(state, player);
+    super::casting::consume_pending_spell_cost_reduction(state, player, object_id);
 
     // CR 601.2f: Stamp and consume one-shot "the next spell …" modifiers.
     super::casting::apply_pending_next_spell_stack_grants(state, player, object_id);

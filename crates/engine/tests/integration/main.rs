@@ -409,6 +409,7 @@ mod issue_4792_isochron_scepter;
 mod issue_4829_zenith_chronicler;
 mod issue_4830_orvar_land_copy;
 mod issue_4831_bloodthorn_flail_equip;
+mod issue_4833_disruptor_flute_oubliette;
 mod issue_4835_intimidation_tactics;
 mod issue_4836_mindskinner;
 mod issue_536_six_grants_retrace;

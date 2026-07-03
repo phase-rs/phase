@@ -2941,6 +2941,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
         parse_for_each_recipient_shared_quality,
+        // CR 604.1 + CR 611.3a + CR 613.4c: "<type> on the battlefield with
+        // <keyword>" — must precede `parse_for_each_battlefield_type`, whose
+        // shorter " on the battlefield" tag would otherwise match first and
+        // strand " with <keyword>" as an unconsumed remainder.
+        parse_for_each_battlefield_type_with_keyword,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
@@ -3942,6 +3947,51 @@ fn parse_for_each_battlefield_type(input: &str) -> OracleResult<'_, QuantityRef>
     ))
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.4c: Parse "[other] <type> on the
+/// battlefield with <keyword>" in a "for each" clause -> a battlefield-wide
+/// (any-controller) population count of permanents of the given type that
+/// have the named keyword, with an optional "other"/"another" exclusion of
+/// the source object. This is a static ability (CR 604.1) whose continuous
+/// effect isn't locked in — it applies at any given moment to whatever the
+/// count currently is (CR 611.3a) — as a layer 7c power/toughness
+/// modification (CR 613.4c), not a characteristic-defining ability.
+///
+/// "for each" sibling of `parse_number_of_type_on_battlefield_with_keyword`
+/// (the "the number of" CR 604.3 CDA form of the same "on the battlefield
+/// with <keyword>" grammar) and of `parse_for_each_battlefield_type` (the
+/// keyword-less bare form, which this arm must precede — its shorter
+/// `tag(" on the battlefield")` would otherwise match first and strand
+/// " with <keyword>" as an unconsumed remainder).
+/// Backs dynamic P/T anthems such as Radiant, Archangel and Pride of the
+/// Clouds ("~ gets +1/+1 for each other creature on the battlefield with
+/// flying"). Generalized over every evergreen keyword via `parse_keyword_name`
+/// + `FilterProp::WithKeyword`, so it covers the whole class, not one card.
+fn parse_for_each_battlefield_type_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    let (rest, _) = tag(" on the battlefield with ").parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name.parse().unwrap();
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(FilterProp::WithKeyword { value: keyword });
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 109.4: Only objects on the stack or on the battlefield have a
     // controller, so a "you control" count is over battlefield permanents
@@ -4325,6 +4375,54 @@ mod tests {
                     );
                 }
                 other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 604.1 + CR 611.3a + CR 613.4c: "for each" sibling of
+    /// `parse_number_of_type_on_battlefield_with_keyword_global_count` — the
+    /// dynamic-pump grammar backing Radiant, Archangel / Pride of the Clouds
+    /// ("~ gets +1/+1 for each other creature on the battlefield with
+    /// flying"), generalized over the KEYWORDS table and the optional
+    /// "other"/"another" exclusion.
+    #[test]
+    fn parse_for_each_battlefield_type_with_keyword_global_count() {
+        for (clause, other, kw) in [
+            (
+                "other creature on the battlefield with flying",
+                true,
+                Keyword::Flying,
+            ),
+            (
+                "another creature on the battlefield with shadow",
+                true,
+                Keyword::Shadow,
+            ),
+            (
+                "creature on the battlefield with flying",
+                false,
+                Keyword::Flying,
+            ),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, None, "{clause:?}: counts every controller");
+                    assert_eq!(
+                        tf.properties.contains(&FilterProp::Another),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
             }
         }
     }

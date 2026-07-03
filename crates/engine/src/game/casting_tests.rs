@@ -22915,6 +22915,77 @@ fn spell_matches_cost_filter_fail_closed_for_unrecognized_variants() {
     ));
 }
 
+/// CR 601.2f: a *filtered* one-shot cost reduction ("the next [type] spell you
+/// cast this turn costs {N} less" — Kadena, Slinking Sorcerer) must be consumed
+/// once the matching spell is cast, not left to discount every matching spell
+/// for the rest of the turn. The consumer previously removed only *unfiltered*
+/// entries. Revert-probe: with the old `spell_filter.is_none()` predicate the
+/// filtered entry survives and the length-0 assertion below fails.
+#[test]
+fn consume_filtered_pending_cost_reduction_removes_the_matching_entry() {
+    use crate::types::game_state::PendingSpellCostReduction;
+
+    let mut state = GameState::new_two_player(1);
+    // A creature spell cast by P0.
+    let spell = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Creature Spell".to_string(),
+        Zone::Stack,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    // 1. A filtered (creature-spell) reduction that matches is consumed.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(0),
+            amount: 2,
+            spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert!(
+        state.pending_spell_cost_reductions.is_empty(),
+        "a matching filtered reduction must be consumed (previously it persisted \
+         and re-discounted every creature spell for the rest of the turn)"
+    );
+
+    // 2. Regression: an unfiltered reduction is still consumed.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(0),
+            amount: 1,
+            spell_filter: None,
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert!(
+        state.pending_spell_cost_reductions.is_empty(),
+        "an unfiltered reduction is still consumed"
+    );
+
+    // 3. Precision: a reduction belonging to a different player is NOT consumed
+    //    by this player's cast.
+    state
+        .pending_spell_cost_reductions
+        .push(PendingSpellCostReduction {
+            player: PlayerId(1),
+            amount: 2,
+            spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+        });
+    consume_pending_spell_cost_reduction(&mut state, PlayerId(0), spell);
+    assert_eq!(
+        state.pending_spell_cost_reductions.len(),
+        1,
+        "another player's reduction must not be consumed by P0's cast"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Flashback (CR 702.34)
 // -----------------------------------------------------------------------

@@ -30,8 +30,8 @@ use crate::types::ability::{
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
     ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
     QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1435,6 +1435,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // ── Build AbilityDefinition from ClauseIr ──
         let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // CR 702.26a: Preserve clause provenance on parent-target tap riders so
+        // host-bound phase-in rewrites can match the exact printed phrase without
+        // falling back to whole-trigger text.
+        if matches!(
+            def.effect.as_ref(),
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ) {
+            def.description = Some(clause_ir.source_text.clone());
+        }
         // CR 608.2c: This clause's link to its parent = the boundary that
         // SEPARATED the previous clause from this one. A `Sentence` boundary
         // marks a `SequentialSibling` (next printed instruction, resolves even
