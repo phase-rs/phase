@@ -2,6 +2,7 @@ use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::AttachmentKind;
 use crate::types::card_type::CoreType;
+use crate::types::mana::ManaCostShard;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -5503,6 +5504,92 @@ fn effect_counter_unless_pays_flat_generic_stays_static() {
         ),
         "flat unless-cost should stay static Mana{{generic:3}}, got {:?}",
         unless_pay.cost
+    );
+}
+
+#[test]
+fn effect_counter_unless_rejects_unrecognized_mana_symbol() {
+    let text = "Counter target spell unless its controller pays {3}{½}";
+    let lower = text.to_lowercase();
+    assert!(
+        parse_unless_payment(&lower).is_none(),
+        "unrecognized mana symbol must not parse as an unless payment"
+    );
+    assert!(
+        crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain("they pay {3}{½}")
+            .is_none(),
+        "shared trigger-side unless-cost parser must not reinterpret malformed mana as life"
+    );
+    assert!(
+        imperative::parse_counter_ast(text, &lower).is_none(),
+        "counter AST must decline an unparsed unless-payment rider"
+    );
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+        panic!(
+            "unrecognized mana symbol must leave the counter unsupported, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(name, "unless_payment");
+    assert!(
+        def.unless_pay.is_none(),
+        "unknown mana symbols must not collapse to a partial unless-pay cost: {:?}",
+        def.unless_pay
+    );
+}
+
+#[test]
+fn effect_counter_unless_rejects_unparsed_dynamic_x_tail() {
+    let text = "Counter target spell unless its controller pays {X}, where X is the number of words in the name with the most words among permanents you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+        panic!(
+            "unparsed dynamic X unless rider must not become a plain counter: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(name, "unless_payment");
+    assert!(
+        def.unless_pay.is_none(),
+        "unparsed dynamic X unless rider must not attach a partial cost: {:?}",
+        def.unless_pay
+    );
+}
+
+#[test]
+fn effect_counter_unless_rejects_that_player_unparsed_dynamic_x_tail() {
+    let text = "counter that spell unless that player pays {X}, where X is the number of cards in all graveyards with the same name as the spell";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+        panic!(
+            "unparsed trigger-relative X unless rider must not become a plain counter: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(name, "unless_payment");
+    assert!(
+        def.unless_pay.is_none(),
+        "unparsed trigger-relative X unless rider must not attach a partial cost: {:?}",
+        def.unless_pay
+    );
+}
+
+#[test]
+fn effect_unless_pays_colored_mana_preserves_shards_after_lowercase() {
+    let lower = "prevent all combat damage that would be dealt by that creature this turn unless its controller pays {2}{r}";
+    let cost = parse_unless_payment(lower).expect("colored unless mana must parse");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    ref shards,
+                    generic: 2
+                }
+            } if shards.as_slice() == [ManaCostShard::Red]
+        ),
+        "colored unless mana must preserve the red shard, got {cost:?}"
     );
 }
 

@@ -7171,6 +7171,7 @@ fn parse_counter_unless_pay(
     match super::parse_unless_payment(rest) {
         Some(cost) => Some(Some(super::counter_unless_pay_modifier(cost))),
         None if counter_unless_has_partial_where_x_quantity(rest) => None,
+        None if super::has_unless_clause(rest) => None,
         None => Some(None),
     }
 }

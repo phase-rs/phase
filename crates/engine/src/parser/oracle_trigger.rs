@@ -1754,16 +1754,7 @@ fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
         });
     }
 
-    let cost_end = trimmed
-        .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
-        .unwrap_or(trimmed.len());
-    let cost_text = trimmed[..cost_end].trim();
-
-    if cost_text.is_empty() || !cost_text.contains('{') {
-        return None;
-    }
-
-    if let Some((amount, rest)) = super::oracle_effect::parse_fixed_energy_unless_cost(cost_text) {
+    if let Some((amount, rest)) = super::oracle_effect::parse_fixed_energy_unless_cost(trimmed) {
         if !rest.trim().is_empty() {
             return None;
         }
@@ -1774,36 +1765,39 @@ fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
         });
     }
 
-    if cost_text == "{x}" || cost_text == "{X}" {
-        let after_cost = &trimmed[cost_end..];
-        if let Some(quantity) = super::oracle_effect::parse_where_x_is(after_cost) {
-            return Some(AbilityCost::ManaDynamic { quantity });
-        }
-        let after_x = after_cost.trim().trim_start_matches(',').trim();
-        let after_x_lower = after_x.to_lowercase();
-        if tag::<_, _, OracleError<'_>>("where x is ")
-            .parse(after_x_lower.as_str())
-            .is_ok()
+    if let Ok((after_cost, _)) = tag::<_, _, OracleError<'_>>("{x}").parse(trimmed) {
+        if tag::<_, _, OracleError<'_>>("{")
+            .parse(after_cost.trim_start())
+            .is_err()
         {
-            return None;
-        }
-        return Some(AbilityCost::ManaDynamic {
-            quantity: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+            if let Some(quantity) = super::oracle_effect::parse_where_x_is(after_cost) {
+                return Some(AbilityCost::ManaDynamic { quantity });
+            }
+            let after_x = after_cost.trim().trim_start_matches(',').trim();
+            let after_x_lower = after_x.to_lowercase();
+            if tag::<_, _, OracleError<'_>>("where x is ")
+                .parse(after_x_lower.as_str())
+                .is_ok()
+            {
+                return None;
+            }
+            return Some(AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
-            },
-        });
+            });
+        }
     }
 
-    let mana_cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text);
+    let (mana_cost, after_cost) = super::oracle_effect::parse_unless_mana_cost_prefix(trimmed)?;
     if mana_cost == crate::types::mana::ManaCost::NoCost
         || mana_cost == crate::types::mana::ManaCost::zero()
     {
         return None;
     }
-    if let Some(cost) =
-        super::oracle_effect::parse_unless_for_each_payment(&trimmed[cost_end..], &mana_cost)
+    if let Some(cost) = super::oracle_effect::parse_unless_for_each_payment(after_cost, &mana_cost)
     {
         return Some(cost);
     }
