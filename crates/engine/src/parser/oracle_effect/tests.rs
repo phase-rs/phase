@@ -8638,6 +8638,154 @@ fn effect_copy_spell_retarget_descends_through_delayed_trigger() {
     );
 }
 
+// ── CR 707.10c: copy-retarget binding across an intervening clause ──────────
+//
+// A "you may choose new targets for the copy/copies" sentence grants the copy's
+// controller retargeting even when a clause that resolves between the copy and
+// the sentence separates them. These walkers collect every `CopySpell`'s
+// retarget permission and count surviving `orphaned_copy_retarget` gap nodes
+// anywhere in a parsed ability tree, so the tests fail if the binding regresses
+// (the copy silently reverts to `KeepOriginalTargets` and the honest residual
+// reappears).
+fn copy_retarget_walk_effect(
+    effect: &Effect,
+    retargets: &mut Vec<CopyRetargetPermission>,
+    orphaned: &mut usize,
+) {
+    match effect {
+        Effect::CopySpell { retarget, .. } => retargets.push(retarget.clone()),
+        Effect::Unimplemented { name, .. } if name == "orphaned_copy_retarget" => *orphaned += 1,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            copy_retarget_walk_def(inner, retargets, orphaned)
+        }
+        _ => {}
+    }
+}
+
+fn copy_retarget_walk_def(
+    def: &AbilityDefinition,
+    retargets: &mut Vec<CopyRetargetPermission>,
+    orphaned: &mut usize,
+) {
+    copy_retarget_walk_effect(&def.effect, retargets, orphaned);
+    if let Some(sub) = def.sub_ability.as_deref() {
+        copy_retarget_walk_def(sub, retargets, orphaned);
+    }
+}
+
+/// Walks every ability and trigger execute body of a parsed card.
+fn copy_retarget_scan_card(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> (Vec<CopyRetargetPermission>, usize) {
+    let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+    let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+    let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+    let mut retargets = Vec::new();
+    let mut orphaned = 0usize;
+    for ability in &parsed.abilities {
+        copy_retarget_walk_def(ability, &mut retargets, &mut orphaned);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            copy_retarget_walk_def(execute, &mut retargets, &mut orphaned);
+        }
+    }
+    (retargets, orphaned)
+}
+
+/// CR 707.10c: Narset's Reversal — the retarget sentence follows the
+/// "then return it to its owner's hand" bounce clause, so it must reach back
+/// past the bounce to the `CopySpell`.
+#[test]
+fn effect_copy_retarget_binds_across_bounce_narsets_reversal() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Copy target instant or sorcery spell, then return it to its owner's hand. \
+         You may choose new targets for the copy.",
+        "Narset's Reversal",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "a CopySpell must carry MayChooseNewTargets, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Increasing Vengeance — the PLURAL "the copies" sentence follows
+/// the conditional "copy that spell twice instead" clause. BOTH the primary
+/// (always-made) `CopySpell` and the conditional second `CopySpell` must carry
+/// the retarget permission — a plural clause retargets every copy the spell
+/// makes, not just the nearest.
+#[test]
+fn effect_copy_retarget_binds_across_conditional_increasing_vengeance() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Copy target instant or sorcery spell you control. If this spell was cast \
+         from a graveyard, copy that spell twice instead. \
+         You may choose new targets for the copies.",
+        "Increasing Vengeance",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert_eq!(
+        retargets.len(),
+        2,
+        "both CopySpells (primary + conditional twice) must be present, got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural 'the copies' clause must retarget EVERY copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Spinerock Tyrant — the retarget sentence follows the "those
+/// spells gain wither" rider (a `GenericEffect`), so it must reach back past
+/// that rider to the triggered `CopySpell`.
+#[test]
+fn effect_copy_retarget_binds_across_wither_rider_spinerock_tyrant() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Flying\nWither (This deals damage to creatures in the form of -1/-1 counters.)\n\
+         Whenever you cast an instant or sorcery spell with a single target, you may copy it. \
+         If you do, those spells gain wither. You may choose new targets for the copy.",
+        "Spinerock Tyrant",
+        &["Creature"],
+        &["Dragon"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "the triggered CopySpell must carry MayChooseNewTargets, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"
+/// sentence with NO preceding `CopySpell` anywhere in the chain must stay an
+/// honest `orphaned_copy_retarget` residual, never a silently-wrong retarget.
+#[test]
+fn effect_copy_retarget_with_no_preceding_copy_stays_orphaned() {
+    let def = parse_effect_chain(
+        "Draw a card. You may choose new targets for the copy.",
+        AbilityKind::Spell,
+    );
+    let mut retargets = Vec::new();
+    let mut orphaned = 0usize;
+    copy_retarget_walk_def(&def, &mut retargets, &mut orphaned);
+    assert!(
+        retargets.is_empty(),
+        "no CopySpell should be produced, got {retargets:?}"
+    );
+    assert_eq!(
+        orphaned, 1,
+        "the retarget clause must remain an honest orphaned residual"
+    );
+}
+
 /// CR 603.7 (issue #1191): Tzaangor Shaman — "copy the next instant or
 /// sorcery spell you cast this turn when you cast it" must install a
 /// one-shot delayed trigger, not a combat-damage CopySpell.

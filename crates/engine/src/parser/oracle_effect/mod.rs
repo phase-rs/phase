@@ -23090,6 +23090,26 @@ pub(crate) fn parse_effect_chain_ir(
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                // CR 707.10c: a "you may choose new targets for the copy/copies"
+                // sentence still grants the copy's controller retargeting even
+                // when a clause that resolves between the copy and this sentence
+                // separates them — Narset's Reversal's "then return it to its
+                // owner's hand" bounce, Increasing Vengeance's conditional "copy
+                // that spell twice instead", Spinerock Tyrant's "those spells
+                // gain wither" rider. The nearest-clause lookback above only sees
+                // that intervening clause, so scan the non-absorbed clauses
+                // (nearest-first) for the closest one whose effect wraps a
+                // `CopySpell` and bind the permission there. If NO preceding copy
+                // exists, fall through so the clause stays an honest orphaned
+                // residual rather than a silently-wrong retarget.
+                let lower = normalized_text.to_lowercase();
+                let all_copies = sequence::copy_retarget_clause_all_copies(&lower)?;
+                non_absorbed
+                    .iter()
+                    .any(|c| sequence::effect_wraps_copy_spell(&effective_effect_of(c)))
+                    .then_some(ContinuationAst::CopyMayRetarget { all_copies })
             });
         let absorb_followup = followup_continuation
             .as_ref()

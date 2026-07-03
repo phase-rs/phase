@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, opt, value};
+use nom::combinator::{all_consuming, eof, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -2685,7 +2685,7 @@ pub(super) fn push_clause_chunk(
 /// spell / triggered contexts) or nested inside a `CreateDelayedTrigger`
 /// wrapper ("When you next cast ..., copy that spell"). Mirrors
 /// `def_tree_has_optional`'s descent through `CreateDelayedTrigger`.
-fn effect_wraps_copy_spell(effect: &Effect) -> bool {
+pub(super) fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     match effect {
         Effect::CopySpell { .. } => true,
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
@@ -2768,18 +2768,26 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 
 /// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
-pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
+///
+/// Returns the clause's plurality: `true` for the plural "the copies" form
+/// (Increasing Vengeance's "You may choose new targets for the copies" — every
+/// copy the spell makes is retargetable), `false` for the singular "the copy" /
+/// "that copy" forms (Fork/Twincast; the Chain cycle).
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> {
+    map(
         (
             opt(alt((tag(", and "), tag("and ")))),
             opt(tag("you ")),
             tag("may choose "),
             alt((tag("a new target "), tag("new targets "))),
             tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            alt((
+                value(true, tag("the copies")),
+                value(false, alt((tag("the copy"), tag("that copy")))),
+            )),
             opt(alt((tag("."), tag(",")))),
         ),
+        |(_, _, _, _, _, all_copies, _)| all_copies,
     )
     .parse(input)
 }
@@ -2800,38 +2808,61 @@ pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 707.10c: plurality of a copy-retarget clause — `Some(true)` for the plural
+/// "the copies" form (patch every copy the source makes), `Some(false)` for the
+/// singular forms, `None` when the text is not a copy-retarget clause at all.
+pub(super) fn copy_retarget_clause_all_copies(lower: &str) -> Option<bool> {
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .ok()
+        .map(|(_, all_copies)| all_copies)
+}
+
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
-/// `CopySpell`. Returns true if a `CopySpell` was found and patched.
-fn set_copy_retarget(effect: &mut Effect, perm: CopyRetargetPermission) -> bool {
+/// `CopySpell`. Returns true if a `CopySpell` was found and patched. A
+/// `CreateDelayedTrigger` wrapper descends through its inner ability so a plural
+/// clause reaches every copy the delayed trigger makes.
+fn set_copy_retarget(effect: &mut Effect, perm: &CopyRetargetPermission, all: bool) -> bool {
     match effect {
         Effect::CopySpell { retarget, .. } => {
-            *retarget = perm;
+            *retarget = perm.clone();
             true
         }
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
-            set_copy_retarget(&mut inner.effect, perm)
+            set_copy_retarget_in_ability(inner, perm, all)
         }
         _ => false,
     }
 }
 
-/// CR 707.10c: Patch the `retarget` permission on the `CopySpell` reachable
+/// CR 707.10c: Patch the `retarget` permission on the `CopySpell`(s) reachable
 /// from this ability definition — its own effect, or a `CopySpell` carried as
 /// a (transitive) `sub_ability`. The Chain cycle (Chain of Acid / Plasma /
 /// Smog / Vapor) nests the optional copy under the parent effect ("Target
 /// player discards two cards. That player may copy this spell ..."), so the
 /// "and may choose a new target for that copy" continuation must descend the
 /// sub-ability chain rather than only inspecting the top-level effect.
+///
+/// `all` distinguishes the plural "the copies" clause (CR 707.10c grants
+/// retargeting to *every* copy — Increasing Vengeance's primary copy AND its
+/// conditional "copy that spell twice" copy nested as a `sub_ability`) from the
+/// singular "the copy" clause: when `all` is false the descent stops at the
+/// nearest copy; when true it patches every copy in the sub-ability chain.
+/// Returns true if at least one `CopySpell` was patched.
 fn set_copy_retarget_in_ability(
     def: &mut AbilityDefinition,
     perm: &CopyRetargetPermission,
+    all: bool,
 ) -> bool {
-    if set_copy_retarget(&mut def.effect, perm.clone()) {
+    let patched_here = set_copy_retarget(&mut def.effect, perm, all);
+    if patched_here && !all {
         return true;
     }
-    def.sub_ability
+    let patched_sub = def
+        .sub_ability
         .as_deref_mut()
-        .is_some_and(|sub| set_copy_retarget_in_ability(sub, perm))
+        .is_some_and(|sub| set_copy_retarget_in_ability(sub, perm, all));
+    patched_here || patched_sub
 }
 
 pub(super) fn apply_clause_continuation(
@@ -2998,17 +3029,33 @@ pub(super) fn apply_clause_continuation(
                 *countered_spell_zone = Some(destination);
             }
         }
-        ContinuationAst::CopyMayRetarget => {
-            // CR 707.10c: patch the preceding CopySpell — descending through a
-            // CreateDelayedTrigger wrapper ("When you next cast ..., copy that
-            // spell" — Galvanic Iteration) and through the sub-ability chain
-            // ("That player may copy this spell ..." — the Chain cycle, where
-            // the optional CopySpell is nested under the parent discard).
-            if let Some(previous) = defs.last_mut() {
-                set_copy_retarget_in_ability(
+        ContinuationAst::CopyMayRetarget { all_copies } => {
+            // CR 707.10c: patch the nearest preceding CopySpell — descending
+            // through a CreateDelayedTrigger wrapper ("When you next cast ...,
+            // copy that spell" — Galvanic Iteration) and through the sub-ability
+            // chain ("That player may copy this spell ..." — the Chain cycle,
+            // where the optional CopySpell is nested under the parent discard).
+            // The copy is usually the last def, but a clause that resolves
+            // between the copy and the retarget sentence (Narset's Reversal's
+            // bounce, Increasing Vengeance's conditional "copy that spell twice",
+            // Spinerock Tyrant's "those spells gain wither" rider) can sit in
+            // between — so walk the defs backward to the first ability whose
+            // effect-tree contains a CopySpell. Recognition already confirmed a
+            // preceding copy exists (parse_followup_continuation_ast), so this
+            // binds it; if somehow none is found, the loop is a no-op.
+            //
+            // `all_copies` (the plural "the copies" clause) patches every copy in
+            // that copy-bearing ability — Increasing Vengeance's primary copy and
+            // its nested conditional "copy that spell twice" copy both live in one
+            // ability — while the singular clause keeps nearest-only binding.
+            for previous in defs.iter_mut().rev() {
+                if set_copy_retarget_in_ability(
                     previous,
                     &CopyRetargetPermission::MayChooseNewTargets,
-                );
+                    all_copies,
+                ) {
+                    break;
+                }
             }
         }
         ContinuationAst::SuspectLastCreated => {
@@ -3960,7 +4007,7 @@ pub(super) fn continuation_absorbs_current(
         // CR 707.10c: recognition was already gated on a preceding CopySpell in
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
-        ContinuationAst::CopyMayRetarget => true,
+        ContinuationAst::CopyMayRetarget { .. } => true,
         ContinuationAst::SelfCostKeywordCostClarification => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
@@ -5328,7 +5375,9 @@ pub(super) fn parse_followup_continuation_ast(
             if effect_wraps_copy_spell(previous_effect)
                 && recognize_copy_retarget_clause(&lower) =>
         {
-            Some(ContinuationAst::CopyMayRetarget)
+            Some(ContinuationAst::CopyMayRetarget {
+                all_copies: copy_retarget_clause_all_copies(&lower).unwrap_or(false),
+            })
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" after a private
         // `Dig` (the "look at the top N cards of <player>'s library" look step)
@@ -7545,7 +7594,10 @@ mod tests {
             &copy,
             &mut ParseContext::default(),
         );
-        assert_eq!(result, Some(ContinuationAst::CopyMayRetarget));
+        assert_eq!(
+            result,
+            Some(ContinuationAst::CopyMayRetarget { all_copies: false })
+        );
     }
 
     /// CR 707.10c: `set_copy_retarget_in_ability` must descend the sub-ability
@@ -7575,7 +7627,8 @@ mod tests {
 
         assert!(set_copy_retarget_in_ability(
             &mut def,
-            &CopyRetargetPermission::MayChooseNewTargets
+            &CopyRetargetPermission::MayChooseNewTargets,
+            false
         ));
         let sub = def.sub_ability.as_ref().unwrap();
         assert!(matches!(
