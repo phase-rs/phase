@@ -29,6 +29,8 @@ pub(super) fn run_post_action_pipeline_from(
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
+    let mut consumed_trigger_events =
+        std::mem::take(&mut state.consumed_before_priority_trigger_events);
 
     // CR 603.2: Triggered abilities trigger at the moment the event occurs.
     // Scan for triggers BEFORE SBAs so that objects still on the battlefield
@@ -48,7 +50,11 @@ pub(super) fn run_post_action_pipeline_from(
     // and fired a second time by the replay, causing double-fire for ETB
     // observers like Soul Warden (issue #830).
     if !skip_trigger_scan {
-        let filtered_events: Vec<_> = events[event_start..]
+        let unconsumed_events = triggers::filter_consumed_trigger_events(
+            &events[event_start..],
+            &consumed_trigger_events,
+        );
+        let filtered_events: Vec<_> = unconsumed_events
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
@@ -115,6 +121,7 @@ pub(super) fn run_post_action_pipeline_from(
             // next SBA pass.
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
                 state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
                 return Ok(waiting_for);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -144,6 +151,7 @@ pub(super) fn run_post_action_pipeline_from(
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             match_flow::handle_game_over_transition(state);
         }
+        state.consumed_before_priority_trigger_events.clear();
         return Ok(state.waiting_for.clone());
     }
 
@@ -151,14 +159,20 @@ pub(super) fn run_post_action_pipeline_from(
     // respect the reassignment that eliminate_player() already performed.
     if let Some(player) = default_wf.acting_player() {
         if !players::is_alive(state, player) {
+            state.consumed_before_priority_trigger_events.clear();
             return Ok(state.waiting_for.clone());
         }
     }
 
     check_exile_returns(state, events);
 
-    let delayed_events = triggers::check_delayed_triggers(state, events);
+    consumed_trigger_events.extend(std::mem::take(
+        &mut state.consumed_before_priority_trigger_events,
+    ));
+    let delayed_input = triggers::filter_consumed_trigger_events(events, &consumed_trigger_events);
+    let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
     events.extend(delayed_events);
+    state.consumed_before_priority_trigger_events.clear();
 
     // CR 603.8: Check state triggers after event-based triggers.
     // State triggers fire when a condition is true, checked whenever a player

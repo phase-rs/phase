@@ -3884,7 +3884,7 @@ fn try_parse_become_choice(
 
     let (choice_type, modification) = if lower.contains("creature type") {
         (
-            ChoiceType::CreatureType,
+            ChoiceType::creature_type(),
             ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             },

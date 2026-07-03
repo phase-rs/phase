@@ -1438,6 +1438,22 @@ fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
+    // CR 608.2c + CR 122.1: `ParentTargetSlot { index }` — a later counter
+    // instruction that refers to a specific earlier declared target slot ("put a
+    // +1/+1 counter on the creature you control", index 0). The counter node's
+    // local `ability.targets` may have been replaced with the most-recent parent
+    // slot by chain propagation, so resolve against the flattened chain root
+    // (single authority in `targeting`), then keep only the object at `index`.
+    if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
+        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+
     // CR 608.2k: "the exiled card" — an untargeted reference to the object
     // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
     // counters on the exiled card"). Resolved from the recursively-stamped
@@ -2056,6 +2072,73 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// T4 (counter resolver arm) — CR 608.2c + CR 122.1: a `PutCounter` whose
+    /// target is `ParentTargetSlot { index }` resolves against the FLATTENED
+    /// CHAIN ROOT (from `resolving_stack_entry`), not the node's local targets.
+    /// The node's own `targets` here carry only the most-recent parent slot
+    /// `[obj1]` (the model-B propagation the arm corrects); slot 0 must still
+    /// resolve to `obj0`. Reverting the arm falls through to the local `[obj1]`
+    /// for BOTH indices, so the `index: 0 → [obj0]` assertion flips.
+    #[test]
+    fn resolve_defined_or_targets_parent_target_slot_indexes_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let obj0 = ObjectId(1);
+        let obj1 = ObjectId(2);
+
+        // Root two-slot chain: TargetOnly(obj0) → TargetOnly(obj1).
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj0)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj1)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: root,
+            },
+        });
+
+        let put_counter = |index: usize| {
+            ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTargetSlot { index },
+                },
+                // Local targets = most-recent slot only (model-B inheritance).
+                vec![TargetRef::Object(obj1)],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(0)),
+            vec![obj0]
+        );
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(1)),
+            vec![obj1]
+        );
     }
 
     fn mark_creature(state: &mut GameState, object_id: ObjectId) {
@@ -3117,6 +3200,102 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden — "Whenever a creature
+    /// dies, if it had power greater than Drizzt's power, put a number of +1/+1
+    /// counters on Drizzt equal to the difference." End-to-end through the real
+    /// parser: a larger-power creature dying gates the trigger on and puts
+    /// `dyingPower - drizztPower` counters (read from LKI, CR 603.10a); an
+    /// equal/smaller creature fails the gate and adds none. Fails on revert
+    /// (parser leaves the effect Unimplemented / drops the gate → 0 counters).
+    #[test]
+    fn drizzt_difference_counters_from_dying_creature_lki_power() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::triggers::TriggerMode;
+
+        // Parse Drizzt's dies trigger from Oracle text (real pipeline).
+        let parsed = crate::parser::parse_oracle_text(
+            "Double strike\n\
+             Whenever a creature dies, if it had power greater than Drizzt's power, \
+             put a number of +1/+1 counters on Drizzt equal to the difference.",
+            "Drizzt Do'Urden",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Ranger".to_string()],
+        );
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.execute
+                        .as_ref()
+                        .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("Drizzt dies PutCounter trigger not parsed: {parsed:#?}"))
+            .clone();
+
+        // Run the dies scenario with a creature of the given power; return the
+        // number of +1/+1 counters Drizzt ends up with.
+        let run = |dying_power: i32| -> u32 {
+            let mut state = GameState::new_two_player(42);
+
+            let drizzt_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Drizzt Do'Urden".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let d = state.objects.get_mut(&drizzt_id).unwrap();
+                d.power = Some(2);
+                d.toughness = Some(3);
+                d.card_types.core_types.push(CoreType::Creature);
+                d.trigger_definitions.push(dies_trigger.clone());
+            }
+
+            let dying_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Hill Giant".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let g = state.objects.get_mut(&dying_id).unwrap();
+                g.power = Some(dying_power);
+                g.toughness = Some(3);
+                g.card_types.core_types.push(CoreType::Creature);
+            }
+
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, dying_id, Zone::Graveyard, &mut events);
+            process_triggers(&mut state, &events);
+            while !state.stack.is_empty() {
+                let mut resolve_events = Vec::new();
+                resolve_top(&mut state, &mut resolve_events);
+            }
+
+            state.objects[&drizzt_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        // Larger power (5) than Drizzt (2): gate passes, +1/+1 counters = 5 - 2 = 3.
+        assert_eq!(
+            run(5),
+            3,
+            "5-power creature dying should give Drizzt 3 (=5-2) +1/+1 counters"
+        );
+        // Equal power (2): strict GT gate fails, no counters.
+        assert_eq!(run(2), 0, "equal-power creature must not add counters");
+        // Smaller power (1): gate fails, no counters.
+        assert_eq!(run(1), 0, "smaller-power creature must not add counters");
+    }
+
     /// Regression test: MoveCounters must use LKI when the source has changed zones.
     /// Simulates Essence Channeler's "When this creature dies, put its counters on
     /// target creature you control" — the source is in the graveyard with no counters,
@@ -3167,6 +3346,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: lki_counters,
                 tapped: false,
+                is_suspected: false,
             },
         );
 

@@ -1388,6 +1388,8 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         chosen_attributes: Vec::new(),
         counters: Default::default(),
         tapped: false,
+        // CR 701.60b: Carry suspected status from the zone-change snapshot.
+        is_suspected: record.is_suspected,
     }
 }
 
@@ -2039,6 +2041,26 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
             .iter()
             .any(condition_depends_on_zone_change_this_way),
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 400.7j: Whether a condition reads the parent's *suspended-
+/// selection result object* — the found/revealed card that a `SearchLibrary`
+/// injects as the continuation target only after the player responds
+/// (`engine_resolution_choices.rs`, `cont.chain.targets = continuation_targets`).
+/// A `TargetMatchesFilter` gate on "that card" ("the revealed card is the chosen
+/// type") cannot be evaluated until then, so it must be deferred WITH its
+/// condition rather than eagerly read against absent targets. Recurses And/Or/Not
+/// like the sibling `condition_depends_on_effect_performed` predicate. Predicate
+/// helper, not rule-implementing code — the CR annotation lives at the gate.
+fn condition_depends_on_result_object(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::TargetMatchesFilter { .. } => true,
+        AbilityCondition::Not { condition } => condition_depends_on_result_object(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_depends_on_result_object)
+        }
         _ => false,
     }
 }
@@ -4027,6 +4049,11 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
 ///    only when `attachment.is_context_ref()`, mirroring the guards above (a
 ///    non-context-ref `attachment` can never be a parent-ref, so excluding it
 ///    cannot change the gate result).
+///  * `Effect::UnattachAll` surfaces `target` but hides `attachment`, exactly as
+///    `Effect::Attach` does; the same context-ref guard applies. A delayed
+///    "when you lose control of this, unattach it" trigger rebinds the per-source
+///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
+///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -4043,6 +4070,9 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
             attach_to: Some(f), ..
         } if f.is_context_ref() => slots.push(f),
         Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
+        Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
+            slots.push(attachment)
+        }
         _ => {}
     }
     slots
@@ -4083,9 +4113,14 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
 fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
+        // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
+        // must snapshot the parent targets at creation, exactly like the broad
+        // `ParentTarget` anaphor — the index is honored later by
+        // `effect_object_targets` when the snapshot fires.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
-        | TargetFilter::ParentTarget => true,
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => matches!(
             typed.controller,
             Some(ControllerRef::ParentTargetController)
@@ -6885,10 +6920,20 @@ fn resolve_chain_body(
             // path; the `DiscardChoice` resume populates `last_zone_changed_ids`
             // from the cards that reached the graveyard before draining, so the
             // re-evaluation at chain top sees the discarded objects.
+            // CR 608.2c: a "that card / the revealed card"-referential destination
+            // gate on a suspended `SearchLibrary` sub can't be evaluated until the
+            // search injects the found card as the continuation target. Scoped to
+            // `SearchChoice` specifically — the ONLY choice whose completion sets
+            // `cont.chain.targets` to the result object; broadening to every
+            // resolution choice would mis-defer e.g. a `Sacrifice`→`EffectZoneChoice`
+            // →`TargetMatchesFilter`-gated sibling, whose completion leaves
+            // `cont.chain.targets` empty (it uses the tracked-set/ParentTarget path).
             if waits_for_resolution_choice(&state.waiting_for)
                 && (condition_depends_on_effect_performed(condition)
                     || condition_depends_on_zone_change_this_way(condition)
-                    || matches!(condition, AbilityCondition::WhenYouDo))
+                    || matches!(condition, AbilityCondition::WhenYouDo)
+                    || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
+                        && condition_depends_on_result_object(condition)))
             {
                 let mut sub_clone = sub.as_ref().clone();
                 if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
@@ -7868,32 +7913,48 @@ pub(crate) fn evaluate_condition(
             })
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
-            // CR 109.4 + CR 603.2: "that creature" / "it" is the ability's first
-            // object target, OR — for subject-based triggers that carry no chosen
-            // target (e.g. "Whenever one or more -1/-1 counters are put on a
-            // creature, draw a card if you control that creature.") — the
-            // triggering event's subject object. Mirror the `ParentTargetController`
-            // fallback (targeting.rs): when `targets` has no object, resolve the
-            // anaphor against `TriggeringSource` from the current trigger event.
-            let target_id = ability
-                .targets
-                .iter()
-                .find_map(|t| match t {
-                    TargetRef::Object(id) => Some(*id),
+        AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki,
+            subject_slot,
+        } => {
+            // CR 608.2c: An explicit `subject_slot` tests a specific declared
+            // chain slot (Malamet's condition reads slot 0, the you-control
+            // fighter) — the current node's local `targets` were overwritten by
+            // most-recent-only chain propagation, so resolve against the
+            // flattened root chain instead of `targets.first()`.
+            // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is the
+            // ability's first object target, OR — for subject-based triggers that
+            // carry no chosen target — the triggering event's subject object.
+            // Mirror the `ParentTargetController` fallback (targeting.rs): when
+            // `targets` has no object, resolve the anaphor against
+            // `TriggeringSource` from the current trigger event.
+            let target_id = if let Some(index) = subject_slot {
+                match crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+                {
+                    Some(TargetRef::Object(id)) => Some(id),
                     _ => None,
-                })
-                .or_else(|| {
-                    crate::game::targeting::resolve_event_context_target(
-                        state,
-                        &TargetFilter::TriggeringSource,
-                        ability.source_id,
-                    )
-                    .and_then(|t| match t {
-                        TargetRef::Object(id) => Some(id),
-                        TargetRef::Player(_) => None,
+                }
+            } else {
+                ability
+                    .targets
+                    .iter()
+                    .find_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
                     })
-                });
+                    .or_else(|| {
+                        crate::game::targeting::resolve_event_context_target(
+                            state,
+                            &TargetFilter::TriggeringSource,
+                            ability.source_id,
+                        )
+                        .and_then(|t| match t {
+                            TargetRef::Object(id) => Some(id),
+                            TargetRef::Player(_) => None,
+                        })
+                    })
+            };
             let matched = if let Some(id) = target_id {
                 if *use_lki {
                     if let Some(GameEvent::ZoneChanged { record, .. }) =
@@ -8571,6 +8632,37 @@ mod tests {
     /// CR 608.2c: a single tapped creature becomes the resolution's anaphoric
     /// referent, so a later "that creature's power" (Enlist) reads it.
     #[test]
+    fn effect_parent_ref_slots_surfaces_context_ref_unattach_all_attachment() {
+        // `Effect::UnattachAll` hides its `attachment` behind `target_filter()`
+        // (which surfaces `target`), exactly like `Effect::Attach`. A context-ref
+        // attachment — a delayed "when you lose control of this, unattach it"
+        // trigger (Stolen Uniform, Ogre Geargrabber) — must be surfaced so the
+        // per-source rebind finds it. Without the `UnattachAll` arm in
+        // `effect_parent_ref_slots` the `_ => {}` fallback drops it: this asserts
+        // the arm surfaces it (revert the arm → SelfRef absent → this fails).
+        let effect = Effect::UnattachAll {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::Any,
+        };
+        let slots = effect_parent_ref_slots(&effect);
+        assert!(
+            slots.iter().any(|s| matches!(s, TargetFilter::SelfRef)),
+            "context-ref UnattachAll attachment must surface as a parent-ref slot; got {slots:?}"
+        );
+        // Guard: a non-context-ref attachment must NOT be surfaced by the arm.
+        let non_ctx = Effect::UnattachAll {
+            attachment: TargetFilter::Any,
+            target: TargetFilter::SelfRef,
+        };
+        assert!(
+            !effect_parent_ref_slots(&non_ctx)
+                .iter()
+                .any(|s| matches!(s, TargetFilter::Any)),
+            "non-context-ref UnattachAll attachment must not be surfaced"
+        );
+    }
+
+    #[test]
     fn tapped_creature_is_captured_as_anaphoric_referent() {
         let mut state = GameState::new_two_player(42);
         let creature = create_object(
@@ -8871,6 +8963,7 @@ mod tests {
                 chosen_attributes: vec![ChosenAttribute::Player(PlayerId(1))],
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
 
@@ -11041,6 +11134,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: Default::default(),
                 tapped: false,
+                is_suspected: false,
             },
         );
         let events = vec![
@@ -11619,6 +11713,7 @@ mod tests {
         .condition(AbilityCondition::TargetMatchesFilter {
             filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             use_lki: true,
+            subject_slot: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Bounce {
@@ -17452,6 +17547,179 @@ mod tests {
         assert!(
             !evaluate_condition(&source_condition, &state, &counter_kicked),
             "Source subject must ignore the target's kicker and read the (empty) own context"
+        );
+    }
+
+    /// Walk a parsed ability tree and return the condition attached to the first
+    /// sub/else ability whose effect matches `want`. Used by the S07 gift-card
+    /// resolver tests to drive the REAL parsed condition (not a hand-built one)
+    /// through `evaluate_condition`.
+    fn s07_find_gated_condition(
+        defs: &[AbilityDefinition],
+        want: fn(&Effect) -> bool,
+    ) -> Option<AbilityCondition> {
+        fn walk(d: &AbilityDefinition, want: fn(&Effect) -> bool) -> Option<AbilityCondition> {
+            if want(&d.effect) {
+                if let Some(c) = &d.condition {
+                    return Some(c.clone());
+                }
+            }
+            if let Some(s) = &d.sub_ability {
+                if let Some(c) = walk(s, want) {
+                    return Some(c);
+                }
+            }
+            if let Some(s) = &d.else_ability {
+                if let Some(c) = walk(s, want) {
+                    return Some(c);
+                }
+            }
+            None
+        }
+        defs.iter().find_map(|d| walk(d, want))
+    }
+
+    /// T6 (s25 site 2) — CR 603.7c + CR 608.2c: `filter_refs_parent_target`
+    /// treats `ParentTargetSlot` like the broad `ParentTarget` anaphor so a
+    /// slot-referencing delayed effect snapshots the parent targets at creation
+    /// (the index is honored at firing by `effect_object_targets`). Pre-fix the
+    /// missing arm fell to `_ => false`, so the snapshot was skipped and the
+    /// delayed effect no-opped — reverting the arm flips the first two asserts.
+    #[test]
+    fn filter_refs_parent_target_detects_parent_target_slot() {
+        assert!(filter_refs_parent_target(&TargetFilter::ParentTargetSlot {
+            index: 0
+        }));
+        // Recursion must find a slot ref nested inside a composite filter.
+        assert!(filter_refs_parent_target(&TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Any,
+                TargetFilter::ParentTargetSlot { index: 2 },
+            ],
+        }));
+        // Negative control: a plain filter is not a parent-target reference.
+        assert!(!filter_refs_parent_target(&TargetFilter::Any));
+    }
+
+    /// CR 702.174b + CR 608.2c: Longstalk Brawl — the +1/+1 counter is gated on
+    /// "if the gift was promised", parsed onto the `PutCounter` sub_ability as
+    /// `additional_cost_paid_any()`. Drives the REAL parsed condition through
+    /// `evaluate_condition`: it fires only when the spell's additional cost
+    /// (gift promise) was paid. Reverting the gate recognizer drops the
+    /// condition (`None`) and `s07_find_gated_condition` returns `None`, failing
+    /// the `.expect`.
+    #[test]
+    fn s07_longstalk_brawl_counter_gated_on_gift_promised() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Choose target creature you control and target creature you don't control. \
+             Put a +1/+1 counter on the creature you control if the gift was promised. \
+             Then those creatures fight each other.",
+            "Longstalk Brawl",
+            &["Gift".to_string()],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let cond = s07_find_gated_condition(&parsed.abilities, |e| {
+            matches!(e, Effect::PutCounter { .. })
+        })
+        .expect("Longstalk's counter must carry the gift-promised condition");
+
+        let state = GameState::new_two_player(1);
+        let mut ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.context.additional_cost_paid = true;
+        assert!(
+            evaluate_condition(&cond, &state, &ability),
+            "gift promised → counter clause fires"
+        );
+        ability.context.additional_cost_paid = false;
+        assert!(
+            !evaluate_condition(&cond, &state, &ability),
+            "gift not promised → counter clause does not fire"
+        );
+    }
+
+    /// CR 702.174b + CR 205.4 + CR 608.2c: Coiling Rebirth — the copy token is
+    /// gated on "if the gift was promised and that creature isn't legendary",
+    /// parsed onto the `CopyTokenOf` sub_ability as
+    /// `And([AdditionalCostPaid, Not(TargetMatchesFilter{Legendary})])`. Drives
+    /// the REAL parsed conjunction through `evaluate_condition` against a
+    /// legendary vs. nonlegendary FIRST target. Reverting the conjunction
+    /// fallback or the "that creature isn't legendary" recognizer drops the
+    /// condition, failing the `.expect` or the polarity assertions.
+    #[test]
+    fn s07_coiling_rebirth_token_gated_on_gift_and_nonlegendary() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Return target creature card from your graveyard to the battlefield. \
+             Then if the gift was promised and that creature isn't legendary, create a \
+             token that's a copy of that creature, except it's 1/1.",
+            "Coiling Rebirth",
+            &["Gift".to_string()],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let cond = s07_find_gated_condition(&parsed.abilities, |e| {
+            matches!(e, Effect::CopyTokenOf { .. })
+        })
+        .expect("Coiling's token must carry the gift+nonlegendary condition");
+
+        let mut state = GameState::new_two_player(1);
+        // Nonlegendary target (id 7) and legendary target (id 8).
+        let nonleg = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Ordinary Beast".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(7), nonleg);
+        let mut legendary = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(701),
+            PlayerId(0),
+            "Legendary Hero".to_string(),
+            Zone::Battlefield,
+        );
+        legendary
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Legendary);
+        state.objects.insert(ObjectId(8), legendary);
+
+        let build = |target: ObjectId, paid: bool| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_rider: None,
+                    countered_spell_zone: None,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(99),
+                PlayerId(0),
+            );
+            ability.context.additional_cost_paid = paid;
+            ability
+        };
+
+        assert!(
+            evaluate_condition(&cond, &state, &build(ObjectId(7), true)),
+            "gift promised + nonlegendary returned creature → token created"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &build(ObjectId(8), true)),
+            "gift promised + LEGENDARY returned creature → no token"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &build(ObjectId(7), false)),
+            "gift NOT promised → no token even for a nonlegendary creature"
         );
     }
 

@@ -267,7 +267,7 @@ fn build_game_started_message(
         },
         derived,
         player_token,
-        events,
+        events: server_core::filter_events_for_player(&events, &session.state, player),
     }
 }
 
@@ -316,7 +316,7 @@ fn build_state_update_message(
 
     Ok(ServerMessage::StateUpdate {
         state: filtered,
-        events: events.clone(),
+        events: server_core::filter_events_for_player(events, raw_state, player),
         legal_actions: if is_actor {
             legal_actions.clone()
         } else {
@@ -382,7 +382,7 @@ fn build_spectator_state_update_message(
 
     Ok(ServerMessage::StateUpdate {
         state: filtered,
-        events: events.to_vec(),
+        events: server_core::filter_events_for_player(events, raw_state, SPECTATOR_PLAYER_ID),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
         eliminated_players,
@@ -3215,7 +3215,9 @@ async fn handle_client_message(
                                     };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
-                                        events: events.clone(),
+                                        events: server_core::filter_events_for_player(
+                                            &events, &raw_state, *pid,
+                                        ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
                                         eliminated_players: eliminated.clone(),
@@ -3314,7 +3316,11 @@ async fn handle_client_message(
                                     };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
-                                        events: ai_events.clone(),
+                                        events: server_core::filter_events_for_player(
+                                            ai_events,
+                                            ai_raw_state,
+                                            *pid,
+                                        ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
                                         eliminated_players: eliminated.clone(),

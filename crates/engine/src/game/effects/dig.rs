@@ -1169,6 +1169,7 @@ mod tests {
                 },
             ])),
             use_lki: false,
+            subject_slot: None,
         });
         state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
 

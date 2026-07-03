@@ -1178,10 +1178,12 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::AddToughness { value: t });
     }
 
-    if parse_legendary_supertype_grant(unquoted_tp.lower).is_some() {
-        modifications.push(ContinuousModification::AddSupertype {
-            supertype: Supertype::Legendary,
-        });
+    // CR 205.4a + CR 205.4b: additive supertype grant on a compound aura/equip
+    // predicate body ("... is snow", "... is legendary, gets +1/+1, ..."). The
+    // recognizer returns the specific supertype, so Legendary/Basic/Snow all
+    // flow through this one seam (Glittering Frost, In Bolas's Clutches).
+    if let Some(supertype) = parse_supertype_grant(unquoted_tp.lower) {
+        modifications.push(ContinuousModification::AddSupertype { supertype });
     }
 
     // CR 613.1d: Layer 4 type removal — "isn't a/an <core type>" (e.g. Blink's
