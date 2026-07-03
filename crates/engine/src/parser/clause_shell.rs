@@ -286,12 +286,14 @@ pub(crate) fn peel_optional_slots(
     if let Some((scope, player_scope, rest)) = try_peel_opponent_may_prefix(text) {
         return (true, scope, player_scope, rest);
     }
-    // CR 603.7c + CR 608.2d: "they may …" on zone-change observer triggers
+    // CR 608.2d: "they may tap …" on zone-change observer triggers
     // (Charismatic Conqueror: the entering permanent's controller may tap it).
     // The optional prompt player is resolved at runtime via
     // `optional_prompt_player` for `SetTapState { TriggeringSource }` effects.
     let lower = text.to_lowercase();
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("they may ")).parse(i)) {
+    if let Some((_, rest)) =
+        nom_on_lower(text, &lower, |i| value((), tag("they may tap ")).parse(i))
+    {
         return (true, None, None, rest.to_string());
     }
     if let Some(rest) = peel_you_may_prefix(text, YouMayBlocklist::ChunkLoop) {

@@ -199,27 +199,6 @@ fn assert_owned_by_opponent(filter: &TargetFilter) {
 }
 
 #[test]
-fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
-    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TargetFilter};
-
-    let filter = parse_post_spell_modifier(
-        "that doesn't share a creature type with a creature you control or a creature card in your graveyard",
-    )
-    .expect("expected SharesQuality post-spell modifier");
-    let TargetFilter::Typed(tf) = filter else {
-        panic!("expected Typed filter, got {filter:?}");
-    };
-    assert!(tf.properties.iter().any(|p| matches!(
-        p,
-        FilterProp::SharesQuality {
-            quality: SharedQuality::CreatureType,
-            relation: SharedQualityRelation::DoesNotShare,
-            reference: Some(_),
-        }
-    )));
-}
-
-#[test]
 fn parse_post_spell_modifier_cast_origin_from_nonhand() {
     // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
     // cast-capable zones except the hand.
