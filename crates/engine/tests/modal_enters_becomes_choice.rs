@@ -180,9 +180,19 @@ fn v6_primal_clay_additive_wall_defender() {
     const CLAY_ORACLE: &str = "As ~ enters, it becomes your choice of a 3/3 artifact \
         creature, a 2/2 artifact creature with flying, or a 1/6 Wall artifact creature \
         with defender in addition to its other types.";
-    const CLAY_LABELS: &[&str] = &["3/3", "2/2 Flying", "1/6 Defender"];
+    // FIX 2: labels now key the additive Artifact card type + Wall subtype.
+    const CLAY_LABELS: &[&str] = &[
+        "3/3 Artifact",
+        "2/2 Artifact Flying",
+        "1/6 Artifact Wall Defender",
+    ];
 
-    let (runner, obj) = place_and_choose("Primal Clay", CLAY_ORACLE, CLAY_LABELS, "1/6 Defender");
+    let (runner, obj) = place_and_choose(
+        "Primal Clay",
+        CLAY_ORACLE,
+        CLAY_LABELS,
+        "1/6 Artifact Wall Defender",
+    );
     let o = &runner.state().objects[&obj];
     assert_eq!(o.power, Some(1), "1/6 mode: power 1");
     assert_eq!(o.toughness, Some(6), "1/6 mode: toughness 6");
@@ -310,5 +320,170 @@ fn v9_duplicate_label_collision_emits_no_modal() {
             .iter()
             .any(|s| matches!(s.condition, Some(StaticCondition::ChosenLabelIs { .. }))),
         "no gated statics when the modal aborts"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FIX 1: production-path regression tests.
+//
+// Unlike `place_and_choose` above (which hand-builds `waiting_for` on an
+// already-battlefield object), these tests cast the modal creature FROM HAND
+// through the real `apply()` `GameAction::CastSpell` pipeline, resolve the spell
+// off the stack, and assert that the ENGINE ITSELF produces the
+// `WaitingFor::NamedChoice` as the `ReplacementDefinition::new(Moved)` fires on
+// the real battlefield entry (CR 614.12a deferred-entry pause). The chosen label
+// is then submitted via the production `GameAction::ChooseOption` handler and the
+// resulting P/T + keywords are asserted off the real object.
+//
+// This mirrors the pattern in `tests/constellation_enters_with_choice.rs`
+// (`as_enters_choice_creature_fires_soul_warden`). If the new
+// `ReplacementDefinition::new(Moved)` did NOT fire on entry, `waiting_for` would
+// be `Priority` (no engine-produced NamedChoice) and the test panics at the
+// `else` arm — that is the load-bearing proof the Moved replacement is live.
+// ---------------------------------------------------------------------------
+
+/// Cast a modal as-enters creature (printed 0/0, no mana cost) from P0's hand
+/// through the REAL pipeline, assert the ENGINE surfaces `WaitingFor::NamedChoice`
+/// on entry (source = the entering object), submit `chosen` via the production
+/// `ChooseOption` handler, and return the runner + object id. `expected_options`
+/// must be exactly the engine-produced label set (proves the synthesized labels
+/// reach the choice).
+fn cast_and_engine_choose(
+    name: &str,
+    oracle: &str,
+    expected_options: &[&str],
+    chosen: &str,
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Printed 0/0 so any nonzero P/T can only come from the gated static that the
+    // chosen label unlocks — never from the printed base.
+    let obj = scenario
+        .add_creature_to_hand_from_oracle(P0, name, 0, 0, oracle)
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects.get(&obj).unwrap().card_id;
+
+    // Cast from hand through the real action handler (Auto payment; the card has
+    // no mana cost). The spell resolves and the creature moves to the battlefield.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: obj,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .unwrap_or_else(|e| panic!("cast {name} from hand: {e:?}"));
+    runner.advance_until_stack_empty();
+
+    // LOAD-BEARING: the engine (not the test) must have paused the entry on the
+    // modal choice produced by the Moved/Battlefield Choose replacement.
+    let WaitingFor::NamedChoice {
+        options, source_id, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the modal entry must pause on an engine-produced NamedChoice, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(
+        source_id,
+        Some(obj),
+        "the NamedChoice source must be the entering modal creature (proves the \
+         SelfRef/Battlefield Moved replacement fired on THIS entrant)"
+    );
+    let expected: Vec<String> = expected_options.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        options, expected,
+        "the engine-surfaced options must be exactly the synthesized mode labels"
+    );
+
+    // Answer through the production ChooseOption handler.
+    runner
+        .act(GameAction::ChooseOption {
+            choice: chosen.to_string(),
+        })
+        .unwrap_or_else(|e| panic!("ChooseOption({chosen}): {e:?}"));
+    runner.advance_until_stack_empty();
+
+    (runner, obj)
+}
+
+/// FIX 1 (Primal Plasma): the FULL production path. Cast from hand, the engine
+/// surfaces the NamedChoice on entry, choose "2/2 Flying", and the entrant is a
+/// 2/2 with Flying (and none of the other modes' keywords). Reverting the Moved
+/// replacement makes `waiting_for` be Priority (panics at the choice `else`);
+/// reverting the `ChosenLabelIs` gate leaves the printed 0/0 and drops Flying, so
+/// the P/T + keyword assertions flip.
+#[test]
+fn production_path_primal_plasma_two_two_flying() {
+    let (runner, obj) =
+        cast_and_engine_choose("Primal Plasma", PLASMA_ORACLE, PLASMA_LABELS, "2/2 Flying");
+    let o = &runner.state().objects[&obj];
+    assert_eq!(
+        o.zone,
+        engine::types::zones::Zone::Battlefield,
+        "the modal creature must have entered the battlefield after the choice"
+    );
+    assert_eq!(
+        o.chosen_label(),
+        Some("2/2 Flying"),
+        "the engine-driven choice must persist as ChosenAttribute::Label"
+    );
+    assert_eq!(
+        o.power,
+        Some(2),
+        "2/2 mode: base power 2 from the gated SetPower on the REAL entry, not printed 0/0"
+    );
+    assert_eq!(o.toughness, Some(2), "2/2 mode: base toughness 2");
+    assert!(
+        o.has_keyword(&Keyword::Flying),
+        "2/2 Flying mode grants Flying on the real entry path"
+    );
+    assert!(
+        !o.has_keyword(&Keyword::Defender),
+        "2/2 Flying mode must not grant the 1/6 mode's Defender"
+    );
+}
+
+/// FIX 1 companion (Primal Clay, additive path): full production path with the
+/// new multi-axis labels. Choosing "1/6 Artifact Wall Defender" yields a 1/6
+/// Artifact Creature with the Wall subtype and Defender — proving the new label
+/// (FIX 2) flows through the engine choice AND gates the additive static.
+#[test]
+fn production_path_primal_clay_additive_wall_defender() {
+    const CLAY_ORACLE: &str = "As ~ enters, it becomes your choice of a 3/3 artifact \
+        creature, a 2/2 artifact creature with flying, or a 1/6 Wall artifact creature \
+        with defender in addition to its other types.";
+    const CLAY_LABELS: &[&str] = &[
+        "3/3 Artifact",
+        "2/2 Artifact Flying",
+        "1/6 Artifact Wall Defender",
+    ];
+
+    let (runner, obj) = cast_and_engine_choose(
+        "Primal Clay",
+        CLAY_ORACLE,
+        CLAY_LABELS,
+        "1/6 Artifact Wall Defender",
+    );
+    let o = &runner.state().objects[&obj];
+    assert_eq!(o.power, Some(1), "1/6 mode: power 1 on the real entry");
+    assert_eq!(o.toughness, Some(6), "1/6 mode: toughness 6");
+    assert!(
+        o.has_keyword(&Keyword::Defender),
+        "1/6 mode must have Defender on the real entry"
+    );
+    assert!(
+        o.card_types.core_types.contains(&CoreType::Artifact),
+        "CR 205.1b additive: entrant is an Artifact Creature"
+    );
+    assert!(
+        o.card_types.subtypes.iter().any(|s| s == "Wall"),
+        "1/6 mode grants the Wall subtype, got {:?}",
+        o.card_types.subtypes
     );
 }

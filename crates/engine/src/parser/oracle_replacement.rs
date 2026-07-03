@@ -1827,22 +1827,83 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
 ///
 /// CR 208.2b: the chosen mode's identity is its power/toughness plus any
 /// additional characteristics the mode lists. This synthesizes that identity
-/// into one stable string ("3/3", "2/2 Flying", "1/6 Defender") that is used at
-/// BOTH the `ChoiceType::Labeled` option list AND each `StaticCondition::
-/// ChosenLabelIs` gate. Persisted as `ChosenAttribute::Label` at entry and
-/// consumed by `StaticCondition::ChosenLabelIs`. This is an engine value, not a
-/// t()-routed display string — it is the internal mode key, so it must be
-/// byte-identical at both producer and consumer sites.
+/// into one stable string ("3/3", "2/2 Flying", "1/6 Artifact Wall Defender")
+/// that is used at BOTH the `ChoiceType::Labeled` option list AND each
+/// `StaticCondition::ChosenLabelIs` gate. Persisted as `ChosenAttribute::Label`
+/// at entry and consumed by `StaticCondition::ChosenLabelIs`. This is an engine
+/// value, not a t()-routed display string — it is the internal mode key, so it
+/// must be byte-identical at both producer and consumer sites.
+///
+/// The label MUST distinguish any two modes that differ on the characteristic-
+/// setting axes these cards use: base P/T, colors (CR 105 / CR 202), supertypes
+/// (CR 205.4), added card types and subtypes (CR 205.1/205.2/205.3), and
+/// keywords. Otherwise two structurally distinct modes would synthesize the same
+/// key, ambiguating the `ChosenLabelIs` gate. Every axis is appended in a stable
+/// canonical order (colors → supertypes → card types → subtypes → keywords) so
+/// the label is collision-free across distinct `mode_mods` while staying human-
+/// readable (it is also the UI button text). A mode differing *solely* by
+/// ability-loss (`remove_all_abilities`, unused by any card in this class — that
+/// is Mercurial Transformation's separate target effect) is not keyed here; such
+/// a collision fails safe via the honest-gap abort in
+/// `lower_as_enters_becomes_choice_modal` (no modal emitted), never a wrong
+/// result.
+///
+/// The `Creature` core type is intentionally omitted: it is implied by the P/T
+/// prefix and is the common denominator of this modal-creature class, so
+/// including it would only add noise without improving collision-freedom (two
+/// modes that differ solely by Creature-vs-not are already distinguished by
+/// their P/T being present-vs-absent, and every mode here is a creature).
 fn synthesize_mode_label(spec: &crate::parser::oracle_ir::ast::AnimationSpec) -> String {
+    use crate::types::card_type::CoreType;
+
     let mut label = format!(
         "{}/{}",
         spec.power.unwrap_or_default(),
         spec.toughness.unwrap_or_default()
     );
+    // CR 105 / CR 202: colors set by the mode (e.g. a mode that "becomes a white
+    // creature"). `SetColor` participates in mode_mods, so it must key the label.
+    if let Some(colors) = &spec.colors {
+        for color in colors {
+            label.push(' ');
+            label.push_str(color_label_word(*color));
+        }
+    }
+    // CR 205.4: supertypes (Legendary, Snow, …) — `AddSupertype` in mode_mods.
+    for supertype in &spec.supertypes {
+        label.push_str(&format!(" {supertype}"));
+    }
+    // CR 205.1/205.2/205.3: card types (except the implied Creature) and
+    // subtypes. `spec.types` stores core types first, then subtypes, exactly as
+    // `animation_modifications` reads it (`AddType` vs `AddSubtype` dispatch on
+    // `CoreType::from_str`) — mirror that classification so the label keys every
+    // `AddType`/`AddSubtype` the mode actually emits.
+    for type_name in &spec.types {
+        match CoreType::from_str(type_name) {
+            Ok(CoreType::Creature) => {}
+            Ok(core) => label.push_str(&format!(" {core}")),
+            Err(()) => label.push_str(&format!(" {type_name}")),
+        }
+    }
+    // Keywords (`AddKeyword` in mode_mods).
     for keyword in &spec.keywords {
         label.push_str(&format!(" {keyword}"));
     }
     label
+}
+
+/// Stable human-readable word for a mode color axis (CR 105.1). `ManaColor` has
+/// no `Display` impl; this maps each color to its Title-Case name so the label
+/// styling matches the rest of `synthesize_mode_label` (keywords/types).
+fn color_label_word(color: crate::types::mana::ManaColor) -> &'static str {
+    use crate::types::mana::ManaColor;
+    match color {
+        ManaColor::White => "White",
+        ManaColor::Blue => "Blue",
+        ManaColor::Black => "Black",
+        ManaColor::Red => "Red",
+        ManaColor::Green => "Green",
+    }
 }
 
 /// CR 208.2b (governing) + CR 614.1c + CR 614.12a + CR 205.1b: lower the modal
@@ -2028,10 +2089,12 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
     // helper, so the CR annotation at each site stays honest (CR 208.2b/614.12a,
     // not the anchor-word CR 614.12c).
     //
-    // G4: enters-path correctness rides on the CR 614.12a deferred-entry ordering.
-    // `choose.rs` `mark_layers_full` excludes `ChoiceType::Labeled`, but the object
-    // enters AFTER the choice is persisted, so the layer system runs fresh over the
-    // already-persisted `ChosenAttribute::Label` — no stale-layer re-run is needed.
+    // CR 614.12a + CR 613.1: enters-path correctness rides on the deferred-entry
+    // ordering AND on `bind_named_choice` (`choose.rs`) scheduling a full layer pass
+    // for a persisted `ChoiceType::Labeled` answer. The object enters after the
+    // choice is persisted, and that `Labeled` re-layer flushes the gated
+    // `ChosenLabelIs` statics below before state-based actions run — without it the
+    // creature would keep its printed P/T (e.g. 0/0) and die to SBAs.
     for (label, mods) in labels.iter().zip(mode_mods) {
         // CR 208.2b: chosen-mode P/T (+ additional characteristics) applied as a
         // Layer-7b continuous effect while this label was chosen at entry.
@@ -15661,7 +15724,17 @@ mod tests {
              artifact creature with flying, or a 1/6 Wall artifact creature with \
              defender in addition to its other types.",
         );
-        assert_modal_shape(&parsed, &["3/3", "2/2 Flying", "1/6 Defender"]);
+        // FIX 2: labels now key every characteristic axis in mode_mods — the
+        // additive Artifact card type and the Wall subtype join the P/T +
+        // keyword. (Creature is the implied common denominator and omitted.)
+        assert_modal_shape(
+            &parsed,
+            &[
+                "3/3 Artifact",
+                "2/2 Artifact Flying",
+                "1/6 Artifact Wall Defender",
+            ],
+        );
 
         let gated: Vec<&StaticDefinition> = parsed
             .statics
@@ -15749,6 +15822,32 @@ mod tests {
                 .any(|s| matches!(s.condition, Some(StaticCondition::ChosenLabelIs { .. }))),
             "no gated statics when the modal aborts"
         );
+    }
+
+    #[test]
+    fn differing_type_axis_yields_distinct_labels_and_emits_modal() {
+        // FIX 2 proof: two modes that share P/T AND keywords but differ on the
+        // card-type axis ("2/2 artifact creature" vs "2/2 creature") must
+        // synthesize DISTINCT labels so the collision guard does NOT abort — the
+        // modal is emitted with a per-mode ChosenLabelIs gate. Before the label
+        // included card types, both modes keyed as "2/2" and were dropped as a
+        // false-positive collision.
+        let parsed = parse_modal_card(
+            "As ~ enters, it becomes your choice of a 2/2 artifact creature or a 2/2 creature.",
+        );
+        assert_modal_shape(&parsed, &["2/2 Artifact", "2/2"]);
+    }
+
+    #[test]
+    fn differing_subtype_axis_yields_distinct_labels_and_emits_modal() {
+        // FIX 2 proof (subtype axis): identical P/T + keyword, different subtype.
+        // The Wall subtype keys the label so the two modes stay distinct and the
+        // modal emits instead of colliding.
+        let parsed = parse_modal_card(
+            "As ~ enters, it becomes your choice of a 2/2 Wall creature with defender or \
+             a 2/2 creature with defender in addition to its other types.",
+        );
+        assert_modal_shape(&parsed, &["2/2 Wall Defender", "2/2 Defender"]);
     }
 
     #[test]
