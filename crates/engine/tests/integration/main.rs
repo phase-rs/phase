@@ -355,6 +355,7 @@ mod issue_3862_ulvenwald_tracker_fight;
 mod issue_3864_swords_two_targets;
 mod issue_3866_insidious_roots_double_trigger;
 mod issue_3869_pentad_prism_mana;
+mod issue_3870_yawgmoth_sacrifice_cancel;
 mod issue_3871_summoners_pact;
 mod issue_3872_tithe_taker_turn_scoped_tax;
 mod issue_3873_teferi_ageless_insight_multi_draw;

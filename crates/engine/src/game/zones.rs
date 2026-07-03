@@ -520,6 +520,25 @@ pub fn create_object(
     id
 }
 
+/// CR 733.1: Restore a permanent sacrificed to pay a cost when its pending
+/// cast/activation is canceled. Replays the pre-payment snapshot without
+/// normal zone-change cleanup or battlefield-entry resets.
+pub fn restore_object_for_cancel(state: &mut GameState, snapshot: GameObject) {
+    let object_id = snapshot.id;
+    let owner = snapshot.owner;
+    let target_zone = snapshot.zone;
+
+    if let Some(current) = state.objects.get(&object_id) {
+        let current_zone = current.zone;
+        if current_zone != target_zone {
+            remove_from_zone(state, object_id, current_zone, owner);
+        }
+    }
+
+    state.objects.insert(object_id, snapshot);
+    add_to_zone(state, object_id, target_zone, owner);
+}
+
 /// CR 700.11: A player has "descended this turn" when a permanent card has
 /// been put into their graveyard from anywhere this turn. Single authority for
 /// the descend bookkeeping, shared by `move_to_zone` and the merge-split

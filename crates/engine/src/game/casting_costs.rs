@@ -14,8 +14,8 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
     CounterCostChoice, CounterRemoveChoice, DistributionUnit, GameState, PayCostKind, PendingCast,
-    PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    PendingCastSacrificeRollback, PendingDiscardForCostResume, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -1736,9 +1736,27 @@ pub(crate) fn handle_sacrifice_for_cost(
     let cost_event_start = events.len();
 
     // Sacrifice each chosen permanent
+    let cast_id = pending.object_id;
+    let deferred_trigger_floor = state.deferred_triggers.len();
+    let mut snapshots = Vec::new();
+    for &id in chosen {
+        snapshots.push(state.objects.get(&id).cloned().ok_or_else(|| {
+            EngineError::InvalidAction(format!("sacrifice target {id:?} missing"))
+        })?);
+    }
     for &id in chosen {
         super::sacrifice::sacrifice_permanent(state, id, player, events)
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
+    }
+    use std::collections::hash_map::Entry;
+    match state.pending_cast_sacrifice_rollbacks.entry(cast_id) {
+        Entry::Occupied(mut entry) => entry.get_mut().snapshots.extend(snapshots),
+        Entry::Vacant(entry) => {
+            entry.insert(PendingCastSacrificeRollback {
+                deferred_trigger_floor,
+                snapshots,
+            });
+        }
     }
 
     // CR 603.10a + CR 701.21a + CR 601.2h + CR 118.8: permanents sacrificed to pay
@@ -3105,6 +3123,7 @@ fn push_ability_entry(
         // CR 606.2: Classify loyalty vs. normal from the source ability cost.
         kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
     });
+    super::casting::clear_pending_cast_sacrifice_rollback(state, source_id);
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
@@ -6551,6 +6570,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             convoked_creatures: convoked_creature_count,
         },
     );
+    super::casting::clear_pending_cast_sacrifice_rollback(state, object_id);
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {

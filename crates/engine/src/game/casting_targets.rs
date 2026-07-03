@@ -355,6 +355,7 @@ pub(crate) fn handle_select_targets(
             player,
             events,
         );
+        super::casting::clear_pending_cast_sacrifice_rollback(state, pending.object_id);
         priority::clear_priority_passes(state);
         return Ok(WaitingFor::Priority { player });
     }
@@ -481,6 +482,7 @@ pub(crate) fn handle_choose_target(
                     player,
                     events,
                 );
+                super::casting::clear_pending_cast_sacrifice_rollback(state, pending.object_id);
                 priority::clear_priority_passes(state);
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
                     state,

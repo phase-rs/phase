@@ -1950,6 +1950,16 @@ impl ActivationResidual {
     }
 }
 
+/// CR 601.2i + CR 733.1: In-flight sacrifice rollback for a pending cast.
+/// Stored on `GameState` rather than inside serializable `PendingCast` so
+/// pre-payment snapshots of face-down permanents are not exposed to non-controllers
+/// (CR 400.2).
+#[derive(Debug, Clone)]
+pub struct PendingCastSacrificeRollback {
+    pub snapshots: Vec<GameObject>,
+    pub deferred_trigger_floor: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -7948,6 +7958,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cast: Option<Box<PendingCast>>,
 
+    /// CR 601.2i + CR 733.1: Pre-payment sacrifice snapshots for in-flight
+    /// casts. Not serialized — kept server-side only so hidden permanent identity
+    /// cannot leak through opponent-visible `PendingCast` views (CR 400.2).
+    #[serde(skip)]
+    pub pending_cast_sacrifice_rollbacks: HashMap<ObjectId, PendingCastSacrificeRollback>,
+
     /// CR 701.54: Per-player ring level (0-3, 4 levels total).
     #[serde(default)]
     pub ring_level: HashMap<PlayerId, u8>,
@@ -8714,6 +8730,7 @@ impl GameState {
             current_triggered_mana_override: None,
             pending_discard_for_cost: None,
             pending_cast: None,
+            pending_cast_sacrifice_rollbacks: HashMap::new(),
             ring_level: HashMap::new(),
             ring_bearer: HashMap::new(),
             dungeon_progress: HashMap::new(),

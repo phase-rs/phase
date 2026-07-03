@@ -15176,6 +15176,12 @@ pub fn handle_activate_ability(
     Ok(WaitingFor::Priority { player })
 }
 
+/// CR 601.2: Drop any in-flight sacrifice rollback state once a cast or
+/// activation commits to the stack, or after cancel rollback consumes it.
+pub(crate) fn clear_pending_cast_sacrifice_rollback(state: &mut GameState, cast_id: ObjectId) {
+    state.pending_cast_sacrifice_rollbacks.remove(&cast_id);
+}
+
 /// CR 601.2i: If the player is unable or unwilling to complete a cast, the
 /// process is reversed: the spell is removed from the stack and any costs
 /// paid/choices made are rewound. The engine exposes this as
@@ -15283,6 +15289,26 @@ pub fn handle_cancel_cast(
             !(unit.is_convoke_payment() && convoked_creatures.contains(&unit.source_id))
                 && !(unit.is_convoke_payment() && delved_cards.contains(&unit.source_id))
         });
+    }
+    // CR 601.2i + CR 733.1: Roll back sacrificed permanents and purge any
+    // sacrifice-side triggers parked for a later drain.
+    if let Some(rollback) = state
+        .pending_cast_sacrifice_rollbacks
+        .remove(&pending.object_id)
+    {
+        state
+            .deferred_triggers
+            .truncate(rollback.deferred_trigger_floor);
+        for snapshot in rollback.snapshots {
+            super::zones::restore_object_for_cancel(state, snapshot);
+        }
+    }
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|cast| cast.object_id == pending.object_id)
+    {
+        state.pending_cast = None;
     }
     if let Some(obj) = state.objects.get_mut(&pending.object_id) {
         obj.convoked_creatures.clear();
