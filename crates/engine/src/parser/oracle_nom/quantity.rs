@@ -2965,6 +2965,13 @@ fn parse_for_each_clause_ref_with_they_controller(
         // "basic land type" is not mis-consumed as a creature/permanent type.
         // Anaphoric "they control" binds to the iterating/scoped player here.
         |i| parse_basic_land_types_among_lands_controlled_by_ref(i, they_controller.clone()),
+        // CR 109.4: "[other] <type> you control with <keyword>" — the
+        // controller-scoped sibling of `parse_for_each_battlefield_type_with_keyword`.
+        // Must precede `parse_for_each_controlled_type`, whose shorter
+        // " you control" match would otherwise strand " with <keyword>" as an
+        // unconsumed remainder (Skycat Sovereign, Aven Gagglemaster, Overgrown
+        // Battlement).
+        parse_for_each_controlled_type_with_keyword,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -3992,6 +3999,55 @@ fn parse_for_each_battlefield_type_with_keyword(input: &str) -> OracleResult<'_,
     ))
 }
 
+/// CR 109.4: Parse "[other] <type> you [already] control with <keyword>" in a
+/// "for each" clause -> a controller-scoped (`ControllerRef::You`) population
+/// count of permanents of the given type that have the named keyword, with an
+/// optional "other"/"another" exclusion of the source object.
+///
+/// Controller-scoped sibling of `parse_for_each_battlefield_type_with_keyword`
+/// (the any-controller "on the battlefield with <keyword>" form): the same
+/// trailing `with <keyword>` predicate, but the population is restricted to the
+/// source's controller via " you control" rather than " on the battlefield"
+/// (CR 109.4 — only objects with a controller are counted). Must precede
+/// `parse_for_each_controlled_type`, whose bare " you control" arm would
+/// otherwise match first and strand " with <keyword>" as an unconsumed
+/// remainder, dropping the quantity. Backs dynamic P/T anthems and per-count
+/// effects such as Skycat Sovereign ("~ gets +1/+1 for each other creature you
+/// control with flying"), Aven Gagglemaster ("2 life for each creature you
+/// control with flying"), and Overgrown Battlement ("{G} for each creature you
+/// control with defender"). Generalized over every evergreen keyword via
+/// `parse_keyword_name` + `FilterProp::WithKeyword`, so it covers the whole
+/// class, not one card.
+fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    // Mirror the bare `parse_for_each_controlled_type` controller phrase,
+    // tolerating the "already" adverb ("<type> you already control with …").
+    let (rest, _) = tag(" you").parse(rest)?;
+    let (rest, _) = opt(tag(" already")).parse(rest)?;
+    let (rest, _) = tag(" control with ").parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name.parse().unwrap();
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(FilterProp::WithKeyword { value: keyword });
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: Some(ControllerRef::You),
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 109.4: Only objects on the stack or on the battlefield have a
     // controller, so a "you control" count is over battlefield permanents
@@ -4424,6 +4480,79 @@ mod tests {
                 }
                 other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
             }
+        }
+    }
+
+    /// CR 109.4: controller-scoped "for each [other] <type> you control with
+    /// <keyword>" count — the "you control" sibling of
+    /// `parse_for_each_battlefield_type_with_keyword`, generalized over the
+    /// KEYWORDS table and the optional "other"/"another" exclusion. Backs Skycat
+    /// Sovereign, Aven Gagglemaster, and Overgrown Battlement.
+    #[test]
+    fn parse_for_each_controlled_type_with_keyword_scoped_count() {
+        for (clause, other, kw) in [
+            (
+                "other creature you control with flying",
+                true,
+                Keyword::Flying,
+            ),
+            (
+                "creature you control with vigilance",
+                false,
+                Keyword::Vigilance,
+            ),
+            (
+                "creature you control with defender",
+                false,
+                Keyword::Defender,
+            ),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::You),
+                        "{clause:?}: scoped to the source's controller"
+                    );
+                    assert_eq!(
+                        tf.properties.contains(&FilterProp::Another),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 109.4: the bare "for each <type> you control" arm still parses without
+    /// a keyword predicate — the new keyword arm must not shadow it.
+    #[test]
+    fn parse_for_each_controlled_type_bare_still_parses() {
+        let (rest, q) = parse_for_each_clause_ref("creature you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+                    "bare arm must not gate on a keyword"
+                );
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
         }
     }
 

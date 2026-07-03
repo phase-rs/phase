@@ -23060,3 +23060,49 @@ fn static_self_dynamic_pump_for_each_other_creature_on_battlefield_with_keyword(
         def.modifications
     );
 }
+
+/// CR 604.1 + CR 611.3a + CR 613.4c + CR 109.4: Skycat Sovereign — "~ gets
+/// +1/+1 for each other creature you control with flying." The controller
+/// scope ("you control") and the keyword qualifier ("with flying") both trail
+/// the type word — the controller-scoped counterpart of Radiant, Archangel's
+/// battlefield-wide pump. The "for each" grammar had a combinator for the
+/// any-controller "on the battlefield with <keyword>" form but none for the
+/// "you control with <keyword>" form, so this dynamic pump previously failed to
+/// parse and the whole modification was dropped.
+#[test]
+fn static_self_dynamic_pump_for_each_other_creature_you_control_with_keyword() {
+    let def = parse_static_line("~ gets +1/+1 for each other creature you control with flying.")
+        .expect("Skycat Sovereign's dynamic pump must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![
+                    FilterProp::Another,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                ],
+            }),
+        },
+    };
+
+    assert!(def.modifications.iter().any(
+        |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
+    ));
+    assert!(def.modifications.iter().any(
+        |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
+    ));
+    assert!(
+        !def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+        def.modifications
+    );
+}
