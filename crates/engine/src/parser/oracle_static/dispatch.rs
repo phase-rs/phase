@@ -558,6 +558,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
 
+    // CR 508.1c: The directional attack restriction (Pramikon, Sky Rampart;
+    // Mystic Barrier; Teyo, Geometric Tactician).
+    if let Some(mode) = parse_attack_only_neighbor_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
+    }
+
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
         return defs.into_iter().next();
     }

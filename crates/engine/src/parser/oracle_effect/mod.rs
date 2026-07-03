@@ -2661,6 +2661,52 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
     })
 }
 
+/// CR 508.1c + CR 611.2a + CR 611.2c: Teyo, Geometric Tactician's [−2]: "Until
+/// your next turn, each player may attack only the nearest opponent in the last
+/// chosen direction and planeswalkers controlled by that opponent." A
+/// duration-bound directional attack restriction — grant the same
+/// `StaticMode::AttackOnlyNeighbor` static that Pramikon/Mystic Barrier print,
+/// but only until the controller's next turn (CR 611.2a: a continuous effect
+/// from a resolving ability lasts as long as stated by that ability, here the
+/// specified "until your next turn" duration — NOT a cleanup-step "until end of
+/// turn" effect, so CR 514.2 does not govern its expiry; CR 611.2c fixes the
+/// affected object set at the time the effect begins). The prefix strip
+/// discriminates the temporary grant from a printed static; the shared static
+/// authority (`parse_static_line`) does the actual line recognition so both
+/// wordings ("the chosen" / "the last chosen") flow through one parser.
+fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("until your next turn, ")).parse(input)
+    })?;
+
+    let static_def = super::oracle_static::parse_static_line(rest_orig)?;
+    if !matches!(static_def.mode, StaticMode::AttackOnlyNeighbor) {
+        return None;
+    }
+
+    let duration = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(static_def),
+                }])],
+            duration: Some(duration.clone()),
+            target: Some(TargetFilter::SelfRef),
+        },
+        distribute: None,
+        multi_target: None,
+        duration: Some(duration),
+        sub_ability: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
@@ -6087,6 +6133,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // (Rowan/Will, Scion of …). Tried after the "next spell" handlers since
     // those are the more specific one-spell forms.
     if let Some(clause) = try_parse_temporary_spell_cost_modification(tp) {
+        return clause;
+    }
+
+    // CR 508.1c + CR 611.2c: "Until your next turn, each player may attack only
+    // the nearest opponent in the last chosen direction ..." (Teyo, Geometric
+    // Tactician [−2]) — a duration-bound directional attack restriction.
+    if let Some(clause) = try_parse_temporary_attack_only_neighbor(tp) {
         return clause;
     }
 

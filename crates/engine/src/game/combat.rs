@@ -30,24 +30,35 @@ use crate::types::zones::Zone;
 /// rejects on `def.mode != mode` first), so `flag && check_static_ability(..)`
 /// is byte-identical to the original call while skipping the redundant scan.
 ///
-/// Representation: five named compile-time presence flags, NOT a no-bool-flags
-/// anti-pattern — these are five independent existence facts, not one
+/// Representation: named compile-time presence flags, NOT a no-bool-flags
+/// anti-pattern — these are independent existence facts, not one
 /// choice-encoding bool. An `EnumSet` is rejected because `enumset` is not a
 /// workspace dependency and `StaticMode` is not fieldless (it carries data
 /// variants such as `MaxUntapPerType { filter, max }` and `Other(String)`).
-/// Five named flags read clearer than a runtime set lookup.
+/// Named flags read clearer than a runtime set lookup.
 struct CombatStaticGates {
     has_cant_attack: bool,
     has_cant_attack_or_block: bool,
     has_must_attack: bool,
     has_goad: bool,
     has_can_attack_with_defender: bool,
+    /// CR 508.1c: any functioning `StaticMode::AttackOnlyNeighbor` present.
+    has_attack_only_neighbor: bool,
 }
 
 impl CombatStaticGates {
-    /// One `game_functioning_statics` sweep computing all five presence flags.
+    /// One `game_functioning_statics` sweep computing the presence flags.
     /// Does NOT increment the static-full-scan perf counter: this is the single
     /// intended hoisted sweep, not a per-element legality scan.
+    ///
+    /// `has_attack_only_neighbor` is deliberately computed from the SAME
+    /// collection the CR 508.1c enforcement loop iterates
+    /// (`battlefield_active_statics`, battlefield-only), not the broader
+    /// `game_functioning_statics` (battlefield + command zone) used for the
+    /// other flags. This keeps the gate flag and the enforcement in lockstep:
+    /// the flag is set iff a battlefield source will actually be enforced. A
+    /// command-zone grant of `AttackOnlyNeighbor` is out of scope and would
+    /// otherwise set the flag but never be enforced (silent under-enforcement).
     fn compute(state: &GameState) -> Self {
         let mut gates = CombatStaticGates {
             has_cant_attack: false,
@@ -55,6 +66,7 @@ impl CombatStaticGates {
             has_must_attack: false,
             has_goad: false,
             has_can_attack_with_defender: false,
+            has_attack_only_neighbor: false,
         };
         for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
             match def.mode {
@@ -66,6 +78,9 @@ impl CombatStaticGates {
                 _ => {}
             }
         }
+        gates.has_attack_only_neighbor =
+            super::functioning_abilities::battlefield_active_statics(state)
+                .any(|(_, def)| matches!(def.mode, StaticMode::AttackOnlyNeighbor));
         gates
     }
 }
@@ -2465,6 +2480,51 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1c + CR 109.5 + CR 607.2d: The directional attack restriction
+    // (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric Tactician): "Each
+    // player may attack only the nearest opponent in the [last] chosen direction
+    // and planeswalkers controlled by that opponent." Each `AttackOnlyNeighbor`
+    // static resolves, per attacker, the neighbor in the source's live chosen
+    // direction and rejects any attack not aimed at that opponent or one of
+    // their planeswalkers. The restriction is global (affects EVERY player,
+    // CR 109.5 "each player"), so it is checked against every attacker regardless
+    // of who controls the source. A source with no chosen direction yet is inert
+    // (skipped). GAP-4: this deliberately does NOT reuse `TargetFilter::Neighbor`
+    // — the direction is a live chosen value read off the source, and the
+    // neighbor must be resolved per attacking player, so a static filter cannot
+    // express it.
+    if gates.has_attack_only_neighbor {
+        for (attacker_id, target) in attacks {
+            let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller)
+            else {
+                continue;
+            };
+            for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+                if !matches!(def.mode, StaticMode::AttackOnlyNeighbor) {
+                    continue;
+                }
+                // CR 607.2d: no direction chosen yet — the restriction is inert.
+                let Some(dir) = source.chosen_direction() else {
+                    continue;
+                };
+                let neighbor = crate::game::players::neighbor(state, attacker_controller, dir);
+                // CR 508.1c: the only legal targets are the nearest opponent in
+                // the chosen direction and planeswalkers that opponent controls.
+                if !crate::game::restrictions::attack_target_matches_defended_scope(
+                    state,
+                    Some(target),
+                    &crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+                    neighbor,
+                    neighbor,
+                ) {
+                    return Err(format!(
+                        "{attacker_id:?} can't attack {target:?} (CR 508.1c: may attack only the nearest opponent in the chosen direction and their planeswalkers)"
+                    ));
+                }
+            }
+        }
+    }
+
     // CR 508.1c + CR 109.5: Player-scoped temporary attack prohibitions
     // (`GameRestriction::ProhibitActivity { activity: Attack { defended } }` —
     // Willie Lumpkin: "that player can't attack you or permanents you control
@@ -3784,8 +3844,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        ChosenAttribute, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SeatDirection, StaticCondition, StaticDefinition, TargetFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::{CounterMatch, CounterType};
@@ -6458,6 +6519,380 @@ mod tests {
             )
             .is_ok(),
             "without qualifying aura attachment, attack is legal"
+        );
+    }
+
+    /// CR 508.1c: Build a directional attack-restriction source (Pramikon-style)
+    /// controlled by `controller`, with `AttackOnlyNeighbor` static and the given
+    /// chosen direction persisted on it. Mirrors how the parser + choose hijack
+    /// wire the real card at runtime.
+    fn create_directional_restrictor(
+        state: &mut GameState,
+        controller: PlayerId,
+        direction: SeatDirection,
+    ) -> ObjectId {
+        let id = create_creature(state, controller, "Pramikon, Sky Rampart", 1, 5);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::AttackOnlyNeighbor));
+        obj.chosen_attributes
+            .push(ChosenAttribute::Direction(direction));
+        id
+    }
+
+    /// CR 508.1c + CR 607.2d: Under Pramikon (chosen Left), the active player may
+    /// attack only the nearest opponent to their left (P0's left = P1 in seat
+    /// order [P0,P1,P2,P3]) and that opponent's planeswalkers. Attacking any
+    /// other player, or another player's planeswalker, is illegal. Revert gate →
+    /// the illegal non-neighbor attack succeeds, failing the `is_err` assertions.
+    #[test]
+    fn attack_only_neighbor_left_restricts_to_left_neighbor_and_their_planeswalkers() {
+        let mut state = setup_multiplayer_combat(4);
+        // Restrictor controlled by P0; chosen direction Left. P0's left = P1.
+        let _pramikon = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let neighbor_pw = create_planeswalker(&mut state, PlayerId(1), "Jace");
+        let far_pw = create_planeswalker(&mut state, PlayerId(2), "Chandra");
+
+        // Neighbor (P1) — legal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "attacking the left neighbor P1 is legal"
+        );
+        // Neighbor's planeswalker — legal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Planeswalker(neighbor_pw))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "attacking the left neighbor's planeswalker is legal"
+        );
+        // Non-neighbor player (P2) — illegal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "attacking a non-neighbor player must be rejected"
+        );
+        // Non-neighbor's planeswalker — illegal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Planeswalker(far_pw))],
+                &mut vec![]
+            )
+            .is_err(),
+            "attacking a non-neighbor's planeswalker must be rejected"
+        );
+    }
+
+    /// CR 508.1c + CR 109.5: "Each player" — the restriction is global. P1's
+    /// attack (a non-active demonstration via active_player swap) against a
+    /// non-neighbor is rejected even though P0 controls the Pramikon. P1's left
+    /// neighbor in [P0,P1,P2,P3] is P2; attacking P3 is illegal.
+    #[test]
+    fn attack_only_neighbor_is_global_across_all_players() {
+        let mut state = setup_multiplayer_combat(4);
+        let _pramikon = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+        state.active_player = PlayerId(1);
+
+        let p1_attacker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        // P1's left neighbor is P2 → legal; P3 is not → illegal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(p1_attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "P1 attacking its own left neighbor P2 is legal under the global restriction"
+        );
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(p1_attacker, AttackTarget::Player(PlayerId(3)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "P1 attacking a non-neighbor P3 is illegal under P0's global Pramikon"
+        );
+    }
+
+    /// CR 607.2d: A restrictor with no chosen direction yet is inert — any attack
+    /// is legal until a direction is chosen. Revert the `chosen_direction()`
+    /// skip → this would wrongly reject.
+    #[test]
+    fn attack_only_neighbor_no_direction_is_inert() {
+        let mut state = setup_multiplayer_combat(4);
+        // Restrictor WITHOUT a chosen direction.
+        let id = create_creature(&mut state, PlayerId(0), "Pramikon, Sky Rampart", 1, 5);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::AttackOnlyNeighbor));
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        assert!(
+            declare_attackers(
+                &mut state,
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "with no direction chosen the restriction is inert"
+        );
+    }
+
+    /// CR 102.2 collapse: in a two-player game the only opponent is always the
+    /// neighbor in either direction, so the restriction never forbids anything.
+    #[test]
+    fn attack_only_neighbor_two_player_collapse_allows_any_attack() {
+        let mut state = setup();
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let _pramikon = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        assert!(
+            declare_attackers(
+                &mut state,
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "the sole opponent is always the neighbor, so any attack is legal"
+        );
+    }
+
+    /// CR 607.2d "the last chosen direction": a re-choice flips legality. After
+    /// re-choosing Right, P0's neighbor becomes P3 (previous in seat order), so
+    /// the previously-legal P1 attack becomes illegal and the P3 attack legal.
+    /// Exercises the replace-on-rechoose clear in `choose.rs` via the runtime
+    /// `bind_named_choice` path.
+    #[test]
+    fn attack_only_neighbor_rechoice_flips_legality() {
+        use crate::game::effects::choose::bind_named_choice;
+        use crate::types::ability::ChoiceType;
+
+        let mut state = setup_multiplayer_combat(4);
+        let pramikon = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Initially Left → P1 legal, P3 illegal.
+        assert!(declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![]
+        )
+        .is_ok());
+
+        // Re-choose Right via the runtime binding authority.
+        let labeled = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon));
+
+        // Exactly one Direction persists, and it is Right.
+        assert_eq!(
+            state.objects.get(&pramikon).unwrap().chosen_direction(),
+            Some(SeatDirection::Right),
+            "re-choice must replace the prior direction"
+        );
+
+        // Now Right → P0's neighbor is P3. P1 illegal, P3 legal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "after flipping to Right, the old left neighbor P1 is illegal"
+        );
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(3)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "after flipping to Right, the right neighbor P3 is legal"
+        );
+    }
+
+    /// CR 508.1c + CR 611.2a/c + CR 607.2d: RUNTIME test for Teyo, Geometric
+    /// Tactician's [−2] duration-bound grant — the seam a parser-shape test
+    /// cannot reach. Teyo's [−2] resolves an `Effect::GenericEffect` that grants
+    /// `StaticMode::AttackOnlyNeighbor` to itself until its controller's next
+    /// turn. This test drives the full runtime chain, NOT the AST shape:
+    ///
+    /// 1. Install the grant through the SAME production storage the effect
+    ///    resolver uses: `effect::register_transient_effect`'s `SelfRef` branch
+    ///    calls `add_transient_continuous_effect` with a `SpecificObject{self}`
+    ///    filter, a `GrantStaticAbility(AttackOnlyNeighbor)` modification, and the
+    ///    `UntilNextTurnOf{Controller}` duration. We call that same function with
+    ///    the same arguments, then run the real `evaluate_layers` so the granted
+    ///    static is materialized onto Teyo's `static_definitions` and surfaced by
+    ///    `battlefield_active_statics` (CR 611.2c object-set fixing).
+    /// 2. Bind Teyo's direction through the production `bind_named_choice`
+    ///    authority (source = Teyo) — the SAME {Left,Right} hijack the printed
+    ///    card uses — so `Teyo.chosen_direction()` is set, NOT hand-pushed.
+    /// 3. Assert the combat gate READS the layer-granted static: with Left chosen,
+    ///    the non-neighbor attack via real `declare_attackers` is rejected and the
+    ///    neighbor attack is legal (proves the granted static reaches the gate).
+    /// 4. Assert EXPIRY: prune P0's `UntilNextTurnOf{Controller}` grant via the
+    ///    production `prune_until_next_turn_effects` (the exact call the untap step
+    ///    makes at the controller's next turn), re-evaluate layers, and confirm the
+    ///    same non-neighbor attack is now legal — the restriction is gone.
+    ///
+    /// REVERT-FAILING: without the grant+layer wiring, the granted static never
+    /// lands on Teyo and step 3's `is_err` flips to `is_ok`; without the duration
+    /// prune the step-4 `is_ok` flips to `is_err`.
+    #[test]
+    fn teyo_minus_two_runtime_grant_gates_attacks_and_expires() {
+        use crate::game::effects::choose::bind_named_choice;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{ChoiceType, ContinuousModification, Duration, PlayerScope};
+
+        let mut state = setup_multiplayer_combat(4);
+
+        // Teyo, a planeswalker P0 controls. Its [−2] granted the directional
+        // restriction to itself; no static is printed on Teyo — the grant will be
+        // materialized by the layer system from the transient continuous effect.
+        let teyo = create_planeswalker(&mut state, PlayerId(0), "Teyo, Geometric Tactician");
+
+        // Step 1: install the grant exactly as `effect::register_transient_effect`
+        // (SelfRef branch) does when Teyo's parsed [−2] `GenericEffect` resolves:
+        // a `SpecificObject{self}`-affected transient continuous effect carrying a
+        // `GrantStaticAbility(AttackOnlyNeighbor)` modification, bounded by the
+        // `UntilNextTurnOf{Controller}` duration `try_parse_temporary_attack_only_neighbor`
+        // attaches. This is the identical grant the [−2] `GenericEffect` produces.
+        state.add_transient_continuous_effect(
+            teyo,
+            PlayerId(0),
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SpecificObject { id: teyo },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::AttackOnlyNeighbor)),
+            }],
+            None,
+        );
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // The granted static must now be present on Teyo (materialized by layer 6).
+        assert!(
+            crate::game::functioning_abilities::battlefield_active_statics(&state)
+                .any(|(src, def)| src.id == teyo
+                    && matches!(def.mode, StaticMode::AttackOnlyNeighbor)),
+            "the [−2] grant must land on Teyo and be surfaced by battlefield_active_statics"
+        );
+
+        // Step 2: bind Teyo's direction through the production choice authority.
+        let labeled = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &labeled, "Left", Some(teyo));
+        assert_eq!(
+            state.objects.get(&teyo).unwrap().chosen_direction(),
+            Some(SeatDirection::Left),
+            "bind_named_choice must set Teyo's chosen direction (source = Teyo)"
+        );
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Step 3: the gate reads the layer-granted static. P0's left neighbor is
+        // P1; attacking P1 is legal, attacking non-neighbor P2 is rejected.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "neighbor attack is legal under the layer-granted Teyo restriction"
+        );
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "non-neighbor attack must be rejected while Teyo's grant is active"
+        );
+
+        // Step 4: expiry. Prune P0's `UntilNextTurnOf{Controller}` transient via
+        // the production path the untap step runs at the controller's next turn.
+        crate::game::layers::prune_until_next_turn_effects(&mut state, PlayerId(0));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // The grant is gone → the granted static no longer functions on Teyo.
+        assert!(
+            !crate::game::functioning_abilities::battlefield_active_statics(&state)
+                .any(|(src, def)| src.id == teyo
+                    && matches!(def.mode, StaticMode::AttackOnlyNeighbor)),
+            "after the controller's next turn, the [−2] grant must be pruned off Teyo"
+        );
+        // The same previously-illegal non-neighbor attack is now legal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "after expiry the directional restriction is gone; non-neighbor attack is legal"
+        );
+    }
+
+    /// CR 508.1c: two restrictors intersect — an attack must satisfy EVERY
+    /// functioning restriction. P0's Pramikon (Left → neighbor P1) and P2's
+    /// Pramikon (Left → P2's neighbor P3) both apply globally. For P0's attacker,
+    /// only P1 satisfies P0's restriction; but P2's restriction demands P0 attack
+    /// P2's-neighbor... no — P2's restriction constrains attacks relative to the
+    /// attacker's own left neighbor (P0's left = P1). Both restrictors resolve the
+    /// neighbor per the ATTACKER (P0), so both demand P1. The attack on P1 is
+    /// legal; an attack on P2 fails the first restrictor.
+    #[test]
+    fn attack_only_neighbor_two_sources_intersect() {
+        let mut state = setup_multiplayer_combat(4);
+        let _a = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+        let _b = create_directional_restrictor(&mut state, PlayerId(2), SeatDirection::Left);
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Both restrictors resolve the neighbor per the attacking player P0 → P1.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "P1 satisfies both restrictors"
+        );
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "P2 violates both restrictors"
         );
     }
 

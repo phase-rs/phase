@@ -37955,3 +37955,45 @@ fn ents_fury_keeps_cost_paid_object_scope() {
         "Ent's Fury must keep Power{{CostPaidObject}} GE 4, got {condition:?}"
     );
 }
+
+/// CR 508.1c + CR 611.2c: Teyo, Geometric Tactician's [−2] must lower to a
+/// duration-bound grant of the `AttackOnlyNeighbor` static onto the source,
+/// ending at the controller's next turn. Reverting the temporary-grant arm
+/// leaves this as `Effect::Unimplemented`, failing the `GenericEffect` match.
+#[test]
+fn teyo_minus_two_grants_temporary_attack_only_neighbor() {
+    let effect = parse_effect(
+        "Until your next turn, each player may attack only the nearest opponent in the last chosen direction and planeswalkers controlled by that opponent.",
+    );
+
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &effect
+    else {
+        panic!("expected a GenericEffect grant, got {effect:?}");
+    };
+
+    assert_eq!(
+        duration.as_ref(),
+        Some(&Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        "Teyo's grant must last until the controller's next turn, got {duration:?}"
+    );
+
+    let grants_neighbor = static_abilities.iter().any(|s| {
+        s.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.mode == StaticMode::AttackOnlyNeighbor
+            )
+        })
+    });
+    assert!(
+        grants_neighbor,
+        "expected a GrantStaticAbility(AttackOnlyNeighbor); got {static_abilities:?}"
+    );
+}

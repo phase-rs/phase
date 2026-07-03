@@ -745,6 +745,14 @@ pub enum StaticMode {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    /// CR 508.1c: Directional attack restriction (Pramikon, Sky Rampart; Mystic
+    /// Barrier; Teyo, Geometric Tactician). "Each player may attack only the
+    /// nearest opponent in the [last] chosen direction and planeswalkers
+    /// controlled by that opponent." A nullary marker static — the chosen
+    /// direction is stored on the source's `chosen_attributes`
+    /// (`ChosenAttribute::Direction`, CR 607.2d linked ability) and runtime
+    /// enforcement is the attacker-declaration gate in `combat.rs`.
+    AttackOnlyNeighbor,
     /// CR 701.60a + CR 701.60d: The affected permanent can't become suspected
     /// (Airtight Alibi: "Enchanted creature ... can't become suspected"). A
     /// nullary marker static — the `affected` filter scopes which permanents are
@@ -1998,6 +2006,7 @@ impl StaticMode {
             | StaticMode::CantAttack
             | StaticMode::CantBlock
             | StaticMode::CantAttackOrBlock
+            | StaticMode::AttackOnlyNeighbor
             | StaticMode::CantBecomeSuspected
             | StaticMode::MaxAttackersEachCombat { .. }
             | StaticMode::MaxBlockersEachCombat { .. }
@@ -2113,6 +2122,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
+            StaticMode::AttackOnlyNeighbor => write!(f, "AttackOnlyNeighbor"),
             StaticMode::CantBecomeSuspected => write!(f, "CantBecomeSuspected"),
             StaticMode::MaxAttackersEachCombat { max, defender } => match defender {
                 None => write!(f, "MaxAttackersEachCombat({max})"),
@@ -2501,6 +2511,7 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "AttackOnlyNeighbor" => StaticMode::AttackOnlyNeighbor,
             "CantBecomeSuspected" => StaticMode::CantBecomeSuspected,
             "LinkedCollectionCounterPlayPermission" => {
                 StaticMode::LinkedCollectionCounterPlayPermission
@@ -3380,6 +3391,7 @@ mod tests {
             // Pre-existing variants
             StaticMode::Continuous,
             StaticMode::CantAttack,
+            StaticMode::AttackOnlyNeighbor,
             StaticMode::ExtraBlockers { count: None },
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat {

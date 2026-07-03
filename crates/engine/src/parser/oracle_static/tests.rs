@@ -12638,6 +12638,26 @@ fn static_no_more_than_one_creature_can_block_each_combat() {
 }
 
 #[test]
+fn static_attack_only_neighbor_chosen_direction() {
+    // CR 508.1c: Pramikon, Sky Rampart — base "the chosen direction" wording.
+    let def = parse_static_line(
+        "Each player may attack only the nearest opponent in the chosen direction and planeswalkers controlled by that opponent.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::AttackOnlyNeighbor);
+}
+
+#[test]
+fn static_attack_only_neighbor_last_chosen_direction() {
+    // CR 508.1c: Mystic Barrier — re-choosable "the last chosen direction".
+    let def = parse_static_line(
+        "Each player may attack only the nearest opponent in the last chosen direction and planeswalkers controlled by that opponent.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::AttackOnlyNeighbor);
+}
+
+#[test]
 fn static_attacks_or_blocks_each_combat_if_able_emits_both_defs() {
     let direct = try_parse_scoped_must_attack_block(
         "this creature attacks or blocks each combat if able.",
