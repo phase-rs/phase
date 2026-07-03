@@ -51,14 +51,11 @@ impl CombatStaticGates {
     /// Does NOT increment the static-full-scan perf counter: this is the single
     /// intended hoisted sweep, not a per-element legality scan.
     ///
-    /// `has_attack_only_neighbor` is deliberately computed from the SAME
-    /// collection the CR 508.1c enforcement loop iterates
-    /// (`battlefield_active_statics`, battlefield-only), not the broader
-    /// `game_functioning_statics` (battlefield + command zone) used for the
-    /// other flags. This keeps the gate flag and the enforcement in lockstep:
-    /// the flag is set iff a battlefield source will actually be enforced. A
-    /// command-zone grant of `AttackOnlyNeighbor` is out of scope and would
-    /// otherwise set the flag but never be enforced (silent under-enforcement).
+    /// `has_attack_only_neighbor` is computed from the SAME
+    /// `game_functioning_statics` (battlefield + command zone) sweep the CR
+    /// 508.1c enforcement loop iterates, so the flag and the enforcement stay in
+    /// lockstep AND a command-zone emblem granting `AttackOnlyNeighbor` is both
+    /// detected and enforced (CR 113.6: command-zone static abilities function).
     fn compute(state: &GameState) -> Self {
         let mut gates = CombatStaticGates {
             has_cant_attack: false,
@@ -75,12 +72,10 @@ impl CombatStaticGates {
                 StaticMode::MustAttack => gates.has_must_attack = true,
                 StaticMode::Goaded => gates.has_goad = true,
                 StaticMode::CanAttackWithDefender => gates.has_can_attack_with_defender = true,
+                StaticMode::AttackOnlyNeighbor => gates.has_attack_only_neighbor = true,
                 _ => {}
             }
         }
-        gates.has_attack_only_neighbor =
-            super::functioning_abilities::battlefield_active_statics(state)
-                .any(|(_, def)| matches!(def.mode, StaticMode::AttackOnlyNeighbor));
         gates
     }
 }
@@ -2494,28 +2489,39 @@ pub fn declare_attackers_with_bands(
     // neighbor must be resolved per attacking player, so a static filter cannot
     // express it.
     if gates.has_attack_only_neighbor {
+        // CR 508.1c + CR 113.6: collect the functioning directional restrictors
+        // once (battlefield + command zone), rather than re-scanning every active
+        // static per attacker — O(A + S) instead of O(A × S).
+        let restrictors: Vec<_> = super::functioning_abilities::game_functioning_statics(state)
+            .filter(|(_, def)| matches!(def.mode, StaticMode::AttackOnlyNeighbor))
+            .collect();
         for (attacker_id, target) in attacks {
             let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller)
             else {
                 continue;
             };
-            for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-                if !matches!(def.mode, StaticMode::AttackOnlyNeighbor) {
-                    continue;
-                }
+            for &(source, _def) in &restrictors {
                 // CR 607.2d: no direction chosen yet — the restriction is inert.
                 let Some(dir) = source.chosen_direction() else {
                     continue;
                 };
-                let neighbor = crate::game::players::neighbor(state, attacker_controller, dir);
-                // CR 508.1c: the only legal targets are the nearest opponent in
-                // the chosen direction and planeswalkers that opponent controls.
+                // CR 508.1c + CR 102.2: the legal target is the nearest OPPONENT
+                // in the chosen direction — skipping living teammates in team
+                // formats (2HG, CR 810), not merely the next seat — and
+                // planeswalkers that opponent controls.
+                let Some(nearest) =
+                    crate::game::players::nearest_opponent(state, attacker_controller, dir)
+                else {
+                    // No opponent in that direction (e.g. attacker is the sole
+                    // survivor) — no restriction target to enforce; inert.
+                    continue;
+                };
                 if !crate::game::restrictions::attack_target_matches_defended_scope(
                     state,
                     Some(target),
                     &crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
-                    neighbor,
-                    neighbor,
+                    nearest,
+                    nearest,
                 ) {
                     return Err(format!(
                         "{attacker_id:?} can't attack {target:?} (CR 508.1c: may attack only the nearest opponent in the chosen direction and their planeswalkers)"
@@ -6538,6 +6544,51 @@ mod tests {
         obj.chosen_attributes
             .push(ChosenAttribute::Direction(direction));
         id
+    }
+
+    /// CR 508.1c + CR 102.2 + CR 810: In Two-Headed Giant the seat adjacent to
+    /// the attacker can be a TEAMMATE. The directional restriction must resolve
+    /// the nearest OPPONENT (skipping teammates), not merely the next seat —
+    /// otherwise the real legal target (the next opponent) is rejected and no
+    /// legal attack exists. Regression for the team-format finding: P0's left
+    /// neighbor P1 is a teammate; the nearest opponent is P2.
+    #[test]
+    fn attack_only_neighbor_skips_teammate_in_two_headed_giant() {
+        // 2HG teams {P0,P1} and {P2,P3}, seat order [P0,P1,P2,P3].
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+
+        let _pramikon = create_directional_restrictor(&mut state, PlayerId(0), SeatDirection::Left);
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // The nearest opponent past teammate P1 is P2 — legal. Before the fix the
+        // gate required attacking teammate P1 (an illegal target), leaving P0 with
+        // no legal attack at all.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "attacking the nearest opponent P2 (past teammate P1) must be legal"
+        );
+        // The far opponent P3 is not the nearest in the Left direction — illegal.
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(3)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "attacking the far opponent P3 must be rejected (P2 is the nearest)"
+        );
     }
 
     /// CR 508.1c + CR 607.2d: Under Pramikon (chosen Left), the active player may
