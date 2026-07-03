@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
+import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
@@ -173,6 +174,36 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 1 } }),
+        phase: "PostCombatMain",
+        auto_pass: { 0: { type: "UntilStackEmpty", initial_stack_len: 1 } },
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 1,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 1 } },
+      legalActions: [],
+      isResolvingAll: false,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    const cancel = screen.getByRole("button", { name: "Resolving Stack..." });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

@@ -421,12 +421,14 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
 ///   their behalf (CR 104.3a).
-/// - **Preference actions** (SetPhaseStops, SetAutoPass, CancelAutoPass) are
-///   per-player UI settings. They have no CR semantics, mutate only the
-///   submitter's own preference slot, and may legitimately fire at any time —
-///   e.g. the human toggles a phase stop while the AI holds priority. The
-///   downstream handlers route by `actor`, so any seat may set its own
-///   preferences regardless of `WaitingFor`.
+/// - **Preference actions** (SetPhaseStops, CancelAutoPass) are per-player UI
+///   settings. They have no CR semantics, mutate only the submitter's own
+///   preference slot, and may legitimately fire at any time — e.g. the human
+///   toggles a phase stop while the AI holds priority. The downstream handlers
+///   route by `actor`, so any seat may set its own preferences regardless of
+///   `WaitingFor`. `SetAutoPass` is deliberately NOT exempt: its handler
+///   stores the mode for the `WaitingFor::Priority` player and immediately
+///   passes that priority, so it must come from the authorized submitter.
 fn check_actor_authorization(
     state: &GameState,
     actor: PlayerId,
