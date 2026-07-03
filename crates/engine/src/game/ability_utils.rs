@@ -2358,7 +2358,7 @@ pub(crate) fn resolve_multi_target_bounds(
     })
 }
 
-fn multi_target_needs_quantity_choice(
+pub(crate) fn multi_target_needs_quantity_choice(
     state: &GameState,
     ability: &ResolvedAbility,
     spec: &MultiTargetSpec,

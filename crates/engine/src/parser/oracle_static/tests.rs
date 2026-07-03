@@ -11770,6 +11770,9 @@ fn static_reduce_ability_cost_ninjutsu() {
                 amount: 1,
                 minimum_mana: None,
                 dynamic_count: None,
+                exemption: _,
+                // CR 602.2: "abilities you activate" is activator-scoped.
+                activator: Some(PlayerFilter::Controller),
             } if keyword == "ninjutsu"
         ),
         "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -11791,6 +11794,9 @@ fn static_reduce_equip_abilities_with_object_qualifier() {
             amount: 1,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            // CR 602.2: "abilities you activate" is activator-scoped.
+            activator: Some(PlayerFilter::Controller),
         }
     );
 }
@@ -12686,6 +12692,26 @@ fn static_no_more_than_one_creature_can_attack_you_each_combat() {
 fn static_no_more_than_one_creature_can_block_each_combat() {
     let def = parse_static_line("No more than one creature can block each combat.").unwrap();
     assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
+}
+
+#[test]
+fn static_attack_only_neighbor_chosen_direction() {
+    // CR 508.1c: Pramikon, Sky Rampart — base "the chosen direction" wording.
+    let def = parse_static_line(
+        "Each player may attack only the nearest opponent in the chosen direction and planeswalkers controlled by that opponent.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::AttackOnlyNeighbor);
+}
+
+#[test]
+fn static_attack_only_neighbor_last_chosen_direction() {
+    // CR 508.1c: Mystic Barrier — re-choosable "the last chosen direction".
+    let def = parse_static_line(
+        "Each player may attack only the nearest opponent in the last chosen direction and planeswalkers controlled by that opponent.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::AttackOnlyNeighbor);
 }
 
 #[test]
@@ -16574,6 +16600,8 @@ fn static_reduce_activated_ability_cost_generic() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
 }
@@ -16592,6 +16620,8 @@ fn static_reduce_activated_ability_cost_generic_with_minimum() {
             amount: 2,
             minimum_mana: Some(1),
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
 }
@@ -16610,6 +16640,8 @@ fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
             amount: 2,
             minimum_mana: Some(1),
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert!(matches!(
@@ -16632,6 +16664,8 @@ fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
             amount: 2,
             minimum_mana: Some(1),
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert!(matches!(
@@ -16659,6 +16693,8 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     // "other ... you control" must exclude the source permanent (CR 109.5).
@@ -16710,6 +16746,8 @@ fn static_activated_ability_cost_increase_chosen_name() {
             // CR 118.7: increases never floor.
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert_eq!(
@@ -16759,6 +16797,8 @@ fn static_possessive_equip_ability_cost_reduction_self_ref() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert_eq!(
@@ -16779,6 +16819,8 @@ fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
             amount: 3,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
         };
         let encoded = original.to_string();
         let decoded = encoded
@@ -16819,6 +16861,8 @@ fn static_reduce_activated_ability_cost_dynamic_power() {
             dynamic_count: Some(QuantityRef::Power {
                 scope: ObjectScope::Source,
             }),
+            exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     match &def.affected {
@@ -16850,6 +16894,109 @@ fn parse_where_x_is_source_power_yields_power_source_ref() {
         }
         other => panic!("expected dynamic Power{{Source}} reduction, got {other:?}"),
     }
+}
+
+/// CR 601.2f + CR 118.7 + CR 605.1a: The unscoped "Activated abilities cost {N}
+/// more/less to activate unless they're mana abilities" (Suppression Field) form
+/// carries no "of <subject>" filter — it applies to every source (affected =
+/// None) and the mana-ability exemption rides on the static as
+/// `ActivationExemption::ManaAbilities`, not on a filter.
+#[test]
+fn static_reduce_ability_cost_global_with_mana_exemption() {
+    let def = parse_static_line(
+        "Activated abilities cost {2} more to activate unless they're mana abilities.",
+    )
+    .expect("Suppression Field global activated-ability tax must parse");
+    assert!(
+        def.affected.is_none(),
+        "the global form applies to all sources; affected must be None, got {:?}",
+        def.affected
+    );
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword,
+                amount: 2,
+                exemption: ActivationExemption::ManaAbilities,
+                ..
+            } if keyword == "activated"
+        ),
+        "expected Raise/activated/2 with ManaAbilities exemption, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 601.2f + CR 602.2 + CR 605.1a: The activator-scoped "Abilities you activate
+/// that aren't mana abilities cost {N} less to activate" (Zirda, the Dawnwaker)
+/// form keys off WHO activates the ability — the static's controller ("you") —
+/// NOT who controls the ability's source. It therefore carries
+/// `activator = Some(PlayerFilter::Controller)` and NO `affected` source filter,
+/// plus the mana-ability exemption.
+#[test]
+fn static_reduce_ability_cost_you_activate_with_mana_exemption() {
+    let def = parse_static_line(
+        "Abilities you activate that aren't mana abilities cost {2} less to activate.",
+    )
+    .expect("Zirda activator-scoped activated-ability discount must parse");
+    assert!(
+        def.affected.is_none(),
+        "the 'you activate' form is activator-scoped, not source-scoped; affected \
+         must be None, got {:?}",
+        def.affected
+    );
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword,
+                amount: 2,
+                exemption: ActivationExemption::ManaAbilities,
+                activator: Some(PlayerFilter::Controller),
+                ..
+            } if keyword == "activated"
+        ),
+        "expected Reduce/activated/2, activator=Controller, ManaAbilities exemption, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 601.2f: The unscoped form WITHOUT a mana exemption keeps
+/// `ActivationExemption::None`, and the pre-existing scoped "of <subject>" form
+/// is unchanged (regression) — its exemption stays `None`.
+#[test]
+fn static_reduce_ability_cost_no_exemption_variants() {
+    let global = parse_static_line("Activated abilities cost {1} more to activate.")
+        .expect("bare global tax must parse");
+    assert!(
+        matches!(
+            &global.mode,
+            StaticMode::ReduceAbilityCost {
+                exemption: ActivationExemption::None,
+                ..
+            }
+        ),
+        "no-exemption global form must carry ActivationExemption::None, got {:?}",
+        global.mode
+    );
+    let scoped = parse_static_line(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+    )
+    .expect("scoped form regression must still parse");
+    assert!(
+        matches!(
+            &scoped.mode,
+            StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                exemption: ActivationExemption::None,
+                ..
+            }
+        ),
+        "scoped 'of <subject>' form must be unchanged with no exemption, got {:?}",
+        scoped.mode
+    );
 }
 
 // --- Group B': Special-action (plot / unlock) cost reduction ---
@@ -23058,5 +23205,182 @@ fn static_self_dynamic_pump_for_each_other_creature_on_battlefield_with_keyword(
         )),
         "must not emit flat P/T modifications alongside dynamic ones: {:?}",
         def.modifications
+    );
+}
+
+/// CR 205.4a + CR 205.4g + CR 613.1d (Layer 4): Glittering Frost's "Enchanted
+/// land is snow." is an Aura that grants the Snow supertype (not a card type)
+/// to the enchanted land. It must lower to a `Continuous` static carrying
+/// `AddSupertype { Snow }` over an `EnchantedBy` land filter — the supertype is
+/// additive (CR 205.4b), so the land keeps its printed types.
+#[test]
+fn glittering_frost_enchanted_land_is_snow_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    // Production front door: exercise the real attached-Aura dispatch
+    // (`parse_static_line_multi`), not the single-line `parse_static_line` bypass.
+    let defs = parse_static_line_multi("Enchanted land is snow.");
+    let def = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("Enchanted land is snow must parse to a Continuous static");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSupertype {
+                supertype: Supertype::Snow,
+            }),
+        "expected AddSupertype(Snow), got {:?}",
+        def.modifications
+    );
+    let affected = def.affected.as_ref().expect("must carry an affected set");
+    assert!(
+        matches!(
+            affected,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Land]
+                    && tf.properties.contains(&FilterProp::EnchantedBy)
+        ),
+        "affected must be the enchanted land, got {affected:?}"
+    );
+}
+
+/// CR 205.4a + CR 205.4c: The recognizer is a building block over every
+/// CR 205.4a supertype, not just the pre-existing narrow "is legendary" grant.
+/// A "basic" supertype grant ("Enchanted land is basic.") — which the old
+/// legendary-only path never handled — proves the added generality and lowers
+/// to `AddSupertype { Basic }`.
+#[test]
+fn enchanted_land_is_basic_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted land is basic.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Basic,
+                })),
+        "expected AddSupertype(Basic), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Disjointness guard (no blast radius): the articled "is a [type]" copula
+/// still routes to the core-type-changing aura parser and is NOT swallowed by
+/// the supertype recognizer. "Enchanted land is a Mountain." shares the
+/// "Enchanted land is …" prefix with Glittering Frost, so it is the strongest
+/// guard that the `eof`-anchored supertype clause does not steal the basic
+/// land-type change (which emits `SetBasicLandType`, never `AddSupertype`).
+#[test]
+fn enchanted_is_a_type_not_captured_by_supertype_recognizer() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted land is a Mountain.");
+    assert!(
+        !defs.is_empty(),
+        "Enchanted land is a Mountain must still parse"
+    );
+    assert!(
+        !defs.iter().any(|d| d.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSupertype {
+                supertype: Supertype::Snow | Supertype::Legendary | Supertype::Basic
+            }
+        ))),
+        "the basic-land-type aura must not emit any AddSupertype, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Regression (nearest at-risk card): On Serra's Wings' "Enchanted creature is
+/// legendary, gets +1/+1, and has flying, vigilance, and lifelink." must NOT
+/// be captured by the new `eof`-anchored supertype recognizer — it has content
+/// after "legendary," so the whole compound falls through to the predicate
+/// path, which grants the supertype AND the P/T pump AND the keywords. If the
+/// supertype recognizer stole this line, the pump and keywords would vanish.
+#[test]
+fn on_serras_wings_compound_legendary_grant_keeps_pump_and_keywords() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi(
+        "Enchanted creature is legendary, gets +1/+1, and has flying, vigilance, and lifelink.",
+    );
+    let has = |m: &ContinuousModification| defs.iter().any(|d| d.modifications.contains(m));
+    assert!(
+        has(&ContinuousModification::AddSupertype {
+            supertype: Supertype::Legendary,
+        }),
+        "must still grant Legendary, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+    assert!(
+        has(&ContinuousModification::AddPower { value: 1 })
+            && has(&ContinuousModification::AddToughness { value: 1 }),
+        "the +1/+1 pump must survive, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+    assert!(
+        has(&ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Flying,
+        }),
+        "the granted keywords must survive, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Regression: In Bolas's Clutches' standalone "Enchanted permanent is
+/// legendary." line lowers to `AddSupertype { Legendary }` (the whole-clause
+/// form my recognizer now owns), identical to the pre-existing narrow
+/// "is legendary" grant. This locks the equivalence so the two paths can't
+/// drift.
+#[test]
+fn in_bolas_clutches_enchanted_permanent_is_legendary_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is legendary.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary,
+                })),
+        "expected AddSupertype(Legendary), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// CR 205.4a + CR 205.4b: World is a CR 205.4a supertype the engine `Supertype`
+/// enum models, but the shared `parse_supertype_word` building block previously
+/// omitted it, so the "general" supertype-grant path silently dropped World. An
+/// attached-subject grant "Enchanted permanent is world." must now lower to a
+/// `Continuous` static carrying `AddSupertype { World }` through the SAME one
+/// seam as Snow/Legendary/Basic — proving the general path is really general.
+#[test]
+fn enchanted_permanent_is_world_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is world.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::World,
+                })),
+        "expected AddSupertype(World), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// CR 205.4a: Ongoing (the scheme supertype) is likewise part of the engine
+/// `Supertype` set and CR 205.4a's enumeration; the shared recognizer previously
+/// omitted it too. "Enchanted permanent is ongoing." must lower to
+/// `AddSupertype { Ongoing }`, completing the general supertype-grant building
+/// block so it covers every CR 205.4a supertype the enum models.
+#[test]
+fn enchanted_permanent_is_ongoing_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is ongoing.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Ongoing,
+                })),
+        "expected AddSupertype(Ongoing), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
     );
 }

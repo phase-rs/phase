@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
@@ -21,7 +22,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{CostModifyMode, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
@@ -3976,6 +3977,11 @@ fn find_defiler_reduction(
         return None;
     }
 
+    // CR 604.1: O(1) presence gate — no DefilerCostReduction static means no reduction.
+    if !static_kind_present(state, StaticModeKind::DefilerCostReduction) {
+        return None;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the gating.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         if bf_obj.controller != caster {

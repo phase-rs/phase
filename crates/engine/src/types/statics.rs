@@ -3,10 +3,11 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, QuantityExpr, QuantityRef,
-    TargetFilter,
+    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
+    QuantityRef, TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -745,6 +746,14 @@ pub enum StaticMode {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    /// CR 508.1c: Directional attack restriction (Pramikon, Sky Rampart; Mystic
+    /// Barrier; Teyo, Geometric Tactician). "Each player may attack only the
+    /// nearest opponent in the [last] chosen direction and planeswalkers
+    /// controlled by that opponent." A nullary marker static — the chosen
+    /// direction is stored on the source's `chosen_attributes`
+    /// (`ChosenAttribute::Direction`, CR 607.2d linked ability) and runtime
+    /// enforcement is the attacker-declaration gate in `combat.rs`.
+    AttackOnlyNeighbor,
     /// CR 701.60a + CR 701.60d: The affected permanent can't become suspected
     /// (Airtight Alibi: "Enchanted creature ... can't become suspected"). A
     /// nullary marker static — the `affected` filter scopes which permanents are
@@ -955,6 +964,25 @@ pub enum StaticMode {
         /// When present, the total adjustment is `amount * resolve_quantity(dynamic_count)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
+        /// CR 605.1a: "unless they're mana abilities" / "that aren't mana abilities"
+        /// exemption (Suppression Field, Zirda the Dawnwaker). Reuses the same
+        /// [`ActivationExemption`] axis as [`StaticMode::CantBeActivated`] rather
+        /// than a bool. `ManaAbilities` excludes activations classified as mana
+        /// abilities (CR 605.1a) from the adjustment; `None` (the default, kept
+        /// back-compatible for already-serialized card-data) adjusts every match.
+        #[serde(default)]
+        exemption: ActivationExemption,
+        /// CR 602.2: Activator scope — *who is activating* the ability, evaluated
+        /// relative to the static's controller (NOT who controls the ability's
+        /// source). `Some(PlayerFilter::Controller)` is the "abilities **you**
+        /// activate" form (Zirda, the Dawnwaker; Fluctuator): the discount applies
+        /// only when the static's controller is the activating player, even for an
+        /// ability on a permanent that player doesn't control. `None` (the default,
+        /// back-compatible for already-serialized card-data) applies no activator
+        /// gate — the global form (Suppression Field) and the source-scoped
+        /// "abilities **of** <subject>" forms, whose scope lives in `affected`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activator: Option<PlayerFilter>,
     },
     /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
     /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
@@ -1810,6 +1838,313 @@ pub enum StaticMode {
     Other(String),
 }
 
+/// Fieldless discriminant mirror of [`StaticMode`], used for O(1) discriminant-only
+/// existence queries (see [`StaticModePresence`]) without touching each variant's payload.
+///
+/// No-wildcard contract: every [`StaticMode`] variant MUST have a matching arm here and in
+/// [`StaticMode::kind`]. The exhaustive, wildcard-free match in `kind()` is the compile-time
+/// gate — adding a `StaticMode` variant without a `StaticModeKind` arm fails to compile.
+/// Precedent: `KeywordKind` / `Keyword::kind` (types/keywords.rs) — a hand-authored fieldless
+/// mirror plus a manual match is the established idiom here (not `strum::EnumDiscriminants`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumCount)]
+pub enum StaticModeKind {
+    Continuous,
+    DamageNotRemovedDuringCleanup,
+    CantAttack,
+    CantBlock,
+    CantAttackOrBlock,
+    CantBecomeSuspected,
+    MaxAttackersEachCombat,
+    MaxBlockersEachCombat,
+    CantBeTargeted,
+    CantBeCast,
+    CantBeActivated,
+    CantSearchLibrary,
+    RestrictLibrarySearchToTop,
+    CantCauseSacrificeOrExile,
+    CastWithFlash,
+    GrantsExtraVote,
+    GrantsExtraVillainousChoice,
+    CastWithKeyword,
+    CastWithAlternativeCost,
+    AlternativeKeywordCost,
+    ModifyCost,
+    ImposeAdditionalCost,
+    ReduceAbilityCost,
+    ReduceActionCost,
+    ModifyActivationLimit,
+    ActivateAsInstant,
+    CantPayCost,
+    CantGainLife,
+    CantLoseLife,
+    PlayerProtection,
+    MustAttack,
+    MustAttackPlayer,
+    MustBlock,
+    MustBlockAttacker,
+    CantDraw,
+    DrawFromBottom,
+    DoubleTriggers,
+    IgnoreHexproof,
+    ExtraBlockers,
+    RevealTopOfLibrary,
+    RevealHand,
+    GraveyardCastPermission,
+    TopOfLibraryCastPermission,
+    TopOfLibraryHasPlot,
+    TopOfLibraryPlotPermission,
+    CastFromHandFree,
+    ExileCastPermission,
+    LinkedCollectionCounterPlayPermission,
+    CountersPersistAcrossZones,
+    CantBeCountered,
+    CantBeCopied,
+    CantEnterBattlefieldFrom,
+    CantCastFrom,
+    CantCastDuring,
+    CantActivateDuring,
+    PerTurnCastLimit,
+    PerTurnDrawLimit,
+    SuppressTriggers,
+    CantBeBlocked,
+    CantBeBlockedExceptBy,
+    CantBeBlockedBy,
+    CantBeBlockedByMoreThan,
+    AttachmentRestriction,
+    Protection,
+    Indestructible,
+    CantBeDestroyed,
+    CantBeRegenerated,
+    FlashBack,
+    Shroud,
+    Hexproof,
+    Vigilance,
+    Menace,
+    Reach,
+    Flying,
+    Trample,
+    Deathtouch,
+    Lifelink,
+    CantTap,
+    CantUntap,
+    MustBeBlocked,
+    MustBeBlockedByAll,
+    Goaded,
+    CombatAlone,
+    CantCrew,
+    CantPhaseIn,
+    CrewContribution,
+    MayLookAtTopOfLibrary,
+    MayLookAtFaceDown,
+    CantBeTurnedFaceUp,
+    MayChooseNotToUntap,
+    AdditionalLandDrop,
+    EmblemStatic,
+    BlockRestriction,
+    NoMaximumHandSize,
+    MaximumHandSize,
+    MayPlayAdditionalLand,
+    CantHaveKeyword,
+    CantWinTheGame,
+    CantLoseTheGame,
+    LegendRuleDoesntApply,
+    SpeedCanIncreaseBeyondFour,
+    DefilerCostReduction,
+    SkipStep,
+    SpendManaAsAnyColor,
+    PayLifeAsColoredMana,
+    StepEndUnspentMana,
+    CanAttackWithDefender,
+    AttackOnlyNeighbor,
+    IgnoreLandwalkForBlocking,
+    CanActivateAbilitiesAsThoughHaste,
+    CanBlockShadow,
+    AssignNoCombatDamage,
+    UntapsDuringEachOtherPlayersUntapStep,
+    MaxUntapPerType,
+    EntersWithAdditionalCounters,
+    Other,
+}
+
+impl StaticMode {
+    /// Maps this [`StaticMode`] to its fieldless [`StaticModeKind`] discriminant.
+    ///
+    /// Wildcard-free exhaustive match — see the no-wildcard contract on [`StaticModeKind`].
+    pub fn kind(&self) -> StaticModeKind {
+        match self {
+            StaticMode::Continuous => StaticModeKind::Continuous,
+            StaticMode::DamageNotRemovedDuringCleanup => {
+                StaticModeKind::DamageNotRemovedDuringCleanup
+            }
+            StaticMode::CantAttack => StaticModeKind::CantAttack,
+            StaticMode::CantBlock => StaticModeKind::CantBlock,
+            StaticMode::CantAttackOrBlock => StaticModeKind::CantAttackOrBlock,
+            StaticMode::CantBecomeSuspected => StaticModeKind::CantBecomeSuspected,
+            StaticMode::MaxAttackersEachCombat { .. } => StaticModeKind::MaxAttackersEachCombat,
+            StaticMode::MaxBlockersEachCombat { .. } => StaticModeKind::MaxBlockersEachCombat,
+            StaticMode::CantBeTargeted => StaticModeKind::CantBeTargeted,
+            StaticMode::CantBeCast { .. } => StaticModeKind::CantBeCast,
+            StaticMode::CantBeActivated { .. } => StaticModeKind::CantBeActivated,
+            StaticMode::CantSearchLibrary { .. } => StaticModeKind::CantSearchLibrary,
+            StaticMode::RestrictLibrarySearchToTop { .. } => {
+                StaticModeKind::RestrictLibrarySearchToTop
+            }
+            StaticMode::CantCauseSacrificeOrExile { .. } => {
+                StaticModeKind::CantCauseSacrificeOrExile
+            }
+            StaticMode::CastWithFlash => StaticModeKind::CastWithFlash,
+            StaticMode::GrantsExtraVote => StaticModeKind::GrantsExtraVote,
+            StaticMode::GrantsExtraVillainousChoice => StaticModeKind::GrantsExtraVillainousChoice,
+            StaticMode::CastWithKeyword { .. } => StaticModeKind::CastWithKeyword,
+            StaticMode::CastWithAlternativeCost { .. } => StaticModeKind::CastWithAlternativeCost,
+            StaticMode::AlternativeKeywordCost { .. } => StaticModeKind::AlternativeKeywordCost,
+            StaticMode::ModifyCost { .. } => StaticModeKind::ModifyCost,
+            StaticMode::ImposeAdditionalCost { .. } => StaticModeKind::ImposeAdditionalCost,
+            StaticMode::ReduceAbilityCost { .. } => StaticModeKind::ReduceAbilityCost,
+            StaticMode::ReduceActionCost { .. } => StaticModeKind::ReduceActionCost,
+            StaticMode::ModifyActivationLimit { .. } => StaticModeKind::ModifyActivationLimit,
+            StaticMode::ActivateAsInstant { .. } => StaticModeKind::ActivateAsInstant,
+            StaticMode::CantPayCost { .. } => StaticModeKind::CantPayCost,
+            StaticMode::CantGainLife => StaticModeKind::CantGainLife,
+            StaticMode::CantLoseLife => StaticModeKind::CantLoseLife,
+            StaticMode::PlayerProtection(..) => StaticModeKind::PlayerProtection,
+            StaticMode::MustAttack => StaticModeKind::MustAttack,
+            StaticMode::MustAttackPlayer { .. } => StaticModeKind::MustAttackPlayer,
+            StaticMode::MustBlock => StaticModeKind::MustBlock,
+            StaticMode::MustBlockAttacker { .. } => StaticModeKind::MustBlockAttacker,
+            StaticMode::CantDraw { .. } => StaticModeKind::CantDraw,
+            StaticMode::DrawFromBottom { .. } => StaticModeKind::DrawFromBottom,
+            StaticMode::DoubleTriggers { .. } => StaticModeKind::DoubleTriggers,
+            StaticMode::IgnoreHexproof => StaticModeKind::IgnoreHexproof,
+            StaticMode::ExtraBlockers { .. } => StaticModeKind::ExtraBlockers,
+            StaticMode::RevealTopOfLibrary { .. } => StaticModeKind::RevealTopOfLibrary,
+            StaticMode::RevealHand { .. } => StaticModeKind::RevealHand,
+            StaticMode::GraveyardCastPermission { .. } => StaticModeKind::GraveyardCastPermission,
+            StaticMode::TopOfLibraryCastPermission { .. } => {
+                StaticModeKind::TopOfLibraryCastPermission
+            }
+            StaticMode::TopOfLibraryHasPlot => StaticModeKind::TopOfLibraryHasPlot,
+            StaticMode::TopOfLibraryPlotPermission => StaticModeKind::TopOfLibraryPlotPermission,
+            StaticMode::CastFromHandFree { .. } => StaticModeKind::CastFromHandFree,
+            StaticMode::ExileCastPermission { .. } => StaticModeKind::ExileCastPermission,
+            StaticMode::LinkedCollectionCounterPlayPermission => {
+                StaticModeKind::LinkedCollectionCounterPlayPermission
+            }
+            StaticMode::CountersPersistAcrossZones { .. } => {
+                StaticModeKind::CountersPersistAcrossZones
+            }
+            StaticMode::CantBeCountered => StaticModeKind::CantBeCountered,
+            StaticMode::CantBeCopied => StaticModeKind::CantBeCopied,
+            StaticMode::CantEnterBattlefieldFrom => StaticModeKind::CantEnterBattlefieldFrom,
+            StaticMode::CantCastFrom { .. } => StaticModeKind::CantCastFrom,
+            StaticMode::CantCastDuring { .. } => StaticModeKind::CantCastDuring,
+            StaticMode::CantActivateDuring { .. } => StaticModeKind::CantActivateDuring,
+            StaticMode::PerTurnCastLimit { .. } => StaticModeKind::PerTurnCastLimit,
+            StaticMode::PerTurnDrawLimit { .. } => StaticModeKind::PerTurnDrawLimit,
+            StaticMode::SuppressTriggers { .. } => StaticModeKind::SuppressTriggers,
+            StaticMode::CantBeBlocked => StaticModeKind::CantBeBlocked,
+            StaticMode::CantBeBlockedExceptBy { .. } => StaticModeKind::CantBeBlockedExceptBy,
+            StaticMode::CantBeBlockedBy { .. } => StaticModeKind::CantBeBlockedBy,
+            StaticMode::CantBeBlockedByMoreThan { .. } => StaticModeKind::CantBeBlockedByMoreThan,
+            StaticMode::AttachmentRestriction { .. } => StaticModeKind::AttachmentRestriction,
+            StaticMode::Protection => StaticModeKind::Protection,
+            StaticMode::Indestructible => StaticModeKind::Indestructible,
+            StaticMode::CantBeDestroyed => StaticModeKind::CantBeDestroyed,
+            StaticMode::CantBeRegenerated => StaticModeKind::CantBeRegenerated,
+            StaticMode::FlashBack => StaticModeKind::FlashBack,
+            StaticMode::Shroud => StaticModeKind::Shroud,
+            StaticMode::Hexproof => StaticModeKind::Hexproof,
+            StaticMode::Vigilance => StaticModeKind::Vigilance,
+            StaticMode::Menace => StaticModeKind::Menace,
+            StaticMode::Reach => StaticModeKind::Reach,
+            StaticMode::Flying => StaticModeKind::Flying,
+            StaticMode::Trample => StaticModeKind::Trample,
+            StaticMode::Deathtouch => StaticModeKind::Deathtouch,
+            StaticMode::Lifelink => StaticModeKind::Lifelink,
+            StaticMode::CantTap => StaticModeKind::CantTap,
+            StaticMode::CantUntap => StaticModeKind::CantUntap,
+            StaticMode::MustBeBlocked => StaticModeKind::MustBeBlocked,
+            StaticMode::MustBeBlockedByAll => StaticModeKind::MustBeBlockedByAll,
+            StaticMode::Goaded => StaticModeKind::Goaded,
+            StaticMode::CombatAlone { .. } => StaticModeKind::CombatAlone,
+            StaticMode::CantCrew => StaticModeKind::CantCrew,
+            StaticMode::CantPhaseIn => StaticModeKind::CantPhaseIn,
+            StaticMode::CrewContribution { .. } => StaticModeKind::CrewContribution,
+            StaticMode::MayLookAtTopOfLibrary => StaticModeKind::MayLookAtTopOfLibrary,
+            StaticMode::MayLookAtFaceDown => StaticModeKind::MayLookAtFaceDown,
+            StaticMode::CantBeTurnedFaceUp => StaticModeKind::CantBeTurnedFaceUp,
+            StaticMode::MayChooseNotToUntap => StaticModeKind::MayChooseNotToUntap,
+            StaticMode::AdditionalLandDrop { .. } => StaticModeKind::AdditionalLandDrop,
+            StaticMode::EmblemStatic => StaticModeKind::EmblemStatic,
+            StaticMode::BlockRestriction { .. } => StaticModeKind::BlockRestriction,
+            StaticMode::NoMaximumHandSize => StaticModeKind::NoMaximumHandSize,
+            StaticMode::MaximumHandSize { .. } => StaticModeKind::MaximumHandSize,
+            StaticMode::MayPlayAdditionalLand => StaticModeKind::MayPlayAdditionalLand,
+            StaticMode::CantHaveKeyword { .. } => StaticModeKind::CantHaveKeyword,
+            StaticMode::CantWinTheGame => StaticModeKind::CantWinTheGame,
+            StaticMode::CantLoseTheGame => StaticModeKind::CantLoseTheGame,
+            StaticMode::LegendRuleDoesntApply => StaticModeKind::LegendRuleDoesntApply,
+            StaticMode::SpeedCanIncreaseBeyondFour => StaticModeKind::SpeedCanIncreaseBeyondFour,
+            StaticMode::DefilerCostReduction { .. } => StaticModeKind::DefilerCostReduction,
+            StaticMode::SkipStep { .. } => StaticModeKind::SkipStep,
+            StaticMode::SpendManaAsAnyColor { .. } => StaticModeKind::SpendManaAsAnyColor,
+            StaticMode::PayLifeAsColoredMana { .. } => StaticModeKind::PayLifeAsColoredMana,
+            StaticMode::StepEndUnspentMana { .. } => StaticModeKind::StepEndUnspentMana,
+            StaticMode::CanAttackWithDefender => StaticModeKind::CanAttackWithDefender,
+            StaticMode::AttackOnlyNeighbor => StaticModeKind::AttackOnlyNeighbor,
+            StaticMode::IgnoreLandwalkForBlocking { .. } => {
+                StaticModeKind::IgnoreLandwalkForBlocking
+            }
+            StaticMode::CanActivateAbilitiesAsThoughHaste => {
+                StaticModeKind::CanActivateAbilitiesAsThoughHaste
+            }
+            StaticMode::CanBlockShadow => StaticModeKind::CanBlockShadow,
+            StaticMode::AssignNoCombatDamage => StaticModeKind::AssignNoCombatDamage,
+            StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
+                StaticModeKind::UntapsDuringEachOtherPlayersUntapStep
+            }
+            StaticMode::MaxUntapPerType { .. } => StaticModeKind::MaxUntapPerType,
+            StaticMode::EntersWithAdditionalCounters { .. } => {
+                StaticModeKind::EntersWithAdditionalCounters
+            }
+            StaticMode::Other(..) => StaticModeKind::Other,
+        }
+    }
+}
+
+/// O(1) presence index over [`StaticModeKind`] discriminants, populated as a byproduct of the
+/// layers pipeline. Answers "does any functioning static of kind K exist?" without an
+/// O(battlefield) scan. Backed by a fixed-size `bool` array indexed by `kind as usize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaticModePresence([bool; StaticModeKind::COUNT]);
+
+impl StaticModePresence {
+    /// All-false. Only used inside the layers-pipeline refresh fold, which rebuilds the index
+    /// wholesale from the same iterator its consumers would scan.
+    pub fn empty() -> Self {
+        StaticModePresence([false; StaticModeKind::COUNT])
+    }
+
+    /// All-true conservative default. Used before the first layers flush makes the index
+    /// precise (e.g. immediately after `GameState::new` or deserialize). Every consumer falls
+    /// through to its exact per-object check when a kind reports present, so a false positive
+    /// costs at most one redundant scan; a false negative would be a correctness bug and is
+    /// impossible in the all-true state.
+    pub fn all_present() -> Self {
+        StaticModePresence([true; StaticModeKind::COUNT])
+    }
+
+    /// Marks `kind` as present.
+    pub fn insert(&mut self, kind: StaticModeKind) {
+        self.0[kind as usize] = true;
+    }
+
+    /// Returns whether any functioning static of `kind` is currently indexed as present.
+    pub fn contains(&self, kind: StaticModeKind) -> bool {
+        self.0[kind as usize]
+    }
+}
+
 /// Manual Hash impl because `ModifyCost` contains `TargetFilter` and `QuantityRef`
 /// which don't implement `Hash`. For data-carrying variants, we hash only the discriminant +
 /// simple fields. This is safe because data-carrying variants are never used as HashMap keys
@@ -1998,6 +2333,7 @@ impl StaticMode {
             | StaticMode::CantAttack
             | StaticMode::CantBlock
             | StaticMode::CantAttackOrBlock
+            | StaticMode::AttackOnlyNeighbor
             | StaticMode::CantBecomeSuspected
             | StaticMode::MaxAttackersEachCombat { .. }
             | StaticMode::MaxBlockersEachCombat { .. }
@@ -2113,6 +2449,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
+            StaticMode::AttackOnlyNeighbor => write!(f, "AttackOnlyNeighbor"),
             StaticMode::CantBecomeSuspected => write!(f, "CantBecomeSuspected"),
             StaticMode::MaxAttackersEachCombat { max, defender } => match defender {
                 None => write!(f, "MaxAttackersEachCombat({max})"),
@@ -2501,6 +2838,7 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "AttackOnlyNeighbor" => StaticMode::AttackOnlyNeighbor,
             "CantBecomeSuspected" => StaticMode::CantBecomeSuspected,
             "LinkedCollectionCounterPlayPermission" => {
                 StaticMode::LinkedCollectionCounterPlayPermission
@@ -2565,6 +2903,11 @@ impl FromStr for StaticMode {
                             amount: amt.parse().unwrap_or(1),
                             minimum_mana: extra.and_then(|value| value.parse().ok()),
                             dynamic_count: None,
+                            exemption: ActivationExemption::None,
+                            // Activator scope is carried by serde JSON, not this
+                            // compact signature form (as with dynamic_count /
+                            // exemption); reconstitutes to the no-gate default here.
+                            activator: None,
                         }
                     } else {
                         StaticMode::Other(s.to_string())
@@ -3380,6 +3723,7 @@ mod tests {
             // Pre-existing variants
             StaticMode::Continuous,
             StaticMode::CantAttack,
+            StaticMode::AttackOnlyNeighbor,
             StaticMode::ExtraBlockers { count: None },
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat {

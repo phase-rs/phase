@@ -270,6 +270,13 @@ mod tests {
                 )),
             );
 
+        // Flush after installing the CantGainLife static so the `StaticModePresence`
+        // index (consulted by `check_static_ability` via `player_has_cant_gain_life`)
+        // reflects it. In production a static entering the battlefield always triggers a
+        // layers flush; this test mutates `static_definitions` directly, so it must flush
+        // to reproduce the production invariant.
+        evaluate_layers(&mut state);
+
         let ability = ResolvedAbility::new(
             Effect::ExchangeLifeWithStat {
                 player: TargetFilter::Controller,
