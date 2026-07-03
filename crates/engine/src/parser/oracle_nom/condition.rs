@@ -4430,8 +4430,11 @@ fn parse_opponent_cards_put_into_their_graveyard_from_anywhere_this_turn(
 
     // The mandatory "card"/"cards" noun and the graveyard clause form the
     // suffix; whatever `take_until` leaves before it is the type qualifier
-    // ("artifact", "creature", …), or empty for the bare-cards case. The suffix
-    // must terminate at end-of-input so upstream `all_consuming` is satisfied.
+    // ("artifact", "creature", …), or empty for the bare-cards case. Any
+    // remaining input is returned unconsumed (a composable leaf parser); the
+    // standalone-condition caller wraps this in `all_consuming`, which enforces
+    // end-of-input, so this parser need not (and must not) reject a non-empty
+    // remainder itself.
     let plural = "cards put into their graveyard from anywhere this turn";
     let singular = "card put into their graveyard from anywhere this turn";
     let (rest, type_text) = alt((
@@ -4439,12 +4442,6 @@ fn parse_opponent_cards_put_into_their_graveyard_from_anywhere_this_turn(
         terminated(take_until(singular), tag(singular)),
     ))
     .parse(rest)?;
-    if !rest.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
     let type_text = type_text.trim();
 
     let filter = if type_text.is_empty() {
