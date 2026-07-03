@@ -14489,6 +14489,11 @@ fn apply_static_activated_ability_cost_reduction(
     let active_keyword = ability_def
         .ability_tag
         .map(crate::types::ability::AbilityTag::keyword_str);
+    // CR 605.1a: Classify the activating ability BEFORE the mutable cost borrow so
+    // an `ActivationExemption::ManaAbilities` static ("unless they're mana
+    // abilities" / "that aren't mana abilities" — Suppression Field, Zirda) can
+    // skip a mana ability's cost.
+    let ability_is_mana = super::mana_abilities::is_mana_ability(ability_def);
 
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
@@ -14501,11 +14506,17 @@ fn apply_static_activated_ability_cost_reduction(
             amount,
             minimum_mana,
             dynamic_count,
+            exemption,
         } = &def.mode
         else {
             continue;
         };
         if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
+            continue;
+        }
+        // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
+        // adjustment (Suppression Field's tax, Zirda's discount).
+        if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
             continue;
         }
         if def.affected.as_ref().is_some_and(|filter| {

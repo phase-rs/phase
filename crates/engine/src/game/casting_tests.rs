@@ -8437,6 +8437,7 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
                 amount: 1,
                 minimum_mana: None,
                 dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
             })
             .affected(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Subtype("Food".to_string())],
@@ -8488,6 +8489,99 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     assert!(
         state.stack.iter().any(|entry| entry.source_id == food),
         "Food activation should reach the stack after paying the reduced cost"
+    );
+}
+
+#[test]
+fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
+    // CR 601.2f + CR 605.1a: A "cost {2} less to activate that aren't mana
+    // abilities" static (Zirda, the Dawnwaker) must discount a NON-mana activated
+    // ability but leave a MANA ability's cost untouched. Both abilities share the
+    // same "{2}, {T}" cost; with no mana available, the discounted non-mana
+    // ability ({2}→{0}) is activatable while the exempt mana ability (still {2})
+    // is not — proving the `ActivationExemption::ManaAbilities` runtime skip.
+    let mut state = setup_game_at_main_phase();
+    let zirda = create_object(
+        &mut state,
+        CardId(760),
+        PlayerId(0),
+        "Zirda, the Dawnwaker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&zirda)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You),
+            )),
+        );
+
+    let rock = create_object(
+        &mut state,
+        CardId(761),
+        PlayerId(0),
+        "Two-Ability Rock".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let cost = || AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        // Ability 0: a MANA ability ("{2}, {T}: Add {C}") — exempt, cost stays {2}.
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(cost()),
+        );
+        // Ability 1: a NON-mana ability ("{2}, {T}: You gain 1 life") — discounted to {0}.
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(cost()),
+        );
+    }
+
+    // No mana available for either activation.
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), rock, 0),
+        "the mana ability must NOT be discounted (exempt) — its {{2}} is unpayable with no mana"
+    );
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), rock, 1),
+        "the non-mana ability must be discounted {{2}}->{{0}} and be activatable with no mana"
     );
 }
 
@@ -8588,6 +8682,7 @@ fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
                 amount: 2,
                 minimum_mana: Some(1),
                 dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -36122,6 +36217,7 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::permanent()
@@ -36246,6 +36342,7 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
         })
         .affected(TargetFilter::HasChosenName)]
         .into();
@@ -36367,6 +36464,7 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
             dynamic_count: Some(QuantityRef::Power {
                 scope: ObjectScope::Source,
             }),
+            exemption: crate::types::statics::ActivationExemption::None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
@@ -36635,6 +36733,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                 dynamic_count: Some(QuantityRef::Power {
                     scope: ObjectScope::Source,
                 }),
+                exemption: crate::types::statics::ActivationExemption::None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -37176,6 +37275,7 @@ fn plot_special_action_ignores_generic_activated_ability_cost_modifiers() {
             amount: 1,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
         })
     };
     let doc_axis = || {
@@ -37400,6 +37500,7 @@ fn firion_reduces_self_equip_ability_cost() {
             amount: 2,
             minimum_mana: None,
             dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
         })
         .affected(TargetFilter::SelfRef)]
         .into();

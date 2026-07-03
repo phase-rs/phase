@@ -955,6 +955,14 @@ pub enum StaticMode {
         /// When present, the total adjustment is `amount * resolve_quantity(dynamic_count)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
+        /// CR 605.1a: "unless they're mana abilities" / "that aren't mana abilities"
+        /// exemption (Suppression Field, Zirda the Dawnwaker). Reuses the same
+        /// [`ActivationExemption`] axis as [`StaticMode::CantBeActivated`] rather
+        /// than a bool. `ManaAbilities` excludes activations classified as mana
+        /// abilities (CR 605.1a) from the adjustment; `None` (the default, kept
+        /// back-compatible for already-serialized card-data) adjusts every match.
+        #[serde(default)]
+        exemption: ActivationExemption,
     },
     /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
     /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
@@ -2565,6 +2573,7 @@ impl FromStr for StaticMode {
                             amount: amt.parse().unwrap_or(1),
                             minimum_mana: extra.and_then(|value| value.parse().ok()),
                             dynamic_count: None,
+                            exemption: ActivationExemption::None,
                         }
                     } else {
                         StaticMode::Other(s.to_string())
