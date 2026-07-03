@@ -794,6 +794,27 @@ pub(crate) fn parse_graveyard_keyword_continuation(
             }
             Some(Keyword::Encore(ManaCost::SelfManaCost))
         }
+        GrantedCastKeywordKind::Embalm => {
+            // CR 702.128a: "Its embalm cost is equal to its mana cost."
+            // (Naktamun). Same shape as scavenge/encore.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("its embalm cost is equal to "),
+                        tag("the embalm cost is equal to "),
+                    )),
+                )
+                .parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                ManaCost::SelfManaCost,
+            )))
+        }
         GrantedCastKeywordKind::Foretell => {
             // CR 702.143a + CR 601.2f: "Its foretell cost is equal to its mana
             // cost reduced by {N}." (Dream Devourer, reduced by {2}). The bare
