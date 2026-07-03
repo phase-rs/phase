@@ -714,7 +714,9 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
 ///    typed condition are rewritten — the tapped/untapped pair plus their
-///    combat-state siblings "attacking"/"blocking"/"blocked"
+///    combat-state siblings "attacking"/"blocking"/"blocked" and the compound
+///    "attacking or blocking" (which `~ is …` lowers to
+///    `Or([SourceIsAttacking, SourceIsBlocking])`)
 ///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
@@ -744,6 +746,7 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
                 | "attacking"
                 | "blocking"
                 | "blocked"
+                | "attacking or blocking"
                 | "modified"
                 | "equipped"
                 | "enchanted"
