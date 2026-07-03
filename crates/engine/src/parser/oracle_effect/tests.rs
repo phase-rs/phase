@@ -38172,3 +38172,56 @@ fn teyo_minus_two_grants_temporary_attack_only_neighbor() {
         "expected a GrantStaticAbility(AttackOnlyNeighbor); got {static_abilities:?}"
     );
 }
+
+/// CR 701.9a + CR 107.1b: The whole Monomania oracle line parses -- with
+/// subject injection -- to the existing `Effect::Discard`: the target player
+/// discards `hand size - 1` cards of their own choice, keeping exactly one.
+/// Fail-before: this line previously lowered to
+/// `Effect::Unimplemented { name: "choose" }` (the "chooses ... discards the
+/// rest" phrasing was unrecognized).
+#[test]
+fn monomania_choose_and_discard_rest_routes_to_discard() {
+    let effect = parse_effect("Target player chooses a card in their hand and discards the rest.");
+    let Effect::Discard {
+        count,
+        target,
+        selection,
+        unless_filter,
+        filter,
+    } = effect
+    else {
+        panic!("expected Effect::Discard, got {effect:?}");
+    };
+    // Subject injection rewrote the default Controller target to the target
+    // player -- the caster is NOT the one who discards.
+    assert_ne!(
+        target,
+        TargetFilter::Controller,
+        "discarding player must be the injected target, not the caster"
+    );
+    // Chooser-directed discard (CR 701.9a): the player keeps one card of choice.
+    assert_eq!(selection, crate::types::ability::CardSelectionMode::Chosen);
+    assert!(unless_filter.is_none() && filter.is_none());
+    // Count = hand size - 1, floored at 0 (keep exactly one card).
+    match count {
+        QuantityExpr::ClampMin { inner, minimum } => {
+            assert_eq!(minimum, 0);
+            match *inner {
+                QuantityExpr::Offset { inner, offset } => {
+                    assert_eq!(offset, -1);
+                    assert!(
+                        matches!(
+                            *inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::HandSize { .. }
+                            }
+                        ),
+                        "expected HandSize inner, got {inner:?}"
+                    );
+                }
+                other => panic!("expected Offset(-1), got {other:?}"),
+            }
+        }
+        other => panic!("expected ClampMin(hand size - 1, 0), got {other:?}"),
+    }
+}
