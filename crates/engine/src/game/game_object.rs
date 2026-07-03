@@ -8,7 +8,7 @@ use crate::types::ability::{
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1785,6 +1785,18 @@ impl GameObject {
     pub fn chosen_label(&self) -> Option<&str> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Label(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// CR 607.2d + CR 508.1c: Look up the persisted chosen seat direction
+    /// (left/right) for a directional attack-restriction source (Pramikon,
+    /// Sky Rampart; Mystic Barrier; Teyo, Geometric Tactician). Returns `None`
+    /// until a direction has been chosen, in which case the restriction is
+    /// inert. Read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+    pub fn chosen_direction(&self) -> Option<SeatDirection> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Direction(d) => Some(*d),
             _ => None,
         })
     }

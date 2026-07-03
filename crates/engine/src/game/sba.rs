@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::functioning_abilities::static_kind_present;
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{
@@ -14,7 +15,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 use super::speed::{controls_start_your_engines_in, set_speed};
@@ -387,11 +388,17 @@ fn ascend_status_in(
 /// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) can reuse the same
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
 pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
-    let from_permanent =
+    // CR 604.1: O(1) presence gate on the battlefield-static authority only. The
+    // transient-continuous-effect path below is a separate authority the index does
+    // NOT fold, so gate the `.any()` with a short-circuit conjunction rather than an
+    // early return.
+    let from_permanent = static_kind_present(state, StaticModeKind::CantLoseTheGame) && {
+        crate::game::perf_counters::record_static_full_scan();
         super::functioning_abilities::battlefield_active_statics(state).any(|(obj, def)| {
             def.mode == StaticMode::CantLoseTheGame
                 && static_affects_player(obj.controller, &def.affected, player_id)
-        });
+        })
+    };
     if from_permanent {
         return true;
     }
@@ -857,9 +864,10 @@ pub fn legend_rule_exempt(
 
 fn legend_rule_exemption_static_present(state: &GameState) -> bool {
     crate::game::perf_counters::record_legend_rule_mode_gate_scan();
-    super::functioning_abilities::any_functioning_static_mode(state, |m| {
-        matches!(m, StaticMode::LegendRuleDoesntApply)
-    })
+    // Read the discriminant from the O(1) `StaticModePresence` index (Unit 1) instead of
+    // sweeping `game_functioning_statics`. A post-flush-precise superset: a spurious `true`
+    // falls through to the exact per-permanent exemption check.
+    static_kind_present(state, StaticModeKind::LegendRuleDoesntApply)
 }
 
 fn legend_rule_exempt_with_gate(
@@ -4443,6 +4451,62 @@ mod tests {
              eliminated by draw-from-empty SBA"
         );
         assert!(!state.eliminated_players.contains(&PlayerId(0)));
+    }
+
+    /// Unit 2, site #19 (multi-authority): `player_has_cant_lose` gates ONLY its
+    /// battlefield `CantLoseTheGame` scan behind the O(1) presence index, via a
+    /// short-circuit conjunction, and leaves the `transient_grants_static_mode_to_player`
+    /// authority below untouched. With the index PRECISE and absent (post-flush, zero
+    /// battlefield statics) but an active TCE granting CantLoseTheGame to P0, the
+    /// predicate must still return `true` — proving the gate did NOT early-return and
+    /// suppress the transient authority. A wrong `if !static_kind_present { return false }`
+    /// flips this. The battlefield scan is skipped (0 recorded full scans), and the
+    /// negative reach-guard (P1, no grant) proves the positive is non-vacuous.
+    #[test]
+    fn cant_lose_tce_survives_precise_battlefield_gate() {
+        use crate::types::ability::{ContinuousModification, Duration};
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            crate::types::identifiers::ObjectId(999),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantLoseTheGame,
+            }],
+            None,
+        );
+        // Flush makes the presence index PRECISE: no battlefield CantLoseTheGame static
+        // exists, so `static_kind_present` is false and the battlefield scan is skipped.
+        layers::evaluate_layers(&mut state);
+
+        crate::game::perf_counters::reset();
+        let p0_cant_lose = player_has_cant_lose(&state, PlayerId(0));
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            p0_cant_lose,
+            "transient-granted CantLoseTheGame must survive the battlefield-static gate (revert-failing)"
+        );
+        assert_eq!(
+            scans, 0,
+            "the precise-absent index must skip the battlefield scan; only the TCE authority answers"
+        );
+        // Negative reach-guard: a player with no grant is not protected — the true above
+        // is a real grant, not a blanket pass.
+        assert!(
+            !player_has_cant_lose(&state, PlayerId(1)),
+            "a player with neither authority is not protected"
+        );
+
+        // Production path: draw-from-empty SBA must not eliminate the TCE-covered player.
+        state.players[0].drew_from_empty_library = true;
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(
+            !state.players[0].is_eliminated,
+            "TCE-covered player must not be eliminated by the draw-from-empty SBA"
+        );
     }
 
     // --- CR 702.131b: Ascend / city's blessing grant SBA ---

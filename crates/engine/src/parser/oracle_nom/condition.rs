@@ -4347,7 +4347,11 @@ fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, Sta
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Graveyard),
                 to: None,
-                filter: add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]),
+                filter: add_owned_with_props(
+                    TargetFilter::Any,
+                    ControllerRef::You,
+                    &[FilterProp::NonToken],
+                ),
             },
             1,
         ),
@@ -4377,7 +4381,7 @@ fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Hand),
-                filter: add_owned_you_with_props(filter, &[]),
+                filter: add_owned_with_props(filter, ControllerRef::You, &[]),
             },
             1,
         ),
@@ -4385,6 +4389,95 @@ fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
 }
 
 fn parse_card_put_into_your_graveyard_from_anywhere_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_opponent_cards_put_into_their_graveyard_from_anywhere_this_turn,
+        parse_your_card_put_into_your_graveyard_from_anywhere_this_turn,
+    ))
+    .parse(input)
+}
+
+/// CR 404.1 + CR 109.5 + CR 603.4: "an opponent had N or more cards put into
+/// their graveyard from anywhere this turn" — Ravenous Trap's alternative-cost
+/// gate. A card is put into *its owner's* graveyard (CR 404.1), so "their
+/// graveyard" scopes by ownership (`Owned { Opponent }`), not control. The
+/// count uses the shared "N or more"/"a(n)" (→ 1) threshold idiom. The bare
+/// "cards" noun carries no type, so `TargetFilter::Any` is accepted here (the
+/// owner + non-token tags still narrow it); a preceding type word
+/// ("artifact cards") narrows via `parse_type_phrase`.
+fn parse_opponent_cards_put_into_their_graveyard_from_anywhere_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // `tag("an opponent had ")` MUST precede any `parse_article` attempt: the
+    // shared `parse_article` (`alt(("an ", "a "))`) would greedily eat "an " of
+    // "an opponent" and desync the parse.
+    let (rest, _) = tag("an opponent had ").parse(input)?;
+    let (rest, count) = alt((
+        // "N or more cards"
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let (rest, _) = tag(" or more ").parse(rest)?;
+            Ok((rest, n))
+        },
+        // "a card" / "an artifact card" → 1
+        |i| {
+            let (rest, _) = parse_article(i)?;
+            Ok((rest, 1u32))
+        },
+    ))
+    .parse(rest)?;
+
+    // The mandatory "card"/"cards" noun and the graveyard clause form the
+    // suffix; whatever `take_until` leaves before it is the type qualifier
+    // ("artifact", "creature", …), or empty for the bare-cards case. Any
+    // remaining input is returned unconsumed (a composable leaf parser); the
+    // standalone-condition caller wraps this in `all_consuming`, which enforces
+    // end-of-input, so this parser need not (and must not) reject a non-empty
+    // remainder itself.
+    let plural = "cards put into their graveyard from anywhere this turn";
+    let singular = "card put into their graveyard from anywhere this turn";
+    let (rest, type_text) = alt((
+        terminated(take_until(plural), tag(plural)),
+        terminated(take_until(singular), tag(singular)),
+    ))
+    .parse(rest)?;
+    let type_text = type_text.trim();
+
+    let filter = if type_text.is_empty() {
+        // Bare "cards" — no type qualifier. Unlike the strict your/singular
+        // branch, `Any` is accepted here; the owner + non-token tags below
+        // still bound the set.
+        TargetFilter::Any
+    } else {
+        let (filter, leftover) = parse_type_phrase(type_text);
+        if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        filter
+    };
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: Some(Zone::Graveyard),
+                filter: add_owned_with_props(
+                    filter,
+                    ControllerRef::Opponent,
+                    &[FilterProp::NonToken],
+                ),
+            },
+            count,
+        ),
+    ))
+}
+
+fn parse_your_card_put_into_your_graveyard_from_anywhere_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
@@ -4405,7 +4498,7 @@ fn parse_card_put_into_your_graveyard_from_anywhere_this_turn(
             QuantityRef::ZoneChangeCountThisTurn {
                 from: None,
                 to: Some(Zone::Graveyard),
-                filter: add_owned_you_with_props(filter, &[FilterProp::NonToken]),
+                filter: add_owned_with_props(filter, ControllerRef::You, &[FilterProp::NonToken]),
             },
             1,
         ),
@@ -4440,19 +4533,24 @@ fn parse_object_put_into_graveyard_from_battlefield_this_turn(
     ))
 }
 
-/// CR 109.5: Append `Owned { controller: You }` plus any caller-supplied
+/// CR 109.5 + CR 404.1: Append `Owned { controller }` plus any caller-supplied
 /// `extras` to `filter`'s property set, skipping props whose variant tag
 /// already appears (presence is variant-tag equality via `mem::discriminant`,
 /// matching the original tag-only `matches!(p, FilterProp::X { .. })` checks).
-/// Pass `&[]` for the bare "owned by you" case; pass `&[FilterProp::NonToken]`
-/// for "you own a nontoken card" patterns. Wraps `TargetFilter::Any` into a
-/// fresh `Typed` filter carrying the same property set; returns other variants
-/// (`Player`, `SpecificObject`, …) unchanged because owner-tagging is
-/// meaningless on non-typed shapes.
-fn add_owned_you_with_props(filter: TargetFilter, extras: &[FilterProp]) -> TargetFilter {
-    let owned = FilterProp::Owned {
-        controller: ControllerRef::You,
-    };
+/// A card is always put into *its owner's* graveyard (CR 404.1), so ownership —
+/// not control — is the correct axis for "your"/"their" graveyard phrases; pass
+/// `ControllerRef::You` for "your graveyard" and `ControllerRef::Opponent` for
+/// "an opponent's/their graveyard". Pass `&[]` for the bare "owned" case; pass
+/// `&[FilterProp::NonToken]` for "own a nontoken card" patterns. Wraps
+/// `TargetFilter::Any` into a fresh `Typed` filter carrying the same property
+/// set; returns other variants (`Player`, `SpecificObject`, …) unchanged
+/// because owner-tagging is meaningless on non-typed shapes.
+fn add_owned_with_props(
+    filter: TargetFilter,
+    controller: ControllerRef,
+    extras: &[FilterProp],
+) -> TargetFilter {
+    let owned = FilterProp::Owned { controller };
     let push_unique_by_tag = |props: &mut Vec<FilterProp>, prop: FilterProp| {
         let tag = std::mem::discriminant(&prop);
         if !props.iter().any(|p| std::mem::discriminant(p) == tag) {
@@ -12733,6 +12831,51 @@ mod tests {
         }
     }
 
+    /// CR 404.1 + CR 109.5 + CR 603.4: Ravenous Trap's alt-cost gate — "an
+    /// opponent had three or more cards put into their graveyard from anywhere
+    /// this turn". Bare "cards" carries no type, so the filter is `Any` narrowed
+    /// only by the owner + non-token tags; ownership is `Opponent` (CR 404.1: a
+    /// card goes to its owner's graveyard), and the threshold is GE 3.
+    #[test]
+    fn test_opponent_cards_put_into_their_graveyard_from_anywhere_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "an opponent had three or more cards put into their graveyard from anywhere this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: None,
+                                to: Some(Zone::Graveyard),
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {
+                assert!(filter.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent
+                    }
+                )));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|property| matches!(property, FilterProp::NonToken)));
+            }
+            other => {
+                panic!(
+                    "expected opponent-owned card graveyard zone-change count GE 3, got {other:?}"
+                )
+            }
+        }
+    }
+
     #[test]
     fn test_artifact_or_creature_put_into_graveyard_from_battlefield_this_turn() {
         let (rest, c) = parse_inner_condition(
@@ -14596,16 +14739,16 @@ mod tests {
         );
     }
 
-    /// CR 109.5: `add_owned_you_with_props` is the unified replacement for the
-    /// prior `add_owned_you` / `add_owned_you_non_token` pair. With an empty
-    /// extras slice it must produce only the `Owned { You }` tag (the bare
-    /// "owned by you" shape); with `&[FilterProp::NonToken]` it must additionally
-    /// carry the `NonToken` tag. Both `Typed` inputs and `Any` (lifted to a
-    /// fresh `Typed` filter) must follow the same uniqueness rule.
+    /// CR 109.5 + CR 404.1: `add_owned_with_props` is the unified replacement
+    /// for the prior `add_owned_you` / `add_owned_you_non_token` pair. With an
+    /// empty extras slice it must produce only the `Owned { controller }` tag
+    /// (the bare "owned" shape); with `&[FilterProp::NonToken]` it must
+    /// additionally carry the `NonToken` tag. Both `Typed` inputs and `Any`
+    /// (lifted to a fresh `Typed` filter) must follow the same uniqueness rule.
     #[test]
     fn add_owned_you_with_props_matches_legacy_helper_shapes() {
         // Empty extras + Any input → fresh Typed filter with Owned only.
-        let owned_only = add_owned_you_with_props(TargetFilter::Any, &[]);
+        let owned_only = add_owned_with_props(TargetFilter::Any, ControllerRef::You, &[]);
         assert_eq!(
             owned_only,
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
@@ -14614,7 +14757,11 @@ mod tests {
         );
 
         // NonToken extras + Any input → Owned + NonToken in that order.
-        let owned_non_token = add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]);
+        let owned_non_token = add_owned_with_props(
+            TargetFilter::Any,
+            ControllerRef::You,
+            &[FilterProp::NonToken],
+        );
         assert_eq!(
             owned_non_token,
             TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -14633,7 +14780,11 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
                 controller: ControllerRef::Opponent,
             }]));
-        let after = add_owned_you_with_props(pre_owned.clone(), &[FilterProp::NonToken]);
+        let after = add_owned_with_props(
+            pre_owned.clone(),
+            ControllerRef::You,
+            &[FilterProp::NonToken],
+        );
         match after {
             TargetFilter::Typed(typed) => {
                 let owned_count = typed
@@ -14649,7 +14800,11 @@ mod tests {
 
         // Non-typed/non-Any inputs (e.g., Player) must pass through unchanged
         // — owner-tagging is meaningless on those shapes.
-        let unchanged = add_owned_you_with_props(TargetFilter::Player, &[FilterProp::NonToken]);
+        let unchanged = add_owned_with_props(
+            TargetFilter::Player,
+            ControllerRef::You,
+            &[FilterProp::NonToken],
+        );
         assert_eq!(unchanged, TargetFilter::Player);
     }
 
