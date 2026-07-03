@@ -2057,11 +2057,13 @@ fn try_split_grant_and_dual_gated_combat(
 ) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
 
+    // `scan_preceded` resumes at word boundaries without the preceding space, so
+    // match `and can't attack if ` (not ` and …`) — same as `try_split_and_cant_attack`.
     let (grant_lower, _matched, gates_lower) =
         nom_primitives::scan_preceded(tp.lower, |i: &str| {
             let (i, _) = alt((
-                tag::<_, _, VE>(" and can't attack if "),
-                tag::<_, _, VE>(" and can\u{2019}t attack if "),
+                tag::<_, _, VE>("and can't attack if "),
+                tag::<_, _, VE>("and can\u{2019}t attack if "),
             ))
             .parse(i)?;
             Ok((i, ()))
