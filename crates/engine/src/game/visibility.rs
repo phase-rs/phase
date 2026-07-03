@@ -1232,28 +1232,24 @@ mod tests {
         }
 
         let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
-        assert!(opponent
-            .iter()
-            .all(|e| !matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    from: Some(Zone::Library),
-                    to: Zone::Battlefield,
-                    ..
-                }
-            )));
+        assert!(opponent.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
 
         let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
-        assert!(spectator
-            .iter()
-            .all(|e| !matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    from: Some(Zone::Library),
-                    to: Zone::Battlefield,
-                    ..
-                }
-            )));
+        assert!(spectator.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1267,7 +1263,6 @@ mod tests {
             "Cascade Card".to_string(),
             Zone::Exile,
         );
-        state.exile.push(card);
 
         let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
             card,
