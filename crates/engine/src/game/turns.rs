@@ -14,12 +14,13 @@ use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::statics::{HandSizeModification, StaticMode};
+use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 use super::combat;
 use super::combat_damage;
 use super::day_night;
+use super::functioning_abilities::static_kind_present;
 use super::priority;
 use super::turn_control;
 use super::zones;
@@ -875,10 +876,7 @@ pub fn execute_untap_with_choices(
     // per-permanent scan so the O(N) `check_static_ability` re-scan is skipped
     // for every permanent when no functioning CantUntap static exists
     // (O(N^2) -> O(N) on the every-turn untap step).
-    let has_cant_untap_static =
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::CantUntap)
-        });
+    let has_cant_untap_static = static_kind_present(state, StaticModeKind::CantUntap);
     let intrinsic_cant_untap: HashSet<ObjectId> = state
         .battlefield
         .iter()
@@ -1144,10 +1142,7 @@ fn untap_excluded_ids(state: &GameState, player: PlayerId) -> HashSet<ObjectId> 
         .collect();
     // CR 502.3 + CR 604.1: hoist the CantUntap existence gate once before the
     // per-permanent scan (O(N^2) -> O(N) when no functioning CantUntap exists).
-    let has_cant_untap_static =
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::CantUntap)
-        });
+    let has_cant_untap_static = static_kind_present(state, StaticModeKind::CantUntap);
     for id in state.battlefield.iter().copied() {
         let Some(obj) = state.objects.get(&id) else {
             continue;
@@ -4049,6 +4044,10 @@ mod tests {
             .map(|i| create_tapped_creature(&mut state, 100 + i, &format!("Bear {i}")))
             .collect();
 
+        // Flush makes the `StaticModePresence` index PRECISE (CantUntap absent). In
+        // production the index is always flushed before the untap step; the pre-flush
+        // `all_present` default would conservatively fall through to the O(N) scan.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
@@ -4083,6 +4082,10 @@ mod tests {
         create_tapped_creature(&mut state, 2, "Bear A");
         create_tapped_creature(&mut state, 3, "Bear B");
 
+        // Flush makes the `StaticModePresence` index PRECISE (CantUntap absent, only the
+        // MaxUntapPerType cap present). Production reaches this path with a flushed index;
+        // the pre-flush `all_present` default would conservatively fall through.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let prompt = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new());
         let scans = crate::game::perf_counters::snapshot().static_full_scans;

@@ -5154,13 +5154,28 @@ fn parse_shared_quality_reference<'a>(
 
     let (filter, rest) = parse_target(input);
     if matches!(filter, TargetFilter::Any) {
-        Err(nom::Err::Error(nom::error::Error::new(
+        return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
-        )))
-    } else {
-        Ok((rest, filter))
+        )));
     }
+    let rest_trimmed = rest.trim_start();
+    if let Ok((after_or, sep)) =
+        alt((tag::<_, _, OracleError<'_>>("or "), tag(", or "))).parse(rest_trimmed)
+    {
+        let (filter2, rest2) = parse_target(after_or);
+        if !matches!(filter2, TargetFilter::Any) {
+            return Ok((
+                rest2,
+                TargetFilter::Or {
+                    filters: vec![filter, filter2],
+                },
+            ));
+        }
+        // Fall through: only accept the first leg if the disjunction tail didn't parse.
+        let _ = sep;
+    }
+    Ok((rest, filter))
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
