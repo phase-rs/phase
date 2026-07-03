@@ -73,6 +73,32 @@ pub fn can_activate_loyalty_ability(
     player: PlayerId,
     ability_index: usize,
 ) -> bool {
+    can_activate_loyalty_ability_impl(state, planeswalker_id, player, ability_index, None)
+}
+
+pub(crate) fn can_activate_loyalty_ability_with_restriction_gates(
+    state: &GameState,
+    planeswalker_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    restriction_gates: &super::restrictions::ActivationRestrictionStaticGates,
+) -> bool {
+    can_activate_loyalty_ability_impl(
+        state,
+        planeswalker_id,
+        player,
+        ability_index,
+        Some(restriction_gates),
+    )
+}
+
+fn can_activate_loyalty_ability_impl(
+    state: &GameState,
+    planeswalker_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    restriction_gates: Option<&super::restrictions::ActivationRestrictionStaticGates>,
+) -> bool {
     let obj = match state.objects.get(&planeswalker_id) {
         Some(o) => o,
         None => return false,
@@ -115,13 +141,23 @@ pub fn can_activate_loyalty_ability(
         return false;
     }
 
-    super::restrictions::check_activation_restrictions(
-        state,
-        player,
-        planeswalker_id,
-        ability_index,
-        &ability.activation_restrictions,
-    )
+    match restriction_gates {
+        Some(gates) => super::restrictions::check_activation_restrictions_with_static_gates(
+            state,
+            player,
+            planeswalker_id,
+            ability_index,
+            &ability.activation_restrictions,
+            gates,
+        ),
+        None => super::restrictions::check_activation_restrictions(
+            state,
+            player,
+            planeswalker_id,
+            ability_index,
+            &ability.activation_restrictions,
+        ),
+    }
     .is_ok()
 }
 

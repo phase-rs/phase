@@ -26,6 +26,7 @@ use crate::types::mana::{
 };
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use std::sync::Arc;
 
 fn setup_game_at_main_phase() -> GameState {
@@ -15199,6 +15200,315 @@ fn exhaust_ability_only_once_is_enforced_and_emits_event() {
             is_mana_ability: false,
         } if *source_id == source
     )));
+}
+
+fn add_tagged_draw_artifact(
+    state: &mut GameState,
+    card_id: CardId,
+    name: &str,
+    restriction: ActivationRestriction,
+    tag: Option<AbilityTag>,
+) -> ObjectId {
+    let source = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&source).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .activation_restrictions(vec![restriction]);
+    ability.ability_tag = tag;
+    Arc::make_mut(&mut obj.abilities).push(ability);
+    source
+}
+
+fn add_modify_activation_limit_static(
+    state: &mut GameState,
+    card_id: CardId,
+    controller: PlayerId,
+    keyword: &str,
+    new_limit: u8,
+    affected: TargetFilter,
+) -> ObjectId {
+    let source = create_object(
+        state,
+        card_id,
+        controller,
+        "Activation Limit Static".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&source).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.static_definitions.push(
+        StaticDefinition::new(StaticMode::ModifyActivationLimit {
+            keyword: keyword.to_string(),
+            new_limit,
+        })
+        .affected(affected),
+    );
+    source
+}
+
+#[test]
+fn only_once_each_turn_without_modify_limit_static_avoids_exact_scan() {
+    let mut state = setup_game_at_main_phase();
+    let source = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_301),
+        "Exhaust Relic",
+        ActivationRestriction::OnlyOnceEachTurn,
+        Some(AbilityTag::Exhaust),
+    );
+
+    let mut events = Vec::new();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+
+    crate::game::perf_counters::reset();
+    let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+    assert!(second.is_err());
+    assert_eq!(
+        crate::game::perf_counters::snapshot().restriction_static_exact_scans,
+        0,
+        "absent ModifyActivationLimit statics must keep the once-per-turn base limit without scanning"
+    );
+
+    let untagged = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_302),
+        "Untagged Relic",
+        ActivationRestriction::OnlyOnceEachTurn,
+        None,
+    );
+    handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events).unwrap();
+
+    crate::game::perf_counters::reset();
+    let untagged_second =
+        handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events);
+
+    assert!(untagged_second.is_err());
+    assert_eq!(
+        crate::game::perf_counters::snapshot().restriction_static_exact_scans,
+        0,
+        "untagged abilities stay at the base limit and never enter the static scan"
+    );
+}
+
+#[test]
+fn priority_activation_candidates_share_activation_restriction_static_gate() {
+    let mut state = setup_game_at_main_phase();
+    let sources = [
+        add_tagged_draw_artifact(
+            &mut state,
+            CardId(7_314),
+            "Exhaust Relic A",
+            ActivationRestriction::OnlyOnceEachTurn,
+            Some(AbilityTag::Exhaust),
+        ),
+        add_tagged_draw_artifact(
+            &mut state,
+            CardId(7_315),
+            "Exhaust Relic B",
+            ActivationRestriction::OnlyOnceEachTurn,
+            Some(AbilityTag::Exhaust),
+        ),
+        add_tagged_draw_artifact(
+            &mut state,
+            CardId(7_316),
+            "Exhaust Relic C",
+            ActivationRestriction::OnlyOnceEachTurn,
+            Some(AbilityTag::Exhaust),
+        ),
+    ];
+
+    crate::game::perf_counters::reset();
+    let actions = crate::ai_support::candidate_actions_broad(&state);
+    let offered = actions
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                &candidate.action,
+                GameAction::ActivateAbility { source_id, .. } if sources.contains(source_id)
+            )
+        })
+        .count();
+
+    assert_eq!(
+        offered,
+        sources.len(),
+        "all test abilities must reach the priority activation candidate loop"
+    );
+    let snapshot = crate::game::perf_counters::snapshot();
+    assert_eq!(
+        snapshot.restriction_static_mode_gate_scans, 1,
+        "priority activation candidate production must compute activation restriction static gates once for the batch"
+    );
+    assert_eq!(
+        snapshot.restriction_static_exact_scans, 0,
+        "absent ModifyActivationLimit statics must not fall through to exact static scans per candidate"
+    );
+}
+
+#[test]
+fn only_once_without_modify_limit_static_avoids_exact_scan() {
+    let mut state = setup_game_at_main_phase();
+    let source = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_303),
+        "Exhaust Jockey",
+        ActivationRestriction::OnlyOnce,
+        Some(AbilityTag::Exhaust),
+    );
+
+    let mut events = Vec::new();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+
+    crate::game::perf_counters::reset();
+    let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+    assert!(second.is_err());
+    assert_eq!(
+        crate::game::perf_counters::snapshot().restriction_static_exact_scans,
+        0,
+        "absent ModifyActivationLimit statics must keep the once-per-game base limit without scanning"
+    );
+}
+
+#[test]
+fn modify_activation_limit_hostile_statics_do_not_raise_limit() {
+    let mut state = setup_game_at_main_phase();
+    let source = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_304),
+        "Exhaust Relic",
+        ActivationRestriction::OnlyOnceEachTurn,
+        Some(AbilityTag::Exhaust),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_305),
+        PlayerId(1),
+        "exhaust",
+        2,
+        TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_306),
+        PlayerId(0),
+        "exhaust",
+        2,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_307),
+        PlayerId(0),
+        "boast",
+        2,
+        TargetFilter::SpecificObject { id: source },
+    );
+
+    let mut events = Vec::new();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+    let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+    assert!(
+        second.is_err(),
+        "wrong-controller, wrong-affected-filter, and wrong-keyword statics must not raise the base limit"
+    );
+}
+
+#[test]
+fn modify_activation_limit_matching_static_raises_each_turn_limit() {
+    let mut state = setup_game_at_main_phase();
+    let source = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_308),
+        "Exhaust Relic",
+        ActivationRestriction::OnlyOnceEachTurn,
+        Some(AbilityTag::Exhaust),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_309),
+        PlayerId(1),
+        "exhaust",
+        2,
+        TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_310),
+        PlayerId(0),
+        "exhaust",
+        2,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_311),
+        PlayerId(0),
+        "exhaust",
+        2,
+        TargetFilter::SpecificObject { id: source },
+    );
+
+    let mut events = Vec::new();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+    crate::game::perf_counters::reset();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
+        .expect("matching ModifyActivationLimit static raises the per-turn cap to 2");
+    assert!(
+        crate::game::perf_counters::snapshot().restriction_static_exact_scans > 0,
+        "matching ModifyActivationLimit mode presence must fall through to the exact static scan"
+    );
+    let third = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+    assert!(
+        third.is_err(),
+        "new_limit 2 must still reject the third activation"
+    );
+}
+
+#[test]
+fn modify_activation_limit_matching_static_raises_only_once_limit() {
+    let mut state = setup_game_at_main_phase();
+    let source = add_tagged_draw_artifact(
+        &mut state,
+        CardId(7_312),
+        "Exhaust Jockey",
+        ActivationRestriction::OnlyOnce,
+        Some(AbilityTag::Exhaust),
+    );
+    add_modify_activation_limit_static(
+        &mut state,
+        CardId(7_313),
+        PlayerId(0),
+        "exhaust",
+        2,
+        TargetFilter::SpecificObject { id: source },
+    );
+
+    let mut events = Vec::new();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+    handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
+        .expect("matching ModifyActivationLimit static raises the per-game cap to 2");
+    let third = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+    assert!(
+        third.is_err(),
+        "new_limit 2 must still reject the third activation"
+    );
 }
 
 #[test]
@@ -30453,6 +30763,35 @@ mod loyalty_gate {
         id
     }
 
+    fn set_opponent_combat_priority(state: &mut GameState) {
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    fn add_activate_as_instant_static(
+        state: &mut GameState,
+        source: ObjectId,
+        cost_category: CostCategory,
+        affected: TargetFilter,
+        condition: Option<StaticCondition>,
+    ) {
+        let mut def = StaticDefinition::new(StaticMode::ActivateAsInstant { cost_category })
+            .affected(affected);
+        if let Some(condition) = condition {
+            def = def.condition(condition);
+        }
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+    }
+
     /// CR 606.3: After activating loyalty ability A of a planeswalker, every
     /// other loyalty ability on the *same* planeswalker must be denied for
     /// the rest of the turn (per-permanent gate, not per-ability-index).
@@ -30631,6 +30970,164 @@ mod loyalty_gate {
         assert!(
             !can_activate_ability_now(&state, PlayerId(0), pw, 0),
             "permission must lapse when SourceEnteredThisTurn is false"
+        );
+    }
+
+    #[test]
+    fn activate_as_instant_no_static_denies_and_avoids_exact_scan() {
+        let mut state = setup_game_at_main_phase();
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Ordinary PW",
+            4,
+            vec![make_loyalty_ability(1)],
+        );
+        set_opponent_combat_priority(&mut state);
+
+        crate::game::perf_counters::reset();
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw, 0),
+            "loyalty ability with AsSorcery must be denied outside a sorcery-speed window without a static permission"
+        );
+        assert_eq!(
+            crate::game::perf_counters::snapshot().restriction_static_mode_gate_scans,
+            1,
+            "direct activation legality must compute one local activation restriction mode gate"
+        );
+        assert_eq!(
+            crate::game::perf_counters::snapshot().restriction_static_exact_scans,
+            0,
+            "absent ActivateAsInstant statics must avoid the exact permission scan"
+        );
+    }
+
+    #[test]
+    fn activate_as_instant_hostile_statics_do_not_allow_loyalty_timing() {
+        let cases = [
+            (
+                "wrong cost category",
+                CostCategory::PaysLife,
+                TargetFilter::SelfRef,
+                None,
+            ),
+            (
+                "false condition",
+                CostCategory::PaysLoyalty,
+                TargetFilter::SelfRef,
+                Some(StaticCondition::SourceEnteredThisTurn),
+            ),
+            (
+                "affected-filter mismatch",
+                CostCategory::PaysLoyalty,
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                None,
+            ),
+        ];
+
+        for (label, cost_category, affected, condition) in cases {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "Ordinary PW",
+                4,
+                vec![make_loyalty_ability(1)],
+            );
+            add_activate_as_instant_static(&mut state, pw, cost_category, affected, condition);
+            set_opponent_combat_priority(&mut state);
+
+            assert!(
+                !can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "{label}: nonmatching ActivateAsInstant static must not allow loyalty timing"
+            );
+        }
+    }
+
+    #[test]
+    fn activate_as_instant_matching_static_allows_loyalty_timing() {
+        let mut state = setup_game_at_main_phase();
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "The Wandering Emperor",
+            4,
+            vec![make_loyalty_ability(1)],
+        );
+        add_activate_as_instant_static(
+            &mut state,
+            pw,
+            CostCategory::PaysLife,
+            TargetFilter::SelfRef,
+            None,
+        );
+        add_activate_as_instant_static(
+            &mut state,
+            pw,
+            CostCategory::PaysLoyalty,
+            TargetFilter::SelfRef,
+            Some(StaticCondition::SourceEnteredThisTurn),
+        );
+        add_activate_as_instant_static(
+            &mut state,
+            pw,
+            CostCategory::PaysLoyalty,
+            TargetFilter::SelfRef,
+            None,
+        );
+        set_opponent_combat_priority(&mut state);
+
+        crate::game::perf_counters::reset();
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw, 0),
+            "matching ActivateAsInstant permission must allow loyalty activation outside sorcery timing"
+        );
+        assert!(
+            crate::game::perf_counters::snapshot().restriction_static_exact_scans > 0,
+            "matching mode presence must fall through to the exact permission scan"
+        );
+    }
+
+    #[test]
+    fn priority_loyalty_candidates_share_activation_restriction_static_gate() {
+        let mut state = setup_game_at_main_phase();
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "The Wandering Emperor",
+            4,
+            vec![make_loyalty_ability(1)],
+        );
+        add_activate_as_instant_static(
+            &mut state,
+            pw,
+            CostCategory::PaysLoyalty,
+            TargetFilter::SelfRef,
+            None,
+        );
+        set_opponent_combat_priority(&mut state);
+
+        crate::game::perf_counters::reset();
+        let actions = crate::ai_support::candidate_actions_broad(&state);
+
+        assert!(
+            actions.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == pw
+            )),
+            "matching ActivateAsInstant permission must offer the loyalty activation outside sorcery timing"
+        );
+        let snapshot = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            snapshot.restriction_static_mode_gate_scans, 1,
+            "priority loyalty candidate production must use the shared activation restriction static gate"
+        );
+        assert_eq!(
+            snapshot.restriction_static_exact_scans, 1,
+            "matching ActivateAsInstant permission must be checked once through the loyalty authority"
         );
     }
 }

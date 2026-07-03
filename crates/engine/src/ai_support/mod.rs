@@ -21,8 +21,8 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 pub use candidates::{
-    candidate_actions, candidate_actions_broad, candidate_actions_exact, ActionMetadata,
-    CandidateAction, TacticalClass,
+    candidate_actions, candidate_actions_broad, candidate_actions_exact,
+    candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
 };
 pub use context::{build_decision_context, AiDecisionContext};
 pub use copy::{
@@ -41,8 +41,15 @@ pub use filter::{
 /// guarantees that no candidate accepted by the simulation is silently
 /// dropped by a cheap filter.
 pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
+    validated_candidate_actions_with_probe(state, None)
+}
+
+pub fn validated_candidate_actions_with_probe(
+    state: &GameState,
+    probe: Option<&crate::game::casting::PriorityCastProbe>,
+) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    pipeline.apply(state, candidate_actions(state))
+    pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe)
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -912,7 +919,14 @@ fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<
 /// not need the spell-cost map or the grouped per-object map that
 /// `legal_actions_full` additionally builds.
 pub fn flat_priority_actions(state: &GameState) -> Vec<GameAction> {
-    validated_candidate_actions(state)
+    flat_priority_actions_with_probe(state, None)
+}
+
+pub fn flat_priority_actions_with_probe(
+    state: &GameState,
+    probe: Option<&crate::game::casting::PriorityCastProbe>,
+) -> Vec<GameAction> {
+    validated_candidate_actions_with_probe(state, probe)
         .into_iter()
         .map(|candidate| candidate.action)
         .filter(|action| !action.is_mana_ability())
@@ -927,20 +941,35 @@ pub fn flat_priority_actions(state: &GameState) -> Vec<GameAction> {
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
-    let flushed;
-    let state = if state.layers_dirty.is_dirty() {
-        flushed = {
-            let mut state = state.clone();
-            layers::flush_layers(&mut state);
-            state
-        };
-        &flushed
-    } else {
-        state
+    let priority_probe_storage;
+    let flushed_storage;
+    let (state, priority_probe) = match &state.waiting_for {
+        WaitingFor::Priority { player } => {
+            priority_probe_storage = if state.layers_dirty.is_dirty() {
+                let mut flushed = state.clone();
+                layers::flush_layers(&mut flushed);
+                crate::game::casting::PriorityCastProbe::from_flushed_state(flushed, *player)
+            } else {
+                crate::game::casting::PriorityCastProbe::new(state, *player)
+            };
+            (
+                priority_probe_storage.state(),
+                Some(&priority_probe_storage),
+            )
+        }
+        _ if state.layers_dirty.is_dirty() => {
+            flushed_storage = {
+                let mut state = state.clone();
+                layers::flush_layers(&mut state);
+                state
+            };
+            (&flushed_storage, None)
+        }
+        _ => (state, None),
     };
 
     let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
-        .unwrap_or_else(|| flat_priority_actions(state));
+        .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -3143,15 +3172,76 @@ mod tests {
 
         crate::game::perf_counters::reset();
         let (actions, spell_costs, grouped) = legal_actions_full(&state);
-        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        let counters = crate::game::perf_counters::snapshot();
 
-        assert_eq!(clones, 0);
+        assert_eq!(counters.state_clone_for_legality, 0);
+        assert_eq!(counters.priority_cast_probe_builds, 0);
         assert_eq!(actions.len(), 26);
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
         assert!(actions
             .iter()
             .any(|action| matches!(action, GameAction::ChooseTarget { target: None })));
+    }
+
+    #[test]
+    fn legal_actions_priority_cast_probe_reuses_one_flushed_state_and_one_auto_tap_cache() {
+        use crate::types::mana::ManaCostShard;
+        use crate::types::phase::Phase;
+
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+
+        for i in 0..3 {
+            create_land(&mut state, &format!("Island {i}"), &["Island"]);
+        }
+
+        let mut spell_ids = Vec::new();
+        for i in 0..3 {
+            let spell = create_object(
+                &mut state,
+                CardId(4000 + i),
+                PlayerId(0),
+                format!("Blue Spell {i}"),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&spell).unwrap();
+                obj.card_types.core_types.push(CoreType::Sorcery);
+                obj.mana_cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                };
+                Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ));
+            }
+            spell_ids.push(spell);
+        }
+
+        crate::game::perf_counters::reset();
+        let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        for spell in &spell_ids {
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if object_id == spell)),
+                "priority legal actions must include each castable spell"
+            );
+        }
+        assert_eq!(counters.priority_cast_probe_builds, 1);
+        assert_eq!(counters.auto_tap_source_cache_builds, 1);
+        assert!(
+            counters.cached_auto_tap_source_reuses >= spell_ids.len() as u64,
+            "expected at least one cached auto-tap source reuse per cast probe, got {:?}",
+            counters
+        );
     }
 
     #[test]

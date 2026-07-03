@@ -1010,7 +1010,7 @@ fn token_creation_needs_choice(
     enter_tapped: crate::types::proposed_event::EtbTapState,
     count: u32,
 ) -> bool {
-    let registry = replacement::build_replacement_registry();
+    let registry = replacement::replacement_registry();
     let proposed = ProposedEvent::CreateToken {
         owner,
         spec: Box::new(spec.clone()),
@@ -1019,7 +1019,7 @@ fn token_creation_needs_choice(
         count,
         applied: HashSet::new(),
     };
-    let candidates = replacement::find_applicable_replacements(state, &proposed, &registry);
+    let candidates = replacement::find_applicable_replacements(state, &proposed, registry);
     if candidates.is_empty() {
         return false;
     }

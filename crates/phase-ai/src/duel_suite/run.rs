@@ -538,6 +538,24 @@ fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
 }
 
 fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
+    drive_game(payload, seed, difficulty, MAX_TOTAL_ACTIONS)
+}
+
+/// Deterministic core game driver shared by the win-rate suite and the perf
+/// gate. Builds the two-player state, installs measurement-mode AI configs, and
+/// loops `run_ai_actions` until the action stream is empty or `action_cap` total
+/// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
+/// realized count may overshoot the cap within a batch — identical semantics to
+/// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
+/// result `(winner, turn_number)` is a pure function of
+/// `(binary, payload, seed, difficulty, action_cap)`; no wall-clock or thread
+/// scheduling influences it.
+pub(crate) fn drive_game(
+    payload: &DeckPayload,
+    seed: u64,
+    difficulty: AiDifficulty,
+    action_cap: usize,
+) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
     load_deck_into_state(&mut state, payload);
     engine::game::engine::start_game(&mut state);
@@ -564,7 +582,7 @@ fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Opti
             break;
         }
         total_actions += results.len();
-        if total_actions >= MAX_TOTAL_ACTIONS {
+        if total_actions >= action_cap {
             break;
         }
     }

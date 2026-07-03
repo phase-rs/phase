@@ -6750,6 +6750,7 @@ pub(super) fn auto_tap_mana_sources_excluding(
         excluded_sources,
         None,
         None,
+        None,
     );
 }
 
@@ -6790,62 +6791,74 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
         excluded_sources,
         payment_context,
         None,
+        None,
     );
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct AutoTapSourceCache {
+    player: PlayerId,
+    sources: Vec<ManaSourceOption>,
+}
+
+impl AutoTapSourceCache {
+    fn sources(&self) -> &[ManaSourceOption] {
+        &self.sources
+    }
+
+    fn is_for_player(&self, player: PlayerId) -> bool {
+        self.player == player
+    }
+
+    pub(super) fn contains_source(&self, source_id: ObjectId) -> bool {
+        self.sources
+            .iter()
+            .any(|option| option.object_id == source_id)
+    }
+}
+
+pub(super) fn build_auto_tap_source_cache(
+    state: &GameState,
+    player: PlayerId,
+) -> AutoTapSourceCache {
+    crate::game::perf_counters::record_auto_tap_source_cache_build();
+    AutoTapSourceCache {
+        player,
+        sources: collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn auto_tap_mana_sources_inner(
+pub(super) fn auto_tap_mana_sources_with_context_excluding_cached(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
-    excluded_sources: &HashSet<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
-    sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
+    excluded_sources: &HashSet<ObjectId>,
+    source_cache: Option<&AutoTapSourceCache>,
 ) {
-    use crate::types::card_type::CoreType;
-    use crate::types::mana::ManaCost;
-
-    // CR 601.2g: A player may spend mana from their mana pool to pay costs.
-    // Plan against the *residual* cost (what the pool can't already cover) so
-    // pre-floated mana isn't shadowed by redundant taps — e.g. Sol Ring + an
-    // Island floated before casting a 3-mana spell must not tap three more
-    // sources. Restriction-aware eligibility is delegated to
-    // `reduce_cost_by_pool`, which mirrors the real payment path.
-    let spell_meta =
-        deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
-    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let effective_ctx = payment_context.or(spell_ctx.as_ref());
-    // CR 609.4b: Auto-tap planning must use the same spend-as-any-color authority
-    // as legality dry-runs and real payment (`player_can_spend_as_any_color_for_payment`),
-    // including activation-source-filtered grants (Agatha's Soul Cauldron class).
-    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+    auto_tap_mana_sources_inner(
         state,
         player,
+        cost,
+        events,
         deprioritize_source,
-        effective_ctx,
+        excluded_sources,
+        payment_context,
+        None,
+        source_cache,
     );
-    let residual = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| {
-            mana_payment::reduce_cost_by_pool(
-                &p.mana_pool,
-                cost,
-                effective_ctx,
-                any_color,
-                sub_cost_demand,
-            )
-        })
-        .unwrap_or_else(|| cost.clone());
+}
 
-    let (shards, generic) = match &residual {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => return,
-        ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
-        ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
-    };
+fn collect_sorted_auto_tap_source_options(
+    state: &GameState,
+    player: PlayerId,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Vec<ManaSourceOption> {
+    use crate::types::card_type::CoreType;
 
     // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
     // every land in this board-global sweep, so compute it once instead of
@@ -6934,6 +6947,103 @@ fn auto_tap_mana_sources_inner(
         )
     });
 
+    available
+}
+
+fn cached_auto_tap_sources<'a>(
+    source_cache: Option<&'a AutoTapSourceCache>,
+    player: PlayerId,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
+) -> Option<&'a [ManaSourceOption]> {
+    let cache = source_cache?;
+    if cache.is_for_player(player)
+        && excluded_sources.is_empty()
+        && sub_cost_demand.is_none()
+        && deprioritize_source.is_none_or(|source_id| !cache.contains_source(source_id))
+    {
+        crate::game::perf_counters::record_cached_auto_tap_source_reuse();
+        Some(cache.sources())
+    } else {
+        crate::game::perf_counters::record_cached_auto_tap_source_reject();
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn auto_tap_mana_sources_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+    sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
+    source_cache: Option<&AutoTapSourceCache>,
+) {
+    use crate::types::mana::ManaCost;
+
+    // CR 601.2g: A player may spend mana from their mana pool to pay costs.
+    // Plan against the *residual* cost (what the pool can't already cover) so
+    // pre-floated mana isn't shadowed by redundant taps — e.g. Sol Ring + an
+    // Island floated before casting a 3-mana spell must not tap three more
+    // sources. Restriction-aware eligibility is delegated to
+    // `reduce_cost_by_pool`, which mirrors the real payment path.
+    let spell_meta =
+        deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let effective_ctx = payment_context.or(spell_ctx.as_ref());
+    // CR 609.4b: Auto-tap planning must use the same spend-as-any-color authority
+    // as legality dry-runs and real payment (`player_can_spend_as_any_color_for_payment`),
+    // including activation-source-filtered grants (Agatha's Soul Cauldron class).
+    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+        state,
+        player,
+        deprioritize_source,
+        effective_ctx,
+    );
+    let residual = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| {
+            mana_payment::reduce_cost_by_pool(
+                &p.mana_pool,
+                cost,
+                effective_ctx,
+                any_color,
+                sub_cost_demand,
+            )
+        })
+        .unwrap_or_else(|| cost.clone());
+
+    let (shards, generic) = match &residual {
+        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => return,
+        ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
+        ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
+    };
+
+    let available_buf;
+    let available: &[ManaSourceOption] = if let Some(cached) = cached_auto_tap_sources(
+        source_cache,
+        player,
+        deprioritize_source,
+        excluded_sources,
+        sub_cost_demand,
+    ) {
+        cached
+    } else {
+        available_buf = collect_sorted_auto_tap_source_options(
+            state,
+            player,
+            deprioritize_source,
+            excluded_sources,
+        );
+        &available_buf
+    };
+
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
     let mut used_sources: HashSet<ObjectId> = HashSet::new();
 
@@ -7007,7 +7117,7 @@ fn auto_tap_mana_sources_inner(
     // requirements. Pre-allocate combination sources against pairs of
     // still-unfilled shards before falling through to the single-color loop.
     assign_combination_sources(
-        &available,
+        available,
         &needs,
         &mut assigned,
         &mut used_sources,
@@ -7035,7 +7145,7 @@ fn auto_tap_mana_sources_inner(
                 continue;
             }
             let count = count_available_sources(
-                &available,
+                available,
                 &used_sources,
                 acceptable,
                 *requires_two_or_more_color_source,
@@ -7054,7 +7164,7 @@ fn auto_tap_mana_sources_inner(
         let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source, _) =
             &needs[idx];
         if let Some(option) = find_least_flexible_source(
-            &available,
+            available,
             &used_sources,
             acceptable,
             *requires_two_or_more_color_source,
@@ -7106,7 +7216,7 @@ fn auto_tap_mana_sources_inner(
         if remaining_generic == 0 {
             break;
         }
-        for option in &available {
+        for option in available {
             if remaining_generic == 0 {
                 break;
             }
@@ -7210,6 +7320,7 @@ fn auto_tap_mana_sources_inner(
                         excluded,
                         Some(&activation_ctx),
                         demand.as_ref(),
+                        None,
                     );
                 }
                 // color_override tells resolve_mana_ability how to resolve the

@@ -21368,6 +21368,42 @@ fn strip_each_player_subject_controls_permanent_clause() {
     }
 }
 
+/// CR 122.1f + CR 109.5: "who has N or more poison counters" must lower to
+/// `PlayerFilter::PlayerAttribute`, not be dropped (Ixhel, Scion of Atraxa).
+#[test]
+fn strip_each_player_subject_poison_counter_clause() {
+    use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+    use crate::types::player::PlayerCounterKind;
+
+    let (scope, result) = strip_each_player_subject(
+        "each opponent who has three or more poison counters exiles the top card of their library face down",
+    );
+    assert_eq!(
+        result, "exile the top card of their library face down",
+        "predicate must deconjugate after the attr clause is stripped"
+    );
+    match scope {
+        Some(PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        }) => {
+            assert_eq!(relation, PlayerRelation::Opponent);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(
+                *attr,
+                QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }
+            );
+        }
+        other => panic!("expected PlayerAttribute(poison), got {other:?}"),
+    }
+}
+
 /// Issue #2016 (Bonder's Ornament): "{4}, {T}: Each player who controls a
 /// permanent named Bonder's Ornament draws a card." The "who controls a
 /// permanent named X" relative clause must be captured into

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -45,6 +45,7 @@ use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
 
 #[derive(Debug, Clone)]
 struct ActiveCombatAssignmentRuleEffect {
@@ -54,6 +55,26 @@ struct ActiveCombatAssignmentRuleEffect {
     modification: ContinuousModification,
     affected_filter: TargetFilter,
     condition: Option<StaticCondition>,
+}
+
+#[derive(Default)]
+struct LayerZoneObjectCache {
+    ids_by_zone: HashMap<Zone, Vec<ObjectId>>,
+}
+
+impl LayerZoneObjectCache {
+    fn ids_for(&mut self, state: &GameState, zone: Zone) -> &[ObjectId] {
+        self.ids_by_zone.entry(zone).or_insert_with(|| {
+            #[cfg(test)]
+            record_layer_zone_materialization(zone);
+            super::targeting::zone_object_ids(state, zone)
+        })
+    }
+}
+
+struct PreparedIncrementalFlush {
+    recipient_ids: HashSet<ObjectId>,
+    active_effects: Vec<ActiveContinuousEffect>,
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
@@ -1372,6 +1393,46 @@ pub fn evaluate_condition_for_test(
 pub(crate) static FULL_EVALUATE_LAYERS_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_EFFECT_COLLECTION_COUNT: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+    static BATTLEFIELD_ZONE_MATERIALIZATION_COUNT: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_active_effect_collection() {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_active_effect_collection_count() {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn active_effect_collection_count() -> usize {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(core::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_layer_zone_materialization(zone: Zone) {
+    if zone == Zone::Battlefield {
+        BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+fn reset_battlefield_zone_materialization_count() {
+    BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn battlefield_zone_materialization_count() -> usize {
+    BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(core::cell::Cell::get)
+}
+
 // Test-only placement toggle for the `StaticSourceIndex` rebuild, used to prove
 // the discriminating regression test goes RED on the (buggy) end-of-pass
 // placement and GREEN on the (correct) top-of-pass placement. Production code
@@ -1597,10 +1658,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     }
 
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
+    let mut zone_cache = LayerZoneObjectCache::default();
     let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &ordered_copy {
-        apply_continuous_effect(state, effect, &mut abilities_suppressed);
+        apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
     }
     if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
         // Sticker ability text is appended after the top-of-pass reset/copy
@@ -1644,7 +1706,7 @@ pub fn evaluate_layers(state: &mut GameState) {
             };
 
             for effect in &ordered {
-                apply_continuous_effect(state, effect, &mut abilities_suppressed);
+                apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
             }
         }
 
@@ -1905,21 +1967,71 @@ pub fn flush_layers(state: &mut GameState) {
             if ids.is_empty() {
                 return;
             }
-            if incremental_flush_must_escalate(state, &ids) {
-                super::perf_counters::record_layers_escalated();
-                super::perf_counters::record_layers_full_eval();
-                evaluate_layers(state);
-                super::public_state::mark_public_state_all_dirty(state);
-            } else {
+            if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
-                apply_layers_incremental(state, &ids);
+                apply_layers_incremental(state, prepared);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
                 }
                 super::public_state::mark_battlefield_display_dirty(state);
+            } else {
+                super::perf_counters::record_layers_escalated();
+                super::perf_counters::record_layers_full_eval();
+                evaluate_layers(state);
+                super::public_state::mark_public_state_all_dirty(state);
             }
         }
     }
+}
+
+fn prepare_incremental_flush(
+    state: &mut GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> Option<PreparedIncrementalFlush> {
+    for &id in entered_ids {
+        let obj = state.objects.get(&id)?;
+        if entered_object_blocks_incremental(state, obj) {
+            return None;
+        }
+    }
+
+    let recipient_ids = incremental_recipient_ids(state, entered_ids);
+
+    // CR 613.1: Match the full-pass binding point for generator discovery. A
+    // previous pass may have removed a recipient's live static definitions in
+    // layer 6; reset the recipient set before rebuilding the static-source index
+    // and collecting the prepared effect set so local CDAs are visible again.
+    for &id in &recipient_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            seed_live_characteristics_from_base(obj);
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
+            obj.assigns_damage_from_toughness = false;
+            obj.assigns_damage_as_though_unblocked = false;
+            obj.assigns_no_combat_damage = false;
+            derive_suspected_abilities(obj);
+        }
+    }
+
+    crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+
+    let active_effects = collect_shared_active_continuous_effects(state);
+    if active_effects.iter().any(|effect| {
+        recipient_ids.contains(&effect.source_id)
+            && !effect_is_restricted_to_incremental_recipients(effect, &recipient_ids)
+    }) {
+        return None;
+    }
+    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects)
+        || any_active_static_condition_perturbed_by_entry(state, entered_ids)
+    {
+        return None;
+    }
+
+    Some(PreparedIncrementalFlush {
+        recipient_ids,
+        active_effects,
+    })
 }
 
 /// Decide whether an `EnteredObjects` flush must conservatively escalate to a
@@ -1942,6 +2054,7 @@ pub fn flush_layers(state: &mut GameState) {
 ///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
 ///    ordering operates on the live set. This scan is O(active-effect-count), NOT
 ///    O(battlefield).
+#[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
     entered_ids: &HashSet<ObjectId>,
@@ -1971,38 +2084,8 @@ pub(crate) fn incremental_flush_must_escalate(
     // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
     // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
     // any_entered_perturbs(e)`; both required.
-    if collect_shared_active_continuous_effects(state)
-        .iter()
-        .any(|e| {
-            let magnitude = continuous_modification_dynamic_quantity(&e.modification);
-            let magnitude_sensitive =
-                magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
-            let affected_sensitive =
-                crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
-            if !magnitude_sensitive && !affected_sensitive {
-                return false;
-            }
-            let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
-            entered_ids.iter().any(|id| {
-                let Some(entered) = state.objects.get(id) else {
-                    return false;
-                };
-                (magnitude_sensitive
-                    && magnitude.is_some_and(|expr| {
-                        crate::game::quantity::entered_object_perturbs_quantity_expr(
-                            state, entered, &ctx, expr,
-                        )
-                    }))
-                    || (affected_sensitive
-                        && crate::game::filter::entered_object_perturbs_affected_filter(
-                            state,
-                            *id,
-                            &ctx,
-                            &e.affected_filter,
-                        ))
-            })
-        })
-    {
+    let active_effects = collect_shared_active_continuous_effects(state);
+    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects) {
         return true;
     }
 
@@ -2025,6 +2108,42 @@ pub(crate) fn incremental_flush_must_escalate(
     // gate; the truth-delta refinement (below) skips escalation even when an
     // entry perturbs the gate INPUT but does not flip its truth value.
     any_active_static_condition_perturbed_by_entry(state, entered_ids)
+}
+
+fn active_effects_force_incremental_escalation(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+    active_effects: &[ActiveContinuousEffect],
+) -> bool {
+    active_effects.iter().any(|e| {
+        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
+        let magnitude_sensitive =
+            magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
+        let affected_sensitive =
+            crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+        if !magnitude_sensitive && !affected_sensitive {
+            return false;
+        }
+        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        entered_ids.iter().any(|id| {
+            let Some(entered) = state.objects.get(id) else {
+                return false;
+            };
+            (magnitude_sensitive
+                && magnitude.is_some_and(|expr| {
+                    crate::game::quantity::entered_object_perturbs_quantity_expr(
+                        state, entered, &ctx, expr,
+                    )
+                }))
+                || (affected_sensitive
+                    && crate::game::filter::entered_object_perturbs_affected_filter(
+                        state,
+                        *id,
+                        &ctx,
+                        &e.affected_filter,
+                    ))
+        })
+    })
 }
 
 /// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
@@ -2229,6 +2348,17 @@ fn incremental_recipient_ids(
     recipients
 }
 
+fn effect_is_restricted_to_incremental_recipients(
+    effect: &ActiveContinuousEffect,
+    recipient_ids: &HashSet<ObjectId>,
+) -> bool {
+    match &effect.affected_filter {
+        TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
+        TargetFilter::SpecificObject { id } => recipient_ids.contains(id),
+        _ => false,
+    }
+}
+
 /// Incremental layer re-derivation for a set of freshly-entered objects.
 ///
 /// Mirrors the PER-OBJECT subset of `evaluate_layers` for `entered_ids` only:
@@ -2244,69 +2374,51 @@ fn incremental_recipient_ids(
 /// `incremental_flush_must_escalate` returned false, which guarantees no active
 /// effect's magnitude or affected set reads board population — so re-deriving
 /// just the entered objects yields a board identical to a full pass (CR 613.1).
-fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectId>) {
-    let recipient_ids = incremental_recipient_ids(state, entered_ids);
+fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
+    let PreparedIncrementalFlush {
+        recipient_ids,
+        active_effects,
+    } = prepared;
     let mut abilities_suppressed = HashSet::new();
-    // Step 1 (per-entered subset): reset computed characteristics to base.
-    for &id in &recipient_ids {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            obj.name = obj.base_name.clone();
-            obj.power = obj.base_power;
-            obj.toughness = obj.base_toughness;
-            obj.loyalty = obj.base_loyalty;
-            obj.card_types = obj.base_card_types.clone();
-            obj.mana_cost = obj.base_mana_cost.clone();
-            obj.keywords = obj.base_keywords.clone();
-            obj.abilities = Arc::clone(&obj.base_abilities);
-            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
-            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
-            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
-            obj.color = obj.base_color.clone();
-            obj.printed_ref = obj.base_printed_ref.clone();
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            // CR 701.60c: re-derive the suspected designation's menace +
-            // "can't block" onto the just-reset live fields (mirrors the full
-            // pass) so the incremental path agrees with `evaluate_layers`.
-            derive_suspected_abilities(obj);
-        }
-    }
-
-    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index before the
-    // incremental gathers. The incremental path only resets `entered_ids` to
-    // base; pre-existing generators keep their already-derived
-    // `static_definitions`, which for a generator still carries its continuous
-    // def — so a full-battlefield rebuild here lists every current generator
-    // (pre-existing + entered). An entered base generator never reaches this
-    // path (`entered_object_blocks_incremental` escalates it to a full eval), so
-    // this is purely a freshness guarantee for the incremental gather. The
-    // `rebuild_static_index_at_top` guard is ALWAYS true in production; togglable
-    // only under `cfg(test)`.
-    if rebuild_static_index_at_top() {
-        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+    let mut zone_cache = LayerZoneObjectCache::default();
+    // Step 1 (per-recipient subset) ran in `prepare_incremental_flush` before the
+    // static-source index rebuild and shared active-effect collection.
 
     // Step 2: Copy effects first (Layer 1), restricted to recipient objects.
-    let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
+    let copy_effects: Vec<ActiveContinuousEffect> = active_effects
+        .iter()
+        .filter(|effect| effect.layer == Layer::Copy)
+        .cloned()
+        .collect();
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &ordered_copy {
-        apply_continuous_effect_to(state, effect, &recipient_ids, &mut abilities_suppressed);
+        apply_continuous_effect_to(
+            state,
+            effect,
+            &recipient_ids,
+            &mut abilities_suppressed,
+            &mut zone_cache,
+        );
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
-    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec) {
+    let stickers_changed =
+        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    let active_effects = if stickers_changed {
         // Incremental resets clear the entered/attached recipients back to base,
         // so retained stickers must be re-applied before the restricted main
         // gather. If a sticker grants a continuous static ability, refresh the
         // generator index so the recipient can source that effect in this pass.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+        collect_shared_active_continuous_effects(state)
+    } else if copy_effects.is_empty() {
+        active_effects
+    } else {
+        collect_shared_active_continuous_effects(state)
+    };
 
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
-    let effects_by_layer = gather_active_continuous_effects(state);
+    let effects_by_layer = bucket_effects_by_layer(active_effects);
     for (layer, layer_bucket) in &effects_by_layer {
         if *layer == Layer::Copy {
             continue;
@@ -2324,6 +2436,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                     effect,
                     &recipient_ids,
                     &mut abilities_suppressed,
+                    &mut zone_cache,
                 );
             }
         }
@@ -2348,7 +2461,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     // CR 702.73a: Changeling — entered object gains all creature types if it now
     // has Changeling but no CDA covered it.
     if !state.all_creature_types.is_empty() {
-        for &id in entered_ids {
+        for &id in &recipient_ids {
             let has_changeling = state
                 .objects
                 .get(&id)
@@ -2486,12 +2599,18 @@ fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<
 fn gather_active_continuous_effects(
     state: &GameState,
 ) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
+    bucket_effects_by_layer(collect_shared_active_continuous_effects(state))
+}
+
+fn bucket_effects_by_layer(
+    active_effects: impl IntoIterator<Item = ActiveContinuousEffect>,
+) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
     let mut effects: Vec<(Layer, Vec<ActiveContinuousEffect>)> = Layer::all()
         .iter()
         .map(|&layer| (layer, Vec::new()))
         .collect();
 
-    for effect in collect_shared_active_continuous_effects(state) {
+    for effect in active_effects {
         push_effect(&mut effects, effect.layer, effect);
     }
 
@@ -2501,6 +2620,9 @@ fn gather_active_continuous_effects(
 pub(crate) fn collect_shared_active_continuous_effects(
     state: &GameState,
 ) -> Vec<ActiveContinuousEffect> {
+    #[cfg(test)]
+    record_active_effect_collection();
+
     let mut effects = Vec::new();
 
     for_each_static_effect_source(state, |state, obj| {
@@ -3892,8 +4014,9 @@ fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
-    apply_continuous_effect_filtered(state, effect, None, abilities_suppressed);
+    apply_continuous_effect_filtered(state, effect, None, abilities_suppressed, zone_cache);
 }
 
 /// Apply a continuous effect's modification only to the subset of its affected
@@ -3909,8 +4032,15 @@ fn apply_continuous_effect_to(
     effect: &ActiveContinuousEffect,
     restrict_to: &HashSet<ObjectId>,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
-    apply_continuous_effect_filtered(state, effect, Some(restrict_to), abilities_suppressed);
+    apply_continuous_effect_filtered(
+        state,
+        effect,
+        Some(restrict_to),
+        abilities_suppressed,
+        zone_cache,
+    );
 }
 
 fn apply_continuous_effect_filtered(
@@ -3918,6 +4048,7 @@ fn apply_continuous_effect_filtered(
     effect: &ActiveContinuousEffect,
     restrict_to: Option<&HashSet<ObjectId>>,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
@@ -3929,8 +4060,8 @@ fn apply_continuous_effect_filtered(
     let scan_zone = effect
         .affected_filter
         .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let scan_ids = super::targeting::zone_object_ids(state, scan_zone);
+        .unwrap_or(Zone::Battlefield);
+    let scan_ids = zone_cache.ids_for(state, scan_zone);
     let ctx = FilterContext::from_source(state, effect.source_id);
     let affected_ids: Vec<ObjectId> = scan_ids
         .iter()
@@ -7528,15 +7659,76 @@ mod tests {
         );
 
         // Suppressor leaves; only the bear is re-derived incrementally.
+        crate::game::perf_counters::reset();
         state.battlefield.retain(|&id| id != suppressor);
         state.objects.remove(&suppressor);
         state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
         flush_layers(&mut state);
 
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "suppression-local CDA restoration must stay on the incremental path"
+        );
+        assert_eq!(counters.layers_escalated, 0);
+        assert_eq!(counters.layers_full_eval, 0);
         assert_eq!(
             state.objects.get(&bear).unwrap().power,
             Some(5),
             "incremental pass must rebuild suppression locally and re-apply the CDA"
+        );
+    }
+
+    /// CR 613.1f: when a suppressed recipient restores a board-wide static, the
+    /// flush must escalate instead of applying only to incremental recipients.
+    #[test]
+    fn restored_recipient_sourced_board_wide_static_escalates_incremental_flush() {
+        let mut state = setup();
+        let anthem_source = make_creature(&mut state, "Suppressed Anthem", 2, 2, PlayerId(0));
+        add_lord_static(&mut state, anthem_source, creature_you_ctrl(), 1, 1);
+
+        let other_creature = make_creature(&mut state, "Other Creature", 2, 2, PlayerId(0));
+        let suppressor = make_creature(&mut state, "Suppressor", 1, 1, PlayerId(0));
+        {
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: anthem_source })
+                .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+            state
+                .objects
+                .get_mut(&suppressor)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().power,
+            Some(2),
+            "suppressed recipient-sourced anthem must not affect other creatures"
+        );
+
+        crate::game::perf_counters::reset();
+        state.battlefield.retain(|&id| id != suppressor);
+        state.objects.remove(&suppressor);
+        state.layers_dirty = LayersDirty::EnteredObjects([anthem_source].into());
+        flush_layers(&mut state);
+
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_escalated, 1,
+            "recipient-sourced non-recipient-restricted effects must force a full layer pass"
+        );
+        assert_eq!(counters.layers_full_eval, 1);
+        assert_eq!(counters.layers_incremental, 0);
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().power,
+            Some(3),
+            "full escalation must restore the board-wide effect on non-recipient creatures"
+        );
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().toughness,
+            Some(3)
         );
     }
 
@@ -14902,6 +15094,136 @@ mod tests {
                 ]),
         );
         id
+    }
+
+    #[test]
+    fn incremental_prepare_rebuilds_static_index_before_shared_gather() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "setup must leave a non-empty staleable index containing only anthem A"
+        );
+
+        make_anthem(&mut state, "Anthem B", PlayerId(0));
+        let bear = make_creature(&mut state, "Fresh Bear", 2, 2, PlayerId(0));
+
+        reset_active_effect_collection_count();
+        state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
+        flush_layers(&mut state);
+
+        assert_eq!(
+            active_effect_collection_count(),
+            1,
+            "incremental preparation should gather once, after rebuilding the static-source index"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            bear_obj.power,
+            Some(4),
+            "fresh bear must receive both anthem A and anthem B despite the pre-flush index missing B"
+        );
+        assert_eq!(bear_obj.toughness, Some(4));
+    }
+
+    #[test]
+    fn incremental_no_copy_no_sticker_reuses_prepared_shared_gather() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem", PlayerId(0));
+        evaluate_layers(&mut state);
+
+        let bear = make_creature(&mut state, "Fresh Bear", 2, 2, PlayerId(0));
+        reset_active_effect_collection_count();
+        state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
+        flush_layers(&mut state);
+
+        assert_eq!(
+            active_effect_collection_count(),
+            1,
+            "no-copy/no-sticker incremental flush should use the prepared active-effect set"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(3));
+        assert_eq!(bear_obj.toughness, Some(3));
+    }
+
+    #[test]
+    fn layer_zone_cache_materializes_battlefield_once_per_pass() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        make_anthem(&mut state, "Anthem B", PlayerId(0));
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        reset_battlefield_zone_materialization_count();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            battlefield_zone_materialization_count(),
+            1,
+            "all object-affecting layer effects in the pass should share one raw battlefield ID materialization"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(4));
+        assert_eq!(bear_obj.toughness, Some(4));
+    }
+
+    #[test]
+    fn layer_zone_cache_keeps_filters_fresh_across_layers() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let anthem = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Flying Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature().properties(
+                        vec![FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        }],
+                    )))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(
+            bear_obj.has_keyword(&Keyword::Flying),
+            "layer 6 grant must apply before the layer 7 flying-creature filter is evaluated"
+        );
+        assert_eq!(
+            bear_obj.power,
+            Some(3),
+            "layer 7 must re-run the flying filter against the post-layer-6 board, not reuse filtered IDs"
+        );
+        assert_eq!(bear_obj.toughness, Some(3));
     }
 
     /// GAP-1 / GAP-B discriminating regression test (FIX B): a SECOND anthem that

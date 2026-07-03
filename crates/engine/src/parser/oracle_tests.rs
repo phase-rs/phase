@@ -13051,6 +13051,88 @@ fn viral_spawning_corrupted_line_parses_as_conditional_flashback_static() {
     );
 }
 
+#[test]
+fn ixhel_corrupted_end_step_trigger_parses_poison_scoped_exile() {
+    use crate::types::ability::{
+        AbilityKind, Comparator, Effect, PlayerFilter, PlayerRelation, QuantityExpr,
+    };
+    use crate::types::player::PlayerCounterKind;
+
+    let def = parse_effect_chain(
+        "each opponent who has three or more poison counters exiles the top card of their library face down",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } => {
+            assert!(matches!(player, TargetFilter::ScopedPlayer));
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            assert!(
+                face_down,
+                "face down qualifier must lower to ExileTop.face_down=true"
+            );
+        }
+        other => panic!("expected ExileTop from poison-scoped clause, got {other:?}"),
+    }
+    match def.player_scope {
+        Some(PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        }) => {
+            assert_eq!(relation, PlayerRelation::Opponent);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(
+                *attr,
+                QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: CountScope::ScopedPlayer,
+                }
+            );
+        }
+        other => panic!("expected PlayerAttribute poison scope, got {other:?}"),
+    }
+}
+
+#[test]
+fn ixhel_full_oracle_trigger_carries_poison_player_scope() {
+    use crate::types::ability::{Effect, PlayerFilter, PlayerRelation};
+    use crate::types::triggers::TriggerMode;
+
+    let result = parse(
+        "Flying, vigilance, toxic 2\nCorrupted — At the beginning of your end step, each opponent who has three or more poison counters exiles the top card of their library face down. You may look at and play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
+        "Ixhel, Scion of Atraxa",
+        &[],
+        &["Creature"],
+        &["Phyrexian", "Angel"],
+    );
+    assert_eq!(result.triggers.len(), 1);
+    let trigger = &result.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    let execute = trigger.execute.as_ref().expect("execute");
+    assert!(
+        matches!(&*execute.effect, Effect::ExileTop { .. }),
+        "trigger effect must be ExileTop, got {:?}",
+        execute.effect
+    );
+    assert!(
+        matches!(
+            execute.player_scope,
+            Some(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                ..
+            })
+        ),
+        "full-card parse must carry poison-scoped player filter, got {:?}",
+        execute.player_scope
+    );
+}
+
 // ── Each player/opponent iteration ────────────────────────────────
 
 #[test]

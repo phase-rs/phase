@@ -358,6 +358,7 @@ mod issue_3875_kozilek_graveyard_shuffle;
 mod issue_3876_gadrak_treasure_count;
 mod issue_3878_go_shintai_combat_damage;
 mod issue_3881_feed_swarm_darksteel_mutation;
+mod issue_3882_ixhel_corrupted;
 mod issue_3883_kari_zev_ragavan;
 mod issue_3987_jace_life_death_split_graveyard_cast;
 mod issue_3988_vaultborn_tyrant;

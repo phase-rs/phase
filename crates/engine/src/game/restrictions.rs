@@ -18,6 +18,39 @@ use crate::types::SpellCastRecord;
 use super::engine::EngineError;
 use crate::types::identifiers::ObjectId;
 
+/// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
+/// consulted by activation restrictions. A false gate is a sound skip because
+/// it is computed from currently-functioning statics; a true gate falls through
+/// to the exact per-ability scan so semantics stay unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationRestrictionStaticGates {
+    has_modify_activation_limit: bool,
+    has_activate_as_instant: bool,
+}
+
+impl ActivationRestrictionStaticGates {
+    pub fn compute(state: &crate::types::game_state::GameState) -> Self {
+        crate::game::perf_counters::record_restriction_static_mode_gate_scan();
+        let mut gates = ActivationRestrictionStaticGates {
+            has_modify_activation_limit: false,
+            has_activate_as_instant: false,
+        };
+        for (_, def) in crate::game::functioning_abilities::game_functioning_statics(state) {
+            match def.mode {
+                StaticMode::ModifyActivationLimit { .. } => {
+                    gates.has_modify_activation_limit = true
+                }
+                StaticMode::ActivateAsInstant { .. } => gates.has_activate_as_instant = true,
+                _ => {}
+            }
+            if gates.has_modify_activation_limit && gates.has_activate_as_instant {
+                break;
+            }
+        }
+        gates
+    }
+}
+
 /// CR 601.3: A player can begin to cast a spell only if a rule or effect allows that player
 /// to cast it and no rule or effect prohibits that player from casting it.
 pub fn check_spell_timing(
@@ -491,8 +524,34 @@ pub fn check_activation_restrictions(
     ability_index: usize,
     restrictions: &[ActivationRestriction],
 ) -> Result<(), EngineError> {
+    let gates = ActivationRestrictionStaticGates::compute(state);
+    check_activation_restrictions_with_static_gates(
+        state,
+        player,
+        source_id,
+        ability_index,
+        restrictions,
+        &gates,
+    )
+}
+
+pub fn check_activation_restrictions_with_static_gates(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restrictions: &[ActivationRestriction],
+    gates: &ActivationRestrictionStaticGates,
+) -> Result<(), EngineError> {
     for restriction in restrictions {
-        if !activation_restriction_applies(state, player, source_id, ability_index, restriction) {
+        if !activation_restriction_applies(
+            state,
+            player,
+            source_id,
+            ability_index,
+            restriction,
+            gates,
+        ) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Activation restriction not satisfied: {restriction:?}"
             )));
@@ -598,6 +657,7 @@ fn effective_activation_limit(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
 ) -> u32 {
     // Check if the ability at this index has a keyword tag
     let ability_tag = state
@@ -608,7 +668,7 @@ fn effective_activation_limit(
     let Some(tag) = ability_tag else {
         return 1; // No tag → default once-per-turn
     };
-    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
 }
 
 /// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
@@ -621,8 +681,14 @@ fn activation_limit_from_statics(
     player: PlayerId,
     source_id: ObjectId,
     keyword: &str,
+    gates: &ActivationRestrictionStaticGates,
 ) -> u32 {
+    if !gates.has_modify_activation_limit {
+        return 1;
+    }
+
     let mut limit: u32 = 1;
+    crate::game::perf_counters::record_restriction_static_exact_scan();
     for (bf_obj, static_def) in
         crate::game::functioning_abilities::battlefield_active_statics(state)
     {
@@ -665,6 +731,7 @@ fn effective_activation_limit_per_game(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
 ) -> u32 {
     let ability_tag = state
         .objects
@@ -674,7 +741,7 @@ fn effective_activation_limit_per_game(
     let Some(tag) = ability_tag else {
         return 1; // No tag → default once-per-game
     };
-    activation_limit_from_statics(state, player, source_id, tag.keyword_str())
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
 }
 
 fn has_activate_as_instant_permission(
@@ -682,6 +749,7 @@ fn has_activate_as_instant_permission(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
 ) -> bool {
     let Some(ability) = state
         .objects
@@ -695,6 +763,11 @@ fn has_activate_as_instant_permission(
         return false;
     }
 
+    if !gates.has_activate_as_instant {
+        return false;
+    }
+
+    crate::game::perf_counters::record_restriction_static_exact_scan();
     crate::game::functioning_abilities::battlefield_active_statics(state).any(
         |(static_source, def)| {
             if static_source.controller != player {
@@ -730,6 +803,7 @@ fn activation_restriction_applies(
     source_id: ObjectId,
     ability_index: usize,
     restriction: &ActivationRestriction,
+    gates: &ActivationRestrictionStaticGates,
 ) -> bool {
     let key = (source_id, ability_index);
 
@@ -737,7 +811,13 @@ fn activation_restriction_applies(
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
         ActivationRestriction::AsSorcery => {
             is_sorcery_speed_window(state, player)
-                || has_activate_as_instant_permission(state, player, source_id, ability_index)
+                || has_activate_as_instant_permission(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    gates,
+                )
         }
         ActivationRestriction::AsInstant => true,
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
@@ -773,7 +853,7 @@ fn activation_restriction_applies(
                 .get(&key)
                 .copied()
                 .unwrap_or(0);
-            let limit = effective_activation_limit(state, player, source_id, ability_index);
+            let limit = effective_activation_limit(state, player, source_id, ability_index, gates);
             current_count < limit
         }
         // CR 602.5b: Per-object activation limit. `zones::move_to_zone` clears
@@ -786,7 +866,14 @@ fn activation_restriction_applies(
                 .get(&key)
                 .copied()
                 .unwrap_or(0);
-            count < effective_activation_limit_per_game(state, player, source_id, ability_index)
+            count
+                < effective_activation_limit_per_game(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    gates,
+                )
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
