@@ -250,6 +250,11 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  // Armed Arena-style "Resolve All" session (multiplayer): the engine is
+  // auto-passing this seat's priority windows until the stack empties or
+  // grows. Surfaced with the same pulsing cancel affordance as UntilEndOfTurn
+  // so the player can revoke it between opponents' windows.
+  const isResolvingStack = autoPass?.type === "UntilStackEmpty";
   const canActDuringAutoPass = mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
@@ -258,9 +263,9 @@ export function ActionButton() {
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:w-full max-lg:max-w-none max-lg:flex-col max-lg:flex-nowrap max-lg:gap-1 max-lg:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
-  const primaryButtonClass = "min-w-[10.5rem] max-lg:w-full max-lg:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
-  const secondaryButtonClass = "min-w-[8rem] max-lg:w-full max-lg:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
+  const primaryButtonClass = "min-w-[10.5rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+  const secondaryButtonClass = "min-w-[8rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
   return (
     <>
@@ -390,7 +395,7 @@ export function ActionButton() {
           </>
         )}
 
-        {(mode === "priority-empty" || idle) && !isEndingTurn && (
+        {(mode === "priority-empty" || idle) && !isEndingTurn && !isResolvingStack && (
           <>
             {canCompanionToHand && !idle && (
               <button
@@ -443,7 +448,7 @@ export function ActionButton() {
           </>
         )}
 
-        {isEndingTurn && !canActDuringAutoPass && (
+        {(isEndingTurn || isResolvingStack) && !canActDuringAutoPass && (
           <button
             disabled={actionBlocked}
             onClick={() => dispatchAction({ type: "CancelAutoPass" })}
@@ -453,7 +458,7 @@ export function ActionButton() {
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">
                 <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.451a.75.75 0 0 0 0-1.5H4.5a.75.75 0 0 0-.75.75v3.75a.75.75 0 0 0 1.5 0v-2.033l.364.363a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.75a.75.75 0 0 0 0 1.5h3.75a.75.75 0 0 0 .75-.75V3.42a.75.75 0 0 0-1.5 0v2.033l-.364-.364A7 7 0 0 0 3.074 8.227a.75.75 0 0 0 1.449.39l.165-.044Z" clipRule="evenodd" />
               </svg>
-              {t("actionButton.autoPassing")}
+              {isEndingTurn ? t("actionButton.autoPassing") : t("actionButton.resolvingStack")}
             </span>
           </button>
         )}

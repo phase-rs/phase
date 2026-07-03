@@ -3917,10 +3917,13 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
                 },
             ),
-            // CR 400.7: "if it had [no] counters on it" / "if it had [no]
-            // <type> counter(s) on it" are handled by the combinator-based
-            // `try_extract_had_counter_condition` (composes the negation and
-            // type axes) so the positive and negated forms share one authority.
+            // CR 400.7 / CR 603.4: counter-state intervening-ifs are handled by
+            // dedicated combinators, not verbatim entries here, so the type axis
+            // (any / typed) composes rather than enumerating every card's list:
+            // past-tense event-subject "if it had [no] [<type>] counter(s) on it"
+            // by `try_extract_had_counter_condition`, and present-tense
+            // source-scoped "if ~ has [a <type>] counter(s) on it" by
+            // `try_extract_has_counter_condition`.
             // CR 702.112b: "if it's renowned" — the event-subject creature's designation.
             // CR 702.112a: "if ~ is renowned" — the source permanent's designation.
             (
@@ -3993,6 +3996,13 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // CR 400.7 + CR 603.10: "if it had [no] [a <type>] counter(s) on it" —
     // past-state counter check (positive, negated, typed, and untyped forms).
     if let Some(result) = try_extract_had_counter_condition(&tp, &lower, text) {
+        return result;
+    }
+
+    // CR 603.4 + CR 122.1: "if <source> has [quantity] [type] counter(s) on it"
+    // — present-tense source-scoped counter check. Delegates the grammar to the
+    // shared `parse_source_has_counters` authority (any/typed/quantified forms).
+    if let Some(result) = try_extract_has_counter_condition(&tp, &lower, text) {
         return result;
     }
 
@@ -5303,6 +5313,45 @@ fn parse_had_counters_body(input: &str) -> OracleResult<'_, (bool, Option<Counte
     // Any-counter form: "counter(s) [on it]".
     let (rest, _) = parse_counter_word_tail(input)?;
     Ok((rest, (negated, None)))
+}
+
+/// CR 603.4 + CR 122.1: Extract source-scoped present-tense counter conditions —
+/// the intervening-if "if <source> has [quantity] [type] counter(s) on it" (The
+/// Ozolith, Denry Klin, and the quantified cycle: Bloodchief Ascension, Ventifact
+/// Bottle, Simic Ascendancy). The subject × quantity × counter-type × "on it"
+/// grammar is delegated to the single authority `parse_source_has_counters`
+/// (shared with static gates via `parse_inner_condition`), and the resulting
+/// `StaticCondition::HasCounters` is bridged to a `TriggerCondition` by
+/// `static_condition_to_trigger_condition` — the same lowering the state-trigger
+/// form (`try_parse_source_counter_state_trigger`) uses. The source permanent
+/// must currently hold a matching counter for the trigger to resolve (evaluated
+/// against `source_id` in `game/triggers.rs`).
+///
+/// Runs ahead of the generic `try_extract_intervening` "if" path because a
+/// non-leading source-referential "~ has …" clause is classified re-homeable
+/// there and deferred; extracting it directly always hoists it to the
+/// trigger-level condition. Distinct from the past-tense event-subject "if it
+/// had counters on it" (`HadCounters`) handled by
+/// `try_extract_had_counter_condition`.
+fn try_extract_has_counter_condition(
+    tp: &TextPair<'_>,
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let prefix = "if ";
+    let pos = tp.find(prefix)?;
+    let after = &lower[pos + prefix.len()..];
+
+    // Delegate the counter grammar to the shared authority; it fails fast for
+    // any non-counter "if …" clause, so the broad "if " anchor is safe.
+    let (rest, static_cond) = parse_source_has_counters(after).ok()?;
+    let condition = static_condition_to_trigger_condition(&static_cond)?;
+    let clause_len = prefix.len() + (after.len() - rest.len());
+
+    Some((
+        strip_condition_clause(text, pos, clause_len),
+        Some(condition),
+    ))
 }
 
 /// Consume `" counter"` (or, when already at the word, `"counter"`), an optional

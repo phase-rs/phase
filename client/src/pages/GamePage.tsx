@@ -1327,7 +1327,7 @@ function GamePageContent({
         flexZone="actionRail"
         scaleKey="actionRail"
         resizeCorner="bl"
-        className="fixed z-30 flex flex-col items-end gap-1.5 max-lg:w-full max-lg:flex-row max-lg:items-end max-lg:justify-between max-lg:gap-2"
+        className="fixed z-30 flex flex-col items-end gap-1.5 max-lg:portrait:w-full max-lg:portrait:flex-row max-lg:portrait:items-end max-lg:portrait:justify-between max-lg:portrait:gap-2"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
@@ -1338,7 +1338,7 @@ function GamePageContent({
         {!isSpectatorMode && (
           <div
             data-mobile-action-left
-            className="flex flex-col gap-1 max-lg:min-w-0 lg:hidden"
+            className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
           >
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <CombatPhaseIndicator />
@@ -1349,21 +1349,21 @@ function GamePageContent({
         )}
         <div
           data-mobile-action-right
-          className="flex flex-col items-end gap-1.5 max-lg:min-w-0 max-lg:items-stretch lg:items-end"
+          className="flex flex-col items-end gap-1.5 max-lg:min-w-0 max-lg:portrait:items-stretch lg:items-end"
         >
           {showFlowHelpNudge && <FlowHelpNudge />}
           {showSandboxToolsNudge && <SandboxToolsNudge />}
-          <div className="hidden lg:block">
+          <div className="hidden max-lg:landscape:block lg:block">
             <CombatPhaseIndicator />
           </div>
           {isSpectatorMode ? (
             <TurnStatusLine />
           ) : (
             <>
-              <div className="max-lg:w-full lg:hidden">
+              <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
                 <TurnStatusLine />
               </div>
-              <div className="hidden flex-row items-center gap-1.5 lg:flex">
+              <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
                 <TurnStatusLine />
                 <HandBadge />
                 <FullControlToggle />
