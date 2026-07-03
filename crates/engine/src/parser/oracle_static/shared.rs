@@ -1064,6 +1064,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 116.2d: "ignore this effect" actions from static abilities are special
+    // actions. Until the engine models that priority-time action, the static
+    // parser must fail closed instead of exporting the lock while dropping the
+    // opt-out sentence.
+    if nom_primitives::scan_contains(&lower, "ignore this effect until end of turn") {
+        return Vec::new();
+    }
+
     // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
     // the host creature's COMBAT STATE — "As long as equipped/enchanted creature
     // is attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
