@@ -912,37 +912,12 @@ async fn main() {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
                         Ok(ps) => {
-                            let lobby_meta = ps.lobby_meta.clone();
-                            let register_in_lobby = ps.should_register_in_lobby();
-                            let pod_size = ps.config.pod_size;
-                            let set_code = ps.config.set_code.clone();
-                            let draft_kind = format!("{:?}", ps.config.kind);
-                            let filled = ps.player_tokens.iter().filter(|t| !t.is_empty()).count();
+                            let register_req =
+                                server_core::persist::restored_draft_lobby_register_request(&ps);
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
-                            if register_in_lobby {
-                                if let Some(meta) = lobby_meta {
-                                    lob.register_game(
-                                        draft_code,
-                                        RegisterGameRequest {
-                                            host_name: meta.host_name,
-                                            public: meta.public,
-                                            password: meta.password,
-                                            timer_seconds: meta.timer_seconds,
-                                            current_players: filled as u32,
-                                            max_players: pod_size as u32,
-                                            draft_metadata: Some(
-                                                server_core::protocol::DraftLobbyMetadata {
-                                                    set_code,
-                                                    draft_kind,
-                                                    cube_name: None,
-                                                },
-                                            ),
-                                            ..Default::default()
-                                        },
-                                        &SysEnv,
-                                    );
-                                }
+                            if let Some(req) = register_req {
+                                lob.register_game(draft_code, req, &SysEnv);
                             }
                             if let Some(ms) = timer_ms {
                                 info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");

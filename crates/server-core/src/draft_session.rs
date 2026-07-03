@@ -847,6 +847,8 @@ mod tests {
 
     #[test]
     fn started_persisted_draft_does_not_register_in_lobby() {
+        use crate::persist::restored_draft_lobby_register_request;
+
         let mut mgr = DraftSessionManager::new();
         let (code, _host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
         mgr.sessions.get_mut(&code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
@@ -880,7 +882,111 @@ mod tests {
             ranked: false,
         });
 
-        assert!(!persisted.should_register_in_lobby());
+        assert!(restored_draft_lobby_register_request(&persisted).is_none());
+    }
+
+    #[test]
+    fn restore_registration_path_registers_only_lobby_status_drafts() {
+        use std::cell::Cell;
+
+        use lobby_broker::{BrokerEnv, LobbyManager};
+
+        use crate::persist::restored_draft_lobby_register_request;
+
+        struct TestEnv {
+            now: Cell<u64>,
+        }
+
+        impl BrokerEnv for TestEnv {
+            fn now_ms(&self) -> u64 {
+                self.now.get()
+            }
+
+            fn new_token(&self) -> String {
+                "tok".to_string()
+            }
+
+            fn new_game_code(&self) -> String {
+                "CODE".to_string()
+            }
+        }
+
+        fn register_restored_draft(
+            lob: &mut LobbyManager,
+            draft_code: &str,
+            ps: &crate::persist::PersistedDraftSession,
+            env: &TestEnv,
+        ) {
+            if let Some(req) = restored_draft_lobby_register_request(ps) {
+                lob.register_game(draft_code, req, env);
+            }
+        }
+
+        let env = TestEnv {
+            now: Cell::new(1_000_000),
+        };
+        let mut lob = LobbyManager::new();
+        let meta = PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        };
+
+        // Still in lobby — should register on restore.
+        let mut lobby_mgr = DraftSessionManager::new();
+        let (lobby_code, _host_token, _) =
+            lobby_mgr.create_draft(test_config(), "Alice".to_string());
+        lobby_mgr.sessions.get_mut(&lobby_code).unwrap().lobby_meta = Some(meta.clone());
+        let lobby_ps = lobby_mgr.sessions[&lobby_code].to_persisted();
+
+        // Started with open seats and stale lobby_meta — must not register.
+        let mut drafting_mgr = DraftSessionManager::new();
+        let (draft_code, _host_token, _) =
+            drafting_mgr.create_draft(test_config(), "Alice".to_string());
+        drafting_mgr
+            .sessions
+            .get_mut(&draft_code)
+            .unwrap()
+            .lobby_meta = Some(meta);
+        drafting_mgr
+            .join_draft(&draft_code, "Bob".to_string(), Some("secret"))
+            .unwrap();
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        drafting_mgr
+            .apply_system_action(&draft_code, DraftAction::StartDraft, Some(&source))
+            .unwrap();
+        let mut drafting_ps = drafting_mgr.sessions[&draft_code].to_persisted();
+        drafting_ps.lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        assert_eq!(drafting_ps.session.status, DraftStatus::Drafting);
+        assert!(
+            drafting_ps.player_tokens.iter().filter(|t| !t.is_empty()).count() < 8,
+            "started draft should still have open seats"
+        );
+
+        register_restored_draft(&mut lob, &lobby_code, &lobby_ps, &env);
+        register_restored_draft(&mut lob, &draft_code, &drafting_ps, &env);
+
+        assert!(
+            lob.has_game(&lobby_code),
+            "lobby-status draft must re-register on restore"
+        );
+        assert!(
+            !lob.has_game(&draft_code),
+            "started draft with stale lobby_meta must not re-register"
+        );
     }
 
     #[test]
