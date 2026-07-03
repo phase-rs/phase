@@ -33,6 +33,20 @@
 </p>
 <!-- coverage-badges:end -->
 
+<p align="center">
+  <a href="https://gittensor.io">
+    <img src="https://raw.githubusercontent.com/entrius/gittensor/main/assets/gt-logo.jpg" alt="Gittensor" width="96" />
+  </a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gittensor/gittensor-impact-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/gittensor/gittensor-impact-light.svg">
+    <img src="docs/assets/gittensor/gittensor-impact-light.svg" alt="Gittensor contributor impact for phase.rs" width="600">
+  </picture>
+</p>
+
 ---
 
 <p align="center">
