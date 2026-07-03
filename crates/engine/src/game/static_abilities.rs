@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use crate::game::combat::AttackTarget;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{
-    battlefield_active_statics, game_active_statics, game_functioning_statics,
+    battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
@@ -13,7 +13,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
-    CrewContributionKind, ProhibitionScope, StaticMode,
+    CrewContributionKind, ProhibitionScope, StaticMode, StaticModeKind,
 };
 
 /// Handler function type for static ability modes.
@@ -1157,20 +1157,28 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
 /// widen the bypass to every target `player_id` chooses. Those are evaluated
 /// per-target by [`target_ignores_hexproof`].
 pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
-    let player_scoped_grant = game_functioning_statics(state).any(|(obj, def)| {
-        matches!(def.mode, StaticMode::IgnoreHexproof)
-            && def.affected.is_none()
-            && static_condition_matches_context(
-                state,
-                obj.id,
-                obj.controller,
-                def,
-                &StaticCheckContext {
-                    player_id: Some(player_id),
-                    ..Default::default()
-                },
-            )
-    });
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no player-scoped hexproof-bypass grant is possible, so skip the
+    // O(battlefield) scan entirely (the O(1) presence index is precise post-flush; before
+    // the first flush it is conservatively all-present and this falls through to the exact
+    // scan below). Verdict-identical to the un-gated `.any()` for all inputs.
+    let player_scoped_grant = static_kind_present(state, StaticModeKind::IgnoreHexproof) && {
+        crate::game::perf_counters::record_static_full_scan();
+        game_functioning_statics(state).any(|(obj, def)| {
+            matches!(def.mode, StaticMode::IgnoreHexproof)
+                && def.affected.is_none()
+                && static_condition_matches_context(
+                    state,
+                    obj.id,
+                    obj.controller,
+                    def,
+                    &StaticCheckContext {
+                        player_id: Some(player_id),
+                        ..Default::default()
+                    },
+                )
+        })
+    };
     player_scoped_grant
         || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
 }
@@ -1197,6 +1205,14 @@ pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
 /// Detection Tower form (`affected = None`) is handled by
 /// [`player_ignores_hexproof`].
 pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no object-scoped hexproof-bypass grant is possible — skip the O(battlefield)
+    // scan. Precise post-flush; conservatively all-present before the first flush, where it
+    // falls through to the exact scan below. Verdict-identical to the un-gated `.any()`.
+    if !static_kind_present(state, StaticModeKind::IgnoreHexproof) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     game_functioning_statics(state).any(|(source_obj, def)| {
         matches!(def.mode, StaticMode::IgnoreHexproof)
             && def.affected.as_ref().is_some_and(|filter| {
