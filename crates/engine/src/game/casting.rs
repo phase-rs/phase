@@ -14922,7 +14922,7 @@ fn is_blocked_by_cant_be_cast(
 
         // CR 604.1: Check spell filter if present.
         if let Some(ref affected) = def.affected {
-            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj) {
+            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj, caster) {
                 continue;
             }
         }
@@ -14946,18 +14946,31 @@ fn is_blocked_by_cant_be_cast(
 
 /// CR 101.2: Check if a spell matches a CantBeCast affected filter.
 /// Handles type filters, mana value comparisons, chosen name, and chosen card type.
-/// Source-dependent filters (HasChosenName, IsChosenCardType) are resolved here
-/// because they need the source permanent's chosen attributes.
+/// Evaluate a `CantBeCast` affected filter against a spell being cast, with the
+/// prohibiting permanent as the filter source.
+///
+/// Only `HasChosenName` needs a dedicated arm — the shared spell-filter matcher
+/// has no top-level chosen-name variant. Every other filter, including the
+/// chosen-attribute *properties* (`IsChosenColor` per CR 105.2/105.4,
+/// `IsChosenCardType` per CR 205), is evaluated as a normal typed-filter
+/// conjunction through the source-aware `spell_object_matches_filter_from_state`
+/// path. That path resolves each chosen property against the source permanent's
+/// chosen attributes from context, so a prohibition can combine a chosen
+/// attribute with any card-type, controller, or zone axis without a bespoke
+/// per-property matcher here.
 fn cant_cast_filter_matches(
     state: &GameState,
     spell_obj: &super::game_object::GameObject,
     filter: &TargetFilter,
     source_obj: &super::game_object::GameObject,
+    caster: PlayerId,
 ) -> bool {
-    use crate::types::ability::{ChosenAttribute, FilterProp};
+    use crate::types::ability::ChosenAttribute;
 
     match filter {
-        // CR 201.2: "spells with the chosen name" — match spell name against source's chosen name.
+        // CR 201.2: "spells with the chosen name" — the shared spell-filter path
+        // has no top-level chosen-name variant, so match the spell name against
+        // the source's chosen name here.
         TargetFilter::HasChosenName => {
             let chosen_name = source_obj.chosen_attributes.iter().find_map(|a| match a {
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
@@ -14965,48 +14978,17 @@ fn cant_cast_filter_matches(
             });
             chosen_name.is_some_and(|name| name.eq_ignore_ascii_case(&spell_obj.name))
         }
-        // CR 205: Typed filter with IsChosenCardType requires source's chosen card type.
-        TargetFilter::Typed(tf)
-            if tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::IsChosenCardType)) =>
-        {
-            let chosen_type = source_obj.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardType(ct) => Some(ct),
-                _ => None,
-            });
-            let Some(chosen_type) = chosen_type else {
-                return false;
-            };
-            spell_obj
-                .card_types
-                .core_types
-                .iter()
-                .any(|ct| ct == chosen_type)
-        }
-        // All other filters delegate to the spell record matcher.
-        _ => {
-            let record = SpellCastRecord {
-                name: spell_obj.name.clone(),
-                core_types: spell_obj.card_types.core_types.clone(),
-                supertypes: spell_obj.card_types.supertypes.clone(),
-                subtypes: spell_obj.card_types.subtypes.clone(),
-                keywords: spell_obj.keywords.clone(),
-                colors: spell_obj.color.clone(),
-                mana_value: spell_obj.mana_cost.mana_value(),
-                has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-                from_zone: spell_obj.zone,
-                cast_variant: crate::types::game_state::CastingVariant::Normal,
-                was_kicked: !spell_obj.kickers_paid.is_empty(),
-            };
-            super::filter::spell_record_matches_filter(
-                &record,
-                filter,
-                source_obj.controller,
-                &state.all_creature_types,
-            )
-        }
+        // Everything else — including IsChosenColor / IsChosenCardType properties —
+        // flows through the shared source-aware typed-filter conjunction.
+        _ => super::filter::spell_object_matches_filter_from_state(
+            state,
+            spell_obj,
+            spell_obj.zone,
+            caster,
+            filter,
+            source_obj.id,
+            &state.all_creature_types,
+        ),
     }
 }
 
