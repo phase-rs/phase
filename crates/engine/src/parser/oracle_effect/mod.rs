@@ -2,6 +2,7 @@ pub(crate) mod animation;
 pub(crate) mod become_copy_except;
 pub(crate) mod conditions;
 pub(crate) mod counter;
+pub(crate) mod fight_each_other;
 pub(crate) mod imperative;
 pub(super) mod lower;
 pub(crate) mod mana;
@@ -20866,6 +20867,23 @@ pub(crate) fn parse_effect_chain_ir(
                 actor: ctx.actor.clone(),
                 repeat_until: None,
             };
+        }
+    }
+    // CR 701.14a + CR 601.2c: "Choose target creature you control and target
+    // creature you don't control. [rider.] Then those creatures fight each other."
+    // (Joust, Blizzard Brawl, Tail Swipe) — recognize the whole frame BEFORE chunk
+    // splitting, which otherwise strands fighter B as a disconnected Unimplemented
+    // and leaves the Fight with an empty target slot. Fast-rejected by the closing
+    // phrase; a hit still routes through the nom recognizer, the sole authority.
+    if ctx
+        .effect_chain_full_lower
+        .as_deref()
+        .is_some_and(|lower| scan_contains_phrase(lower, fight_each_other::FIGHT_EACH_OTHER_MARKER))
+    {
+        if let Some(ir) =
+            fight_each_other::parse_choose_two_creatures_fight(full_text.trim(), kind, ctx)
+        {
+            return ir;
         }
     }
     let chunks = split_clause_sequence(text);

@@ -987,6 +987,190 @@ mod tests {
         );
     }
 
+    /// CR 701.14a + CR 601.2c: End-to-end cast of Joust ("Choose target creature
+    /// you control and target creature you don't control. The creature you control
+    /// gets +2/+1 until end of turn if it's a Knight. Then those creatures fight
+    /// each other."). The whole frame must lower to a single connected dual-target
+    /// fight: exactly TWO targets are announced (no spurious third slot), the pump
+    /// binds to fighter A and applies BEFORE the fight (fighter B takes A's BOOSTED
+    /// power), and both fighters deal each other's power. Discriminates the false-
+    /// green: the old parse left fighter B a disconnected `Unimplemented`, so the
+    /// fight never resolved and a third target was demanded.
+    #[test]
+    fn joust_full_cast_resolves_dual_target_fight_with_pump_on_fighter_a() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        const JOUST: &str = "Choose target creature you control and target creature you don't control. The creature you control gets +2/+1 until end of turn if it's a Knight. Then those creatures fight each other. (Each deals damage equal to its power to the other.)";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Fighter A is a Knight so the rider condition holds; large toughness so
+        // both fighters survive and their marked damage stays observable.
+        let mine = scenario
+            .add_creature(P0, "My Knight", 2, 9)
+            .with_subtypes(vec!["Knight"])
+            .id();
+        let theirs = scenario.add_creature(P1, "Their Beast", 3, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Joust", true, JOUST)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 6],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+        }
+
+        // CR 601.2c: exactly two targets — fighter A then fighter B.
+        let outcome = runner.cast(spell).target_objects(&[mine, theirs]).resolve();
+
+        // CR 611.2c: the +2/+1 pump bound to fighter A and applied before the fight.
+        assert_eq!(
+            outcome.power_toughness(mine),
+            (4, 10),
+            "pump must bind to fighter A (2/9 + 2/1 = 4/10)"
+        );
+        // CR 701.14a: fighter B takes fighter A's BOOSTED power (4), proving the
+        // pump applied before the fight and the fight actually resolved.
+        assert_eq!(
+            outcome.damage_marked(theirs),
+            4,
+            "fighter B takes fighter A's boosted power (4)"
+        );
+        // CR 701.14a: fighter A takes fighter B's power (3).
+        assert_eq!(
+            outcome.damage_marked(mine),
+            3,
+            "fighter A takes fighter B's power (3)"
+        );
+        // No spurious third target: the spell resolved cleanly back to priority.
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "cast needed exactly two targets; got {:?}",
+            outcome.final_waiting_for()
+        );
+    }
+
+    /// CR 701.14a + CR 608.2c: Blizzard Brawl's rider ("If you control three or
+    /// more snow permanents, the creature you control gets +1/+0 and gains
+    /// indestructible") is gated. With the gate FALSE, the buff is skipped but the
+    /// fight — an unconditional `SequentialSibling` sub — must STILL resolve. This
+    /// pins the coverage-honesty core: the fight resolves regardless of the rider.
+    #[test]
+    fn blizzard_brawl_fight_resolves_when_snow_condition_false() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        const BLIZZARD_BRAWL: &str = "Choose target creature you control and target creature you don't control. If you control three or more snow permanents, the creature you control gets +1/+0 and gains indestructible until end of turn. Then those creatures fight each other. (Each deals damage equal to its power to the other.)";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mine = scenario.add_creature(P0, "My Bear", 2, 9).id();
+        let theirs = scenario.add_creature(P1, "Their Beast", 3, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Blizzard Brawl", true, BLIZZARD_BRAWL)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 6],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+        }
+
+        let outcome = runner.cast(spell).target_objects(&[mine, theirs]).resolve();
+
+        // No snow permanents → no buff; power unchanged.
+        assert_eq!(outcome.power_toughness(mine), (2, 9), "no snow → no buff");
+        // CR 701.14a: the fight still resolves with base powers.
+        assert_eq!(
+            outcome.damage_marked(theirs),
+            2,
+            "fighter B takes fighter A's (unbuffed) power (2)"
+        );
+        assert_eq!(
+            outcome.damage_marked(mine),
+            3,
+            "fighter A takes fighter B's power (3) — fight resolved despite skipped rider"
+        );
+    }
+
+    /// CR 701.14a + CR 702.12: With Blizzard Brawl's snow gate TRUE, the +1/+0 and
+    /// indestructible grant binds to fighter A: A deals its BOOSTED power and
+    /// SURVIVES lethal fight damage via indestructible.
+    #[test]
+    fn blizzard_brawl_snow_true_binds_grant_and_indestructible_to_fighter_a() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::card_type::Supertype;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        const BLIZZARD_BRAWL: &str = "Choose target creature you control and target creature you don't control. If you control three or more snow permanents, the creature you control gets +1/+0 and gains indestructible until end of turn. Then those creatures fight each other. (Each deals damage equal to its power to the other.)";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mine = scenario.add_creature(P0, "My Bear", 2, 2).id();
+        // Two extra permanents you control; together with `mine` they form the
+        // three snow permanents the rider gate requires.
+        let snow_a = scenario.add_creature(P0, "Snow Ally A", 1, 1).id();
+        let snow_b = scenario.add_creature(P0, "Snow Ally B", 1, 1).id();
+        let theirs = scenario.add_creature(P1, "Their Ogre", 5, 5).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Blizzard Brawl", true, BLIZZARD_BRAWL)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 6],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+            // CR 205.4: mark three permanents you control as snow.
+            for id in [mine, snow_a, snow_b] {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.supertypes.push(Supertype::Snow);
+                obj.base_card_types.supertypes.push(Supertype::Snow);
+            }
+        }
+
+        let outcome = runner.cast(spell).target_objects(&[mine, theirs]).resolve();
+
+        // CR 611.2c: +1/+0 bound to fighter A (2/2 → 3/2).
+        assert_eq!(
+            outcome.power_toughness(mine),
+            (3, 2),
+            "+1/+0 binds to fighter A"
+        );
+        // CR 701.14a: fighter B takes fighter A's boosted power (3).
+        assert_eq!(
+            outcome.damage_marked(theirs),
+            3,
+            "fighter B takes fighter A's boosted power (3)"
+        );
+        // CR 702.12: fighter A took lethal (5) fight damage but the granted
+        // indestructible kept it on the battlefield.
+        assert_eq!(
+            outcome.zone_of(mine),
+            Zone::Battlefield,
+            "indestructible saved fighter A"
+        );
+        assert_eq!(
+            outcome.damage_marked(mine),
+            5,
+            "fighter A still marked with fighter B's power (5), but survives"
+        );
+    }
+
     #[test]
     fn fight_self_deals_twice_power() {
         let mut state = GameState::new_two_player(42);
