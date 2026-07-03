@@ -14,6 +14,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -148,6 +149,23 @@ fn plague_drone_parses_as_gain_life_replacement() {
         matches!(parsed.replacements[0].event, ReplacementEvent::GainLife),
         "Plague Drone's replacement must be keyed on the GainLife event; got: {:?}",
         parsed.replacements[0].event
+    );
+
+    let execute = parsed.replacements[0]
+        .execute
+        .as_deref()
+        .expect("Plague Drone's replacement must carry an execute body");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::PostReplacementDamageTarget),
+                ..
+            }
+        ),
+        "the life-loss recipient must be the explicit post-replacement \
+         event-recipient filter bound at the parser seam; got: {:?}",
+        execute.effect
     );
 
     // Scope the serialized-shape assertions to the replacement itself: the

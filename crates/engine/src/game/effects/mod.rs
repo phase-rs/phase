@@ -4591,16 +4591,6 @@ pub(crate) fn resolve_player_for_context_ref(
     // library"). Object-target uses of `ParentTarget` continue through the
     // object/controller resolution paths below.
     if matches!(target_filter, TargetFilter::ParentTarget) {
-        if let Some(ref event_target) = state.post_replacement_event_target {
-            return match event_target {
-                TargetRef::Player(player) => *player,
-                TargetRef::Object(id) => state
-                    .objects
-                    .get(id)
-                    .map(|obj| obj.controller)
-                    .unwrap_or(ability.controller),
-            };
-        }
         if let Some(player) = ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,
@@ -4615,31 +4605,11 @@ pub(crate) fn resolve_player_for_context_ref(
     // source's controller (the entering permanent), not the parent ability's
     // chosen target (the exiled creature).
     if matches!(target_filter, TargetFilter::ParentTargetController) {
-        if let Some(ref event_target) = state.post_replacement_event_target {
-            match event_target {
-                TargetRef::Player(player) => return *player,
-                TargetRef::Object(id) => {
-                    if let Some(obj) = state.objects.get(id) {
-                        return obj.controller;
-                    }
-                }
-            }
-        }
         if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
             return player;
         }
     }
     if matches!(target_filter, TargetFilter::ParentTargetOwner) {
-        if let Some(ref event_target) = state.post_replacement_event_target {
-            match event_target {
-                TargetRef::Player(player) => return *player,
-                TargetRef::Object(id) => {
-                    if let Some(obj) = state.objects.get(id) {
-                        return obj.owner;
-                    }
-                }
-            }
-        }
         if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
             return player;
         }

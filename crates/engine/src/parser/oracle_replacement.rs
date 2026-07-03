@@ -511,7 +511,18 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             return Some(def);
         }
         if let Some(e) = effect_text {
-            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+            // CR 614.6 + CR 615.5: "that player loses that much life instead"
+            // - the recipient of the converted effect is the replaced event's
+            // gaining player. The standalone effect parser has no referent for
+            // "that player" in a replacement context and lowers it to the
+            // generic `ParentTargetController` anaphor; rewrite it to the
+            // explicit post-replacement event-recipient filter at the parser
+            // seam, exactly as the CR 615.5 prevention follow-up path does for
+            // damage recipients. Generic `ParentTarget*` resolution is left
+            // untouched.
+            let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
+            rewrite_damage_recipient_to_post_replacement_target(&mut execute);
+            def = def.execute(execute);
         }
         // CR 614.1a: Parse the subject to determine player scope.
         apply_gain_life_player_scope(&lower, &mut def);
