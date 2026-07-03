@@ -216,12 +216,21 @@ impl DraftSessionManager {
         &mut self,
         draft_code: &str,
         display_name: String,
-        _password: Option<&str>,
+        password: Option<&str>,
     ) -> Result<(String, u8, DraftPlayerView), String> {
         let session = self
             .sessions
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
+
+        if let Some(meta) = &session.lobby_meta {
+            match (&meta.password, password) {
+                (None, _) => {}
+                (Some(_), None) => return Err("password_required".to_string()),
+                (Some(expected), Some(provided)) if expected == provided => {}
+                (Some(_), Some(_)) => return Err("Wrong password".to_string()),
+            }
+        }
 
         let seat = session
             .first_open_seat()
@@ -758,6 +767,34 @@ mod tests {
         assert_eq!(token.len(), 32);
         assert_eq!(seat, 0);
         assert!(mgr.sessions.contains_key(&code));
+    }
+
+    #[test]
+    fn join_draft_enforces_lobby_password() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.sessions.get_mut(&code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+
+        assert_eq!(
+            mgr.join_draft(&code, "Bob".to_string(), None)
+                .unwrap_err(),
+            "password_required"
+        );
+        assert_eq!(
+            mgr.join_draft(&code, "Bob".to_string(), Some("wrong"))
+                .unwrap_err(),
+            "Wrong password"
+        );
+        assert!(mgr
+            .join_draft(&code, "Bob".to_string(), Some("secret"))
+            .is_ok());
     }
 
     #[test]

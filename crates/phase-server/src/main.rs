@@ -905,13 +905,46 @@ async fn main() {
         match game_db.load_all_drafts() {
             Ok(persisted_drafts) => {
                 let mut dsm = draft_sessions.lock().await;
+                let mut lob_guard = lobby.lock().await;
+                let lob = lob_guard.lobby_mut();
                 let mut restored_drafts = 0u32;
                 for (draft_code, json) in &persisted_drafts {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
                         Ok(ps) => {
+                            let lobby_meta = ps.lobby_meta.clone();
+                            let pod_size = ps.config.pod_size;
+                            let set_code = ps.config.set_code.clone();
+                            let draft_kind = format!("{:?}", ps.config.kind);
+                            let filled = ps
+                                .player_tokens
+                                .iter()
+                                .filter(|t| !t.is_empty())
+                                .count();
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
+                            if let Some(meta) = lobby_meta {
+                                lob.register_game(
+                                    draft_code,
+                                    RegisterGameRequest {
+                                        host_name: meta.host_name,
+                                        public: meta.public,
+                                        password: meta.password,
+                                        timer_seconds: meta.timer_seconds,
+                                        current_players: filled as u32,
+                                        max_players: pod_size as u32,
+                                        draft_metadata: Some(
+                                            server_core::protocol::DraftLobbyMetadata {
+                                                set_code,
+                                                draft_kind,
+                                                cube_name: None,
+                                            },
+                                        ),
+                                        ..Default::default()
+                                    },
+                                    &SysEnv,
+                                );
+                            }
                             if let Some(ms) = timer_ms {
                                 info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
                             }
@@ -5325,7 +5358,19 @@ async fn handle_client_message(
 
             let (draft_code, player_token, seat_index) = {
                 let mut mgr = draft_state.lock().await;
-                mgr.create_draft(config, display_name.clone())
+                let (draft_code, player_token, seat_index) =
+                    mgr.create_draft(config, display_name.clone());
+                if let Some(session) = mgr.sessions.get_mut(&draft_code) {
+                    session.lobby_meta = Some(server_core::PersistedLobbyMeta {
+                        host_name: display_name.clone(),
+                        public,
+                        password: password.clone(),
+                        timer_seconds,
+                        start_when_full: true,
+                        ranked: false,
+                    });
+                }
+                (draft_code, player_token, seat_index)
             };
 
             identity.draft_code = Some(draft_code.clone());
@@ -5471,6 +5516,15 @@ async fn handle_client_message(
                     }
                 }
                 Err(reason) => {
+                    if reason == "password_required" {
+                        let msg = ServerMessage::PasswordRequired {
+                            game_code: draft_code.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
                     let msg = ServerMessage::DraftActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
