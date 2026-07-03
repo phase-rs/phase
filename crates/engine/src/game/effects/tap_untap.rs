@@ -223,29 +223,37 @@ fn prompt_resolution_tap_untap_choice(
         .copied()
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))
         .collect();
-    let Ok(bounds) = crate::game::ability_utils::resolve_multi_target_bounds(
+    let bounds = match crate::game::ability_utils::resolve_multi_target_bounds(
         state,
         ability,
         spec,
         eligible.len(),
-    ) else {
-        return false;
+    ) {
+        Ok(bounds) => bounds,
+        // CR 608.2b + CR 601.2c (issue #4961): `resolve_multi_target_bounds`
+        // errors when the eligible pool is smaller than the selection's required
+        // minimum. With zero eligible permanents the required tap/untap choice is
+        // vacuously impossible, so resolve it here — the single reachable
+        // no-candidate point — as a clean no-op. This keeps a resolution-time
+        // `EffectZoneChoice` from ever being built over an empty pool (which is
+        // the shape that wedges the game). A non-empty-but-under-filled pool is
+        // left to the normal target path (`return false`) so partial selections
+        // keep their existing behavior.
+        Err(_) => {
+            if eligible.is_empty() {
+                events.push(GameEvent::EffectResolved {
+                    kind: effect_kind,
+                    source_id: ability.source_id,
+                });
+                return true;
+            }
+            return false;
+        }
     };
 
     if bounds.max == 0 && bounds.min == 0 {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        return true;
-    }
-
-    // CR 608.2d: zero eligible objects with a positive minimum is unsatisfiable.
-    // Mirror attach.rs empty-pool no-op so resolution does not wedge the game
-    // (issue #4961 class — no-candidate zone-choice prompts).
-    if eligible.is_empty() && bounds.min > 0 {
-        events.push(GameEvent::EffectResolved {
-            kind: effect_kind,
             source_id: ability.source_id,
         });
         return true;
@@ -721,13 +729,9 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// Issue #4961: zero eligible permanents with `min_count >= 1` must no-op
-    /// instead of building an unsatisfiable `EffectZoneChoice` wedge.
-    #[test]
-    fn tap_untap_choice_with_no_eligible_permanents_does_not_deadlock() {
+    fn resolution_tap_choice_ability(seed_min: usize) -> ResolvedAbility {
         use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
 
-        let mut state = GameState::new_two_player(4961);
         let mut ability = ResolvedAbility::new(
             Effect::SetTapState {
                 target: TargetFilter::Typed(
@@ -742,8 +746,22 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        ability.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+        ability.multi_target = Some(MultiTargetSpec::fixed(seed_min, seed_min));
         ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    /// Issue #4961: a resolution-time tap choice with a required minimum and
+    /// zero eligible permanents must resolve as a no-op via the reachable
+    /// no-candidate arm — `resolve_multi_target_bounds` errors first, so the
+    /// handling lives in that `Err` branch, not after it. Without the branch the
+    /// only thing preventing a wedge is the incidental empty-target fallthrough;
+    /// this asserts the intended path emits `EffectResolved` and never installs a
+    /// `WaitingFor` prompt.
+    #[test]
+    fn tap_untap_choice_with_no_eligible_permanents_does_not_deadlock() {
+        let mut state = GameState::new_two_player(4961);
+        let ability = resolution_tap_choice_ability(1);
 
         let mut events = Vec::new();
         resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
@@ -763,6 +781,43 @@ mod tests {
             )),
             "no-op path must emit EffectResolved"
         );
+    }
+
+    /// Guard the normal path: when the eligible pool DOES satisfy the required
+    /// minimum, the resolution-time choice must still be offered as an
+    /// `EffectZoneChoice` prompt (the #4961 no-op fix must not swallow real
+    /// selections).
+    #[test]
+    fn tap_untap_choice_with_eligible_permanents_still_prompts() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(4961);
+        let zombie = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Walking Corpse".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&zombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Zombie".to_string());
+        }
+        let ability = resolution_tap_choice_ability(1);
+
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards, min_count, ..
+            } => {
+                assert_eq!(cards, &vec![zombie]);
+                assert_eq!(*min_count, 1);
+            }
+            other => panic!("expected an EffectZoneChoice prompt, got {other:?}"),
+        }
     }
 
     #[test]
