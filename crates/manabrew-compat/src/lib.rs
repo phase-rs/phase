@@ -1471,6 +1471,9 @@ fn mana_cost_string(cost: &ManaCost) -> String {
         ManaCost::NoCost => String::new(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
         ManaCost::SelfManaValue => "its mana value".to_string(),
+        ManaCost::SelfManaCostReduced { reduction } => {
+            format!("its mana cost reduced by {{{reduction}}}")
+        }
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {

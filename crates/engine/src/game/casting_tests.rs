@@ -342,7 +342,14 @@ fn add_foretell_sorcery(state: &mut GameState) -> ObjectId {
     );
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.card_types.core_types.push(CoreType::Sorcery);
-    obj.keywords.push(Keyword::Foretell(foretell_test_cost()));
+    // A real printed foretell keyword lives in BOTH `keywords` and
+    // `base_keywords` (the off-zone characteristic layer seeds from
+    // `base_keywords`). `effective_foretell_cost` now consults the off-zone layer
+    // as its single authority, so mirror the keyword into `base_keywords` to model
+    // a printed keyword faithfully.
+    let foretell = Keyword::Foretell(foretell_test_cost());
+    obj.keywords.push(foretell.clone());
+    obj.base_keywords.push(foretell);
     object_id
 }
 

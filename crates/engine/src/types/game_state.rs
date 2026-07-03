@@ -5269,12 +5269,16 @@ pub enum CastingVariant {
     /// paying the spell's mana cost. Unlike Sneak, Web-slinging grants no
     /// special timing permission and has no enter-attacking placement rule.
     WebSlinging { returned_creature: ObjectId },
-    /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
-    /// the card as the first card drawn this turn. The granting keyword carries
-    /// the miracle mana cost, which `prepare_spell_cast_with_variant_override`
-    /// substitutes for the printed mana cost. The keyword's `ManaCost` payload
-    /// is read at preparation time rather than stored here because
-    /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
+    /// CR 702.94a + CR 608.2g: Cast from hand via Miracle's alternative cost after
+    /// revealing the card as the first card drawn this turn. This is a UNIT variant;
+    /// the concrete miracle cost is NOT re-read from live keywords at cast time.
+    /// Instead it is latched at offer-enqueue on `CastOfferKind::Miracle.cost` (a
+    /// concrete `ManaCost::Cost` resolved by `draw.rs`) and threaded through
+    /// `handle_cast_spell_as_miracle_with_payment_mode` →
+    /// `prepare_spell_cast_with_variant_override_inner(latched_alt_cost)`. This
+    /// preserves the offered cost even if the granting source (e.g. Aminatou) has
+    /// left the battlefield between reveal-accept and trigger resolution
+    /// (CR 608.2b last-known-information).
     Miracle,
     /// CR 702.35a: Cast from exile via Madness after the discard replacement
     /// exiled the card and its madness triggered ability resolved.

@@ -2556,6 +2556,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 113.6b: A "without <keyword>" clause may TRAIL a zone clause ("nonland
+    // card in your hand without foretell" — Dream Devourer). The pre-zone
+    // `parse_without_keyword_suffix` pass above only catches the clause when it
+    // precedes the zone; this second pass catches the zone-then-without ordering
+    // so the subject fully consumes (the graveyard/hand keyword-grant gate
+    // requires an empty remainder).
+    if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
+        properties.extend(keyword_props);
+        pos += consumed;
+    }
+
     let mut exclude_chosen_type = false;
     let mut exclude_owned_by_controller: Option<ControllerRef> = None;
     let remaining_not_owned = lower[pos..].trim_start();
@@ -5053,6 +5064,8 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             | "harmonize"
             | "unearth"
             | "awaken"
+            | "foretell"
+            | "miracle"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -5063,6 +5076,11 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             "harmonize" => KeywordKind::Harmonize,
             "unearth" => KeywordKind::Unearth,
             "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
+            // CR 702.143 / CR 702.94: "card in your hand without foretell" and the
+            // miracle analogue are keyword-presence meta-references — match by
+            // discriminant so a granted (cost-bearing) instance still matches.
+            "foretell" => KeywordKind::Foretell, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
+            "miracle" => KeywordKind::Miracle, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));

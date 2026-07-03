@@ -11420,14 +11420,14 @@ fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
 #[test]
 fn parse_graveyard_granted_keyword_kind_recognizes_all_members() {
     use crate::parser::oracle_static::{
-        parse_graveyard_granted_keyword_kind, GraveyardGrantedKeywordKind,
+        parse_graveyard_granted_keyword_kind, GrantedCastKeywordKind,
     };
     for (word, expected) in [
-        ("flashback", GraveyardGrantedKeywordKind::Flashback),
-        ("escape", GraveyardGrantedKeywordKind::Escape),
-        ("mayhem", GraveyardGrantedKeywordKind::Mayhem),
-        ("scavenge", GraveyardGrantedKeywordKind::Scavenge),
-        ("encore", GraveyardGrantedKeywordKind::Encore),
+        ("flashback", GrantedCastKeywordKind::Flashback),
+        ("escape", GrantedCastKeywordKind::Escape),
+        ("mayhem", GrantedCastKeywordKind::Mayhem),
+        ("scavenge", GrantedCastKeywordKind::Scavenge),
+        ("encore", GrantedCastKeywordKind::Encore),
     ] {
         let (_, kind) = parse_graveyard_granted_keyword_kind(word)
             .unwrap_or_else(|_| panic!("combinator failed on {word:?}"));

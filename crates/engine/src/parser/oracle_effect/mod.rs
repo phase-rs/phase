@@ -9839,7 +9839,7 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
     )?;
     if !matches!(
         keyword_kind,
-        crate::parser::oracle_static::GraveyardGrantedKeywordKind::Escape
+        crate::parser::oracle_static::GrantedCastKeywordKind::Escape
     ) {
         return None;
     }

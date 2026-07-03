@@ -29,28 +29,32 @@ pub(crate) enum RuleStaticPredicate {
 
 /// CR 702.34a / CR 702.138a / CR 702.187b / CR 702.97 / CR 702.141: maps the
 /// leading keyword token of a graveyard-cast-keyword grant ("flashback",
-/// "escape", "mayhem", "scavenge", "encore") to its `GraveyardGrantedKeywordKind`.
+/// "escape", "mayhem", "scavenge", "encore") to its `GrantedCastKeywordKind`.
 /// Single authority for the keyword-word → kind dispatch, shared by the static
 /// "each ... has <kw>" clause below and the targeted/imperative grant front door
 /// in `oracle_effect` so both forms recognize the same keyword set.
 pub(crate) fn parse_graveyard_granted_keyword_kind(
     input: &str,
-) -> OracleResult<'_, GraveyardGrantedKeywordKind> {
+) -> OracleResult<'_, GrantedCastKeywordKind> {
     alt((
-        value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
-        value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
-        value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+        value(GrantedCastKeywordKind::Flashback, tag("flashback")),
+        value(GrantedCastKeywordKind::Escape, tag("escape")),
+        value(GrantedCastKeywordKind::Mayhem, tag("mayhem")),
         // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
         // Wire Surgeons (encore) grant activated graveyard keywords.
-        value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
-        value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
+        value(GrantedCastKeywordKind::Scavenge, tag("scavenge")),
+        value(GrantedCastKeywordKind::Encore, tag("encore")),
+        // CR 702.143a / CR 702.94a: Dream Devourer grants foretell, Aminatou
+        // grants miracle — hand-zone cast keywords (gated by `grant_zone`).
+        value(GrantedCastKeywordKind::Foretell, tag("foretell")),
+        value(GrantedCastKeywordKind::Miracle, tag("miracle")),
     ))
     .parse(input)
 }
 
 pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     text: &str,
-) -> Option<(TargetFilter, GraveyardGrantedKeywordKind, String)> {
+) -> Option<(TargetFilter, GrantedCastKeywordKind, String)> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let rest = nom_tag_lower(&stripped, &lower, "each ")?;
@@ -70,7 +74,10 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     .0;
 
     let (filter, remainder) = parse_type_phrase(subject);
-    if !remainder.trim().is_empty() || !target_filter_is_your_graveyard(&filter) {
+    // CR 113.6b: the affected filter's zone must match the keyword's functional
+    // zone (graveyard for flashback/escape/…, hand for foretell/miracle). A
+    // mismatch (foretell-in-graveyard, flashback-in-hand) declines the grant.
+    if !remainder.trim().is_empty() || !target_filter_is_your_zone(&filter, kind.grant_zone()) {
         return None;
     }
 
@@ -83,7 +90,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
 /// arrives in a separate continuation sentence (handled upstream).
 fn parse_graveyard_granted_keyword_phrase(
     keyword_text: &str,
-    kind: GraveyardGrantedKeywordKind,
+    kind: GrantedCastKeywordKind,
 ) -> Option<Keyword> {
     if let Some((keyword, where_x)) = parse_keyword_with_where_x(keyword_text) {
         return normalize_graveyard_granted_keyword(keyword, where_x, kind);
@@ -105,13 +112,15 @@ fn binds_recipient_mana_value(where_x: &Option<QuantityRef>) -> bool {
     )
 }
 
-fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GraveyardGrantedKeywordKind> {
+fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GrantedCastKeywordKind> {
     [
-        GraveyardGrantedKeywordKind::Flashback,
-        GraveyardGrantedKeywordKind::Escape,
-        GraveyardGrantedKeywordKind::Mayhem,
-        GraveyardGrantedKeywordKind::Scavenge,
-        GraveyardGrantedKeywordKind::Encore,
+        GrantedCastKeywordKind::Flashback,
+        GrantedCastKeywordKind::Escape,
+        GrantedCastKeywordKind::Mayhem,
+        GrantedCastKeywordKind::Scavenge,
+        GrantedCastKeywordKind::Encore,
+        GrantedCastKeywordKind::Foretell,
+        GrantedCastKeywordKind::Miracle,
     ]
     .into_iter()
     .find(|kind| kind.matches_keyword(keyword))
@@ -130,7 +139,7 @@ fn finalize_graveyard_zone_grant_keyword(
 fn normalize_graveyard_granted_keyword(
     keyword: Keyword,
     where_x: Option<QuantityRef>,
-    kind: GraveyardGrantedKeywordKind,
+    kind: GrantedCastKeywordKind,
 ) -> Option<Keyword> {
     if !kind.matches_keyword(&keyword) {
         return None;
