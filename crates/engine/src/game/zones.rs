@@ -529,10 +529,7 @@ pub fn restore_object_for_cancel(state: &mut GameState, snapshot: GameObject) {
     let target_zone = snapshot.zone;
 
     if let Some(current) = state.objects.get(&object_id) {
-        let current_zone = current.zone;
-        if current_zone != target_zone {
-            remove_from_zone(state, object_id, current_zone, owner);
-        }
+        remove_from_zone(state, object_id, current.zone, owner);
     }
 
     state.objects.insert(object_id, snapshot);

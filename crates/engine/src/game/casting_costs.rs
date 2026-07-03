@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 
 use crate::game::functioning_abilities::static_kind_present;
@@ -1748,7 +1749,6 @@ pub(crate) fn handle_sacrifice_for_cost(
         super::sacrifice::sacrifice_permanent(state, id, player, events)
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
     }
-    use std::collections::hash_map::Entry;
     match state.pending_cast_sacrifice_rollbacks.entry(cast_id) {
         Entry::Occupied(mut entry) => entry.get_mut().snapshots.extend(snapshots),
         Entry::Vacant(entry) => {

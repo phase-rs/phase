@@ -5,13 +5,14 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, StaticDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::zones::{EtbTapState, Zone};
 
 const YAWGMOTH_ORACLE: &str = "Protection from Humans\n\
@@ -440,5 +441,55 @@ fn completed_activation_does_not_restore_prior_sacrifice_on_later_cancel() {
         runner.state().objects[&second_fodder].zone,
         Zone::Battlefield,
         "cancel must restore only the current activation's sacrifice"
+    );
+}
+
+#[test]
+fn yawgmoth_cancel_after_prevented_sacrifice_does_not_duplicate_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let yawgmoth = scenario
+        .add_creature_from_oracle(P0, "Yawgmoth, Thran Physician", 2, 4, YAWGMOTH_ORACLE)
+        .id();
+    let protected = scenario
+        .add_creature(P0, "Protected Fodder", 1, 1)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+                .affected(TargetFilter::SelfRef),
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    let ability_index = yawgmoth_sacrifice_ability_index(&runner);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: yawgmoth,
+            ability_index,
+        })
+        .expect("begin Yawgmoth activation");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![protected],
+        })
+        .expect("attempt sacrifice on protected creature");
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel after prevented sacrifice cost");
+
+    assert_eq!(
+        runner.state().objects[&protected].zone,
+        Zone::Battlefield,
+        "prevented sacrifice must leave the creature on the battlefield"
+    );
+    let battlefield_dupes = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|&&id| id == protected)
+        .count();
+    assert_eq!(
+        battlefield_dupes, 1,
+        "cancel rollback must not duplicate battlefield zone-list entries for same-zone snapshots"
     );
 }
