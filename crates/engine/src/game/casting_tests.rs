@@ -39925,3 +39925,152 @@ fn heal_draws_on_the_next_turns_upkeep() {
         "Heal must draw exactly one card on the next turn's upkeep"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ravenous Trap alternative-cost gate (CR 118.9 + CR 601.2b + CR 404.1 +
+// CR 109.5). "If an opponent had three or more cards put into their graveyard
+// from anywhere this turn, you may pay {0} rather than pay this spell's mana
+// cost." Drives the real cast-cost pipeline
+// (`payable_spell_alternative_cost_details` → `restrictions::evaluate_condition`
+// → `resolve_quantity_scoped` over `zone_changes_this_turn`), binding the
+// parsed `Owned { Opponent }` gate against each record's `owner`.
+// ---------------------------------------------------------------------------
+
+/// Build a Ravenous Trap in `player`'s hand carrying the REAL parsed alt-cost
+/// casting option (so the runtime tests bind directly to the parser output, not
+/// a hand-rolled condition). Base printed cost is {2}{B} so the {0} alt-cost is
+/// distinguishable.
+fn create_ravenous_trap_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let option = crate::parser::oracle_casting::parse_spell_casting_option_line(
+        "If an opponent had three or more cards put into their graveyard from anywhere this turn, you may pay {0} rather than pay this spell's mana cost.",
+        "Ravenous Trap",
+    )
+    .expect("Ravenous Trap alt-cost line must parse");
+
+    let obj_id = create_object(
+        state,
+        CardId(9500),
+        player,
+        "Ravenous Trap".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Instant);
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 2,
+    };
+    Arc::make_mut(&mut obj.abilities).clear();
+    Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+        "Exile target player's graveyard.",
+        AbilityKind::Spell,
+    ));
+    obj.casting_options.push(option);
+    obj_id
+}
+
+/// Push `count` "card put into `owner`'s graveyard from anywhere this turn"
+/// zone-change records (from hand → graveyard, nontoken) so the gate's
+/// `ZoneChangeCountThisTurn { to: Graveyard, filter: Owned{..} + NonToken }`
+/// resolver counts them.
+fn push_cards_to_graveyard_this_turn(state: &mut GameState, owner: PlayerId, count: usize) {
+    for i in 0..count {
+        state
+            .zone_changes_this_turn
+            .push(crate::types::game_state::ZoneChangeRecord {
+                name: format!("Milled Card {i}"),
+                core_types: vec![CoreType::Creature],
+                mana_value: 1,
+                controller: owner,
+                owner,
+                is_token: false,
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    ObjectId(40_000 + i as u64),
+                    Some(Zone::Hand),
+                    Zone::Graveyard,
+                )
+            });
+    }
+}
+
+fn ravenous_trap_offered_cost(
+    state: &GameState,
+    player: PlayerId,
+    trap: ObjectId,
+) -> Option<AbilityCost> {
+    crate::game::casting_costs::payable_spell_alternative_cost_details(state, player, trap)
+        .map(|details| details.cost)
+}
+
+/// R-a: fewer than three opponent-owned cards to a graveyard this turn → the
+/// alt-cost gate is unmet, so no free-cast option is offered.
+#[test]
+fn ravenous_trap_alt_cost_not_offered_below_threshold() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(1), 2);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        None,
+        "two opponent-owned cards is below the GE-3 gate; alt-cost must not be offered"
+    );
+}
+
+/// R-b: three or more opponent-owned cards to a graveyard this turn → alt-cost
+/// offered and the spell is castable for {0}.
+#[test]
+fn ravenous_trap_alt_cost_offered_at_threshold() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(1), 3);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            },
+        }),
+        "three opponent-owned cards meets the GE-3 gate; {{0}} alt-cost must be offered"
+    );
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), trap),
+        "with the alt-cost payable for {{0}}, Ravenous Trap must be castable with no mana"
+    );
+}
+
+/// R-c: the owner-vs-controller discriminator. Three CASTER-owned cards (zero
+/// opponent-owned) went to a graveyard this turn. Because a card goes to its
+/// OWNER's graveyard (CR 404.1) and the gate scopes by `Owned { Opponent }`,
+/// the gate must stay unmet — the alt-cost is NOT offered. This is the hostile
+/// fixture that would pass if the filter used control (or `You`) instead of
+/// opponent ownership.
+#[test]
+fn ravenous_trap_alt_cost_owner_not_controller_discriminator() {
+    let mut state = setup_game_at_main_phase();
+    let trap = create_ravenous_trap_in_hand(&mut state, PlayerId(0));
+    push_cards_to_graveyard_this_turn(&mut state, PlayerId(0), 3);
+
+    assert_eq!(
+        ravenous_trap_offered_cost(&state, PlayerId(0), trap),
+        None,
+        "caster-owned cards must not satisfy the opponent-owned gate (CR 404.1 owner scope)"
+    );
+}
+
+/// R-d: a still-unsupported leading-if predicate ("If the sky is green, …")
+/// keeps dropping the whole casting option — the generalization must not have
+/// widened the leading-if acceptance surface for unrelated predicates.
+#[test]
+fn unsupported_leading_if_predicate_still_drops_option() {
+    let option = crate::parser::oracle_casting::parse_spell_casting_option_line(
+        "If the sky is green, you may pay {0} rather than pay this spell's mana cost.",
+        "Not A Real Trap",
+    );
+    assert!(
+        option.is_none(),
+        "an unrecognized leading-if predicate must still drop the alt-cost option, got {option:?}"
+    );
+}
