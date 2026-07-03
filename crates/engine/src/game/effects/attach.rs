@@ -596,15 +596,16 @@ pub(crate) fn attachment_illegality(
     // being attached to the protected permanent.
     // CR 702.16d: Protection from a quality prevents Equipment or Fortifications
     // of that quality from being attached to the protected permanent.
-    // CR 702.16c–702.16d: Protection from a quality prevents new attachments of
-    // that quality, but CR 702.16n/702.16p exempt already-attached Auras and
-    // Equipment named by the protection-granting effect.
     if let (Some(host), Some(attachment)) = (
         state.objects.get(&host_id),
         state.objects.get(&attachment_id),
     ) {
         if crate::game::keywords::protection_prevents_from(host, attachment) {
-            if protection_doesnt_remove_attached_exemption(
+            // CR 702.16n / CR 702.16p: an ALREADY-attached Aura/Equipment is
+            // detached UNLESS every protection instance matching its quality was
+            // granted by an effect that ALSO exempts THIS attachment. Protection
+            // of the same quality from any other source still removes it.
+            if attachment_exempt_from_protection(
                 state,
                 host_id,
                 attachment_id,
@@ -620,85 +621,164 @@ pub(crate) fn attachment_illegality(
     None
 }
 
-/// CR 702.16n / CR 702.16p: already-attached Auras/Equipment exempt from
-/// protection-based detachment when the host carries the matching exemption
-/// static from the protection-granting effect.
-fn protection_doesnt_remove_attached_exemption(
+/// CR 702.16n / CR 702.16p: Decide whether an already-attached Aura/Equipment is
+/// exempt from protection-based detachment.
+///
+/// The exemption is bound to the SPECIFIC protection-granting continuous effect.
+/// A protection instance only fails to remove this attachment when the same
+/// effect that granted the protection ALSO carries the matching exemption
+/// modification and names this attachment (`ProtectionDoesntRemoveThisAura` for
+/// the source Aura itself; `ProtectionDoesntRemoveControlledAttachments` for
+/// attachments controlled by the granting effect's controller). Every other
+/// protection instance of the same quality — from a different effect, from the
+/// host's intrinsic (printed) keywords, or from a transient grant — still
+/// detaches the attachment (CR 702.16n/p: other instances of protection from the
+/// same quality affect the attached permanent normally).
+///
+/// Fail-closed: a protection quality present on the host that cannot be traced
+/// back to an exempting granting effect (e.g. a transient "gains protection
+/// until end of turn") counts as a non-exempt instance.
+fn attachment_exempt_from_protection(
     state: &GameState,
     host_id: ObjectId,
     attachment_id: ObjectId,
     attacher_is_aura: bool,
     attacher_is_equipment: bool,
 ) -> bool {
-    let Some(host) = state.objects.get(&host_id) else {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let (Some(host), Some(attachment)) = (
+        state.objects.get(&host_id),
+        state.objects.get(&attachment_id),
+    ) else {
         return false;
     };
+
+    // CR 702.16n/p: this is a DETACHMENT exemption for objects that are ALREADY
+    // attached. A brand-new attach attempt is prevented normally (CR 702.16c/d).
     if !host.attachments.contains(&attachment_id) {
         return false;
     }
-
-    let host_has_this_aura =
-        crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| {
-            matches!(
-                def.mode,
-                crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura
-            )
-        });
-    let host_has_controlled =
-        crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| {
-            matches!(
-                def.mode,
-                crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments
-            )
-        });
-
-    if host_has_this_aura
-        && attacher_is_aura
-        && aura_grants_protection_attachment_exemption(
-            state,
-            attachment_id,
-            crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura,
-        )
-    {
-        return true;
+    if !attacher_is_aura && !attacher_is_equipment {
+        return false;
     }
 
-    if host_has_controlled && (attacher_is_aura || attacher_is_equipment) {
-        let Some(attachment) = state.objects.get(&attachment_id) else {
-            return false;
-        };
-        return host.attachments.iter().any(|&grantor_id| {
-            aura_grants_protection_attachment_exemption(
-                state,
-                grantor_id,
-                crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments,
-            ) && state
-                .objects
-                .get(&grantor_id)
-                .is_some_and(|grantor| grantor.controller == attachment.controller)
-        });
+    let matches_attachment = |pt: &ProtectionTarget| {
+        crate::game::keywords::source_matches_protection_target(pt, host, attachment)
+    };
+
+    // Protection targets granted by an effect that exempts THIS attachment.
+    let mut exempted: Vec<ProtectionTarget> = Vec::new();
+    // Set once any protection instance matching the attachment is NOT exempt.
+    let mut has_unexempted = false;
+
+    // CR 702.16n/p: intrinsic (printed) protection never carries an attachment
+    // exemption, so a matching printed keyword always detaches.
+    for kw in &host.base_keywords {
+        if let Keyword::Protection(pt) = kw {
+            if matches_attachment(pt) {
+                has_unexempted = true;
+            }
+        }
     }
 
-    false
+    // Granted protection scanned WITH provenance: the granting `StaticDefinition`
+    // exposes both its `AddKeyword(Protection)` and any sibling exemption
+    // `AddStaticMode`, so the exemption binds to that one specific effect.
+    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
+        let ctx = FilterContext::from_source(state, source_obj.id);
+        if !matches_target_filter(state, host_id, &affected, &ctx) {
+            continue;
+        }
+        let def_exempts = definition_exempts_attachment(
+            def,
+            source_obj,
+            attachment,
+            attacher_is_aura,
+            attacher_is_equipment,
+        );
+        for modification in &def.modifications {
+            let ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(pt),
+            } = modification
+            else {
+                continue;
+            };
+            let Some(resolved) = resolve_granted_protection_target(pt, source_obj) else {
+                continue;
+            };
+            if !matches_attachment(&resolved) {
+                continue;
+            }
+            if def_exempts {
+                exempted.push(resolved);
+            } else {
+                has_unexempted = true;
+            }
+        }
+    }
+
+    if has_unexempted {
+        return false;
+    }
+
+    // Fail-closed: every protection quality currently on the host that matches
+    // the attachment must be covered by an exempting granting effect. A baked
+    // quality with no such source (e.g. a transient grant) is non-exempt.
+    let all_matching_covered = host.keywords.iter().all(|kw| match kw {
+        Keyword::Protection(pt) if matches_attachment(pt) => exempted.iter().any(|e| e == pt),
+        _ => true,
+    });
+
+    all_matching_covered && !exempted.is_empty()
 }
 
-fn aura_grants_protection_attachment_exemption(
-    state: &GameState,
-    aura_id: ObjectId,
-    mode: crate::types::statics::StaticMode,
+/// CR 702.16n / CR 702.16p: True if the continuous effect `def` (functioning from
+/// `source_obj`) carries the attachment-exemption static that names `attachment`.
+fn definition_exempts_attachment(
+    def: &crate::types::ability::StaticDefinition,
+    source_obj: &crate::game::game_object::GameObject,
+    attachment: &crate::game::game_object::GameObject,
+    attacher_is_aura: bool,
+    attacher_is_equipment: bool,
 ) -> bool {
-    let Some(aura) = state.objects.get(&aura_id) else {
-        return false;
-    };
-    crate::game::functioning_abilities::active_static_definitions(state, aura).any(|def| {
-        def.modifications.iter().any(|m| {
-            matches!(
-                m,
-                crate::types::ability::ContinuousModification::AddStaticMode { mode: m }
-                    if *m == mode
-            )
+    use crate::types::ability::ContinuousModification;
+    use crate::types::statics::StaticMode;
+    def.modifications
+        .iter()
+        .any(|modification| match modification {
+            ContinuousModification::AddStaticMode { mode } => match mode {
+                // CR 702.16n: "This effect doesn't remove this Aura" — only the Aura
+                // that IS the protection source is exempt from its own protection.
+                StaticMode::ProtectionDoesntRemoveThisAura => {
+                    attacher_is_aura && attachment.id == source_obj.id
+                }
+                // CR 702.16p: "...doesn't remove Auras and Equipment you control" —
+                // attachments controlled by the controller of the granting effect.
+                StaticMode::ProtectionDoesntRemoveControlledAttachments => {
+                    (attacher_is_aura || attacher_is_equipment)
+                        && attachment.controller == source_obj.controller
+                }
+                _ => false,
+            },
+            _ => false,
         })
-    })
+}
+
+/// Resolve a granted protection target against its SOURCE (e.g. `ChosenColor` →
+/// the source's chosen color), matching how the layer pipeline bakes the keyword
+/// onto the host. Returns `None` when the grant is not yet concrete.
+fn resolve_granted_protection_target(
+    pt: &crate::types::keywords::ProtectionTarget,
+    source_obj: &crate::game::game_object::GameObject,
+) -> Option<crate::types::keywords::ProtectionTarget> {
+    use crate::types::keywords::ProtectionTarget;
+    match pt {
+        ProtectionTarget::ChosenColor => source_obj.chosen_color().map(ProtectionTarget::Color),
+        other => Some(other.clone()),
+    }
 }
 
 /// CR 301.5 + CR 303.4 + CR 701.3a: True unless `host_id` is forbidden by a
@@ -879,18 +959,57 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AttachmentKind, ControllerRef, FilterProp, StaticDefinition, TargetFilter, TargetRef,
-        TypedFilter,
+        AttachmentKind, ContinuousModification, ControllerRef, FilterProp, StaticDefinition,
+        TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// Mirror the production "Enchanted creature has protection ..." affected
+    /// filter so a granting Aura's continuous effect resolves to the creature it
+    /// is attached to (via `FilterProp::EnchantedBy`).
+    fn enchanted_creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
+    }
+
+    /// Push a continuous effect that grants `Protection(color)` to the enchanted
+    /// creature, plus any additional modifications (e.g. an attachment-exemption
+    /// static), onto `aura`, and attach it to `host`.
+    fn attach_protection_grant(
+        state: &mut GameState,
+        aura: ObjectId,
+        host: ObjectId,
+        color: ManaColor,
+        extra: Vec<ContinuousModification>,
+    ) {
+        let mut modifications = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Color(color)),
+        }];
+        modifications.extend(extra);
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.attached_to = Some(AttachTarget::Object(host));
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(enchanted_creature_filter())
+                .modifications(modifications),
+        );
+        let host_obj = state.objects.get_mut(&host).unwrap();
+        host_obj.attachments.push(aura);
+        // Layer-baked result of the grant above (what the host would carry after
+        // an `evaluate_layers` pass).
+        host_obj
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(color)));
     }
 
     /// Build Equipment on the battlefield (Artifact + Equipment subtype).
@@ -968,47 +1087,27 @@ mod tests {
 
     #[test]
     fn attachment_illegality_protection_exemption_keeps_attached_controlled_aura() {
-        // CR 702.16p (issue #4964): Benevolent Blessing — protection from the
-        // chosen color must not detach your already-attached Auras/Equipment.
+        // CR 702.16p (issue #4964): Benevolent Blessing grants the host protection
+        // from the chosen color AND carries the "doesn't remove Auras and
+        // Equipment you control" exemption on the SAME continuous effect.
+        // Choosing that color must not detach the Aura that granted it.
         let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bear");
         let aura = spawn_with_subtype(&mut state, "Benevolent Blessing", "Aura");
         {
             let obj = state.objects.get_mut(&aura).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.color.push(crate::types::mana::ManaColor::White);
+            obj.color.push(ManaColor::White);
         }
-        let creature = spawn_creature(&mut state, "Bear");
-        state
-            .objects
-            .get_mut(&creature)
-            .unwrap()
-            .attachments
-            .push(aura);
-        state.objects.get_mut(&creature).unwrap().keywords.push(
-            crate::types::keywords::Keyword::Protection(
-                crate::types::keywords::ProtectionTarget::Color(
-                    crate::types::mana::ManaColor::White,
-                ),
-            ),
+        attach_protection_grant(
+            &mut state,
+            aura,
+            creature,
+            ManaColor::White,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }],
         );
-        state
-            .objects
-            .get_mut(&aura)
-            .unwrap()
-            .static_definitions
-            .push(StaticDefinition::continuous().modifications(vec![
-                crate::types::ability::ContinuousModification::AddStaticMode {
-                    mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
-                },
-            ]));
-        state
-            .objects
-            .get_mut(&creature)
-            .unwrap()
-            .static_definitions
-            .push(StaticDefinition::new(
-                StaticMode::ProtectionDoesntRemoveControlledAttachments,
-            ));
 
         assert_eq!(attachment_illegality(&state, aura, creature), None);
         assert!(can_attach_to_object(&state, aura, creature));
@@ -1023,53 +1122,94 @@ mod tests {
     #[test]
     fn attachment_illegality_this_aura_exemption_is_source_specific() {
         let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bear");
 
-        // Granting Aura: carries the "doesn't remove this Aura" grant AND is the
-        // aura that supplies the host's protection static.
+        // Granting Aura: grants protection-from-white to the host AND carries the
+        // "doesn't remove this Aura" exemption on that same effect.
         let granting_aura = spawn_with_subtype(&mut state, "Pentarch Ward", "Aura");
         {
             let obj = state.objects.get_mut(&granting_aura).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.color.push(crate::types::mana::ManaColor::White);
-            obj.static_definitions
-                .push(StaticDefinition::continuous().modifications(vec![
-                    crate::types::ability::ContinuousModification::AddStaticMode {
-                        mode: StaticMode::ProtectionDoesntRemoveThisAura,
-                    },
-                ]));
+            obj.color.push(ManaColor::White);
         }
+        attach_protection_grant(
+            &mut state,
+            granting_aura,
+            creature,
+            ManaColor::White,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveThisAura,
+            }],
+        );
 
-        // Sibling Aura: same controller, plain white Aura, NO exemption grant.
+        // Sibling Aura: same controller, plain white Aura, NO grant/exemption.
         let sibling_aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
         {
             let obj = state.objects.get_mut(&sibling_aura).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.color.push(crate::types::mana::ManaColor::White);
+            obj.color.push(ManaColor::White);
+            obj.attached_to = Some(AttachTarget::Object(creature));
         }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(sibling_aura);
 
-        let creature = spawn_creature(&mut state, "Bear");
-        {
-            let obj = state.objects.get_mut(&creature).unwrap();
-            obj.attachments.push(granting_aura);
-            obj.attachments.push(sibling_aura);
-            obj.keywords
-                .push(crate::types::keywords::Keyword::Protection(
-                    crate::types::keywords::ProtectionTarget::Color(
-                        crate::types::mana::ManaColor::White,
-                    ),
-                ));
-            // Host carries the applied "this Aura" static from the granting Aura.
-            obj.static_definitions.push(StaticDefinition::new(
-                StaticMode::ProtectionDoesntRemoveThisAura,
-            ));
-        }
-
-        // Granting Aura is exempt; sibling Aura is still removed by protection.
+        // Granting Aura is exempt from its OWN protection; the sibling Aura is
+        // still removed by that protection (CR 702.16n is source-specific).
         assert_eq!(attachment_illegality(&state, granting_aura, creature), None);
         assert_eq!(
             attachment_illegality(&state, sibling_aura, creature),
             Some(AttachIllegality::Protection),
             "a sibling controlled Aura must NOT share the source Aura's CR 702.16n exemption"
+        );
+    }
+
+    /// CR 702.16n / CR 702.16p (issue #4964 review, [HIGH]): the exemption is
+    /// bound to the specific protection-granting effect. Benevolent Blessing's
+    /// exemption only neutralizes ITS OWN protection grant — a second, unrelated
+    /// protection-from-white instance on the same host (no exemption) still
+    /// detaches Benevolent Blessing.
+    #[test]
+    fn attachment_illegality_other_protection_instance_still_detaches_exempt_aura() {
+        let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bear");
+
+        // Benevolent Blessing: white Aura that grants protection-from-white and
+        // the controlled-attachment exemption on one effect.
+        let blessing = spawn_with_subtype(&mut state, "Benevolent Blessing", "Aura");
+        {
+            let obj = state.objects.get_mut(&blessing).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(ManaColor::White);
+        }
+        attach_protection_grant(
+            &mut state,
+            blessing,
+            creature,
+            ManaColor::White,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }],
+        );
+
+        // A second, unrelated protection-from-white source with NO exemption.
+        let other = spawn_with_subtype(&mut state, "Gift of Sanctuary", "Aura");
+        {
+            let obj = state.objects.get_mut(&other).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+        }
+        attach_protection_grant(&mut state, other, creature, ManaColor::White, vec![]);
+
+        // The exempting effect neutralizes only its own protection; `other`'s
+        // protection-from-white still detaches the (white) Benevolent Blessing.
+        assert_eq!(
+            attachment_illegality(&state, blessing, creature),
+            Some(AttachIllegality::Protection),
+            "a same-quality protection instance from another source must still \
+             detach the otherwise-exempt Aura (CR 702.16n/p)"
         );
     }
 
