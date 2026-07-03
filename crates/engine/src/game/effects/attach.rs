@@ -601,11 +601,53 @@ pub(crate) fn attachment_illegality(
         state.objects.get(&attachment_id),
     ) {
         if crate::game::keywords::protection_prevents_from(host, attachment) {
+            if protection_doesnt_remove_attached_exemption(
+                state,
+                host_id,
+                attachment_id,
+                attacher_is_aura,
+                attacher_is_equipment,
+            ) {
+                return None;
+            }
             return Some(AttachIllegality::Protection);
         }
     }
 
     None
+}
+
+/// CR 702.16n / CR 702.16p: already-attached Auras/Equipment exempt from
+/// protection-based detachment when the host carries the matching exemption
+/// static from the protection-granting effect.
+fn protection_doesnt_remove_attached_exemption(
+    state: &GameState,
+    host_id: ObjectId,
+    attachment_id: ObjectId,
+    attacher_is_aura: bool,
+    attacher_is_equipment: bool,
+) -> bool {
+    let Some(host) = state.objects.get(&host_id) else {
+        return false;
+    };
+    let Some(attachment) = state.objects.get(&attachment_id) else {
+        return false;
+    };
+    if !host.attachments.contains(&attachment_id) {
+        return false;
+    }
+
+    crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| match def
+        .mode
+    {
+        crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura => {
+            attacher_is_aura && attachment.controller == host.controller
+        }
+        crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments => {
+            (attacher_is_aura || attacher_is_equipment) && attachment.controller == host.controller
+        }
+        _ => false,
+    })
 }
 
 /// CR 301.5 + CR 303.4 + CR 701.3a: True unless `host_id` is forbidden by a
@@ -871,6 +913,44 @@ mod tests {
             Some(AttachIllegality::Protection)
         );
         assert!(!can_attach_to_object(&state, aura, creature));
+    }
+
+    #[test]
+    fn attachment_illegality_protection_exemption_keeps_attached_controlled_aura() {
+        // CR 702.16p (issue #4964): Benevolent Blessing — protection from the
+        // chosen color must not detach your already-attached Auras/Equipment.
+        let mut state = setup();
+        let aura = spawn_with_subtype(&mut state, "Benevolent Blessing", "Aura");
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(crate::types::mana::ManaColor::White);
+        }
+        let creature = spawn_creature(&mut state, "Bear");
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+        state.objects.get_mut(&creature).unwrap().keywords.push(
+            crate::types::keywords::Keyword::Protection(
+                crate::types::keywords::ProtectionTarget::Color(
+                    crate::types::mana::ManaColor::White,
+                ),
+            ),
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            ));
+
+        assert_eq!(attachment_illegality(&state, aura, creature), None);
+        assert!(can_attach_to_object(&state, aura, creature));
     }
 
     #[test]

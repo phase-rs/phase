@@ -21929,6 +21929,15 @@ fn protection_chosen_color_drops_trailing_sba_exemption_benevolent_blessing() {
         "expected Protection(ChosenColor), got {mods:?}"
     );
     assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }
+        )),
+        "expected ProtectionDoesntRemoveControlledAttachments, got {mods:?}"
+    );
+    assert!(
         !mods.iter().any(|m| matches!(
             m,
             ContinuousModification::AddKeyword {
@@ -21968,7 +21977,8 @@ fn protection_chosen_color_drops_trailing_this_aura_exemption() {
 
 /// Building-block: `push_grant_clause_modifications` must drop the trailing prose
 /// sentence directly on the bare keyword leg and emit one
-/// `Protection(ChosenColor)`. (fail-if-reverted)
+/// `Protection(ChosenColor)` plus the CR 702.16p attachment exemption static.
+/// (fail-if-reverted)
 #[test]
 fn push_grant_clause_drops_trailing_sentence_chosen_color() {
     use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -21976,15 +21986,23 @@ fn push_grant_clause_drops_trailing_sentence_chosen_color() {
     let mut mods = Vec::new();
     push_grant_clause_modifications(
         &mut mods,
-        "protection from the chosen color. this effect doesn't remove auras",
+        "protection from the chosen color. This effect doesn't remove Auras and Equipment you control that are already attached to it.",
         None,
     );
-    assert_eq!(
-        mods,
-        vec![ContinuousModification::AddKeyword {
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
-        }],
-        "expected exactly one Protection(ChosenColor), got {mods:?}"
+        }),
+        "expected Protection(ChosenColor), got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            }
+        )),
+        "expected exemption static, got {mods:?}"
     );
 }
 

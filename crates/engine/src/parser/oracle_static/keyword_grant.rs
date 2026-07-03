@@ -1400,12 +1400,29 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             }
         }
     } else if let Some(keyword_text) = extract_keyword_clause(&unquoted_text) {
-        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
+        let (keyword_only, trailing_exemption) =
+            match super::oracle_nom::bridge::split_once_on_lower(
+                keyword_text,
+                &keyword_text.to_lowercase(),
+                ". ",
+            ) {
+                Some((first, rest))
+                    if rest.to_ascii_lowercase().contains("doesn't remove")
+                        || rest.to_ascii_lowercase().contains("does not remove") =>
+                {
+                    (first, Some(rest.trim()))
+                }
+                _ => (keyword_text, None),
+            };
+        for part in split_keyword_list(keyword_only.trim().trim_end_matches('.')) {
             push_grant_clause_modifications(
                 &mut modifications,
                 part.as_ref(),
                 where_x_expression.as_deref(),
             );
+        }
+        if let Some(trailing) = trailing_exemption {
+            push_protection_attachment_exemption_modifications(&mut modifications, trailing);
         }
     }
 
@@ -1461,11 +1478,12 @@ pub(crate) fn push_grant_clause_modifications(
     // parse_quoted_ability_modifications at :798) before extract_keyword_clause
     // runs, so any ". " here can only introduce a trailing inert prose sentence
     // (e.g. Benevolent Blessing's SBA-exemption "This effect doesn't remove ...").
-    // Drop it so the keyword sentence reaches map_keyword clean.
-    let part =
+    // Strip it from the keyword token, but emit the matching protection-attachment
+    // exemption static when recognized.
+    let (part, trailing_exemption) =
         match super::oracle_nom::bridge::split_once_on_lower(part, &part.to_lowercase(), ". ") {
-            Some((first, _)) => first,
-            None => part,
+            Some((first, rest)) => (first, Some(rest.trim())),
+            None => (part, None),
         };
 
     let part_trimmed = part.trim().trim_end_matches('.');
@@ -1538,6 +1556,9 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+        if let Some(trailing) = trailing_exemption {
+            push_protection_attachment_exemption_modifications(modifications, trailing);
+        }
         return;
     }
 
@@ -1562,6 +1583,24 @@ pub(crate) fn push_grant_clause_modifications(
                 modifications.push(ContinuousModification::AddStaticMode { mode });
             }
         }
+    }
+}
+
+fn push_protection_attachment_exemption_modifications(
+    modifications: &mut Vec<ContinuousModification>,
+    trailing: &str,
+) {
+    let lower = trailing.to_lowercase();
+    if lower.contains("doesn't remove this aura") || lower.contains("does not remove this aura") {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::ProtectionDoesntRemoveThisAura,
+        });
+    } else if lower.contains("doesn't remove auras and equipment you control")
+        || lower.contains("does not remove auras and equipment you control")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+        });
     }
 }
 

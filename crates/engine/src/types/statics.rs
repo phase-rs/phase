@@ -1627,6 +1627,14 @@ pub enum StaticMode {
     /// Try-My-Deck Elemental, ...). Enforced per-permanent in `sba.rs` via
     /// `check_static_ability` with the candidate as the target object.
     LegendRuleDoesntApply,
+    /// CR 702.16n: A protection-granting Aura whose printed text includes
+    /// "This effect doesn't remove this Aura" does not detach itself when the
+    /// chosen/host color matches (Cho-Manno's Blessing, Pentarch Ward).
+    ProtectionDoesntRemoveThisAura,
+    /// CR 702.16p: A protection grant whose printed text includes "doesn't remove
+    /// Auras and Equipment you control that are already attached" keeps those
+    /// attachments when protection would otherwise detach them (Benevolent Blessing).
+    ProtectionDoesntRemoveControlledAttachments,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
     /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
@@ -2082,6 +2090,8 @@ impl StaticMode {
             | StaticMode::CantWinTheGame
             | StaticMode::CantLoseTheGame
             | StaticMode::LegendRuleDoesntApply
+            | StaticMode::ProtectionDoesntRemoveThisAura
+            | StaticMode::ProtectionDoesntRemoveControlledAttachments
             | StaticMode::SpeedCanIncreaseBeyondFour
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::SkipStep { .. }
@@ -2442,6 +2452,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantWinTheGame => write!(f, "CantWinTheGame"),
             StaticMode::CantLoseTheGame => write!(f, "CantLoseTheGame"),
             StaticMode::LegendRuleDoesntApply => write!(f, "LegendRuleDoesntApply"),
+            StaticMode::ProtectionDoesntRemoveThisAura => {
+                write!(f, "ProtectionDoesntRemoveThisAura")
+            }
+            StaticMode::ProtectionDoesntRemoveControlledAttachments => {
+                write!(f, "ProtectionDoesntRemoveControlledAttachments")
+            }
             StaticMode::SpeedCanIncreaseBeyondFour => write!(f, "SpeedCanIncreaseBeyondFour"),
             StaticMode::DefilerCostReduction { color, .. } => {
                 write!(f, "DefilerCostReduction({color:?})")
@@ -2883,6 +2899,10 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "LegendRuleDoesntApply" => StaticMode::LegendRuleDoesntApply,
+            "ProtectionDoesntRemoveThisAura" => StaticMode::ProtectionDoesntRemoveThisAura,
+            "ProtectionDoesntRemoveControlledAttachments" => {
+                StaticMode::ProtectionDoesntRemoveControlledAttachments
+            }
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
             // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
             "IgnoreLandwalkForBlocking" => {

@@ -214,6 +214,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 704.5j: LegendRuleDoesntApply — affected permanents are excluded from
     // the legend-rule SBA. Runtime enforcement is in sba.rs::legend_rule_exempt().
     registry.insert(StaticMode::LegendRuleDoesntApply, handle_rule_mod);
+    // CR 702.16n / CR 702.16p: protection attachment exemptions — enforced in
+    // effects/attach.rs::attachment_illegality via active static scan.
+    registry.insert(StaticMode::ProtectionDoesntRemoveThisAura, handle_rule_mod);
+    registry.insert(
+        StaticMode::ProtectionDoesntRemoveControlledAttachments,
+        handle_rule_mod,
+    );
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."
