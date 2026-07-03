@@ -14460,7 +14460,7 @@ fn apply_cost_reduction(
     // (active_keyword == None) — so skipping the whole function is equivalent to
     // skipping just the "activated" arm, and clearer.
     if !is_plot_special_action(ability_def) {
-        apply_static_activated_ability_cost_reduction(state, ability_def, source_id);
+        apply_static_activated_ability_cost_reduction(state, ability_def, player, source_id);
     }
 
     // CR 116.2k + CR 702.170: Plot is taken as a special action via a synthesized
@@ -14480,6 +14480,7 @@ fn apply_cost_reduction(
 fn apply_static_activated_ability_cost_reduction(
     state: &GameState,
     ability_def: &mut AbilityDefinition,
+    player: PlayerId,
     source_id: ObjectId,
 ) {
     // CR 601.2f: A `ReduceAbilityCost` static keyed on a keyword (e.g. "power-up")
@@ -14507,6 +14508,7 @@ fn apply_static_activated_ability_cost_reduction(
             minimum_mana,
             dynamic_count,
             exemption,
+            activator,
         } = &def.mode
         else {
             continue;
@@ -14518,6 +14520,25 @@ fn apply_static_activated_ability_cost_reduction(
         // adjustment (Suppression Field's tax, Zirda's discount).
         if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
             continue;
+        }
+        // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda,
+        // the Dawnwaker; Fluctuator) keys off WHO is activating the ability,
+        // evaluated relative to the static's controller — NOT who controls the
+        // ability's source. Reuse the activator-permission predicate with the
+        // static's controller as the reference point so "you" resolves to the
+        // static controller. An ability on a permanent this player doesn't control
+        // (activatable via `activator_filter`) is still discounted when they
+        // activate it, and an ability on a permanent they DO control but activated
+        // by someone else is not. `None` leaves the source/global scope untouched.
+        if let Some(activator) = activator {
+            if !player_may_begin_activating(
+                state,
+                player,
+                static_source.controller,
+                Some(activator),
+            ) {
+                continue;
+            }
         }
         if def.affected.as_ref().is_some_and(|filter| {
             !super::filter::matches_target_filter(

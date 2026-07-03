@@ -11720,6 +11720,8 @@ fn static_reduce_ability_cost_ninjutsu() {
                 minimum_mana: None,
                 dynamic_count: None,
                 exemption: _,
+                // CR 602.2: "abilities you activate" is activator-scoped.
+                activator: Some(PlayerFilter::Controller),
             } if keyword == "ninjutsu"
         ),
         "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -11742,6 +11744,8 @@ fn static_reduce_equip_abilities_with_object_qualifier() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            // CR 602.2: "abilities you activate" is activator-scoped.
+            activator: Some(PlayerFilter::Controller),
         }
     );
 }
@@ -16526,6 +16530,7 @@ fn static_reduce_activated_ability_cost_generic() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
 }
@@ -16545,6 +16550,7 @@ fn static_reduce_activated_ability_cost_generic_with_minimum() {
             minimum_mana: Some(1),
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
 }
@@ -16564,6 +16570,7 @@ fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
             minimum_mana: Some(1),
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert!(matches!(
@@ -16587,6 +16594,7 @@ fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
             minimum_mana: Some(1),
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert!(matches!(
@@ -16615,6 +16623,7 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     // "other ... you control" must exclude the source permanent (CR 109.5).
@@ -16667,6 +16676,7 @@ fn static_activated_ability_cost_increase_chosen_name() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert_eq!(
@@ -16717,6 +16727,7 @@ fn static_possessive_equip_ability_cost_reduction_self_ref() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     assert_eq!(
@@ -16738,6 +16749,7 @@ fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: ActivationExemption::None,
+            activator: None,
         };
         let encoded = original.to_string();
         let decoded = encoded
@@ -16779,6 +16791,7 @@ fn static_reduce_activated_ability_cost_dynamic_power() {
                 scope: ObjectScope::Source,
             }),
             exemption: ActivationExemption::None,
+            activator: None,
         }
     );
     match &def.affected {
@@ -16844,21 +16857,22 @@ fn static_reduce_ability_cost_global_with_mana_exemption() {
     );
 }
 
-/// CR 601.2f + CR 605.1a: The activator-scoped "Abilities you activate that
-/// aren't mana abilities cost {N} less to activate" (Zirda, the Dawnwaker) form
-/// scopes to sources you control and carries the mana-ability exemption.
+/// CR 601.2f + CR 602.2 + CR 605.1a: The activator-scoped "Abilities you activate
+/// that aren't mana abilities cost {N} less to activate" (Zirda, the Dawnwaker)
+/// form keys off WHO activates the ability — the static's controller ("you") —
+/// NOT who controls the ability's source. It therefore carries
+/// `activator = Some(PlayerFilter::Controller)` and NO `affected` source filter,
+/// plus the mana-ability exemption.
 #[test]
 fn static_reduce_ability_cost_you_activate_with_mana_exemption() {
     let def = parse_static_line(
         "Abilities you activate that aren't mana abilities cost {2} less to activate.",
     )
     .expect("Zirda activator-scoped activated-ability discount must parse");
-    assert_eq!(
-        def.affected,
-        Some(TargetFilter::Typed(
-            TypedFilter::card().controller(ControllerRef::You)
-        )),
-        "the 'you activate' form scopes to sources you control, got {:?}",
+    assert!(
+        def.affected.is_none(),
+        "the 'you activate' form is activator-scoped, not source-scoped; affected \
+         must be None, got {:?}",
         def.affected
     );
     assert!(
@@ -16869,10 +16883,11 @@ fn static_reduce_ability_cost_you_activate_with_mana_exemption() {
                 keyword,
                 amount: 2,
                 exemption: ActivationExemption::ManaAbilities,
+                activator: Some(PlayerFilter::Controller),
                 ..
             } if keyword == "activated"
         ),
-        "expected Reduce/activated/2 with ManaAbilities exemption, got {:?}",
+        "expected Reduce/activated/2, activator=Controller, ManaAbilities exemption, got {:?}",
         def.mode
     );
 }

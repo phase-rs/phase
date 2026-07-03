@@ -2520,6 +2520,11 @@ pub(crate) fn parse_static_line_inner(
                         filter: TargetFilter::Typed(TypedFilter::card()),
                     },
                 });
+            // CR 602.2: "abilities you activate" is ACTIVATOR-scoped — the discount
+            // keys off who activates the ability (the static's controller, "you"),
+            // not who controls the ability's source. Emit the activator axis rather
+            // than a `controller(You)` source filter, which mis-scoped abilities on
+            // permanents another player controls but this player may activate.
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     mode: CostModifyMode::Reduce,
@@ -2528,10 +2533,8 @@ pub(crate) fn parse_static_line_inner(
                     minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                     dynamic_count,
                     exemption: ActivationExemption::None,
+                    activator: Some(PlayerFilter::Controller),
                 })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::card().controller(ControllerRef::You),
-                ))
                 .description(text.to_string()),
             );
         }
@@ -2565,6 +2568,9 @@ pub(crate) fn parse_static_line_inner(
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
+                // Source-scoped ("abilities of <subject>"): scope is the `affected`
+                // filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2614,6 +2620,9 @@ pub(crate) fn parse_static_line_inner(
                 minimum_mana,
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
+                // Source-scoped ("<subject>'s <keyword> abilities"): scope is the
+                // `affected` filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2667,6 +2676,9 @@ pub(crate) fn parse_static_line_inner(
                 minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
+                // Source-scoped ("[Enchanted/Equipped] <type>'s activated
+                // abilities"): scope is the `affected` filter below; no activator gate.
+                activator: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -2738,6 +2750,9 @@ pub(crate) fn parse_static_line_inner(
                     minimum_mana,
                     dynamic_count,
                     exemption: ActivationExemption::None,
+                    // Source-scoped ("Activated abilities of <filter>"): scope is
+                    // the `affected` filter below; no activator gate.
+                    activator: None,
                 })
                 .affected(affected)
                 .description(text.to_string()),
@@ -2756,26 +2771,25 @@ pub(crate) fn parse_static_line_inner(
     // `keyword == "activated"` matches every activated ability at runtime; the
     // optional mana-ability exemption (prefix "that aren't mana abilities" or
     // suffix "unless they're mana abilities") is enforced there via
-    // `ActivationExemption::ManaAbilities`. Global form leaves `affected = None`
-    // (all sources, all players); the activator form scopes to sources you control.
-    if let Some(((affected, exemption, amount, mode), _)) =
+    // `ActivationExemption::ManaAbilities`. CR 602.2: the global form (Suppression
+    // Field) leaves both scopes open (`activator = None`, `affected = None`); the
+    // "abilities you activate" form is ACTIVATOR-scoped, not source-scoped, so it
+    // sets `activator = Some(PlayerFilter::Controller)` ("you" = the static's
+    // controller) and leaves `affected = None` — the discount keys off who
+    // activates the ability, never who controls its source.
+    if let Some(((activator, exemption, amount, mode), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, (affected, prefix_exempt)) = alt((
+            let (i, (activator, prefix_exempt)) = alt((
                 map(
                     (
                         tag("abilities you activate"),
                         opt(tag(" that aren't mana abilities")),
                     ),
                     |(_, exempt): (&str, Option<&str>)| {
-                        (
-                            Some(TargetFilter::Typed(
-                                TypedFilter::card().controller(ControllerRef::You),
-                            )),
-                            exempt.is_some(),
-                        )
+                        (Some(PlayerFilter::Controller), exempt.is_some())
                     },
                 ),
-                value((None::<TargetFilter>, false), tag("activated abilities")),
+                value((None::<PlayerFilter>, false), tag("activated abilities")),
             ))
             .parse(i)?;
             let (i, _) = tag(" cost {").parse(i)?;
@@ -2792,26 +2806,25 @@ pub(crate) fn parse_static_line_inner(
             } else {
                 ActivationExemption::None
             };
-            Ok((i, (affected, exemption, amount, mode)))
+            Ok((i, (activator, exemption, amount, mode)))
         })
     {
         // CR 118.7: a one-mana floor only applies to reductions.
         let minimum_mana = matches!(mode, CostModifyMode::Reduce)
             .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
             .flatten();
-        let mut def = StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode,
-            keyword: "activated".to_string(),
-            amount,
-            minimum_mana,
-            dynamic_count: None,
-            exemption,
-        })
-        .description(text.to_string());
-        if let Some(affected) = affected {
-            def = def.affected(affected);
-        }
-        return Some(def);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption,
+                activator,
+            })
+            .description(text.to_string()),
+        );
     }
 
     // --- CR 116.2 + CR 118.7a: special-action (plot/unlock) cost reduction ---

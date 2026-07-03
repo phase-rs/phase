@@ -8438,6 +8438,7 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
                 minimum_mana: None,
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Subtype("Food".to_string())],
@@ -8514,6 +8515,9 @@ fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
         .unwrap()
         .static_definitions
         .push(
+            // CR 602.2 + CR 605.1a: Zirda is ACTIVATOR-scoped ("abilities you
+            // activate") — keyed on the static's controller activating, not on a
+            // source filter — and carries the mana-ability exemption.
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: crate::types::statics::CostModifyMode::Reduce,
                 keyword: "activated".to_string(),
@@ -8521,10 +8525,8 @@ fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
                 minimum_mana: None,
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::ManaAbilities,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::card().controller(ControllerRef::You),
-            )),
+                activator: Some(crate::types::ability::PlayerFilter::Controller),
+            }),
         );
 
     let rock = create_object(
@@ -8582,6 +8584,123 @@ fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
     assert!(
         can_activate_ability_now(&state, PlayerId(0), rock, 1),
         "the non-mana ability must be discounted {{2}}->{{0}} and be activatable with no mana"
+    );
+}
+
+/// CR 602.2: A "abilities you activate cost {N} less" static (Zirda, the
+/// Dawnwaker) is ACTIVATOR-scoped — the discount keys off *who activates* the
+/// ability (the static's controller), NOT who controls the ability's source.
+///
+/// Discriminating: the ability lives on a permanent Zirda's controller (P0) owns,
+/// but its `activator_filter = All` makes it legally activatable by the opponent
+/// (P1) too (CR 602.2). Driving the production seam `apply_cost_reduction` with
+/// each activator in turn:
+///   - P0 (Zirda's controller) activates → discounted {3} -> {1}.
+///   - P1 (opponent) activates the SAME ability on P0's own permanent → NOT
+///     discounted, stays {3}.
+///
+/// A source-controller-scoped implementation (the reverted bug — an `affected`
+/// filter of `card().controller(You)`) would wrongly discount P1's activation
+/// because the source is controlled by P0. Only an activator-scoped gate keeps
+/// the P1 cost at {3}.
+#[test]
+fn activated_ability_cost_reduction_you_activate_keys_off_activator_not_source_controller() {
+    let mut state = setup_game_at_main_phase();
+    let zirda = create_object(
+        &mut state,
+        CardId(760),
+        PlayerId(0),
+        "Zirda, the Dawnwaker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&zirda)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            // CR 602.2: activator-scoped to the static's controller ("you"),
+            // with no `affected` source filter.
+            activator: Some(crate::types::ability::PlayerFilter::Controller),
+        }));
+
+    // A permanent P0 controls, carrying an activated ability that ANY player may
+    // activate (CR 602.2 exception via `activator_filter = All`).
+    let source = create_object(
+        &mut state,
+        CardId(761),
+        PlayerId(0),
+        "Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+
+    let make_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(3),
+        });
+        def.activator_filter = Some(crate::types::ability::PlayerFilter::All);
+        def
+    };
+    let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        other => panic!("expected a plain mana cost, got {other:?}"),
+    };
+
+    // P0 (Zirda's controller) activating → discounted {3} -> {1}.
+    let mut def_p0 = make_def();
+    apply_cost_reduction(&state, &mut def_p0, PlayerId(0), source);
+    assert_eq!(
+        generic_of(&def_p0),
+        1,
+        "the static's controller activating must be discounted {{3}} -> {{1}}"
+    );
+
+    // P1 (opponent) activating the SAME ability on P0's permanent → NOT discounted.
+    let mut def_p1 = make_def();
+    apply_cost_reduction(&state, &mut def_p1, PlayerId(1), source);
+    assert_eq!(
+        generic_of(&def_p1),
+        3,
+        "an opponent activating an ability on the static controller's own permanent \
+         must NOT be discounted — the discount keys off the activator, not the source \
+         controller (source-controller scoping would wrongly yield {{1}})"
+    );
+
+    // Mirror direction: an ability on an OPPONENT's (P1's) permanent that P0 may
+    // activate (activator_filter = All). P0 activating it → discounted {3} -> {1},
+    // even though P0 does not control the source. The reverted source-controller
+    // bug (`affected = card().controller(You)`) would have WRONGLY left this at
+    // {3} because the source is controlled by P1 — the opposite failure direction.
+    let opp_source = create_object(
+        &mut state,
+        CardId(762),
+        PlayerId(1),
+        "Opponent's Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+    let mut def_p0_on_opp = make_def();
+    apply_cost_reduction(&state, &mut def_p0_on_opp, PlayerId(0), opp_source);
+    assert_eq!(
+        generic_of(&def_p0_on_opp),
+        1,
+        "the static's controller activating an ability on an OPPONENT's permanent \
+         must still be discounted {{3}} -> {{1}} — activator scope, not source \
+         controller (source-controller scoping would wrongly yield {{3}})"
     );
 }
 
@@ -8683,6 +8802,7 @@ fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
                 minimum_mana: Some(1),
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -36218,6 +36338,7 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::permanent()
@@ -36343,6 +36464,7 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::HasChosenName)]
         .into();
@@ -36465,6 +36587,7 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
                 scope: ObjectScope::Source,
             }),
             exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
@@ -36734,6 +36857,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                     scope: ObjectScope::Source,
                 }),
                 exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -37276,6 +37400,7 @@ fn plot_special_action_ignores_generic_activated_ability_cost_modifiers() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
     };
     let doc_axis = || {
@@ -37501,6 +37626,7 @@ fn firion_reduces_self_equip_ability_cost() {
             minimum_mana: None,
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
         })
         .affected(TargetFilter::SelfRef)]
         .into();

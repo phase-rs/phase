@@ -5,8 +5,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, QuantityExpr, QuantityRef,
-    TargetFilter,
+    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
+    QuantityRef, TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -963,6 +963,17 @@ pub enum StaticMode {
         /// back-compatible for already-serialized card-data) adjusts every match.
         #[serde(default)]
         exemption: ActivationExemption,
+        /// CR 602.2: Activator scope — *who is activating* the ability, evaluated
+        /// relative to the static's controller (NOT who controls the ability's
+        /// source). `Some(PlayerFilter::Controller)` is the "abilities **you**
+        /// activate" form (Zirda, the Dawnwaker; Fluctuator): the discount applies
+        /// only when the static's controller is the activating player, even for an
+        /// ability on a permanent that player doesn't control. `None` (the default,
+        /// back-compatible for already-serialized card-data) applies no activator
+        /// gate — the global form (Suppression Field) and the source-scoped
+        /// "abilities **of** <subject>" forms, whose scope lives in `affected`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activator: Option<PlayerFilter>,
     },
     /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
     /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
@@ -2574,6 +2585,10 @@ impl FromStr for StaticMode {
                             minimum_mana: extra.and_then(|value| value.parse().ok()),
                             dynamic_count: None,
                             exemption: ActivationExemption::None,
+                            // Activator scope is carried by serde JSON, not this
+                            // compact signature form (as with dynamic_count /
+                            // exemption); reconstitutes to the no-gate default here.
+                            activator: None,
                         }
                     } else {
                         StaticMode::Other(s.to_string())
