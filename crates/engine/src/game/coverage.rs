@@ -9928,6 +9928,70 @@ mod tests {
         }
     }
 
+    /// CR 608.2d + issue #4963 (matthewevans review): production `parse_details`
+    /// regression for Charismatic Conqueror. This is the exact tree the
+    /// `coverage-parse-diff` sticky is built from. It must show the trigger's
+    /// optional tap as a *concrete* `Tap` ability bound to the entering object
+    /// ("triggering source"), NOT the vague `that` bare-noun-phrase
+    /// (`Effect::Unimplemented { name: "that" }`, which surfaces as an
+    /// unsupported `label == "that"`). Guards the clause-shell peel so it keeps
+    /// the "tap" verb and does not strand a noun phrase.
+    #[test]
+    fn charismatic_conqueror_parse_details_is_concrete_tap_not_vague_that() {
+        let mut face = make_face();
+        face.name = "Charismatic Conqueror".to_string();
+        face.oracle_text = Some(
+            "Vigilance\nWhenever an artifact or creature an opponent controls enters untapped, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.".to_string(),
+        );
+        face.triggers = vec![crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever an artifact or creature an opponent controls enters untapped, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.",
+            "Charismatic Conqueror",
+        )];
+
+        let details = build_parse_details_for_face(&face);
+        let trigger = details
+            .iter()
+            .find(|item| item.category == ParseCategory::Trigger)
+            .expect("Charismatic Conqueror must produce a trigger parse item");
+        assert!(
+            trigger.supported,
+            "the zone-change trigger must be supported, got {trigger:?}"
+        );
+        let tap = trigger
+            .children
+            .first()
+            .expect("trigger must carry its execute ability");
+        assert_eq!(
+            tap.label, "Tap",
+            "the optional effect must stay a concrete Tap (never the vague \
+             `that` bare noun phrase), got label {:?}",
+            tap.label
+        );
+        assert!(
+            tap.supported,
+            "the tap ability must be supported, got {tap:?}"
+        );
+        assert!(
+            tap.details
+                .iter()
+                .any(|(k, v)| k == "target" && v == "triggering source"),
+            "the tap must bind to the entering object (`triggering source`), \
+             not the ability's own parent target, got {:?}",
+            tap.details
+        );
+        // Belt-and-suspenders: no node anywhere in the tree may be the vague
+        // `that` unimplemented residual the earlier peel produced.
+        fn none_is_vague_that(items: &[ParsedItem]) -> bool {
+            items
+                .iter()
+                .all(|it| it.label != "that" && none_is_vague_that(&it.children))
+        }
+        assert!(
+            none_is_vague_that(&details),
+            "no parse node may be the vague `that` residual, got {details:?}"
+        );
+    }
+
     #[test]
     fn card_face_with_nested_mode_unimplemented_is_detected() {
         let mut face = make_face();
