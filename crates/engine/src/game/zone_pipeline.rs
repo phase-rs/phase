@@ -2994,7 +2994,11 @@ mod face_down_exile_entry_tests {
              entry must re-assert it so the card does not leak face up"
         );
         assert_eq!(obj.power, Some(2), "a face-down card is a 2/2 (CR 708.2a)");
-        assert_eq!(obj.toughness, Some(2), "a face-down card is a 2/2 (CR 708.2a)");
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "a face-down card is a 2/2 (CR 708.2a)"
+        );
         assert!(
             obj.card_types.core_types.contains(&CoreType::Creature),
             "a face-down card presents as a creature regardless of its hidden type"
