@@ -6622,8 +6622,7 @@ mod detect_condition_if_replacement_exemption_tests {
         let result = strip_represented_replacement_instead_sentences(&combined, &parsed);
 
         assert_eq!(
-            result,
-            " if a player would sacrifice a permanent, exile it instead.",
+            result, " if a player would sacrifice a permanent, exile it instead.",
             "only the represented sentence should have been stripped"
         );
     }
