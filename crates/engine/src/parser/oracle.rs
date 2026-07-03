@@ -1281,7 +1281,6 @@ fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition) -> bool {
 }
 
 fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
-    use crate::parser::oracle_nom::primitives::scan_contains;
     let lower = text.to_ascii_lowercase();
     scan_contains(&lower, "as it phases in this way")
         || scan_contains(&lower, "as that creature phases in this way")
