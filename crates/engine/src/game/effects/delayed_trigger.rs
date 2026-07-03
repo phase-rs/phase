@@ -2192,4 +2192,107 @@ mod tests {
             other => panic!("expected ChangeZone, got {other:?}"),
         }
     }
+
+    /// Cluster J3 (delayed-trigger provenance lock-in): Saheeli's "Sacrifice it
+    /// at the beginning of the next end step" must bind the specific token
+    /// created THIS resolution, not "whatever token was created most recently"
+    /// at firing time. The token id is SNAPSHOTTED from `last_created_token_ids`
+    /// into `delayed_triggers[0].ability.targets` at `CreateDelayedTrigger`
+    /// resolution — before any later token exists.
+    ///
+    /// CR 603.7c: A delayed triggered ability that refers to information from
+    /// its creation event keeps that creation-time binding for later resolution.
+    ///
+    /// Hostile multi-authority fixture: after the snapshot, a SECOND unrelated
+    /// token is created (mutating `last_created_token_ids`). The discriminating
+    /// assertion is that the snapshot equals the FIRST token's id — a live
+    /// re-read at firing would instead point at the second token. Firing the
+    /// stored ability then sacrifices the FIRST token and leaves the second
+    /// untouched, confirming the snapshot is what production consumes.
+    #[test]
+    fn delayed_sacrifice_it_snapshots_first_token_not_later_token() {
+        let mut state = GameState::new_two_player(42);
+
+        // The token created by this resolution (Saheeli's 5/5 copy).
+        let first_token = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saheeli Token".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first_token)
+            .unwrap()
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Creature];
+        // CopyTokenOf records the created token id here; the snapshot reads it.
+        state.last_created_token_ids = vec![first_token];
+
+        // "Sacrifice it at the beginning of the next end step" — the anaphoric
+        // "it" parses to `TargetFilter::LastCreated`.
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: crate::types::ability::TargetFilter::LastCreated,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(100), // Saheeli's source id
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("CreateDelayedTrigger resolves");
+
+        // Discriminating assertion: the snapshot captured the FIRST token at
+        // creation. A live re-read at firing would instead read the second.
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![crate::types::ability::TargetRef::Object(first_token)],
+            "CR 603.7c: the delayed 'sacrifice it' must snapshot the just-created \
+             token's id at creation time"
+        );
+
+        // A SECOND, unrelated token is created before the end step fires,
+        // mutating `last_created_token_ids`.
+        let second_token = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Later Token".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second_token)
+            .unwrap()
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Creature];
+        state.last_created_token_ids = vec![second_token];
+
+        // Fire the stored delayed ability through the effect dispatcher.
+        let fired = state.delayed_triggers[0].ability.clone();
+        let mut fire_events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &fired, &mut fire_events, 0)
+            .expect("delayed sacrifice resolves");
+
+        assert!(
+            state.players[0].graveyard.contains(&first_token),
+            "the FIRST (snapshotted) token is sacrificed at the end step"
+        );
+        assert!(
+            state.battlefield.contains(&second_token),
+            "the later, unrelated token must survive — the snapshot did not drift to it"
+        );
+    }
 }

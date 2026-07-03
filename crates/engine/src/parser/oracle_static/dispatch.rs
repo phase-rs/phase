@@ -1223,6 +1223,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
+    // — supertype sibling of the color path (Leyline of Singularity "All nonland
+    // permanents are legendary", Melting "All lands are no longer snow"). The
+    // supertype predicate (legendary/basic/snow) is disjoint from color and
+    // land-type words, so this is order-safe here; it precedes `parse_land_type_change`
+    // so "All lands are basic" (supertype) is not probed as a land-type line.
+    if let Some(def) = parse_subject_is_supertype(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 508.1d / CR 509.1c: Subject-scoped "attack/block each combat if able" patterns.
     // These apply MustAttack/MustBlock to a class of creatures (not just self).
     // Compound forms ("attacks or blocks") produce multiple statics; return the first here.

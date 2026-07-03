@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 160,
+      "date": "2026-07-03",
+      "title": "Directional attacks and modal forms",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Directional attack restrictions now work — Pramikon Sky Rampart, Mystic Barrier, and Teyo Geometric Tactician can force attacks toward the nearest opponent to the left or right\n• Creatures that choose a form as they enter now apply the chosen profile correctly (Primal Plasma, Primal Clay, Corrupted Shapeshifter, and Aquamorph Entity's enters mode)\n• New cards and card classes now work: Plague Drone, Corrupted Resolve, Ravenous Trap's trap cost, and activated-ability cost modifiers like Suppression Field and Zirda\n• Copy effects can now keep their “choose new targets” option even when another clause sits between the copy and the retarget sentence\n\n🛠️ Cards That Now Work Right\n• Dungeon rooms are more faithful: Lost Level now scries 2, The Atropal has deathtouch, Storeroom can target any creature, and Fungi Cavern lasts until your next turn\n• Iona, Shield of Emeria now stops only the chosen color, not every spell your opponents could cast\n• Disruptor Flute taxes the named spell correctly, and Oubliette-style phase-out now taps the creature only when it phases back in this way\n• Lure-style permanents now actually force all able creatures to block them (Ochran Assassin, Breaker of Armies, Prized Unicorn, and Lure)\n• Jabari's Influence now targets only a creature that attacked you this turn and also puts the -1/-0 counter on it\n• Shauku, Seer of the Bright Side, Entourage of Trest, Tadeas, Tromokratis, Cairn Wanderer, Tarmogoyf, Ixhel, Denry Klin, The Ozolith, Drizzt, Radiant, and Pride of the Clouds all read their conditional text more accurately\n• “That player adds mana” effects now prompt and give mana to the chosen player, not the controller (Spectral Searchlight, Stadium Vendors, Mad Science Fair Project)\n• One-shot spell discounts now get used once, and negative discard, mill, and exile-top counts now become zero instead of draining whole hands or libraries\n• X plus or minus a number now resolves with the right amount, and target phrases like “an opponent's graveyard” now point at cards in that graveyard\n\n⚔️ Combat & Gameplay\n• Resolve All now works in multiplayer, and local hotseat no longer lets AI take over another human player's priority window\n• The infinite-combo detector can now recognize growing multiplayer cascades instead of grinding through repeated loops\n\n🖥️ Interface\n• During target and board-choice prompts, attached Auras and Equipment can be selected in place, with a fan view for crowded permanents\n• Manual mana and Undo now ride with the player HUD, and mobile landscape layouts no longer use portrait-only controls\n\n🤖 AI\n• Very large token boards are much faster to search and target — full-board static scans are now skipped when no matching static exists",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522668927291887788"
+    },
+    {
       "id": 159,
       "date": "2026-07-02",
       "title": "Split attackers across multiple defenders",

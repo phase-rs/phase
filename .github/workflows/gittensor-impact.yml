@@ -1,0 +1,64 @@
+name: Gittensor Impact Report
+
+on:
+  schedule:
+    # Refresh weekly on Monday at 14:00 UTC.
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Git date window for the report"
+        default: "30 days ago"
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Refresh Gittensor impact assets
+    if: github.repository == 'phase-rs/phase'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITTENSOR_REPO: phase-rs/phase
+      REPORT_WINDOW: ${{ inputs.since || '30 days ago' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate report assets
+        run: |
+          mkdir -p docs/assets/gittensor
+          python3 scripts/gittensor/contrib_stats.py \
+            --repo-dir "$GITHUB_WORKSPACE" \
+            --repo "$GITTENSOR_REPO" \
+            --since "$REPORT_WINDOW" \
+            --out docs/assets/gittensor/gittensor-stats-latest.json
+          python3 scripts/gittensor/contrib_compact_svg.py \
+            docs/assets/gittensor/gittensor-stats-latest.json \
+            docs/assets/gittensor/gittensor-impact-dark.svg \
+            --theme dark
+          python3 scripts/gittensor/contrib_compact_svg.py \
+            docs/assets/gittensor/gittensor-stats-latest.json \
+            docs/assets/gittensor/gittensor-impact-light.svg \
+            --theme light
+
+      - name: Check for changes
+        id: diff
+        run: |
+          git diff --quiet docs/assets/gittensor && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update Gittensor impact PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: ./.github/actions/create-auto-merge-pr
+        with:
+          token: ${{ secrets.CI_PAT }}
+          add-paths: docs/assets/gittensor/*
+          commit-message: "chore: refresh Gittensor impact report"
+          branch: chore/refresh-gittensor-impact
+          title: "chore: refresh Gittensor impact report"
+          body: "Automated weekly refresh of the Gittensor contributor impact assets."

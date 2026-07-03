@@ -50,6 +50,8 @@ import re
 import subprocess
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -198,13 +200,49 @@ def pr_login_map(repo_slug: str, limit: int) -> tuple[dict[int, dict], bool]:
     return m, len(prs) >= limit
 
 
+def gittensor_pr_map(repo_slug: str, api_url: str | None) -> tuple[dict[int, dict], str | None]:
+    """Fetch Gittensor-attributed PRs for repo_slug from the public API.
+
+    Returns PR number -> API record. If the API is unavailable, returns an empty
+    map plus a warning string so callers can fall back to the local whitelist.
+    """
+    if not api_url:
+        return {}, None
+    try:
+        req = urllib.request.Request(
+            api_url,
+            headers={"User-Agent": "phase-rs-gittensor-impact/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            records = json.load(response)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return {}, f"Gittensor API unavailable ({exc}); falling back to contributors.toml"
+
+    repo = repo_slug.lower()
+    pr_records: dict[int, dict] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("repository", "")).lower() != repo:
+            continue
+        number = record.get("pullRequestNumber")
+        if not isinstance(number, int):
+            continue
+        # The git history only contains merged PRs, so open Gittensor records
+        # cannot match commits anyway. Restricting to merged rows keeps the
+        # metadata honest and avoids treating future-open PR numbers as impact.
+        if record.get("mergedAt"):
+            pr_records[number] = record
+    return pr_records, None
+
+
 # ── commit walk (unified attribution) ────────────────────────────────────────
 REC, US = "\x00", "\x1f"                       # emitted by git's %x00 / %x1f
 FMT = "%x00%H%x1f%an%x1f%ae%x1f%at%x1f%s"       # sha, name, email, unixtime, subject
 
 
 def walk(repo: Path, ref: str, since: str | None, until: str | None,
-         prmap: dict[int, dict], wl: Whitelist):
+         prmap: dict[int, dict], gittensor_prs: dict[int, dict], wl: Whitelist):
     cmd = ["log", ref, "--no-merges", "--no-renames", "--numstat", f"--format={FMT}"]
     if since:
         cmd.append(f"--since={since}")
@@ -228,10 +266,19 @@ def walk(repo: Path, ref: str, since: str | None, until: str | None,
                 cur["code_commits"] += 1
             _sha, name, email, ts, subject = line[1:].split(US, 4)
             nums = _PR_NUM.findall(subject)
-            pr = prmap.get(int(nums[-1])) if nums else None
+            pr_num = int(nums[-1]) if nums else None
+            pr = prmap.get(pr_num) if pr_num else None
             if pr:
                 login = wl.login_alias.get(pr["login"].lower(), pr["login"].lower())
-                group = "bot" if pr["is_bot"] else wl.group_of.get(login, "unclassified")
+                if pr["is_bot"]:
+                    group = "bot"
+                elif pr_num in gittensor_prs:
+                    group = "gittensor"
+                else:
+                    group = wl.group_of.get(login, "unclassified")
+            elif pr_num in gittensor_prs:
+                login = str(gittensor_prs[pr_num].get("author") or f"pr-{pr_num}").lower()
+                group = "gittensor"
             else:
                 login, group = wl.by_commit(name, email)
             s = stats[login]
@@ -240,7 +287,7 @@ def walk(repo: Path, ref: str, since: str | None, until: str | None,
             if not s["name"]:
                 s["name"] = name
             s["commits"] += 1
-            if pr:
+            if pr_num:
                 s["prs"] += 1
             cur, cur_has_code = s, False
             t = int(ts)
@@ -289,6 +336,9 @@ def main() -> None:
     ap.add_argument("--until", help="git date")
     ap.add_argument("--whitelist", type=Path,
                     default=Path(__file__).with_name("contributors.toml"))
+    ap.add_argument("--gittensor-api-url", default="https://api.gittensor.io/prs",
+                    help="public Gittensor PR API used for PR-number attribution "
+                    "(empty string disables API attribution)")
     ap.add_argument("-o", "--out", default="contrib-stats.json", type=Path)
     ap.add_argument("--pr-limit", type=int, default=6000)
     ap.add_argument("--allow-shallow", action="store_true",
@@ -310,8 +360,11 @@ def main() -> None:
                              "-q", ".nameWithOwner"]).strip()
 
     wl = Whitelist(args.whitelist)
+    gittensor_prs, api_warning = gittensor_pr_map(slug, args.gittensor_api_url or None)
+    if api_warning:
+        sys.stderr.write(f"WARNING: {api_warning}\n")
     prmap, capped = pr_login_map(slug, args.pr_limit)
-    stats, first, last = walk(repo, args.ref, args.since, args.until, prmap, wl)
+    stats, first, last = walk(repo, args.ref, args.since, args.until, prmap, gittensor_prs, wl)
 
     if args.triage:
         rows = sorted(((k, v) for k, v in stats.items() if v["group"] == "unclassified"),
@@ -371,6 +424,11 @@ def main() -> None:
                    "first_commit": iso(first), "last_commit": iso(last)},
         "total_commits": sum(s["commits"] for s in stats.values()),
         "pr_limit_hit": capped,
+        "gittensor_api": {
+            "url": args.gittensor_api_url or None,
+            "merged_prs_for_repo": len(gittensor_prs),
+            "warning": api_warning,
+        },
         "groups": groups,
         "bots": bots,
         "unclassified": unclassified,
@@ -394,6 +452,8 @@ def main() -> None:
         f"Wrote {args.out}\n")
     if capped:
         sys.stderr.write(f"WARNING: hit --pr-limit={args.pr_limit}; raise it.\n")
+    if gittensor_prs:
+        sys.stderr.write(f"Gittensor API attribution: {len(gittensor_prs)} merged PR(s) for {slug}\n")
 
 
 if __name__ == "__main__":

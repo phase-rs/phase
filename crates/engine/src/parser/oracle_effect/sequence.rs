@@ -1240,6 +1240,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
+            || starts_target_players_subject_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
@@ -1515,6 +1516,23 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
         tag("has "),
     ))
     .parse(predicate)
+    .is_ok()
+}
+
+/// CR 115.1d + CR 608.2c: True when `s` is a distributive "any number of target
+/// player(s) [each] <verb>" clause (Singularity Rupture: "Destroy all creatures,
+/// then any number of target players each mill half their library, rounded
+/// down."). The leading token is a player *subject*, not an imperative verb, so
+/// `starts_clause_text_or_conjugated` misses it and the whole tail is dropped —
+/// even though `parse_subject_application` lowers it to a per-player targeted
+/// effect on its own. Recognize it so the `, then …` splitter peels it off as a
+/// standalone continuation.
+fn starts_target_players_subject_clause(s: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("any number of target player"),
+        alt((tag("s each "), tag(" each "), tag("s "), tag(" "))),
+    )
+    .parse(s)
     .is_ok()
 }
 
@@ -7172,6 +7190,40 @@ mod tests {
         // "Each player discards their hand, then draws seven cards."
         let chunks = clause_texts("discards their hand, then draws seven cards");
         assert_eq!(chunks, vec!["discards their hand", "draws seven cards"]);
+    }
+
+    #[test]
+    fn any_number_of_target_players_each_splits_after_then() {
+        // #4783 Singularity Rupture: "Destroy all creatures, then any number of
+        // target players each mill half their library, rounded down." The
+        // subject-led "any number of target players each …" tail lowers to a
+        // per-player Mill, so it must split off as its own clause after ", then"
+        // rather than being dropped.
+        let chunks = clause_texts(
+            "destroy all creatures, then any number of target players each mill half their library, rounded down",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "destroy all creatures",
+                "any number of target players each mill half their library, rounded down",
+            ]
+        );
+    }
+
+    #[test]
+    fn starts_target_players_subject_clause_recognizes_distributive() {
+        assert!(starts_target_players_subject_clause(
+            "any number of target players each mill half their library"
+        ));
+        assert!(starts_target_players_subject_clause(
+            "any number of target players mill two cards"
+        ));
+        // Not a player-subject distributive clause.
+        assert!(!starts_target_players_subject_clause("draw a card"));
+        assert!(!starts_target_players_subject_clause(
+            "any number of target creatures"
+        ));
     }
 
     #[test]

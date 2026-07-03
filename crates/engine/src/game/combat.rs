@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{StaticDefinition, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
@@ -15,6 +16,7 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
+    StaticModeKind,
 };
 use crate::types::zones::Zone;
 
@@ -47,36 +49,34 @@ struct CombatStaticGates {
 }
 
 impl CombatStaticGates {
-    /// One `game_functioning_statics` sweep computing the presence flags.
-    /// Does NOT increment the static-full-scan perf counter: this is the single
-    /// intended hoisted sweep, not a per-element legality scan.
+    /// Reads all six presence flags from the O(1) `StaticModePresence` index
+    /// (Unit 1) instead of sweeping `game_functioning_statics`. Each flag mirrors
+    /// the discriminant its consumers gate `check_static_ability` behind; the
+    /// index is a post-flush-precise superset of the sweep, so a spurious `true`
+    /// merely falls through to the exact per-permanent scan.
     ///
-    /// `has_attack_only_neighbor` is computed from the SAME
-    /// `game_functioning_statics` (battlefield + command zone) sweep the CR
-    /// 508.1c enforcement loop iterates, so the flag and the enforcement stay in
-    /// lockstep AND a command-zone emblem granting `AttackOnlyNeighbor` is both
-    /// detected and enforced (CR 113.6: command-zone static abilities function).
+    /// `has_attack_only_neighbor` (CR 508.1c) is read from the SAME index; the
+    /// enforcement loop still sweeps `game_functioning_statics`, and the index is
+    /// precise post-flush (a spurious `true` merely runs that loop, which finds no
+    /// `AttackOnlyNeighbor` static and is inert), so the flag and the enforcement
+    /// stay consistent while the per-combat sweep is eliminated. CR 113.6:
+    /// command-zone statics function and are included in the refresh sweep.
+    /// Does NOT increment the static-full-scan perf counter: no scan occurs here.
     fn compute(state: &GameState) -> Self {
-        let mut gates = CombatStaticGates {
-            has_cant_attack: false,
-            has_cant_attack_or_block: false,
-            has_must_attack: false,
-            has_goad: false,
-            has_can_attack_with_defender: false,
-            has_attack_only_neighbor: false,
-        };
-        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
-            match def.mode {
-                StaticMode::CantAttack => gates.has_cant_attack = true,
-                StaticMode::CantAttackOrBlock => gates.has_cant_attack_or_block = true,
-                StaticMode::MustAttack => gates.has_must_attack = true,
-                StaticMode::Goaded => gates.has_goad = true,
-                StaticMode::CanAttackWithDefender => gates.has_can_attack_with_defender = true,
-                StaticMode::AttackOnlyNeighbor => gates.has_attack_only_neighbor = true,
-                _ => {}
-            }
+        CombatStaticGates {
+            has_cant_attack: static_kind_present(state, StaticModeKind::CantAttack),
+            has_cant_attack_or_block: static_kind_present(state, StaticModeKind::CantAttackOrBlock),
+            has_must_attack: static_kind_present(state, StaticModeKind::MustAttack),
+            has_goad: static_kind_present(state, StaticModeKind::Goaded),
+            has_can_attack_with_defender: static_kind_present(
+                state,
+                StaticModeKind::CanAttackWithDefender,
+            ),
+            has_attack_only_neighbor: static_kind_present(
+                state,
+                StaticModeKind::AttackOnlyNeighbor,
+            ),
         }
-        gates
     }
 }
 
@@ -680,6 +680,15 @@ fn defending_player_for_target(state: &GameState, target: AttackTarget) -> Playe
 /// battlefield for every attacker. Mirrors the filter in
 /// `block_restriction_statics_against`.
 pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, StaticDefinition)> {
+    // CR 509.1b: O(1) presence gate — no CantBeBlocked* discriminant present means the
+    // filtered sweep yields nothing, so return empty without walking the battlefield.
+    if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
+        || static_kind_present(state, StaticModeKind::CantBeBlockedExceptBy)
+        || static_kind_present(state, StaticModeKind::CantBeBlockedBy)
+        || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan))
+    {
+        return Vec::new();
+    }
     super::functioning_abilities::battlefield_functioning_statics(state)
         .filter(|(_, def)| {
             matches!(
@@ -698,6 +707,12 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
 /// once per legality pass. Mirrors the filter in
 /// `blocker_restriction_statics_for`.
 pub fn collect_blocker_restriction_statics(state: &GameState) -> Vec<(ObjectId, StaticDefinition)> {
+    // CR 509.1b: O(1) presence gate — skip the sweep when neither discriminant is present.
+    if !(static_kind_present(state, StaticModeKind::CantBlock)
+        || static_kind_present(state, StaticModeKind::CantAttackOrBlock))
+    {
+        return Vec::new();
+    }
     super::functioning_abilities::game_functioning_statics(state)
         .filter(|(_, def)| {
             matches!(
@@ -713,6 +728,10 @@ pub fn collect_blocker_restriction_statics(state: &GameState) -> Vec<(ObjectId, 
 /// <filter>") static once per legality pass. Mirrors the filter in
 /// `blocker_block_allowed_statics_for`.
 pub fn collect_blocker_allowed_statics(state: &GameState) -> Vec<(ObjectId, StaticDefinition)> {
+    // CR 509.1b: O(1) presence gate — no BlockRestriction static means an empty result.
+    if !static_kind_present(state, StaticModeKind::BlockRestriction) {
+        return Vec::new();
+    }
     super::functioning_abilities::game_functioning_statics(state)
         .filter(|(_, def)| matches!(def.mode, StaticMode::BlockRestriction { .. }))
         .map(|(src, def)| (src.id, def.clone()))
@@ -723,6 +742,12 @@ pub fn collect_blocker_allowed_statics(state: &GameState) -> Vec<(ObjectId, Stat
 /// static once per legality pass. Mirrors the filter in
 /// `must_be_blocked_statics_for_attacker`.
 pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, StaticDefinition)> {
+    // CR 509.1c: O(1) presence gate — skip the sweep when neither discriminant is present.
+    if !(static_kind_present(state, StaticModeKind::MustBeBlocked)
+        || static_kind_present(state, StaticModeKind::MustBeBlockedByAll))
+    {
+        return Vec::new();
+    }
     super::functioning_abilities::battlefield_functioning_statics(state)
         .filter(|(_, def)| {
             matches!(
@@ -1007,10 +1032,7 @@ pub fn validate_blockers_for_player(
     // 509.1b/609.4/702.28b). Hoisted once so the per-blocker shadow scan below
     // and every `can_block_pair_with_precomputed` call skip the O(N)
     // `check_static_ability` sweep when no `CanBlockShadow` static exists.
-    let can_block_shadow_exists =
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::CanBlockShadow)
-        });
+    let can_block_shadow_exists = static_kind_present(state, StaticModeKind::CanBlockShadow);
 
     // Group assignments by attacker for menace validation and by blocker for
     // per-creature block-capacity checks.
@@ -1476,10 +1498,7 @@ pub fn validate_blockers_for_player(
         // CR 604.1: hoist the MustBlock existence gate once before iterating N
         // permanents so the per-permanent `check_static_ability` re-scan is
         // skipped when no functioning MustBlock static exists (O(N^2) -> O(N)).
-        let has_must_block_static =
-            super::functioning_abilities::any_functioning_static_mode(state, |m| {
-                matches!(m, StaticMode::MustBlock)
-            });
+        let has_must_block_static = static_kind_present(state, StaticModeKind::MustBlock);
         for &obj_id in &state.battlefield {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -2779,9 +2798,7 @@ pub(crate) fn goading_players_for_creature(
     goading_players_for_creature_gated(
         state,
         creature_id,
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::Goaded)
-        }),
+        static_kind_present(state, StaticModeKind::Goaded),
     )
 }
 
@@ -3186,10 +3203,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     let block_restriction = collect_block_restriction_statics(state);
     let blocker_allowed = collect_blocker_allowed_statics(state);
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b).
-    let can_block_shadow_exists =
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::CanBlockShadow)
-        });
+    let can_block_shadow_exists = static_kind_present(state, StaticModeKind::CanBlockShadow);
     can_block_pair_with_precomputed(
         state,
         blocker_id,
@@ -3385,10 +3399,7 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
     let blocker_allowed = collect_blocker_allowed_statics(state);
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
     // hoisted once for the whole O(blockers × attackers) sweep.
-    let can_block_shadow_exists =
-        super::functioning_abilities::any_functioning_static_mode(state, |m| {
-            matches!(m, StaticMode::CanBlockShadow)
-        });
+    let can_block_shadow_exists = static_kind_present(state, StaticModeKind::CanBlockShadow);
 
     let mut result = HashMap::new();
     for &blocker_id in &valid_blockers {
@@ -3940,6 +3951,10 @@ mod tests {
             .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
             .collect();
 
+        // Flush makes the `StaticModePresence` index PRECISE (no combat-restriction
+        // statics). Production reaches combat with a flushed index; the pre-flush
+        // `all_present` default would conservatively fall through to the O(K) scan.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let valid = get_valid_attacker_ids(&state);
         let scans = crate::game::perf_counters::snapshot().static_full_scans;
@@ -3960,6 +3975,8 @@ mod tests {
             create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2);
         }
 
+        // Flush makes the presence index PRECISE (production reaches combat post-flush).
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let any = has_potential_attackers(&state);
         let scans = crate::game::perf_counters::snapshot().static_full_scans;
@@ -3988,6 +4005,8 @@ mod tests {
             .map(|id| (*id, AttackTarget::Player(PlayerId(1))))
             .collect();
 
+        // Flush makes the presence index PRECISE (production reaches combat post-flush).
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let mut events = Vec::new();
         let result = declare_attackers_with_bands(&mut state, &attacks, &[], &mut events);
@@ -5569,6 +5588,10 @@ mod tests {
             ..Default::default()
         });
 
+        // Flush makes the presence index PRECISE (no CanBlockShadow static). Production
+        // reaches block declaration post-flush; the pre-flush `all_present` default would
+        // conservatively fall through to the O(K) per-blocker shadow scan.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         let targets = get_valid_block_targets(&state);
         let scans = crate::game::perf_counters::snapshot().combat_shadow_block_scans;

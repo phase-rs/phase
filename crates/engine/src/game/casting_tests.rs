@@ -15487,6 +15487,10 @@ fn only_once_each_turn_without_modify_limit_static_avoids_exact_scan() {
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
 
+    // Flush makes the `StaticModePresence` index PRECISE (no ModifyActivationLimit static).
+    // Production reaches activation legality post-flush; the pre-flush `all_present` default
+    // would conservatively fall through to the exact per-candidate static scan.
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
@@ -15506,6 +15510,7 @@ fn only_once_each_turn_without_modify_limit_static_avoids_exact_scan() {
     );
     handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events).unwrap();
 
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let untagged_second =
         handle_activate_ability(&mut state, PlayerId(0), untagged, 0, &mut events);
@@ -15545,6 +15550,10 @@ fn priority_activation_candidates_share_activation_restriction_static_gate() {
         ),
     ];
 
+    // Flush makes the presence index PRECISE (no ModifyActivationLimit static). Production
+    // reaches candidate production post-flush; the pre-flush `all_present` default would
+    // conservatively fall through to the exact per-candidate static scan.
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let actions = crate::ai_support::candidate_actions_broad(&state);
     let offered = actions
@@ -15587,6 +15596,8 @@ fn only_once_without_modify_limit_static_avoids_exact_scan() {
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
 
+    // Flush makes the presence index PRECISE (no ModifyActivationLimit static).
+    crate::game::layers::evaluate_layers(&mut state);
     crate::game::perf_counters::reset();
     let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
@@ -31271,6 +31282,10 @@ mod loyalty_gate {
         );
         set_opponent_combat_priority(&mut state);
 
+        // Flush makes the presence index PRECISE (no ActivateAsInstant static). Production
+        // reaches activation legality post-flush; the pre-flush `all_present` default would
+        // conservatively fall through to the exact permission scan.
+        crate::game::layers::evaluate_layers(&mut state);
         crate::game::perf_counters::reset();
         assert!(
             !can_activate_ability_now(&state, PlayerId(0), pw, 0),

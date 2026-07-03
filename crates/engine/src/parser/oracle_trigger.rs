@@ -13010,6 +13010,21 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
         }
     }
 
+    // CR 205.3m: "that doesn't share a creature type with a creature you control
+    // or a creature card in your graveyard" (Volo, Guide to Monsters). Reuse the
+    // shared-quality clause combinator so the disjunctive reference ("creature
+    // you control or a creature card in your graveyard") is not mis-split as a
+    // type-phrase `Or` inside `parse_type_phrase`.
+    if let Ok((rest, prop)) =
+        super::oracle_target::parse_shared_quality_clause(modifier, &ParseContext::default())
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![prop]),
+            ));
+        }
+    }
+
     None
 }
 
