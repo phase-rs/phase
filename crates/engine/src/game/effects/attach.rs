@@ -596,6 +596,9 @@ pub(crate) fn attachment_illegality(
     // being attached to the protected permanent.
     // CR 702.16d: Protection from a quality prevents Equipment or Fortifications
     // of that quality from being attached to the protected permanent.
+    // CR 702.16c–702.16d: Protection from a quality prevents new attachments of
+    // that quality, but CR 702.16n/702.16p exempt already-attached Auras and
+    // Equipment named by the protection-granting effect.
     if let (Some(host), Some(attachment)) = (
         state.objects.get(&host_id),
         state.objects.get(&attachment_id),
@@ -630,23 +633,71 @@ fn protection_doesnt_remove_attached_exemption(
     let Some(host) = state.objects.get(&host_id) else {
         return false;
     };
-    let Some(attachment) = state.objects.get(&attachment_id) else {
-        return false;
-    };
     if !host.attachments.contains(&attachment_id) {
         return false;
     }
 
-    crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| match def
-        .mode
+    let host_has_this_aura =
+        crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura
+            )
+        });
+    let host_has_controlled =
+        crate::game::functioning_abilities::active_static_definitions(state, host).any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments
+            )
+        });
+
+    if host_has_this_aura
+        && attacher_is_aura
+        && aura_grants_protection_attachment_exemption(
+            state,
+            attachment_id,
+            crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura,
+        )
     {
-        crate::types::statics::StaticMode::ProtectionDoesntRemoveThisAura => {
-            attacher_is_aura && attachment.controller == host.controller
-        }
-        crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments => {
-            (attacher_is_aura || attacher_is_equipment) && attachment.controller == host.controller
-        }
-        _ => false,
+        return true;
+    }
+
+    if host_has_controlled && (attacher_is_aura || attacher_is_equipment) {
+        let Some(attachment) = state.objects.get(&attachment_id) else {
+            return false;
+        };
+        return host.attachments.iter().any(|&grantor_id| {
+            aura_grants_protection_attachment_exemption(
+                state,
+                grantor_id,
+                crate::types::statics::StaticMode::ProtectionDoesntRemoveControlledAttachments,
+            ) && state
+                .objects
+                .get(&grantor_id)
+                .is_some_and(|grantor| grantor.controller == attachment.controller)
+        });
+    }
+
+    false
+}
+
+fn aura_grants_protection_attachment_exemption(
+    state: &GameState,
+    aura_id: ObjectId,
+    mode: crate::types::statics::StaticMode,
+) -> bool {
+    let Some(aura) = state.objects.get(&aura_id) else {
+        return false;
+    };
+    crate::game::functioning_abilities::active_static_definitions(state, aura).any(|def| {
+        def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                crate::types::ability::ContinuousModification::AddStaticMode { mode: m }
+                    if *m == mode
+            )
+        })
     })
 }
 
@@ -940,6 +991,16 @@ mod tests {
                 ),
             ),
         );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::continuous().modifications(vec![
+                crate::types::ability::ContinuousModification::AddStaticMode {
+                    mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
+                },
+            ]));
         state
             .objects
             .get_mut(&creature)

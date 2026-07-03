@@ -1406,10 +1406,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
                 &keyword_text.to_lowercase(),
                 ". ",
             ) {
-                Some((first, rest))
-                    if rest.to_ascii_lowercase().contains("doesn't remove")
-                        || rest.to_ascii_lowercase().contains("does not remove") =>
-                {
+                Some((first, rest)) if trailing_mentions_protection_attachment_exemption(rest) => {
                     (first, Some(rest.trim()))
                 }
                 _ => (keyword_text, None),
@@ -1586,21 +1583,40 @@ pub(crate) fn push_grant_clause_modifications(
     }
 }
 
+fn trailing_mentions_protection_attachment_exemption(text: &str) -> bool {
+    nom_primitives::scan_contains(text, "doesn't remove")
+        || nom_primitives::scan_contains(text, "does not remove")
+}
+
+fn parse_protection_attachment_exemption_trailing(text: &str) -> Option<StaticMode> {
+    let lower = text.trim().to_ascii_lowercase();
+    let mut this_aura = alt((
+        tag::<_, _, OracleError<'_>>("this effect doesn't remove this aura"),
+        tag("this effect does not remove this aura"),
+        tag("doesn't remove this aura"),
+        tag("does not remove this aura"),
+    ));
+    if this_aura.parse(lower.as_str()).is_ok() {
+        return Some(StaticMode::ProtectionDoesntRemoveThisAura);
+    }
+    let mut controlled = alt((
+        tag::<_, _, OracleError<'_>>("this effect doesn't remove auras and equipment you control"),
+        tag("this effect does not remove auras and equipment you control"),
+        tag("doesn't remove auras and equipment you control"),
+        tag("does not remove auras and equipment you control"),
+    ));
+    if controlled.parse(lower.as_str()).is_ok() {
+        return Some(StaticMode::ProtectionDoesntRemoveControlledAttachments);
+    }
+    None
+}
+
 fn push_protection_attachment_exemption_modifications(
     modifications: &mut Vec<ContinuousModification>,
     trailing: &str,
 ) {
-    let lower = trailing.to_lowercase();
-    if lower.contains("doesn't remove this aura") || lower.contains("does not remove this aura") {
-        modifications.push(ContinuousModification::AddStaticMode {
-            mode: StaticMode::ProtectionDoesntRemoveThisAura,
-        });
-    } else if lower.contains("doesn't remove auras and equipment you control")
-        || lower.contains("does not remove auras and equipment you control")
-    {
-        modifications.push(ContinuousModification::AddStaticMode {
-            mode: StaticMode::ProtectionDoesntRemoveControlledAttachments,
-        });
+    if let Some(mode) = parse_protection_attachment_exemption_trailing(trailing) {
+        modifications.push(ContinuousModification::AddStaticMode { mode });
     }
 }
 
