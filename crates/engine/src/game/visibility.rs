@@ -800,8 +800,9 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
     };
 
     match event {
-        // Individual draws identify the exact library card — only the drawer.
-        GameEvent::CardDrawn { player_id, .. } => *player_id == viewer,
+        // Individual draws identify the exact library card — only viewers with
+        // private-zone authority for the drawer may see them.
+        GameEvent::CardDrawn { player_id, .. } => can_view_private_for_player(*player_id),
         GameEvent::ZoneChanged {
             object_id,
             from,
@@ -1193,6 +1194,23 @@ mod tests {
 
         let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
         assert!(opponent.is_empty());
+    }
+
+    #[test]
+    fn library_draw_events_visible_to_turn_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        let event = GameEvent::CardDrawn {
+            player_id: PlayerId(1),
+            object_id: ObjectId(99),
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+
+        let controller =
+            filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
+        assert_eq!(controller, vec![event]);
     }
 
     #[test]
