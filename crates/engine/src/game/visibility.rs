@@ -16,6 +16,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     let mut filtered = state.clone();
     filtered.pending_begin_game_abilities.clear();
     filtered.resolving_begin_game_abilities = false;
+
+    // Hidden-information + fairness integrity: the game's RNG is a deterministic
+    // ChaCha20 stream seeded from `rng_seed`, and that seed is a serialized field
+    // of `GameState`. Broadcasting it to clients (every `StateUpdate` /
+    // `GameStarted` carries the filtered `GameState`) would let any player
+    // reconstruct the stream and predict every future shuffle, draw, coin flip,
+    // and random selection — including their own and the opponent's hidden
+    // library order, defeating the library redaction below and breaking ranked
+    // integrity. The authoritative engine and on-disk persistence operate on the
+    // UNFILTERED state, so redacting the seed here (and resetting the skipped RNG
+    // handle for good measure) closes the wire leak without affecting
+    // server-side randomness or session restore.
+    filtered.rng_seed = 0;
+    filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
+
     let can_view_private_for_player = |player: PlayerId| {
         player == viewer
             || (player == state.active_player
@@ -1001,6 +1016,25 @@ mod tests {
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn redacts_rng_seed_from_every_viewer() {
+        // A distinctive non-zero seed so a leak is unmistakable.
+        let state = GameState::new_two_player(0x1234_5678_9abc_def0);
+        assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+
+        // Seat viewers and the non-seat spectator must never see the real seed.
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(u8::MAX)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.rng_seed, 0,
+                "rng_seed must be redacted for viewer {viewer:?}"
+            );
+        }
+
+        // The authoritative source state is untouched by filtering.
+        assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
     }
 
     #[test]

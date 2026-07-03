@@ -23207,3 +23207,180 @@ fn static_self_dynamic_pump_for_each_other_creature_on_battlefield_with_keyword(
         def.modifications
     );
 }
+
+/// CR 205.4a + CR 205.4g + CR 613.1d (Layer 4): Glittering Frost's "Enchanted
+/// land is snow." is an Aura that grants the Snow supertype (not a card type)
+/// to the enchanted land. It must lower to a `Continuous` static carrying
+/// `AddSupertype { Snow }` over an `EnchantedBy` land filter — the supertype is
+/// additive (CR 205.4b), so the land keeps its printed types.
+#[test]
+fn glittering_frost_enchanted_land_is_snow_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    // Production front door: exercise the real attached-Aura dispatch
+    // (`parse_static_line_multi`), not the single-line `parse_static_line` bypass.
+    let defs = parse_static_line_multi("Enchanted land is snow.");
+    let def = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("Enchanted land is snow must parse to a Continuous static");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSupertype {
+                supertype: Supertype::Snow,
+            }),
+        "expected AddSupertype(Snow), got {:?}",
+        def.modifications
+    );
+    let affected = def.affected.as_ref().expect("must carry an affected set");
+    assert!(
+        matches!(
+            affected,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Land]
+                    && tf.properties.contains(&FilterProp::EnchantedBy)
+        ),
+        "affected must be the enchanted land, got {affected:?}"
+    );
+}
+
+/// CR 205.4a + CR 205.4c: The recognizer is a building block over every
+/// CR 205.4a supertype, not just the pre-existing narrow "is legendary" grant.
+/// A "basic" supertype grant ("Enchanted land is basic.") — which the old
+/// legendary-only path never handled — proves the added generality and lowers
+/// to `AddSupertype { Basic }`.
+#[test]
+fn enchanted_land_is_basic_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted land is basic.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Basic,
+                })),
+        "expected AddSupertype(Basic), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Disjointness guard (no blast radius): the articled "is a [type]" copula
+/// still routes to the core-type-changing aura parser and is NOT swallowed by
+/// the supertype recognizer. "Enchanted land is a Mountain." shares the
+/// "Enchanted land is …" prefix with Glittering Frost, so it is the strongest
+/// guard that the `eof`-anchored supertype clause does not steal the basic
+/// land-type change (which emits `SetBasicLandType`, never `AddSupertype`).
+#[test]
+fn enchanted_is_a_type_not_captured_by_supertype_recognizer() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted land is a Mountain.");
+    assert!(
+        !defs.is_empty(),
+        "Enchanted land is a Mountain must still parse"
+    );
+    assert!(
+        !defs.iter().any(|d| d.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSupertype {
+                supertype: Supertype::Snow | Supertype::Legendary | Supertype::Basic
+            }
+        ))),
+        "the basic-land-type aura must not emit any AddSupertype, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Regression (nearest at-risk card): On Serra's Wings' "Enchanted creature is
+/// legendary, gets +1/+1, and has flying, vigilance, and lifelink." must NOT
+/// be captured by the new `eof`-anchored supertype recognizer — it has content
+/// after "legendary," so the whole compound falls through to the predicate
+/// path, which grants the supertype AND the P/T pump AND the keywords. If the
+/// supertype recognizer stole this line, the pump and keywords would vanish.
+#[test]
+fn on_serras_wings_compound_legendary_grant_keeps_pump_and_keywords() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi(
+        "Enchanted creature is legendary, gets +1/+1, and has flying, vigilance, and lifelink.",
+    );
+    let has = |m: &ContinuousModification| defs.iter().any(|d| d.modifications.contains(m));
+    assert!(
+        has(&ContinuousModification::AddSupertype {
+            supertype: Supertype::Legendary,
+        }),
+        "must still grant Legendary, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+    assert!(
+        has(&ContinuousModification::AddPower { value: 1 })
+            && has(&ContinuousModification::AddToughness { value: 1 }),
+        "the +1/+1 pump must survive, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+    assert!(
+        has(&ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Flying,
+        }),
+        "the granted keywords must survive, got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// Regression: In Bolas's Clutches' standalone "Enchanted permanent is
+/// legendary." line lowers to `AddSupertype { Legendary }` (the whole-clause
+/// form my recognizer now owns), identical to the pre-existing narrow
+/// "is legendary" grant. This locks the equivalence so the two paths can't
+/// drift.
+#[test]
+fn in_bolas_clutches_enchanted_permanent_is_legendary_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is legendary.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary,
+                })),
+        "expected AddSupertype(Legendary), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// CR 205.4a + CR 205.4b: World is a CR 205.4a supertype the engine `Supertype`
+/// enum models, but the shared `parse_supertype_word` building block previously
+/// omitted it, so the "general" supertype-grant path silently dropped World. An
+/// attached-subject grant "Enchanted permanent is world." must now lower to a
+/// `Continuous` static carrying `AddSupertype { World }` through the SAME one
+/// seam as Snow/Legendary/Basic — proving the general path is really general.
+#[test]
+fn enchanted_permanent_is_world_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is world.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::World,
+                })),
+        "expected AddSupertype(World), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+/// CR 205.4a: Ongoing (the scheme supertype) is likewise part of the engine
+/// `Supertype` set and CR 205.4a's enumeration; the shared recognizer previously
+/// omitted it too. "Enchanted permanent is ongoing." must lower to
+/// `AddSupertype { Ongoing }`, completing the general supertype-grant building
+/// block so it covers every CR 205.4a supertype the enum models.
+#[test]
+fn enchanted_permanent_is_ongoing_grants_supertype() {
+    use crate::types::card_type::Supertype;
+    let defs = parse_static_line_multi("Enchanted permanent is ongoing.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous
+            && d.modifications
+                .contains(&ContinuousModification::AddSupertype {
+                    supertype: Supertype::Ongoing,
+                })),
+        "expected AddSupertype(Ongoing), got {:?}",
+        defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
