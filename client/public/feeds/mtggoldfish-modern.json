@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-02T00:00:00Z",
+  "updated": "2026-07-03T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1335,64 +1335,20 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Flickerwisp"
-        },
-        {
-          "count": 2,
-          "name": "Orcish Bowmasters"
+          "count": 1,
+          "name": "Boggart Trawler"
         },
         {
           "count": 1,
-          "name": "Meticulous Archive"
+          "name": "Prismatic Ending"
         },
         {
           "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 1,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 2,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 2,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Polluted Delta"
+          "name": "March of Otherworldly Light"
         },
         {
           "count": 3,
-          "name": "Witch Enchanter"
-        },
-        {
-          "count": 1,
-          "name": "Boggart Trawler"
+          "name": "Ephemerate"
         },
         {
           "count": 4,
@@ -1400,19 +1356,11 @@
         },
         {
           "count": 4,
-          "name": "Quantum Riddler"
+          "name": "Flooded Strand"
         },
         {
           "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "name": "Godless Shrine"
         },
         {
           "count": 1,
@@ -1420,7 +1368,43 @@
         },
         {
           "count": 2,
-          "name": "Prismatic Ending"
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 2,
+          "name": "Flickerwisp"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
         },
         {
           "count": 1,
@@ -1431,8 +1415,8 @@
           "name": "Thoughtseize"
         },
         {
-          "count": 3,
-          "name": "Fatal Push"
+          "count": 1,
+          "name": "Undercity Sewers"
         },
         {
           "count": 1,
@@ -1440,19 +1424,23 @@
         },
         {
           "count": 2,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 3,
-          "name": "Ephemerate"
+          "name": "Witch Enchanter"
         },
         {
           "count": 4,
           "name": "Solitude"
+        },
+        {
+          "count": 1,
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 1,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Emperor of Bones"
         },
         {
           "count": 4,
@@ -1462,43 +1450,35 @@
       "sideboard": [
         {
           "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 1,
-          "name": "High Noon"
-        },
-        {
-          "count": 1,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 2,
-          "name": "White Orchid Phantom"
-        },
-        {
-          "count": 1,
           "name": "Clarion Conqueror"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Consign to Memory"
         },
         {
-          "count": 1,
-          "name": "Nihil Spellbomb"
+          "count": 3,
+          "name": "High Noon"
         },
         {
           "count": 2,
           "name": "Mystical Dispute"
         },
         {
+          "count": 2,
+          "name": "Wrath of the Skies"
+        },
+        {
           "count": 1,
-          "name": "Drannith Magistrate"
+          "name": "End of the Hunt"
+        },
+        {
+          "count": 1,
+          "name": "Nihil Spellbomb"
+        },
+        {
+          "count": 3,
+          "name": "White Orchid Phantom"
         }
       ]
     }
