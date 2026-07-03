@@ -503,6 +503,23 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
             PlayerScope::Target,
             tag("target opponent discarded this turn"),
         ),
+        // CR 701.9 + CR 702.29 (Cycling — pays a discard cost, so a cycled card
+        // already counts toward "discarded this turn" via the shared
+        // restrictions::record_discard counter; exact CR sub-letter should be
+        // grep-verified against docs/MagicCompRules.txt once available — not
+        // possible in this session):
+        // "you've cycled or discarded this turn" / "you've discarded or cycled
+        // this turn" (Hollow One).
+        value(
+            PlayerScope::Controller,
+            preceded(
+                alt((tag("you've "), tag("you have "))),
+                alt((
+                    tag("cycled or discarded this turn"),
+                    tag("discarded or cycled this turn"),
+                )),
+            ),
+        ),
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
@@ -7456,6 +7473,42 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 701.9 + CR 702.29: Hollow One's compound cycled-or-discarded phrase
+    /// lowers to the controller-scoped `CardsDiscardedThisTurn`, in both
+    /// orderings, reached via the bare "card(s) …" for-each path.
+    #[test]
+    fn test_parse_cards_cycled_or_discarded_this_turn_controller() {
+        for phrase in [
+            "card you've cycled or discarded this turn",
+            "card you've discarded or cycled this turn",
+            "cards you've cycled or discarded this turn",
+        ] {
+            let (rest, q) = parse_number_of_cards_discarded_this_turn(phrase)
+                .unwrap_or_else(|e| panic!("phrase {phrase:?} should parse, got {e:?}"));
+            assert_eq!(
+                q,
+                QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                "phrase {phrase:?} must lower to controller-scoped discard count"
+            );
+            assert_eq!(rest, "", "phrase {phrase:?} must be fully consumed");
+        }
+    }
+
+    /// Negative: the new compound arm must NOT match an unrelated "drawn or
+    /// discarded" phrase (only "cycled or discarded" / "discarded or cycled"
+    /// are recognized), so the function returns `Err` and does not silently
+    /// coerce a draws-flavored phrase into a discard count.
+    #[test]
+    fn test_parse_cards_drawn_or_discarded_this_turn_rejected() {
+        assert!(
+            parse_number_of_cards_discarded_this_turn("cards you've drawn or discarded this turn")
+                .is_err(),
+            "'drawn or discarded' must not match the cycled-or-discarded arm"
+        );
     }
 
     /// Serde round-trip for the new object-axis variant.

@@ -13754,6 +13754,55 @@ fn phlage_unless_it_escaped_attaches_negated_escape_condition() {
     }
 }
 
+/// CR 106.3 + CR 601.2h + CR 603.4: Hollow One's full ETB line — "When Hollow
+/// One enters the battlefield, if it was cast for {5} or less, sacrifice it."
+/// The brace-notation subject-first "was cast for {5} or less" intervening-if
+/// must hoist to a trigger-level `QuantityComparison(ManaSpentToCast{SelfObject,
+/// Total} <= 5)`, and the effect must be a SelfRef `Sacrifice`. CR 400.7d: on a
+/// self-ETB trigger, "it"/"this creature" is the source object → `SelfObject`
+/// (NOT `TriggeringSpell`, which is the spell-cast anaphora).
+#[test]
+fn hollow_one_etb_cast_for_five_or_less_sacrifices_self() {
+    let def = parse_trigger_line(
+        "When Hollow One enters the battlefield, if it was cast for {5} or less, sacrifice it.",
+        "Hollow One",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    let cond = def
+        .condition
+        .as_ref()
+        .expect("cast-for-{5}-or-less intervening-if must hoist as a trigger condition");
+    match cond {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                            metric: crate::types::ability::CastManaSpentMetric::Total,
+                        },
+                },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        } => {}
+        other => panic!(
+            "expected ManaSpentToCast {{ SelfObject, Total }} <= 5 trigger condition, got {other:?}"
+        ),
+    }
+    let execute = def.execute.as_deref().expect("execute ability");
+    match &*execute.effect {
+        Effect::Sacrifice { target, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::SelfRef,
+                "`sacrifice it` in a self-ETB trigger should resolve to SelfRef"
+            );
+        }
+        other => panic!("expected Sacrifice, got {other:?}"),
+    }
+}
+
 #[test]
 fn grave_pact_scopes_sacrifice_to_other_players() {
     let def = parse_trigger_line(
