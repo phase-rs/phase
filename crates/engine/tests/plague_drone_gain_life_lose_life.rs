@@ -150,11 +150,15 @@ fn plague_drone_parses_as_gain_life_replacement() {
         parsed.replacements[0].event
     );
 
-    let json = serde_json::to_string(&parsed).expect("ParsedAbilities must serialize");
+    // Scope the serialized-shape assertions to the replacement itself: the
+    // keyword line ("Flying") legitimately lowers to an Unimplemented ability
+    // when no MTGJSON keyword list is supplied to the parser, and this test
+    // pins the replacement's shape, not keyword handling.
+    let json = serde_json::to_string(&parsed.replacements).expect("replacements must serialize");
 
     assert!(
         json.contains("GainLife"),
-        "serialized AST must contain the GainLife event marker; json: {json}"
+        "serialized replacement must contain the GainLife event marker; json: {json}"
     );
     assert!(
         json.contains("LoseLife"),
@@ -162,8 +166,11 @@ fn plague_drone_parses_as_gain_life_replacement() {
          effect (CR 614.6 conversion), not an opaque fallback; json: {json}"
     );
     assert!(
+        json.contains("\"valid_player\":\"Opponent\""),
+        "the replacement must be scoped to opponents of the controller; json: {json}"
+    );
+    assert!(
         !json.contains("Unimplemented"),
-        "Plague Drone must not fall back to an Unimplemented effect anywhere \
-         in its parsed AST; json: {json}"
+        "the replacement must not fall back to an Unimplemented effect; json: {json}"
     );
 }
