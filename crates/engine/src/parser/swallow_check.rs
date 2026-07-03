@@ -6482,6 +6482,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 mod detect_condition_if_replacement_exemption_tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::replacements::ReplacementEvent;
 
     /// Plague Drone-class text: a single represented gain-life replacement,
     /// preceded by a keyword line and an ability-word line. The structural
