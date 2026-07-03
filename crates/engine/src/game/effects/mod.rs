@@ -688,9 +688,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // re-pausing on a further per-target replacement choice.
     if !waits_for_resolution_choice(&state.waiting_for) {
         if let Some(cont) = state.pending_continuation.take() {
-            let PendingContinuation { chain, parent_kind } = cont;
+            let PendingContinuation {
+                chain,
+                parent_kind,
+                search_attach_host,
+            } = cont;
+            state.search_continuation_attach_host = search_attach_host;
             let source_id = chain.source_id;
             let _ = resolve_ability_chain(state, &chain, events, 1);
+            state.search_continuation_attach_host = None;
             if let Some(kind) = parent_kind {
                 events.push(GameEvent::EffectResolved { kind, source_id });
             }
@@ -854,6 +860,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             face_down_profile,
             library_placement,
             enters_modified_if,
+            enter_attached_to,
             effect_kind,
         } = pending;
         // CR 608.2c: the object that paused this iteration on a replacement CHOICE
@@ -918,6 +925,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // resume ctx so a resumed member is still gated on its type
                 // (Summoner's Grimoire), matching the synchronous move path.
                 enters_modified_if: enters_modified_if.clone(),
+                enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -970,6 +978,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 614.12: preserve the moved-object type gate
                             // across a further pause.
                             enters_modified_if: ctx.enters_modified_if.clone(),
+                            enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
                     paused = true;
@@ -1000,6 +1009,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 614.12: preserve the moved-object type gate
                             // across a further pause.
                             enters_modified_if: ctx.enters_modified_if.clone(),
+                            enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
                     // CR 608.2c: a further member paused mid-move on a replacement
@@ -1194,11 +1204,16 @@ pub(crate) fn append_to_pending_continuation(
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
     if let Some(existing) = state.pending_continuation.take() {
-        let PendingContinuation { chain, parent_kind } = existing;
+        let PendingContinuation {
+            chain,
+            parent_kind,
+            search_attach_host,
+        } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.pending_continuation = Some(PendingContinuation {
             chain: Box::new(head),
             parent_kind,
+            search_attach_host,
         });
     } else {
         state.pending_continuation = Some(PendingContinuation::new(Box::new(head)));

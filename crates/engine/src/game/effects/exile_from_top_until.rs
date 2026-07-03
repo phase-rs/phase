@@ -104,6 +104,7 @@ pub fn resolve(
             None,
             track_exiled_by_source,
             None,
+            None,
             events,
         ) {
             super::change_zone::ZoneMoveResult::Done => {}
