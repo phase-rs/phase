@@ -2120,6 +2120,7 @@ fn strip_represented_replacement_instead_sentences(
     // sentence IS the clause). Only ever walks forward from a separator to
     // the next one — it does not itself require an "if" to be present.
     fn antecedent_clause_start(sentence: &str) -> usize {
+        // allow-noncombinator: structural ability-word em-dash boundary scan on cleaned text
         let em_dash_pos = sentence.rfind("— ").map(|i| i + "— ".len());
         let newline_pos = sentence.rfind('\n').map(|i| i + 1);
         em_dash_pos
@@ -6620,13 +6621,10 @@ mod detect_condition_if_replacement_exemption_tests {
 
         let result = strip_represented_replacement_instead_sentences(&combined, &parsed);
 
-        assert!(
-            !result.contains("gain life"),
-            "represented sentence should have been stripped, got: {result:?}"
-        );
-        assert!(
-            result.contains("sacrifice a permanent"),
-            "unrepresented sentence should survive, got: {result:?}"
+        assert_eq!(
+            result,
+            " if a player would sacrifice a permanent, exile it instead.",
+            "only the represented sentence should have been stripped"
         );
     }
 }
