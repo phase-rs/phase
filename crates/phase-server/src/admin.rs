@@ -54,8 +54,7 @@ pub async fn admin_get_draft(
         Some(session) => {
             // Use the secret-redacted snapshot: this endpoint is reachable
             // unauthenticated (nginx proxies `/`), so it must never disclose
-            // per-seat `player_tokens` or the lobby password, which would let a
-            // caller impersonate any seat.
+            // per-seat `player_tokens`, the lobby password, or the draft RNG seed.
             let persisted = session.to_admin_snapshot();
             match serde_json::to_value(&persisted) {
                 Ok(val) => Json(val).into_response(),
