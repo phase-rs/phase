@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -758,6 +759,54 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
 }
 
+/// Whether `viewer` may see another player's library/hand private zones.
+fn viewer_may_see_player_private_zone(
+    state: &GameState,
+    viewer: PlayerId,
+    player: PlayerId,
+) -> bool {
+    player == viewer
+        || (player == state.active_player
+            && turn_control::viewer_controls_active_turn(state, viewer))
+}
+
+/// Returns a viewer-safe copy of `events` for wire broadcast.
+///
+/// `StateUpdate` / `GameStarted` carry a parallel `events` array alongside the
+/// filtered `GameState`. Unlike the state snapshot, this array was broadcast
+/// verbatim to every seat and spectator — leaking hidden library information
+/// through `GameEvent::CardDrawn` (specific `object_id`) and
+/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
+/// `ZoneChangeRecord` embeds the full card name and type line). The structured
+/// game log already excludes these events; this closes the same hole on the
+/// raw event channel clients also consume.
+pub fn filter_events_for_viewer(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    events
+        .iter()
+        .filter(|event| event_visible_to_viewer(event, state, viewer))
+        .cloned()
+        .collect()
+}
+
+fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerId) -> bool {
+    match event {
+        // Individual draws identify the exact library card — only the drawer.
+        GameEvent::CardDrawn { player_id, .. } => *player_id == viewer,
+        GameEvent::ZoneChanged { from, to, record, .. } if *from == Some(Zone::Library) => {
+            // Mill, cast, and other public zone changes stay visible to everyone.
+            if matches!(*to, Zone::Battlefield | Zone::Stack | Zone::Graveyard) {
+                return true;
+            }
+            viewer_may_see_player_private_zone(state, viewer, record.owner)
+        }
+        _ => true,
+    }
+}
+
 /// CR 708.5: `viewer` may look at face-down permanent `obj_id` they do not
 /// control if they control an active `MayLookAtFaceDown` permission whose
 /// affected filter matches the permanent. The permission has two sources:
@@ -1035,6 +1084,66 @@ mod tests {
 
         // The authoritative source state is untouched by filtering.
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn filters_library_draw_events_for_non_drawer() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Library),
+            Zone::Hand,
+        );
+        record.name = "Secret Card".to_string();
+        record.owner = PlayerId(0);
+
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: PlayerId(0),
+                object_id: ObjectId(99),
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(record),
+            },
+        ];
+
+        let drawer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(drawer.len(), 2);
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent.is_empty());
+    }
+
+    #[test]
+    fn library_mill_zone_change_stays_public() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(7),
+            Some(Zone::Library),
+            Zone::Graveyard,
+        );
+        record.name = "Milled Card".to_string();
+        record.owner = PlayerId(1);
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        }];
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(opponent.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = &opponent[0] {
+            assert_eq!(record.name, "Milled Card");
+        } else {
+            panic!("expected ZoneChanged");
+        }
     }
 
     #[test]

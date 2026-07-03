@@ -1,4 +1,6 @@
+use engine::game::filter_events_for_viewer;
 use engine::game::filter_state_for_viewer;
+use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -6,6 +8,15 @@ use engine::types::player::PlayerId;
 /// Hides ALL opponents' hand contents and ALL players' library contents.
 pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState {
     filter_state_for_viewer(state, viewer)
+}
+
+/// Returns viewer-safe game events for wire broadcast (library draws, etc.).
+pub fn filter_events_for_player(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    filter_events_for_viewer(events, state, viewer)
 }
 
 #[cfg(test)]
