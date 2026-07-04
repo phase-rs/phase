@@ -307,6 +307,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Myriad
         | Effect::NoOp
         | Effect::OpenAttractions { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }
         | Effect::PayCost { .. }
         | Effect::PhaseIn { .. }
