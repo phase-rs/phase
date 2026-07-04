@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineAdapter, GameEvent, GameState } from "../../adapter/types";
 import { GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../../constants/storage";
 import { useGameStore } from "../../stores/gameStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import { buildGameState, buildPriorityWaitingFor } from "../../test/factories/gameStateFactory";
 import { restoreGameState } from "../dispatch";
 
 vi.mock("idb-keyval", () => ({
@@ -16,46 +18,22 @@ vi.mock("idb-keyval", () => ({
 import { set as idbSet } from "idb-keyval";
 
 function createMockState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
+  return buildGameState({
     players: [],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
     rng_seed: 42,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
+    waiting_for: buildPriorityWaitingFor(),
     ...overrides,
-  };
+  });
 }
 
 function createMockAdapter(state: GameState): EngineAdapter {
   let currentState = state;
-  return {
-    initialize: vi.fn().mockResolvedValue(undefined),
-    initializeGame: vi.fn().mockResolvedValue({ events: [] }),
-    submitAction: vi.fn().mockResolvedValue({ events: [] }),
+  return buildEngineAdapterMock(state, {
     getState: vi.fn().mockImplementation(() => Promise.resolve(currentState)),
-    getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
     restoreState: vi.fn().mockImplementation(async (nextState: GameState) => {
       currentState = nextState;
     }),
-    getAiAction: vi.fn().mockReturnValue(null),
-    dispose: vi.fn(),
-    estimateBracket: vi.fn().mockResolvedValue(null),
-  };
+  });
 }
 
 describe("restoreGameState", () => {

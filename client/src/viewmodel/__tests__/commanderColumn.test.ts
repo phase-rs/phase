@@ -1,23 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, GameState, PlayerId } from "../../adapter/types";
+import type { GameObject, PlayerId } from "../../adapter/types";
+import { buildGameObject, buildObjectMap } from "../../test/factories/gameObjectFactory";
+import {
+  buildCommanderFormatConfig,
+  buildFormatConfig,
+  buildGameState,
+} from "../../test/factories/gameStateFactory";
 import { commanderDamageEntriesFor, commandersInZone } from "../commanderColumn";
 
 function obj(overrides: Partial<GameObject>): GameObject {
-  return {
+  return buildGameObject({
     id: 1,
     owner: 0,
     is_commander: false,
     zone: "Battlefield",
     ...overrides,
-  } as unknown as GameObject;
+  });
 }
 
-function stateWith(objects: GameObject[], commandZone: number[]): GameState {
-  return {
+function stateWith(objects: GameObject[], commandZone: number[]) {
+  return buildGameState({
     command_zone: commandZone,
-    objects: Object.fromEntries(objects.map((o) => [String(o.id), o])),
-  } as unknown as GameState;
+    objects: buildObjectMap(...objects),
+  });
 }
 
 describe("commandersInZone", () => {
@@ -41,11 +47,14 @@ describe("commanderDamageEntriesFor", () => {
   function damageState(
     byAttacker: Record<string, Array<{ victim: PlayerId; commander: number; damage: number }>>,
     formatThreshold?: number,
-  ): GameState {
-    return {
-      format_config: formatThreshold == null ? {} : { commander_damage_threshold: formatThreshold },
+  ) {
+    return buildGameState({
+      format_config:
+        formatThreshold == null
+          ? buildFormatConfig()
+          : buildCommanderFormatConfig({ commander_damage_threshold: formatThreshold }),
       derived: { commander_damage_by_attacker: byAttacker },
-    } as unknown as GameState;
+    });
   }
 
   it("surfaces live damage entries for the victim even when no format threshold is set", () => {
