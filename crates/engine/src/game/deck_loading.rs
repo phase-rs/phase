@@ -1117,6 +1117,7 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
             )],
             triggers: vec![],

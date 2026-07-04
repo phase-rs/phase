@@ -488,6 +488,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }

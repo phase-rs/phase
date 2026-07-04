@@ -3496,6 +3496,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
                             amount: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Typed(TypedFilter::creature()),
                             damage_source: None,
+                            excess: None,
                         },
                     ))
                     .valid_card(TargetFilter::Typed(TypedFilter::creature()))

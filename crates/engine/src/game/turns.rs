@@ -54,11 +54,14 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // created entry occurs first ("the most recently created phase will occur
     // first" per CR 500.8). An entry with a non-matching anchor is preserved
     // until its anchor phase is reached.
-    let next = state
+    let removed = state
         .extra_phases
         .iter()
         .rposition(|ep| ep.anchor == state.phase)
-        .map(|i| state.extra_phases.remove(i).phase)
+        .map(|i| state.extra_phases.remove(i));
+    let next = removed
+        .as_ref()
+        .map(|ep| ep.phase)
         .unwrap_or_else(|| next_phase(state.phase));
 
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
@@ -86,6 +89,24 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 500.8 + CR 508.1c: activate the scheduled combat's attacker restriction
+    // when (and only when) that BeginCombat begins. A natural combat consumes no
+    // extra-phase entry, so `removed` is `None` and the restriction clears —
+    // natural combats are never restricted. The field persists untouched through
+    // DeclareAttackers/DeclareBlockers/CombatDamage (entered with next != BeginCombat)
+    // and is cleared at end of combat (CR 511.3).
+    // CR 611.2c: also propagate the source ObjectId so that
+    // `passes_combat_attacker_restriction` can evaluate source-relative
+    // restriction predicates against the scheduling spell's actual object.
+    if next == Phase::BeginCombat {
+        state.current_combat_attacker_restriction = removed
+            .as_ref()
+            .and_then(|ep| ep.attacker_restriction.clone());
+        state.current_combat_attacker_restriction_source = removed
+            .as_ref()
+            .and_then(|ep| ep.attacker_restriction_source);
+    }
+
     enter_phase(state, next, events);
 }
 
@@ -98,6 +119,13 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 724.1d: "skip any phases or steps between this phase or step and the
     // cleanup step" — drop scheduled extra phases for this (now-ending) turn.
     state.extra_phases.clear();
+    // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
+    // removed from combat and the combat phase is over. Clear any active
+    // additional-combat attacker restriction (Last Night Together / Bumi) — the
+    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
+    // is skipped, so we must expire the restriction here.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     enter_phase(state, Phase::Cleanup, events);
 }
 
@@ -121,6 +149,11 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+
+    // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
+    // additional-combat attacker restriction (Last Night Together / Bumi).
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -675,6 +708,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creature_types_dealt_combat_damage_this_turn.clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
+    // CR 511.3 / CR 724.1d: Defensive reset of any combat attacker restriction
+    // that may not have been cleared via the normal EndCombat or EndTheTurn
+    // path (e.g., edge cases in ruleset extensions). The authoritative clear is
+    // in Phase::EndCombat and end_turn_to_cleanup; this is the belt-and-suspenders
+    // reset so stale restrictions never survive across turn boundaries.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
     state.mana_spent_on_spells_this_turn.clear();
     // CR 601.2f: Clear one-shot cost reductions and spell modifiers from the previous turn.
@@ -2173,6 +2213,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     process_phase_triggers(state, &event_snapshot, events);
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
+                // CR 511.3: the combat phase is over — its attacker restriction
+                // (Last Night Together / Bumi) ends with it.
+                state.current_combat_attacker_restriction = None;
+                state.current_combat_attacker_restriction_source = None;
                 super::layers::prune_end_of_combat_effects(state);
                 for obj in state.objects.iter_mut().map(|(_, v)| v) {
                     obj.replacement_definitions
@@ -2473,6 +2517,8 @@ mod tests {
             .push(crate::types::game_state::ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         state.phase = Phase::EndCombat;
         advance_phase(&mut state, &mut events);
@@ -3447,6 +3493,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3473,6 +3521,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3498,6 +3548,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         // Walk the phase machine forward and record each phase entered.
@@ -3551,10 +3603,14 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::PostCombatMain,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3602,6 +3658,8 @@ mod tests {
             state.extra_phases.push(ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
 

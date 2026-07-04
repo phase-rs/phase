@@ -2123,6 +2123,7 @@ mod tests {
             amount,
             target: default_target_filter_any(),
             damage_source: None,
+            excess: None,
         }
     }
     fn set_tap(state: TapStateChange) -> Effect {
@@ -2914,6 +2915,7 @@ mod tests {
                 after: crate::types::phase::Phase::PostCombatMain,
                 followed_by: Vec::new(),
                 count: fixed(1),
+                attacker_restriction: None,
             }),
             None,
         );
@@ -2928,6 +2930,7 @@ mod tests {
                 after: crate::types::phase::Phase::Upkeep,
                 followed_by: Vec::new(),
                 count: fixed(1),
+                attacker_restriction: None,
             }),
             Projection::Unmodeled
         ));

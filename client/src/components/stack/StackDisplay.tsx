@@ -8,6 +8,7 @@ import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { getSeatCount, isSplitBoardActive } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
@@ -77,7 +78,8 @@ function getViewportSize() {
 
 export function StackDisplay() {
   const { t } = useTranslation("game");
-  const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
+  const gameState = useGameStore((s) => s.gameState);
+  const stack = gameState?.stack ?? EMPTY_STACK;
   const waitingFor = useGameStore((s) => s.waitingFor);
   // Engine-authored stack grouping rides on the same state snapshot that
   // carries `state.stack` (see `engine::game::derived_views`). Reading
@@ -99,6 +101,7 @@ export function StackDisplay() {
   // choice on every resolution.
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const dockedLeft = stackDockSide === "left";
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
@@ -175,8 +178,10 @@ export function StackDisplay() {
   // clamped to a pixel top below so the panel header — the only controls (swap,
   // collapse, count) — can never be pushed off the top edge when the pile is
   // taller than the viewport.
-  const topFraction =
-    viewport.width < 640 ? 0.38 :
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const topFraction = splitBoardActive
+    ? viewport.width < 640 ? 0.52 : viewport.width < 1024 ? 0.58 : 0.66
+    : viewport.width < 640 ? 0.38 :
       viewport.width < 1024 ? 0.43 : 0.5;
   const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
