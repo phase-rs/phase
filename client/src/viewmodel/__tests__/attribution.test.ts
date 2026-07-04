@@ -5,6 +5,7 @@ import type {
   ObjectAttribution,
   TransientContinuousEffect,
 } from "../../adapter/types";
+import { buildGameObject, buildObjectMap } from "../../test/factories/gameObjectFactory";
 import {
   buildGrantedKeywordSources,
   buildPTSources,
@@ -12,41 +13,13 @@ import {
 } from "../attribution";
 
 function makeObject(overrides: Partial<GameObject>): GameObject {
-  return {
+  return buildGameObject({
     id: 1,
     card_id: 0,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Object",
-    power: null,
-    toughness: null,
-    loyalty: null,
     card_types: { supertypes: [], core_types: [], subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
-    timestamp: 1,
-    entered_battlefield_turn: null,
     ...overrides,
-  };
+  });
 }
 
 describe("buildPTSources", () => {
@@ -68,7 +41,7 @@ describe("buildPTSources", () => {
             { type: "AddPower", value: 1 },
             { type: "AddToughness", value: 1 },
           ],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const attribution: ObjectAttribution = {
@@ -80,7 +53,7 @@ describe("buildPTSources", () => {
       },
     };
     const deref = {
-      objects: { "10": lord } as Record<string, GameObject>,
+      objects: buildObjectMap(lord),
       transientContinuousEffects: [],
     };
     const sources = buildPTSources(attribution, 1, deref);
@@ -102,7 +75,7 @@ describe("buildPTSources", () => {
             { type: "AddPower", value: 1 },
             { type: "AddToughness", value: 1 },
           ],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const anthemB = makeObject({
@@ -111,7 +84,7 @@ describe("buildPTSources", () => {
       static_definitions: [
         {
           modifications: [{ type: "AddPower", value: 2 }],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const attribution: ObjectAttribution = {
@@ -124,7 +97,7 @@ describe("buildPTSources", () => {
       },
     };
     const deref = {
-      objects: { "20": anthemA, "21": anthemB } as Record<string, GameObject>,
+      objects: buildObjectMap(anthemA, anthemB),
       transientContinuousEffects: [],
     };
     const sources = buildPTSources(attribution, 1, deref);
@@ -177,7 +150,7 @@ describe("buildPTSources", () => {
       static_definitions: [
         {
           modifications: [{ type: "AddPower", value: 1 }],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const attribution: ObjectAttribution = {
@@ -202,7 +175,7 @@ describe("buildPTSources", () => {
       static_definitions: [
         {
           modifications: [{ type: "AddDynamicPower", quantity: "stuff" }],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const attribution: ObjectAttribution = {
@@ -243,7 +216,7 @@ describe("buildGrantedKeywordSources still works with refactored helper", () => 
       static_definitions: [
         {
           modifications: [{ type: "AddKeyword", keyword: "Flying" }],
-        } as unknown as GameObject["static_definitions"][number],
+        },
       ],
     });
     const attribution: ObjectAttribution = {
@@ -254,7 +227,7 @@ describe("buildGrantedKeywordSources still works with refactored helper", () => 
       },
     };
     const map = buildGrantedKeywordSources(attribution, 1, {
-      objects: { "10": lord },
+      objects: buildObjectMap(lord),
       transientContinuousEffects: [],
     });
     expect(map.get("Flying")).toBe("Lord");

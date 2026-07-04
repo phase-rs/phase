@@ -1,9 +1,11 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
+import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { buildGameObject } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPendingCast } from "../../../test/factories/gameStateFactory.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -12,74 +14,66 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
   useGameDispatch: () => dispatchMock,
 }));
 
+type PayCostWaitingFor = Extract<WaitingFor, { type: "PayCost" }>;
+type EffectZoneChoiceWaitingFor = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
+
+const buildPayCostWaitingFor = (
+  data: PayCostWaitingFor["data"],
+): PayCostWaitingFor => ({
+  type: "PayCost",
+  data,
+});
+
+const buildEffectZoneChoiceWaitingFor = (
+  data: EffectZoneChoiceWaitingFor["data"],
+): EffectZoneChoiceWaitingFor => ({
+  type: "EffectZoneChoice",
+  data,
+});
+
+const cancellablePrompts: Array<[string, WaitingFor]> = [
+  [
+    "PayCost ExileFromZone",
+    buildPayCostWaitingFor({
+      player: 0,
+      kind: { type: "ExileFromZone", zone: "Graveyard" },
+      choices: [],
+      count: 1,
+      min_count: 0,
+      resume: { type: "Spell", Spell: buildPendingCast() },
+    }),
+  ],
+  [
+    "CollectEvidenceChoice",
+    {
+      type: "CollectEvidenceChoice",
+      data: {
+        player: 0,
+        minimum_mana_value: 1,
+        cards: [],
+        resume: {},
+      },
+    },
+  ],
+];
+
 function makeObject(id: number, name: string, zone: GameObject["zone"] = "Hand"): GameObject {
-  return {
+  return buildGameObject({
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone,
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-    mana_cost: { type: "Cost", shards: [], generic: 0 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: id,
-    entered_battlefield_turn: null,
-  };
-}
-
-function makeState(waitingFor: WaitingFor, objects: Record<string, GameObject> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects,
-    next_object_id: 100,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: waitingFor,
-    has_pending_cast: true,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 2,
-    eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 function setWaitingFor(waitingFor: WaitingFor, objects?: Record<string, GameObject>) {
-  const state = makeState(waitingFor, objects);
+  const state = buildGameState({
+    objects: objects ?? {},
+    waiting_for: waitingFor,
+    has_pending_cast: true,
+    next_object_id: 100,
+  });
   useGameStore.setState({
     gameMode: "online",
     gameState: state,
@@ -98,17 +92,16 @@ describe("Discard cost modal", () => {
   });
 
   it("allows cancelling discard costs", () => {
-    setWaitingFor({
-      type: "PayCost",
-      data: {
+    setWaitingFor(
+      buildPayCostWaitingFor({
         player: 0,
         kind: { type: "Discard" },
         choices: [],
         count: 1,
         min_count: 0,
-        resume: { type: "Spell", Spell: {} },
-      },
-    } as unknown as WaitingFor);
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+    );
 
     render(<CardChoiceModal />);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -116,32 +109,8 @@ describe("Discard cost modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
-  it.each([
-    [
-      "PayCost ExileFromZone",
-      {
-        player: 0,
-        kind: { type: "ExileFromZone", zone: "Graveyard" },
-        choices: [],
-        count: 1,
-        min_count: 0,
-        resume: { type: "Spell", Spell: {} },
-      },
-    ],
-    [
-      "CollectEvidenceChoice",
-      {
-        player: 0,
-        minimum_mana_value: 1,
-        cards: [],
-        resume: {},
-      },
-    ],
-  ])("allows cancelling %s", (label, data) => {
-    // CollectEvidence keeps its own variant `type`; the PayCost-prefixed labels
-    // all map to the unified `PayCost` variant.
-    const type = label.startsWith("PayCost") ? "PayCost" : label;
-    setWaitingFor({ type, data } as unknown as WaitingFor);
+  it.each(cancellablePrompts)("allows cancelling %s", (_label, waitingFor) => {
+    setWaitingFor(waitingFor);
 
     render(<CardChoiceModal />);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -160,9 +129,9 @@ describe("Discard cost modal", () => {
           choices: [10],
           count: 1,
           min_count: 0,
-          resume: { type: "Spell", Spell: {} },
+          resume: { type: "Spell", Spell: buildPendingCast() },
         },
-      },
+      } satisfies WaitingFor,
       { 10: makeObject(10, "Food Token", "Battlefield") },
     ],
     [
@@ -175,9 +144,9 @@ describe("Discard cost modal", () => {
           choices: [10],
           count: 1,
           min_count: 0,
-          resume: { type: "Spell", Spell: {} },
+          resume: { type: "Spell", Spell: buildPendingCast() },
         },
-      },
+      } satisfies WaitingFor,
       { 10: makeObject(10, "Kor Skyfisher", "Battlefield") },
     ],
     [
@@ -188,9 +157,9 @@ describe("Discard cost modal", () => {
           player: 0,
           count: 1,
           creatures: [],
-          pending_cast: {},
+          pending_cast: buildPendingCast(),
         },
-      },
+      } satisfies WaitingFor,
       {},
     ],
     [
@@ -200,13 +169,13 @@ describe("Discard cost modal", () => {
         data: {
           player: 0,
           eligible_creatures: [],
-          pending_cast: {},
+          pending_cast: buildPendingCast(),
         },
-      },
+      } satisfies WaitingFor,
       {},
     ],
   ])("suppresses the modal for board-native %s", (_label, waitingFor, objects) => {
-    setWaitingFor(waitingFor as unknown as WaitingFor, objects);
+    setWaitingFor(waitingFor, objects);
 
     render(<CardChoiceModal />);
 
@@ -214,17 +183,16 @@ describe("Discard cost modal", () => {
   });
 
   it("handles discard prompts for mana ability costs", () => {
-    setWaitingFor({
-      type: "PayCost",
-      data: {
+    setWaitingFor(
+      buildPayCostWaitingFor({
         player: 0,
         kind: { type: "Discard" },
         choices: [],
         count: 1,
         min_count: 0,
         resume: { type: "ManaAbility", ManaAbility: {} },
-      },
-    } as unknown as WaitingFor);
+      }),
+    );
 
     render(<CardChoiceModal />);
 
@@ -233,9 +201,7 @@ describe("Discard cost modal", () => {
 
   it("describes untap selection without saying sacrifice", () => {
     setWaitingFor(
-      {
-        type: "EffectZoneChoice",
-        data: {
+      buildEffectZoneChoiceWaitingFor({
           player: 0,
           cards: [10, 11],
           count: 5,
@@ -244,8 +210,7 @@ describe("Discard cost modal", () => {
           source_id: 1,
           effect_kind: "Untap",
           zone: "Battlefield",
-        },
-      } as unknown as WaitingFor,
+      }),
       {
         10: { ...makeObject(10, "Island"), zone: "Battlefield" },
         11: { ...makeObject(11, "Forest"), zone: "Battlefield" },
@@ -261,9 +226,7 @@ describe("Discard cost modal", () => {
 
   it("describes optional attach selection without saying sacrifice and allows decline", () => {
     setWaitingFor(
-      {
-        type: "EffectZoneChoice",
-        data: {
+      buildEffectZoneChoiceWaitingFor({
           player: 0,
           cards: [10, 11],
           count: 2,
@@ -272,8 +235,7 @@ describe("Discard cost modal", () => {
           source_id: 19,
           effect_kind: "Attach",
           zone: "Battlefield",
-        },
-      } as unknown as WaitingFor,
+      }),
       {
         10: { ...makeObject(10, "S.H.I.E.L.D. Spy Kit"), zone: "Battlefield" },
         11: { ...makeObject(11, "Vibranium Energy Daggers"), zone: "Battlefield" },
@@ -295,9 +257,8 @@ describe("Discard cost modal", () => {
   });
 
   it("describes library placement without saying battlefield", () => {
-    setWaitingFor({
-      type: "EffectZoneChoice",
-      data: {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
         player: 0,
         cards: [],
         count: 2,
@@ -306,8 +267,8 @@ describe("Discard cost modal", () => {
         source_id: 1,
         effect_kind: "PutAtLibraryPosition",
         zone: "Hand",
-      },
-    } as unknown as WaitingFor);
+      }),
+    );
 
     render(<CardChoiceModal />);
 
@@ -318,9 +279,7 @@ describe("Discard cost modal", () => {
 
   it("suppresses battlefield return choices for board-native selection", () => {
     setWaitingFor(
-      {
-        type: "EffectZoneChoice",
-        data: {
+      buildEffectZoneChoiceWaitingFor({
           player: 0,
           cards: [10],
           count: 1,
@@ -330,8 +289,7 @@ describe("Discard cost modal", () => {
           effect_kind: "ReturnToHand",
           zone: "Battlefield",
           destination: "Hand",
-        },
-      } as unknown as WaitingFor,
+      }),
       {
         10: { ...makeObject(10, "Kor Skyfisher"), zone: "Battlefield" },
       },
@@ -345,9 +303,7 @@ describe("Discard cost modal", () => {
 
   it("shows topdeck order and dispatches selected cards in click order", () => {
     setWaitingFor(
-      {
-        type: "EffectZoneChoice",
-        data: {
+      buildEffectZoneChoiceWaitingFor({
           player: 0,
           cards: [10, 11],
           count: 2,
@@ -356,8 +312,7 @@ describe("Discard cost modal", () => {
           source_id: 1,
           effect_kind: "PutAtLibraryPosition",
           zone: "Hand",
-        },
-      } as unknown as WaitingFor,
+      }),
       {
         10: makeObject(10, "First Card"),
         11: makeObject(11, "Second Card"),

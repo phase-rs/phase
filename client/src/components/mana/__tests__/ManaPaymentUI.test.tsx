@@ -5,54 +5,50 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ManaPaymentUI } from "../ManaPaymentUI";
 import { useGameStore } from "../../../stores/gameStore";
 import type { GameState } from "../../../adapter/types";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildManaPaymentWaitingFor,
+  buildPendingCast,
+  buildStackEntry,
+} from "../../../test/factories/gameStateFactory.ts";
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: {
-      type: "ManaPayment",
-      data: { player: 0 },
-    },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    seat_order: [0, 1],
-    format_config: {
-      format: "Standard",
-      starting_life: 20,
-      min_players: 2,
-      max_players: 2,
-      deck_size: 60,
-      singleton: false,
-      command_zone: false,
-      commander_damage_threshold: null,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: false,
-
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
+  return buildGameState({
+    waiting_for: buildManaPaymentWaitingFor(),
     ...overrides,
-  };
+  });
+}
+
+function stackSpellObject(
+  id: number,
+  name: string,
+  manaCost: GameState["objects"][number]["mana_cost"],
+  coreTypes: string[] = ["Instant"],
+) {
+  return buildGameObjectWithCoreTypes(coreTypes, {
+    id,
+    card_id: id,
+    name,
+    mana_cost: manaCost,
+    zone: "Stack",
+  });
+}
+
+function spellStackEntry(objectId: number) {
+  return buildStackEntry({
+    id: objectId,
+    source_id: objectId,
+    controller: 0,
+    kind: {
+      type: "Spell",
+      data: {
+        card_id: objectId,
+        ability: undefined,
+        actual_mana_spent: 0,
+      },
+    },
+  });
 }
 
 describe("ManaPaymentUI", () => {
@@ -88,54 +84,18 @@ describe("ManaPaymentUI", () => {
 
   it("shows the convoke payment hint during convoke mana payment", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 300,
-      name: "Venerated Loxodon",
-      controller: 0,
-      owner: 0,
-      card_id: 3,
-      mana_cost: {
-        type: "Cost",
-        shards: ["White"],
-        generic: 4,
-      },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Creature"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: ["White"],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      300,
+      "Venerated Loxodon",
+      { type: "Cost", shards: ["White"], generic: 4 },
+      ["Creature"],
+    );
     const gameState = createGameState({
-      objects: { 300: spellObj },
-      stack: [
-        {
-          id: 300,
-          source_id: 300,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 3,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
-      waiting_for: {
-        type: "ManaPayment",
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(300)],
+      waiting_for: buildManaPaymentWaitingFor({
         data: { player: 0, convoke_mode: "Convoke" },
-      },
+      }),
     });
 
     act(() => {
@@ -157,54 +117,17 @@ describe("ManaPaymentUI", () => {
 
   it("shows the delve payment hint during delve mana payment", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 301,
-      name: "Dig Through Time",
-      controller: 0,
-      owner: 0,
-      card_id: 4,
-      mana_cost: {
-        type: "Cost",
-        shards: ["Blue", "Blue"],
-        generic: 6,
-      },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: ["Blue"],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      301,
+      "Dig Through Time",
+      { type: "Cost", shards: ["Blue", "Blue"], generic: 6 },
+    );
     const gameState = createGameState({
-      objects: { 301: spellObj },
-      stack: [
-        {
-          id: 301,
-          source_id: 301,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 4,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
-      waiting_for: {
-        type: "ManaPayment",
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(301)],
+      waiting_for: buildManaPaymentWaitingFor({
         data: { player: 0, convoke_mode: "Delve" },
-      },
+      }),
     });
 
     act(() => {
@@ -230,51 +153,15 @@ describe("ManaPaymentUI", () => {
   // dispatches SubmitPhyrexianChoices with one choice per shard (default: PayMana).
   it("dispatches SubmitPhyrexianChoices with defaults for PhyrexianPayment", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 100,
-      name: "Gitaxian Probe",
-      controller: 0,
-      owner: 0,
-      card_id: 1,
-      mana_cost: {
-        type: "Cost",
-        shards: ["PhyrexianBlue"],
-        generic: 0,
-      },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: [],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      100,
+      "Gitaxian Probe",
+      { type: "Cost", shards: ["PhyrexianBlue"], generic: 0 },
+    );
 
     const gameState = createGameState({
-      objects: { 100: spellObj },
-      stack: [
-        {
-          id: 100,
-          source_id: 100,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 1,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(100)],
       waiting_for: {
         type: "PhyrexianPayment",
         data: {
@@ -321,52 +208,19 @@ describe("ManaPaymentUI", () => {
   // engine inflates {2}{W} to {4}{W}{W}{W}. The panel must show the inflated total.
   it("displays the Strive-inflated pending_cast cost, not the printed mana_cost", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 400,
-      name: "Call the Coppercoats",
-      controller: 0,
-      owner: 0,
-      card_id: 4,
-      // Printed base cost {2}{W} — must NOT be what the panel shows.
-      mana_cost: { type: "Cost", shards: ["White"], generic: 2 },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: ["White"],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      400,
+      "Call the Coppercoats",
+      { type: "Cost", shards: ["White"], generic: 2 },
+    );
     const gameState = createGameState({
-      objects: { 400: spellObj },
-      stack: [
-        {
-          id: 400,
-          source_id: 400,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 4,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(400)],
       // Engine-resolved locked-in total: {2}{W} + 2 × {1}{W} Strive surcharge.
-      pending_cast: {
+      pending_cast: buildPendingCast({
         object_id: 400,
         cost: { type: "Cost", shards: ["White", "White", "White"], generic: 4 },
-      } as unknown as GameState["pending_cast"],
+      }),
     });
 
     act(() => {
@@ -392,50 +246,18 @@ describe("ManaPaymentUI", () => {
   // printed mana_cost, so the panel renders the unchanged base cost.
   it("renders the base cost when pending_cast.cost equals the printed mana_cost", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 500,
-      name: "Plain Spell",
-      controller: 0,
-      owner: 0,
-      card_id: 5,
-      mana_cost: { type: "Cost", shards: ["White"], generic: 2 },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: ["White"],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      500,
+      "Plain Spell",
+      { type: "Cost", shards: ["White"], generic: 2 },
+    );
     const gameState = createGameState({
-      objects: { 500: spellObj },
-      stack: [
-        {
-          id: 500,
-          source_id: 500,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 5,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
-      pending_cast: {
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(500)],
+      pending_cast: buildPendingCast({
         object_id: 500,
         cost: { type: "Cost", shards: ["White"], generic: 2 },
-      } as unknown as GameState["pending_cast"],
+      }),
     });
 
     act(() => {
@@ -455,34 +277,18 @@ describe("ManaPaymentUI", () => {
 
   it("displays activated-ability mana cost from pending_cast.activation_cost when present", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const sourceObj = {
+    const sourceObj = buildGameObjectWithCoreTypes(["Artifact"], {
       id: 700,
       name: "The Reality Chip",
-      controller: 0,
-      owner: 0,
       card_id: 7,
       mana_cost: { type: "Cost", shards: ["Blue"], generic: 2 },
       zone: "Battlefield",
-      tapped: false,
       card_types: { core_types: ["Artifact"], subtypes: ["Equipment"], supertypes: [] },
-      abilities: [],
-      colors: [],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    });
 
     const gameState = createGameState({
-      objects: { 700: sourceObj },
-      pending_cast: {
+      objects: buildObjectMap(sourceObj),
+      pending_cast: buildPendingCast({
         object_id: 700,
         // Spells use `cost`; activated abilities use `activation_cost`.
         cost: { type: "NoCost" },
@@ -491,7 +297,7 @@ describe("ManaPaymentUI", () => {
           cost: { type: "Cost", shards: ["Blue"], generic: 2 },
         },
         activation_ability_index: 0,
-      } as unknown as GameState["pending_cast"],
+      }),
     });
 
     act(() => {
@@ -513,46 +319,14 @@ describe("ManaPaymentUI", () => {
   // pending_cast absent — fall back to the stack spell object's mana_cost.
   it("falls back to the stack spell object mana_cost when pending_cast is absent", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 600,
-      name: "Fallback Spell",
-      controller: 0,
-      owner: 0,
-      card_id: 6,
-      mana_cost: { type: "Cost", shards: ["Blue"], generic: 3 },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: ["Blue"],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    const spellObj = stackSpellObject(
+      600,
+      "Fallback Spell",
+      { type: "Cost", shards: ["Blue"], generic: 3 },
+    );
     const gameState = createGameState({
-      objects: { 600: spellObj },
-      stack: [
-        {
-          id: 600,
-          source_id: 600,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 6,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(600)],
     });
 
     act(() => {
@@ -573,51 +347,19 @@ describe("ManaPaymentUI", () => {
   // CR 107.4f: With PayLife toggled on a ManaOrLife shard, dispatch carries PayLife.
   it("dispatches PayLife when the shard toggle is flipped", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const spellObj = {
-      id: 200,
-      name: "Dismember",
-      controller: 0,
-      owner: 0,
-      card_id: 2,
-      mana_cost: {
+    const spellObj = stackSpellObject(
+      200,
+      "Dismember",
+      {
         type: "Cost",
         shards: ["PhyrexianBlack", "PhyrexianBlack", "PhyrexianBlack"],
         generic: 1,
       },
-      zone: "Stack",
-      tapped: false,
-      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
-      abilities: [],
-      colors: [],
-      counters: {},
-      damage: 0,
-      is_summon_sick: false,
-      attached_to: null,
-      cast_from_zone: null,
-      face_down: false,
-      is_commander: false,
-      is_attacking: null,
-      is_blocking: null,
-      mana_spent_to_cast: false,
-      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
-    } as unknown as GameState["objects"][number];
+    );
 
     const gameState = createGameState({
-      objects: { 200: spellObj },
-      stack: [
-        {
-          id: 200,
-          source_id: 200,
-          controller: 0,
-          kind: {
-            type: "Spell",
-            card_id: 2,
-            ability: null,
-            casting_variant: { type: "Normal" },
-            actual_mana_spent: 0,
-          },
-        },
-      ] as unknown as GameState["stack"],
+      objects: buildObjectMap(spellObj),
+      stack: [spellStackEntry(200)],
       waiting_for: {
         type: "PhyrexianPayment",
         data: {

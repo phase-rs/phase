@@ -20,6 +20,7 @@ import { UnhandledWaitingForModal } from "../UnhandledWaitingForModal.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 
 // S3 + S4: spread the real module, replace only `isWaitingForHandled` with a
 // `vi.fn` defaulting to the real implementation. The factory closes over no
@@ -42,33 +43,12 @@ function readWaitingForPriorityFixture(): WaitingFor {
 }
 
 function makeState(waitingFor: WaitingFor): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 100,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
+  return buildGameState({
     waiting_for: waitingFor,
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
+    next_object_id: 100,
     next_timestamp: 2,
-    eliminated_players: [],
     turn_decision_controller: 0,
-  } as unknown as GameState;
+  });
 }
 
 /** Adapter→store entry point: feeds the `WaitingFor` into gameStore exactly as
