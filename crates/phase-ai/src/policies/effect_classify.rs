@@ -362,7 +362,11 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::VentureInto { .. }
         | Effect::VentureIntoDungeon
         | Effect::Vote { .. }
-        | Effect::WinTheGame { .. } => EffectPolarity::Contextual,
+        | Effect::WinTheGame { .. }
+        // CR 122.1 + CR 608.2d: ChooseCounterAdjustment lets the controller add
+        // or remove a counter kind at resolution — polarity depends on the chosen
+        // kind and direction, which are not known statically.
+        | Effect::ChooseCounterAdjustment { .. } => EffectPolarity::Contextual,
     }
 }
 
