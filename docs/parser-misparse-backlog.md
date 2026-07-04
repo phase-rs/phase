@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4795
-- **Total card appearances across root causes:** 4829 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4790
+- **Total card appearances across root causes:** 4824 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -40,7 +40,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 21 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 19 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
-| 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
+| 30 | Token/named-card name corrupted by normalization or overrun | 13 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 6 | manual triage |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
@@ -5156,7 +5156,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (18 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (13 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5166,15 +5166,10 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Deathpact Angel
 - Dragonstorm Forecaster
-- Emerald Collector
 - Hecatomb
 - High Marshal Arguel
-- Jet Collector
 - Kookus
 - Liu Bei, Lord of Shu
-- Pearl Collector
-- Ruby Collector
-- Sapphire Collector
 - Sift Through Sands
 - Thran Golem
 - Thrasta, Tempest's Roar
