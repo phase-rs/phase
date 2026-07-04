@@ -373,6 +373,17 @@ pub enum ChoiceType {
         options: Vec<Keyword>,
         count: usize,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it" — pick one of the distinct
+    /// counter kinds currently present on a specific object (The Caves of
+    /// Androzani II/III). The concrete `options` list is enumerated at
+    /// resolution from the target object's counters (mirroring the runtime-baked
+    /// `Keyword { options }` template idiom), so the same interactive
+    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind persists as
+    /// `ChosenAttribute::Counter` on the source for a downstream
+    /// `Effect::PutChosenCounter` ("put an additional counter of that kind").
+    CounterKind {
+        options: Vec<CounterType>,
+    },
 }
 
 impl ChoiceType {
@@ -527,6 +538,14 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
+            // CR 608.2d + CR 122.1: Runtime-only counter-kind choice (never
+            // appears in card data; baked with concrete kinds at resolution).
+            Self::CounterKind { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 15, "CounterKind", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
         }
     }
 }
@@ -575,6 +594,9 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default = "default_keyword_choice_count")]
                 count: usize,
             },
+            CounterKind {
+                options: Vec<CounterType>,
+            },
         }
 
         fn default_keyword_choice_count() -> usize {
@@ -621,6 +643,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
                 ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
+                ChoiceTypeData::CounterKind { options } => Ok(Self::CounterKind { options }),
             },
         }
     }
@@ -942,6 +965,12 @@ pub enum ChosenAttribute {
     /// changes zones (CR 400.7), which is exactly the lifetime Koh's grant needs.
     /// Replace-on-rechoose: `RememberCard` removes any prior `Card` before pushing.
     Card(ObjectId),
+    /// CR 608.2d + CR 122.1: The counter kind chosen from a `ChoiceType::CounterKind`
+    /// option list (The Caves of Androzani "choose a counter on it"). Read by
+    /// `Effect::PutChosenCounter` ("put an additional counter of that kind on
+    /// that permanent") to add one counter of the chosen kind. Replace-on-rechoose
+    /// (the per-iteration bind clears the prior `Counter` — see `bind_named_choice`).
+    Counter(CounterType),
     /// CR 607.2d: The chosen seat direction (left/right) for a directional
     /// "choose left or right" ability linked to a "the [last] chosen direction"
     /// static (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
@@ -996,6 +1025,12 @@ impl ChosenAttribute {
             Self::Card(_) => ChoiceType::Labeled {
                 options: Vec::new(),
             },
+            // CR 608.2d + CR 122.1: A category template — the concrete counter-kind
+            // option list is enumerated at each resolution from the target object's
+            // counters (mirrors the `Keyword` template idiom).
+            Self::Counter(_) => ChoiceType::CounterKind {
+                options: Vec::new(),
+            },
             // CR 607.2d: The directional choice is a two-option labeled prompt.
             // The {Left,Right} hijack in `choose.rs` recognises exactly this
             // option set to persist a typed `Direction` rather than a `Label`.
@@ -1023,6 +1058,9 @@ impl ChosenAttribute {
             // companion `ChosenLabelIs` conditions (static + trigger) can read
             // it for the lifetime of the permanent.
             ChoiceValue::Label(label) => Some(Self::Label(label)),
+            // CR 608.2d + CR 122.1: Persist the chosen counter kind so a later
+            // `Effect::PutChosenCounter` can read it.
+            ChoiceValue::Counter(counter_type) => Some(Self::Counter(counter_type)),
             ChoiceValue::LandType(_) => None,
         }
     }
@@ -1048,6 +1086,10 @@ pub enum ChoiceValue {
     /// `chosen_attributes` as `ChosenAttribute::Keyword` for later
     /// `RemoveChosenKeyword` resolution.
     Keyword(Keyword),
+    /// CR 608.2d + CR 122.1: typed counter-kind choice from a
+    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Persisted
+    /// as `ChosenAttribute::Counter` for later `PutChosenCounter` resolution.
+    Counter(CounterType),
 }
 
 impl ChoiceValue {
@@ -1093,6 +1135,17 @@ impl ChoiceValue {
                     .find(|k| k.to_string().to_lowercase() == needle)
                     .cloned()
                     .map(Self::Keyword)
+            }
+            // CR 608.2d + CR 122.1: match the player's response against the typed
+            // counter-kind option list by display string (case-insensitive, so
+            // the frontend can render canonical capitalization).
+            ChoiceType::CounterKind { options } => {
+                let needle = value.to_lowercase();
+                options
+                    .iter()
+                    .find(|k| k.as_str().to_lowercase() == needle)
+                    .cloned()
+                    .map(Self::Counter)
             }
         }
     }
@@ -3257,6 +3310,19 @@ pub enum FilterProp {
     /// than a bespoke `NotAttacked`/`NotEntered` sibling cluster. Boxed for recursion.
     Not {
         prop: Box<FilterProp>,
+    },
+    /// CR 608.2c: The object is a member of the active resolution-chain tracked
+    /// set ("... chosen this way" / "the rest"). Composes with `FilterProp::Not`
+    /// for "all other <type>" after a choose-into-tracked-set head (Day of the
+    /// Doctor IV: "Choose up to three Doctors. You may exile all other
+    /// creatures."). The sentinel `TrackedSetId(0)` is resolved to the active
+    /// chain set at match time (see `matches_filter_prop` in `game/filter.rs`),
+    /// so no compile-time id binding is required. This is a *property* form of
+    /// the whole-filter `TargetFilter::TrackedSet` selector — usable as a
+    /// negatable constraint inside a `Typed` filter's `properties` vector,
+    /// which the whole-filter selector cannot express.
+    InTrackedSet {
+        id: super::identifiers::TrackedSetId,
     },
     /// CR 700.9: A permanent is modified if it has one or more counters on it
     /// (CR 122), if it is equipped (CR 301.5), or if it is enchanted by an Aura
@@ -9410,6 +9476,30 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it" — the controller picks one
+    /// of the distinct counter kinds currently on `target`. Zero kinds → no-op
+    /// (CR 608.2d "can't choose an impossible option"); one kind → auto-select
+    /// (no prompt); two or more → an interactive `WaitingFor::NamedChoice`
+    /// (`ChoiceType::CounterKind`). The chosen kind persists as
+    /// `ChosenAttribute::Counter` on the source for a following
+    /// `Effect::PutChosenCounter`. Building block for The Caves of Androzani
+    /// II/III (member-driven `repeat_for` over each non-Saga permanent).
+    ChooseCounterKind {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 122.1 + CR 122.6: "put an additional counter of that kind on that
+    /// permanent" — read the source's `ChosenAttribute::Counter` and add `count`
+    /// counters of that kind to `target`. No-op when no counter kind was chosen
+    /// (the preceding `ChooseCounterKind` was skipped because the object had no
+    /// counters). Mirrors the `ChosenAttribute::Keyword` → `RemoveChosenKeyword`
+    /// consume precedent.
+    PutChosenCounter {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// CR 122.1: Place counters on all objects matching a filter (no targeting).
     PutCounterAll {
         counter_type: CounterType,
@@ -12169,6 +12259,12 @@ impl Effect {
             | Effect::GainActivatedAbilitiesOfTarget { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
+            // CR 608.2d + CR 122.1: `ChooseCounterKind`/`PutChosenCounter`
+            // surface their `target` (typically `ParentTarget`) so the
+            // member-driven `repeat_for` loop rebinds it to the i-th permanent
+            // per iteration (The Caves of Androzani), mirroring `PutCounter`.
+            | Effect::ChooseCounterKind { target, .. }
+            | Effect::PutChosenCounter { target, .. }
             | Effect::MultiplyCounter { target, .. }
             | Effect::DoublePT { target, .. }
             | Effect::MoveCounters { target, .. }
@@ -12586,6 +12682,8 @@ impl Effect {
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
+            // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
+            | Effect::PutChosenCounter { count, .. }
             | Effect::Discard { count, .. }
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
@@ -12633,6 +12731,8 @@ impl Effect {
             // --- Effects with no QuantityExpr count/amount ---
             Effect::ApplyPerpetual { .. }
             | Effect::StartYourEngines { .. }
+            // CR 608.2d: the counter-kind CHOICE carries no magnitude.
+            | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -12816,6 +12916,8 @@ impl Effect {
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
+            // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
+            | Effect::PutChosenCounter { count, .. }
             | Effect::Discard { count, .. }
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
@@ -12863,6 +12965,8 @@ impl Effect {
             // --- Effects with no QuantityExpr count/amount ---
             Effect::ApplyPerpetual { .. }
             | Effect::StartYourEngines { .. }
+            // CR 608.2d: the counter-kind CHOICE carries no magnitude.
+            | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -13110,6 +13214,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainActivatedAbilitiesOfTarget { .. } => "GainActivatedAbilitiesOfTarget",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
+        Effect::ChooseCounterKind { .. } => "ChooseCounterKind",
+        Effect::PutChosenCounter { .. } => "PutChosenCounter",
         Effect::PutCounterAll { .. } => "PutCounterAll",
         Effect::MultiplyCounter { .. } => "MultiplyCounter",
         Effect::DoublePT { .. } => "DoublePT",
@@ -13415,6 +13521,8 @@ pub enum EffectKind {
     ChooseFromZone,
     RememberCard,
     ChooseObjectsIntoTrackedSet,
+    ChooseCounterKind,
+    PutChosenCounter,
     ChooseAndSacrificeRest,
     Exploit,
     GainEnergy,
@@ -13666,6 +13774,8 @@ impl From<&Effect> for EffectKind {
             // emits `ChooseFromZone` resolution events; it shares the kind.
             Effect::ForEachCategoryExile { .. } => EffectKind::ChooseFromZone,
             Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
+            Effect::ChooseCounterKind { .. } => EffectKind::ChooseCounterKind,
+            Effect::PutChosenCounter { .. } => EffectKind::PutChosenCounter,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,

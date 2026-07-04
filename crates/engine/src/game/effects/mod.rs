@@ -9,7 +9,7 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
     EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
     QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
@@ -51,6 +51,7 @@ pub mod change_zone;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
+pub mod choose_counter_kind;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
 pub mod choose_objects_into_tracked_set;
@@ -88,6 +89,7 @@ pub mod endure;
 pub mod energy;
 pub mod epic;
 pub mod exile_resolving_spell;
+pub mod put_chosen_counter;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
 // `epic.rs` stays implementation-only).
 #[cfg(test)]
@@ -3075,6 +3077,8 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
+        Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Unsuspect { .. } => suspect::resolve_unsuspect(state, ability, events),
@@ -4230,6 +4234,29 @@ fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
 
 fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &ResolvedAbility) -> bool {
     has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
+}
+
+/// CR 608.2d: "A player can't choose an impossible option." An optional effect
+/// whose only reachable outcome is a no-op must not be offered as a "you may"
+/// prompt at all. Currently the sole such class is `Effect::PutChosenCounter`
+/// reached after a `ChooseCounterKind` whose 0-kind branch fired: the iterated
+/// permanent had no counters, so no `ChosenAttribute::Counter` was persisted onto
+/// the source and "put an additional counter of that kind" has no "that kind" to
+/// add. The Caves of Androzani II/III iterates over EVERY non-Saga permanent, so
+/// without this guard the controller is flooded with impossible yes/no prompts
+/// for lands and counterless creatures. Suppressing the prompt lets the effect
+/// resolve as its defined no-op instead (CR 122.6).
+fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::PutChosenCounter { .. } => {
+            !state.objects.get(&ability.source_id).is_some_and(|src| {
+                src.chosen_attributes
+                    .iter()
+                    .any(|attr| matches!(attr, ChosenAttribute::Counter(_)))
+            })
+        }
+        _ => false,
+    }
 }
 
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
@@ -5989,6 +6016,7 @@ fn resolve_chain_body(
         && !has_kind_driven_repeat(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
         && !is_repeated_optional_payment(ability)
+        && !optional_effect_is_infeasible(state, ability)
     {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);

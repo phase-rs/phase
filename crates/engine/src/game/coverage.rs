@@ -908,6 +908,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let inner_tf = TypedFilter::default().properties(vec![(**prop).clone()]);
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
+            // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
+            FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
@@ -1840,6 +1842,9 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
                     .join(", ")
             );
         }
+        // CR 608.2d + CR 122.1: "choose a counter on it" — the option list is
+        // enumerated at resolution, so the coverage label stays generic.
+        ChoiceType::CounterKind { .. } => return "counter kind".to_string(),
     }
     .into()
 }
@@ -2836,6 +2841,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+        }
+        Effect::ChooseCounterKind { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PutChosenCounter { target, count } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));

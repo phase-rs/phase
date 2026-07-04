@@ -5137,6 +5137,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // for the Dig-from-among continuation search.
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize
+        // CR 608.2d + CR 122.1: counter-kind choice / consume are their own
+        // resolving effects, not Dig-lookback-transparent.
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
