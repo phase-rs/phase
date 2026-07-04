@@ -73,10 +73,10 @@
 //! plus a `..`-free destructure so a future field forces re-audit.
 
 use crate::types::ability::{
-    AbilityCondition, ControllerRef, CountScope, Duration, Effect, ModalChoice, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ReplacementCondition, ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition,
+    AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
+    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -323,6 +323,7 @@ fn scan_effect(x: &Effect) -> Axes {
             amount,
             target,
             damage_source: _,
+            excess: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount));
@@ -339,6 +340,19 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(sources));
             acc = acc.or(scan_target_filter(recipient));
+            acc
+        }
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(sources));
+            acc = acc.or(scan_quantity_expr(amount));
+            if let EachDamageRecipient::Shared(filter) = recipient {
+                acc = acc.or(scan_target_filter(filter));
+            }
             acc
         }
         Effect::Draw { count, target } => {
@@ -409,6 +423,17 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count));
             acc = acc.or(scan_target_filter(target));
+            acc
+        }
+        Effect::ChooseCounterKind { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc
+        }
+        Effect::PutChosenCounter { target, count } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc = acc.or(scan_quantity_expr(count));
             acc
         }
         Effect::Sacrifice {
@@ -1310,6 +1335,7 @@ fn scan_effect(x: &Effect) -> Axes {
             phase: _,
             after: _,
             followed_by: _,
+            attacker_restriction: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
@@ -1430,6 +1456,10 @@ fn scan_effect(x: &Effect) -> Axes {
             destination: _,
             tapped: _,
         } => Axes::NONE,
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            scan_effect(replacement_effect)
+        }
+        Effect::ChaosEnsues => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
             name: _,
@@ -1762,6 +1792,9 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc
         }
         QuantityRef::CrimesCommittedThisTurn => Axes::NONE,
+        // Controller turn-accumulator: no event/sibling/projected axis (mirrors
+        // CrimesCommittedThisTurn / DescendedThisTurn).
+        QuantityRef::BendTypesThisTurn => Axes::NONE,
         QuantityRef::LifeGainedThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
@@ -2096,7 +2129,18 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         AbilityCondition::HasCityBlessing => Axes::NONE,
         AbilityCondition::IsRingBearer => Axes::NONE,
         AbilityCondition::TargetHasKeywordInstead { keyword: _ } => Axes::NONE,
-        AbilityCondition::TargetMatchesFilter { filter, use_lki: _ } => {
+        // `subject_slot: _` is a target-slot INDEX selector (CR 608.2c): `Some(n)`
+        // tests `filter` against declared chain slot `n` (via
+        // `resolve_parent_slot_from_root`), `None` against the local most-recent
+        // target. It reroutes WHICH already-declared target the filter reads and
+        // introduces no new event/sibling/projected resource — the game-state read
+        // is entirely through `filter` (scanned below). Axes-neutral; destructured
+        // without `..` so a future read-bearing field forces re-audit.
+        AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki: _,
+            subject_slot: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(filter));
             acc
@@ -3263,6 +3307,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Token { .. }
         | Effect::SetTapState { .. }
         | Effect::RemoveCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
@@ -3428,6 +3474,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -3453,6 +3500,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::ChaosEnsues
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }

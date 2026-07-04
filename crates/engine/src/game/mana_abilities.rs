@@ -3388,6 +3388,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -3403,6 +3404,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -8372,6 +8374,7 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
                     damage_source: None,
+                    excess: None,
                 },
             )),
         );
@@ -8425,6 +8428,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         );
 

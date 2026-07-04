@@ -983,6 +983,7 @@ mod tests {
                         count: 1,
                         filter: TargetFilter::Typed(filter),
                         action: BeholdCostAction::ChooseOrReveal,
+                        ..
                     },
                 repeatability: AdditionalCostRepeatability::Once,
             }) => {
@@ -1008,6 +1009,7 @@ mod tests {
                     count: 1,
                     filter: TargetFilter::Typed(filter),
                     action: BeholdCostAction::ChooseOrReveal,
+                    ..
                 },
                 AbilityCost::Mana { cost },
             )) => {
@@ -1033,6 +1035,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ExileChosen,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1058,6 +1061,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(
                     filter
@@ -1107,6 +1111,7 @@ mod tests {
                 count: 3,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1949,6 +1954,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             }) => {
                 assert!(filter
                     .type_filters

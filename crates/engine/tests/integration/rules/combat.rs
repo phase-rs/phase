@@ -420,6 +420,7 @@ fn damage_received_trigger_fires_when_creature_dies() {
                 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         ))
         .valid_card(TargetFilter::SelfRef)

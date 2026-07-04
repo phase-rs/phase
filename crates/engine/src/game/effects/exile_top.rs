@@ -694,6 +694,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),

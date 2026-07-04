@@ -300,6 +300,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ControlChangeAwarenessPolicy.verdict(&ctx)
     }
@@ -329,6 +330,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ControlChangeAwarenessPolicy.verdict(&ctx)
     }

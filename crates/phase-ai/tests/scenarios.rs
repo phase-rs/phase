@@ -367,6 +367,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
                         amount: QuantityExpr::Fixed { value: 3 },
                         target: TargetFilter::Any,
                         damage_source: None,
+                        excess: None,
                     },
                     vec![TargetRef::Object(target)],
                     ObjectId(300),

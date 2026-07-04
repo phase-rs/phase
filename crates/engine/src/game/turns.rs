@@ -54,11 +54,14 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // created entry occurs first ("the most recently created phase will occur
     // first" per CR 500.8). An entry with a non-matching anchor is preserved
     // until its anchor phase is reached.
-    let next = state
+    let removed = state
         .extra_phases
         .iter()
         .rposition(|ep| ep.anchor == state.phase)
-        .map(|i| state.extra_phases.remove(i).phase)
+        .map(|i| state.extra_phases.remove(i));
+    let next = removed
+        .as_ref()
+        .map(|ep| ep.phase)
         .unwrap_or_else(|| next_phase(state.phase));
 
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
@@ -86,6 +89,24 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 500.8 + CR 508.1c: activate the scheduled combat's attacker restriction
+    // when (and only when) that BeginCombat begins. A natural combat consumes no
+    // extra-phase entry, so `removed` is `None` and the restriction clears —
+    // natural combats are never restricted. The field persists untouched through
+    // DeclareAttackers/DeclareBlockers/CombatDamage (entered with next != BeginCombat)
+    // and is cleared at end of combat (CR 511.3).
+    // CR 611.2c: also propagate the source ObjectId so that
+    // `passes_combat_attacker_restriction` can evaluate source-relative
+    // restriction predicates against the scheduling spell's actual object.
+    if next == Phase::BeginCombat {
+        state.current_combat_attacker_restriction = removed
+            .as_ref()
+            .and_then(|ep| ep.attacker_restriction.clone());
+        state.current_combat_attacker_restriction_source = removed
+            .as_ref()
+            .and_then(|ep| ep.attacker_restriction_source);
+    }
+
     enter_phase(state, next, events);
 }
 
@@ -98,6 +119,13 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 724.1d: "skip any phases or steps between this phase or step and the
     // cleanup step" — drop scheduled extra phases for this (now-ending) turn.
     state.extra_phases.clear();
+    // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
+    // removed from combat and the combat phase is over. Clear any active
+    // additional-combat attacker restriction (Last Night Together / Bumi) — the
+    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
+    // is skipped, so we must expire the restriction here.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     enter_phase(state, Phase::Cleanup, events);
 }
 
@@ -121,6 +149,11 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+
+    // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
+    // additional-combat attacker restriction (Last Night Together / Bumi).
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -675,6 +708,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creature_types_dealt_combat_damage_this_turn.clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
+    // CR 511.3 / CR 724.1d: Defensive reset of any combat attacker restriction
+    // that may not have been cleared via the normal EndCombat or EndTheTurn
+    // path (e.g., edge cases in ruleset extensions). The authoritative clear is
+    // in Phase::EndCombat and end_turn_to_cleanup; this is the belt-and-suspenders
+    // reset so stale restrictions never survive across turn boundaries.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
     state.mana_spent_on_spells_this_turn.clear();
     // CR 601.2f: Clear one-shot cost reductions and spell modifiers from the previous turn.
@@ -1858,48 +1898,29 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
 ///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
 ///     603.3). The caller MUST surface this prompt instead of granting priority.
-fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
-    let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
-    let stack_before = state.stack.len();
-    let waiting_before = state.waiting_for.clone();
-    super::triggers::process_triggers(state, &phase_event);
-    // CR 603.3b: an unresolved ordering pass keeps its triggers in
-    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so it
-    // must count toward `fired` and surface its prompt. Reconstruct the prompt
-    // from the AUTHORITATIVE source (`pending_trigger_order`) rather than cloning
-    // `state.waiting_for`: if an upstream phase-advance orphaned the pass and left
-    // `waiting_for` stale, cloning it would re-surface the stale state and hang.
-    // Reading the canonical pending state also RECOVERS already-corrupted saves by
-    // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
-    // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
-    // the prior `.then(|| clone)` idiom was unsafe.
-    let order_triggers_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
-    let active_trigger_prompt = (order_triggers_prompt.is_none()
-        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
-    .then(|| state.waiting_for.clone());
-    // CR 117.5 + CR 118.12a: Unless-pay and other inline resolution prompts arm
-    // `waiting_for` without `pending_trigger` after the trigger has reached the
-    // stack and begun resolving. Surface any non-priority prompt
-    // `process_triggers` left behind so auto_advance does not clobber it with an
-    // upkeep/draw/main priority window (Tabernacle #1326). The prompt must be
-    // newly produced by trigger processing; stale turn-action prompts from an
-    // earlier phase (DeclareAttackers, etc.) are not phase-trigger work.
-    let inline_resolution_prompt = (order_triggers_prompt.is_none()
-        && active_trigger_prompt.is_none()
-        && state.waiting_for != waiting_before
-        && !matches!(
-            state.waiting_for,
-            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
-        ))
-    .then(|| state.waiting_for.clone());
-    let prompt = order_triggers_prompt
-        .or(active_trigger_prompt)
-        .or(inline_resolution_prompt);
-    let fired = state.stack.len() > stack_before
-        || state.pending_trigger.is_some()
-        || !state.deferred_triggers.is_empty()
-        || prompt.is_some();
-    (fired, prompt)
+fn process_phase_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> (bool, Option<WaitingFor>) {
+    let phase_events: Vec<GameEvent> = events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::PhaseChanged { phase } if *phase == state.phase))
+        .cloned()
+        .collect();
+    let (phase_events, delayed_events) = if phase_events.is_empty() {
+        let fallback = vec![GameEvent::PhaseChanged { phase: state.phase }];
+        (fallback.clone(), fallback)
+    } else {
+        (phase_events, events.to_vec())
+    };
+    let outcome = super::triggers::process_triggers_with_delayed_phase_events(
+        state,
+        &phase_events,
+        &delayed_events,
+        events_out,
+    );
+    (outcome.fired, outcome.prompt)
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
@@ -1980,7 +2001,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
                 // cards, two Howling Mines) require an ordering choice that must be
                 // surfaced before priority — see `process_phase_triggers`.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                let event_snapshot = events.clone();
+                if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                     return prompt;
                 }
                 // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
@@ -2012,7 +2034,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                let event_snapshot = events.clone();
+                if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                     return prompt;
                 }
                 // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
@@ -2045,7 +2068,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are
                 // put on the stack before the active player receives priority.
                 // CR 603.3b: surface a same-controller ordering prompt first.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                let event_snapshot = events.clone();
+                if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                     return prompt;
                 }
                 // CR 505.6: The active player receives priority during a main phase.
@@ -2058,7 +2082,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Process triggers regardless of attackers — CR 507.1 says the step
                 // happens unconditionally; trigger conditions (e.g., ControlCount)
                 // are checked by the trigger system, not by skipping the step.
-                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
+                let event_snapshot = events.clone();
+                let (triggers_fired, ordering_prompt) =
+                    process_phase_triggers(state, &event_snapshot, events);
                 if triggers_fired {
                     state.combat = Some(crate::game::combat::CombatState::default());
                     // CR 603.3b: surface a same-controller ordering prompt before
@@ -2182,9 +2208,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::EndCombat => {
                 // CR 511.1: "At end of combat" triggers fire here.
-                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
+                let event_snapshot = events.clone();
+                let (triggers_fired, ordering_prompt) =
+                    process_phase_triggers(state, &event_snapshot, events);
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
+                // CR 511.3: the combat phase is over — its attacker restriction
+                // (Last Night Together / Bumi) ends with it.
+                state.current_combat_attacker_restriction = None;
+                state.current_combat_attacker_restriction_source = None;
                 super::layers::prune_end_of_combat_effects(state);
                 for obj in state.objects.iter_mut().map(|(_, v)| v) {
                     obj.replacement_definitions
@@ -2222,7 +2254,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                let event_snapshot = events.clone();
+                if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                     return prompt;
                 }
                 return WaitingFor::Priority {
@@ -2484,6 +2517,8 @@ mod tests {
             .push(crate::types::game_state::ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         state.phase = Phase::EndCombat;
         advance_phase(&mut state, &mut events);
@@ -3458,6 +3493,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3484,6 +3521,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3509,6 +3548,8 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         // Walk the phase machine forward and record each phase entered.
@@ -3562,10 +3603,14 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::PostCombatMain,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let mut events = Vec::new();
@@ -3613,6 +3658,8 @@ mod tests {
             state.extra_phases.push(ExtraPhase {
                 anchor: Phase::EndCombat,
                 phase: Phase::BeginCombat,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
 

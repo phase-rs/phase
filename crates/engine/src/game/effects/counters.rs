@@ -1438,6 +1438,22 @@ fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
+    // CR 608.2c + CR 122.1: `ParentTargetSlot { index }` — a later counter
+    // instruction that refers to a specific earlier declared target slot ("put a
+    // +1/+1 counter on the creature you control", index 0). The counter node's
+    // local `ability.targets` may have been replaced with the most-recent parent
+    // slot by chain propagation, so resolve against the flattened chain root
+    // (single authority in `targeting`), then keep only the object at `index`.
+    if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
+        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+
     // CR 608.2k: "the exiled card" — an untargeted reference to the object
     // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
     // counters on the exiled card"). Resolved from the recursively-stamped
@@ -2056,6 +2072,73 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// T4 (counter resolver arm) — CR 608.2c + CR 122.1: a `PutCounter` whose
+    /// target is `ParentTargetSlot { index }` resolves against the FLATTENED
+    /// CHAIN ROOT (from `resolving_stack_entry`), not the node's local targets.
+    /// The node's own `targets` here carry only the most-recent parent slot
+    /// `[obj1]` (the model-B propagation the arm corrects); slot 0 must still
+    /// resolve to `obj0`. Reverting the arm falls through to the local `[obj1]`
+    /// for BOTH indices, so the `index: 0 → [obj0]` assertion flips.
+    #[test]
+    fn resolve_defined_or_targets_parent_target_slot_indexes_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let obj0 = ObjectId(1);
+        let obj1 = ObjectId(2);
+
+        // Root two-slot chain: TargetOnly(obj0) → TargetOnly(obj1).
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj0)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj1)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: root,
+            },
+        });
+
+        let put_counter = |index: usize| {
+            ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTargetSlot { index },
+                },
+                // Local targets = most-recent slot only (model-B inheritance).
+                vec![TargetRef::Object(obj1)],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(0)),
+            vec![obj0]
+        );
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(1)),
+            vec![obj1]
+        );
     }
 
     fn mark_creature(state: &mut GameState, object_id: ObjectId) {
@@ -3263,6 +3346,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: lki_counters,
                 tapped: false,
+                is_suspected: false,
             },
         );
 

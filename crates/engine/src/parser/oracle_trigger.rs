@@ -1241,6 +1241,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // CR 702.179c-d: fold trailing speed-floor sentences into the
             // preceding `ChangeSpeed` effect and drop the orphan node.
             crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
+            // CR 508.1c + CR 611.2c: fold a trailing "only X can attack during
+            // that combat phase" sentence into the preceding `AdditionalPhase`
+            // (Bumi, Unleashed — triggered additional combat) and drop the
+            // orphan node, mirroring the spell-effect path.
+            crate::parser::oracle_effect::fold_additional_combat_attacker_restriction(&mut ability);
             if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
                 && matches!(
                     ability.effect.as_ref(),
@@ -12838,6 +12843,16 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
             ));
         }
     }
+    if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
+        .parse(qualifier)
+        .is_ok()
+    {
+        // CR 702.33d: A spell whose controller declared any kicker payment has
+        // been kicked; use the existing cast snapshot filter for kicked spells.
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::WasKicked]),
+        ));
+    }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)
@@ -13007,6 +13022,21 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
                     value: 1,
                 }],
             )));
+        }
+    }
+
+    // CR 205.3m: "that doesn't share a creature type with a creature you control
+    // or a creature card in your graveyard" (Volo, Guide to Monsters). Reuse the
+    // shared-quality clause combinator so the disjunctive reference ("creature
+    // you control or a creature card in your graveyard") is not mis-split as a
+    // type-phrase `Or` inside `parse_type_phrase`.
+    if let Ok((rest, prop)) =
+        super::oracle_target::parse_shared_quality_clause(modifier, &ParseContext::default())
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![prop]),
+            ));
         }
     }
 

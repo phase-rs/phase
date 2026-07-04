@@ -1933,7 +1933,15 @@ fn collect_target_slots(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // CR 608.2c + CR 701.14a: A context-ref fighter (SelfRef, ParentTarget,
+            // ParentTargetSlot, TrackedSet — the reciprocal "those creatures fight
+            // each other") resolves from chain context, never a cast-time choice,
+            // so it surfaces no target slot. Broadened from the narrow
+            // SelfRef|ParentTarget check: the reciprocal-fight lowering re-keys the
+            // target to a TrackedSet, which is equally a context ref — generating a
+            // slot for it produced a spurious all-players slot that panicked the
+            // cast (Malamet Battle Glyph).
+            if filter.is_context_ref() {
                 continue;
             }
             let legal_targets =
@@ -2358,7 +2366,7 @@ pub(crate) fn resolve_multi_target_bounds(
     })
 }
 
-fn multi_target_needs_quantity_choice(
+pub(crate) fn multi_target_needs_quantity_choice(
     state: &GameState,
     ability: &ResolvedAbility,
     spec: &MultiTargetSpec,
@@ -5012,7 +5020,12 @@ fn assign_targets_recursive(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Mirror `collect_target_slots`: a context-ref fighter (SelfRef,
+            // ParentTarget, ParentTargetSlot, reciprocal-fight TrackedSet)
+            // surfaces no slot, so it consumes no selected target here either —
+            // otherwise the assign/slot-gen counts diverge and a valid two-target
+            // selection reports a spurious "Missing required target".
+            if filter.is_context_ref() {
                 continue;
             }
             if let Some(chosen) = targets.get(*next_target) {
@@ -8440,6 +8453,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),
@@ -8862,6 +8876,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Player,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),
@@ -9275,6 +9290,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![
                 TargetRef::Object(ObjectId(1)),
@@ -9319,6 +9335,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![
                 TargetRef::Player(PlayerId(1)),
@@ -9345,6 +9362,7 @@ mod tests {
                     TypedFilter::creature().controller(ControllerRef::TargetPlayer),
                 ),
                 damage_source: None,
+                excess: None,
             },
             vec![
                 TargetRef::Player(PlayerId(1)),
@@ -9391,6 +9409,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Player,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -10474,6 +10493,7 @@ mod tests {
                     },
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     damage_source: None,
+                    excess: None,
                 },
                 vec![],
                 ObjectId(10),
@@ -10962,6 +10982,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
         );
         def.target_selection_mode = TargetSelectionMode::Random;
@@ -11235,6 +11256,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
 
@@ -11781,6 +11803,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),
@@ -11793,6 +11816,7 @@ mod tests {
                     TypedFilter::default().properties(vec![FilterProp::Another]),
                 ),
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),
@@ -11831,6 +11855,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),
@@ -11843,6 +11868,7 @@ mod tests {
                     TypedFilter::creature().properties(vec![FilterProp::Another]),
                 ),
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(900),

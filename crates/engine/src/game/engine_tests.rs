@@ -17,6 +17,7 @@ use crate::types::format::FormatConfig;
 use crate::types::game_state::CastingVariant;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
 
 /// Create a simple test ability definition.
@@ -94,6 +95,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             damage_source: None,
+            excess: None,
         },
         vec![],
         source_id,
@@ -333,6 +335,7 @@ fn make_damage_ability(amount: i32, cost: Option<AbilityCost>) -> AbilityDefinit
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     );
     if let Some(c) = cost {
@@ -4869,6 +4872,101 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
     assert!(state.players[0].graveyard.contains(&hill_giant));
 }
 
+/// Cluster J1 (headline `/card-test` regression guard): "When this creature
+/// enters, sacrifice **another** creature." must exclude the source. Casting
+/// Disciple of Bolas through the full cast → trigger → stack → apply() → chain
+/// → `sacrifice::resolve` pipeline with exactly one OTHER creature must
+/// sacrifice that other creature and leave Disciple on the battlefield.
+///
+/// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
+/// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
+/// builds its eligible pool via `FilterContext::from_ability` (source excluded
+/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+///
+/// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
+/// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
+/// `recipient_id: None` identically to `from_ability`, so both paths hit the
+/// same `FilterProp::Another` exclusion site with an identical source id. This
+/// one effect-path guard therefore substantiates the whole "sacrifice another"
+/// class (effect + cost forms) — no separate cost-path integration test needed.
+///
+/// The positive Hill-Giant sacrifice plus the +3 life / +3 draw deltas prove
+/// the sacrifice machinery actually ran (non-vacuous), and the paired sibling
+/// test `sacrifice_a_creature_without_another_includes_sole_source` proves the
+/// exclusion is `Another`-driven, not an empty-pool artifact.
+#[test]
+fn disciple_of_bolas_sacrifices_another_creature_not_itself() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The entering creature carries the verbatim Oracle text (parser branch
+    // fidelity — a paraphrase could take a different branch). Mana is elided
+    // (default zero cost) so the test isolates the sacrifice-exclusion seam.
+    let disciple = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Disciple of Bolas",
+            2,
+            1,
+            "When this creature enters, sacrifice another creature. You gain X life and draw X cards, where X is that creature's power.",
+        )
+        .id();
+
+    // Exactly one OTHER creature: the sole eligible sacrifice, so the effect
+    // auto-resolves (no EffectZoneChoice) onto it. Power 3 → X = 3.
+    let hill_giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+
+    // Three library cards so the "draw X" (X = 3) has cards to draw.
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(disciple).resolve();
+
+    // Source excluded: Disciple survives on the battlefield.
+    outcome.assert_zone(&[disciple], Zone::Battlefield);
+    // The OTHER creature was sacrificed (positive, non-vacuous reach-guard).
+    outcome.assert_zone(&[hill_giant], Zone::Graveyard);
+    // X = Hill Giant's power (3): +3 life and 3 cards drawn.
+    outcome.assert_life_delta(P0, 3);
+    outcome.assert_hand_drawn(P0, 3);
+}
+
+/// Cluster J1 (paired sibling reach-guard): the same ETB shape WITHOUT the
+/// `another` qualifier ("sacrifice a creature") DOES include the sole source,
+/// sacrificing the entering creature itself. This proves the exclusion in
+/// `disciple_of_bolas_sacrifices_another_creature_not_itself` is driven by
+/// `FilterProp::Another`, not by a vacuously empty eligible pool.
+///
+/// CR 701.21a: with the source as the only eligible creature, the mandatory
+/// sacrifice auto-resolves onto it.
+#[test]
+fn sacrifice_a_creature_without_another_includes_sole_source() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // No "another" — the source is a legal sacrifice target. It is the ONLY
+    // creature on the battlefield when the ETB resolves.
+    let reaper = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Test Reaper",
+            1,
+            1,
+            "When this creature enters, sacrifice a creature.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(reaper).resolve();
+
+    // Sole eligible creature is the source itself → it sacrifices itself.
+    outcome.assert_zone(&[reaper], Zone::Graveyard);
+}
+
 const SQUADRON_HAWK_ORACLE: &str = "Flying\nWhen this creature enters, you may search your library for up to three cards named Squadron Hawk, reveal them, put them into your hand, then shuffle.";
 
 fn add_squadron_hawk_to_library(state: &mut GameState, card_id: u64) -> ObjectId {
@@ -7792,4 +7890,104 @@ fn reorder_hand_succeeds_while_opponent_holds_priority() {
     );
     // Priority hasn't moved — reorder doesn't transition WaitingFor.
     assert_eq!(state.priority_player, PlayerId(1));
+}
+
+/// CR 305.1 + CR 116.2a + CR 401.5: A `OncePerTurn` `TopOfLibraryCastPermission`
+/// with `play_mode: Play` must consume its per-turn slot when a land is played
+/// from the library top (land play is a special action per CR 305.1/CR 116.2a;
+/// CR 401.5 governs top-of-library visibility during the action), and a second
+/// `PlayLand` from the same permission source must be rejected.
+#[test]
+fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+
+    let perm_src = create_object(
+        &mut state,
+        CardId(9200),
+        player,
+        "Permission Source (test)".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: crate::types::ability::CardPlayMode::Play,
+            frequency: CastFrequency::OncePerTurn,
+            alt_cost: None,
+        })
+        .affected(TargetFilter::Any);
+        let obj = state.objects.get_mut(&perm_src).unwrap();
+        obj.static_definitions.push(def.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+
+    let land1 = create_object(
+        &mut state,
+        CardId(9201),
+        player,
+        "Forest A".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land1)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_back(land1);
+    }
+
+    let land2 = create_object(
+        &mut state,
+        CardId(9202),
+        player,
+        "Forest B".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land2)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_front(land2);
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land2,
+            card_id: CardId(9202),
+        },
+    )
+    .expect("first top-of-library land play must succeed");
+
+    assert!(
+        state.battlefield.contains(&land2),
+        "land2 must be on the battlefield after the first play"
+    );
+    assert!(
+        state
+            .top_of_library_cast_permissions_used
+            .contains(&perm_src),
+        "the OncePerTurn slot must be recorded after the land is moved"
+    );
+
+    let second = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land1,
+            card_id: CardId(9201),
+        },
+    );
+    assert!(
+        second.is_err(),
+        "second top-of-library land play under the same OncePerTurn source must be rejected"
+    );
 }

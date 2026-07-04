@@ -4093,6 +4093,35 @@ fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
 }
 
 #[test]
+fn lost_in_thought_ignore_effect_rider_fails_closed() {
+    let r = parse(
+        "Enchant creature\n\
+         Enchanted creature can't attack or block, and its activated abilities can't be activated. \
+         Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn.",
+        "Lost in Thought",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+
+    assert!(
+        r.statics.is_empty(),
+        "unimplemented CR 116.2d ignore-effect rider must not export unconditional statics: {:?}",
+        r.statics
+    );
+    assert!(
+        r.abilities.iter().any(|a| {
+            matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "static_structure"
+            )
+        }),
+        "expected static_structure Unimplemented for ignore-effect rider, got {:?}",
+        r.abilities
+    );
+}
+
+#[test]
 fn vazal_megalegendary_line_consumed_and_limit_extracted() {
     // CR 100.2a / CR 903.5b: Vazal's "Megalegendary (Your deck can have only
     // one copy of this card.)" line must not surface as Unimplemented, and
@@ -13253,7 +13282,7 @@ fn helper_parses_same_line_escape_grant_continuation() {
 fn escape_continuation_parser_accepts_self_mana_cost_clause() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         )
         .expect("continuation should parse");
     assert_eq!(keyword, granted_escape_cost(3));
@@ -13263,7 +13292,7 @@ fn escape_continuation_parser_accepts_self_mana_cost_clause() {
 fn escape_continuation_parser_rejects_trailing_text() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard until end of turn.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         );
     assert!(
         keyword.is_none(),
@@ -17557,7 +17586,7 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
     assert!(matches!(
         &*execute.effect,
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         }

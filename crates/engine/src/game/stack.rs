@@ -590,7 +590,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             !o.is_token
                 && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
         });
-        if has_rebound && super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand) {
+        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
+        // popped, so real instant/sorcery spells must read the pre-announcement
+        // zone from the local ResolvedAbility context. `spell_cast_origin`
+        // remains the fallback for object-stamped placeholder/permanent paths.
+        let cast_from_zone = ability
+            .as_ref()
+            .and_then(|a| a.context.cast_from_zone)
+            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
+        if has_rebound && cast_from_zone == Some(Zone::Hand) {
             super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
         } else {
             false
@@ -2131,6 +2139,8 @@ fn zone_change_record_from_spec(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        // A freshly created token is never suspected (CR 701.60b).
+        is_suspected: false,
     }
 }
 
@@ -3320,6 +3330,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(first_target)],
             spell_id,
@@ -3330,6 +3341,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(second_target)],
             spell_id,
@@ -4056,6 +4068,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target_id)],
             spell_id,

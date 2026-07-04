@@ -353,6 +353,31 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     (filter, rest)
 }
 
+/// CR 701.14a: Parse the object of a `fight` clause. The reciprocal "each other"
+/// ("those creatures fight each other" — Malamet Battle Glyph, Longstalk Brawl,
+/// Duel for Dominance, and 7 siblings) is NOT an independent target: both
+/// fighters are the two earlier-declared chosen creatures. Emit
+/// `TargetFilter::ParentTarget` so fight slot-gen (`ability_utils`) creates no
+/// spurious target slot — otherwise the unrecognized "each other" falls back to
+/// an empty `Typed` filter that generates an illegal all-players slot and panics
+/// the cast. Every non-reciprocal object ("~ fights target creature", "it fights
+/// target creature") delegates unchanged to `parse_target_with_ctx`, keeping its
+/// explicit target slot. Shared by BOTH `fight ` dispatchers
+/// (`parse_targeted_action_ast`, `try_parse_verb_and_target`) so neither path
+/// silently no-ops.
+pub fn parse_fight_target<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    let lower = text.trim().to_ascii_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each other").parse(lower.as_str()) {
+        // Structural trailing-period cleanup after the `each other` tag matched.
+        // allow-noncombinator: punctuation strip on a matched chunk, not dispatch.
+        let rest = rest.strip_prefix('.').unwrap_or(rest);
+        if rest.trim().is_empty() {
+            return (TargetFilter::ParentTarget, "");
+        }
+    }
+    parse_target_with_ctx(text, ctx)
+}
+
 /// Context-aware target parser that additionally reports whether the phrase
 /// used the "target" keyword (`TargetKeyword`) or a descriptor scope
 /// (`Descriptor`). CR 115.1 + Whitemane Lion ruling distinguishes these for
@@ -1244,6 +1269,20 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
+    }
+
+    // CR 608.2c: "each of them" is a plural-pronoun anaphor that refers back to
+    // the parent ability's chosen targets. Centralising the binding here means
+    // every sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
+    // automatically instead of each site adding its own special case. A word-
+    // boundary guard via `parse_word_bounded` excludes "themselves". Resolution
+    // delegates to `resolve_pronoun_target` which applies the same trigger-
+    // subject vs. compound-anaphor dispatch as the bare "them" pronoun arm above.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(input)?;
+        parse_word_bounded(i, "them")
+    }) {
+        return (resolve_pronoun_target(ctx, "them"), rest, syntax);
     }
 
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
@@ -2553,6 +2592,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // no leftover remains (a leftover that the clone-replacement guard rejects).
     if let Some((prop, consumed)) = parse_counter_suffix(&lower[pos..]) {
         properties.push(prop);
+        pos += consumed;
+    }
+
+    // CR 113.6b: A "without <keyword>" clause may TRAIL a zone clause ("nonland
+    // card in your hand without foretell" — Dream Devourer). The pre-zone
+    // `parse_without_keyword_suffix` pass above only catches the clause when it
+    // precedes the zone; this second pass catches the zone-then-without ordering
+    // so the subject fully consumes (the graveyard/hand keyword-grant gate
+    // requires an empty remainder).
+    if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
+        properties.extend(keyword_props);
         pos += consumed;
     }
 
@@ -5053,6 +5103,8 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             | "harmonize"
             | "unearth"
             | "awaken"
+            | "foretell"
+            | "miracle"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -5063,6 +5115,11 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             "harmonize" => KeywordKind::Harmonize,
             "unearth" => KeywordKind::Unearth,
             "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
+            // CR 702.143 / CR 702.94: "card in your hand without foretell" and the
+            // miracle analogue are keyword-presence meta-references — match by
+            // discriminant so a granted (cost-bearing) instance still matches.
+            "foretell" => KeywordKind::Foretell, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
+            "miracle" => KeywordKind::Miracle, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));
@@ -5154,13 +5211,28 @@ fn parse_shared_quality_reference<'a>(
 
     let (filter, rest) = parse_target(input);
     if matches!(filter, TargetFilter::Any) {
-        Err(nom::Err::Error(nom::error::Error::new(
+        return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
-        )))
-    } else {
-        Ok((rest, filter))
+        )));
     }
+    let rest_trimmed = rest.trim_start();
+    if let Ok((after_or, sep)) =
+        alt((tag::<_, _, OracleError<'_>>("or "), tag(", or "))).parse(rest_trimmed)
+    {
+        let (filter2, rest2) = parse_target(after_or);
+        if !matches!(filter2, TargetFilter::Any) {
+            return Ok((
+                rest2,
+                TargetFilter::Or {
+                    filters: vec![filter, filter2],
+                },
+            ));
+        }
+        // Fall through: only accept the first leg if the disjunction tail didn't parse.
+        let _ = sep;
+    }
+    Ok((rest, filter))
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
@@ -9086,6 +9158,32 @@ mod tests {
         let (filter, rest) = parse_target("each of two target creatures");
         assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
         assert_eq!(rest, "");
+    }
+
+    /// CR 608.2c: "each of them" is a plural-pronoun anaphor and must map to
+    /// `ParentTarget`, not degenerate to the all-matching "each <type>" path.
+    /// This guard ensures that all sibling effects (counter, destroy, exile,
+    /// bounce, tap, etc.) route through the central parser rather than needing
+    /// their own special-case intercepts.
+    #[test]
+    fn each_of_them_is_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest, _syntax) = parse_target_with_syntax("each of them", &mut ctx);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    /// Word-boundary guard: "each of themselves" must NOT match the
+    /// "each of them" arm — the trailing "selves" suffix makes it a distinct
+    /// word that the word-boundary check (`parse_word_bounded`) must reject.
+    #[test]
+    fn each_of_themselves_does_not_match_each_of_them_arm() {
+        let (filter, _rest) = parse_target("each of themselves");
+        assert_ne!(
+            filter,
+            TargetFilter::ParentTarget,
+            "\"each of themselves\" must not bind to ParentTarget via the \"each of them\" arm"
+        );
     }
 
     /// CR 702.113: "card with awaken" is a parameterized-keyword presence

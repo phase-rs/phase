@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameState, LegalActionsResult, WaitingFor } from "../../../adapter/types";
+import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
 
 /**
  * Regression test for issue #484 (P0 AI softlock).
@@ -72,19 +73,20 @@ const ILLEGAL_DECLARE: GameAction = {
 } as unknown as GameAction;
 
 function declareAttackersState(): GameState {
-  const waitingFor = {
+  const waitingFor: WaitingFor = {
     type: "DeclareAttackers",
     data: { player: 1, valid_attacker_ids: [GOADED_ID] },
-  } as unknown as WaitingFor;
-  return {
+  };
+  return buildGameState({
     waiting_for: waitingFor,
     stack: [],
     has_pending_cast: false,
-  } as unknown as GameState;
+    priority_player: 1,
+  });
 }
 
 function castOfferState(): GameState {
-  const waitingFor = {
+  const waitingFor: WaitingFor = {
     type: "CastOffer",
     data: {
       player: 1,
@@ -95,13 +97,13 @@ function castOfferState(): GameState {
         source_mv: 4,
       },
     },
-  } as unknown as WaitingFor;
-  return {
+  };
+  return buildGameState({
     waiting_for: waitingFor,
     stack: [],
     has_pending_cast: false,
     priority_player: 1,
-  } as unknown as GameState;
+  });
 }
 
 /** Flush pending microtasks (promise `.then` chains). */
@@ -290,11 +292,8 @@ describe("aiController turn-control authorization (issue #2012)", () => {
    *  authorized submitter slot (priority_player) — i.e. the human controls
    *  the AI's turn. */
   function humanControlsAiTurnState(): GameState {
-    const waitingFor = {
-      type: "Priority",
-      data: { player: 1 },
-    } as unknown as WaitingFor;
-    return {
+    const waitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
+    return buildGameState({
       waiting_for: waitingFor,
       stack: [],
       has_pending_cast: false,
@@ -302,7 +301,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
       priority_player: 0,
       active_player: 1,
       turn_decision_controller: 0,
-    } as unknown as GameState;
+    });
   }
 
   it("stays silent when a human controls the AI's turn (does not crash)", async () => {
@@ -338,14 +337,14 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     const getAiAction = vi.fn(async () => PASS);
     // Normal turn: AI seat 1 is both the acting player and the authorized
     // submitter (no turn-control effect).
-    const state = {
-      waiting_for: { type: "Priority", data: { player: 1 } } as unknown as WaitingFor,
+    const state = buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
       stack: [],
       has_pending_cast: false,
       priority_player: 1,
       active_player: 1,
       turn_decision_controller: null,
-    } as unknown as GameState;
+    });
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,
@@ -377,14 +376,14 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     // authorized submitter to the controller (priority_player = 1). The AI must
     // act for, and dispatch as, the controller seat — not bail because
     // data.player is the local human (which previously soft-stalled the turn).
-    const state = {
-      waiting_for: { type: "Priority", data: { player: 0 } } as unknown as WaitingFor,
+    const state = buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 0 } }),
       stack: [],
       has_pending_cast: false,
       priority_player: 1,
       active_player: 0,
       turn_decision_controller: 1,
-    } as unknown as GameState;
+    });
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,

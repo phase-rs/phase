@@ -146,6 +146,7 @@ fn enchantment_cast_scored() {
         config: &config,
         context: &context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     };
 
     let (delta, kind) = delta_of(policy().verdict(&ctx));
@@ -174,6 +175,7 @@ fn non_enchantment_spell_inert() {
         config: &config,
         context: &context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     };
 
     let (delta, kind) = delta_of(policy().verdict(&ctx));

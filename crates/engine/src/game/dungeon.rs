@@ -417,19 +417,17 @@ pub fn room_effects(
             ability.player_scope = Some(PlayerFilter::All);
             (ability, vec![])
         }
-        // 1: Veils of Fear — "Each player sacrifices a creature"
+        // 1: Veils of Fear — "Each player loses 2 life unless they discard a card."
+        // CR 118.12a: a punisher — each player either discards a card or loses
+        // 2 life. Parsed from the Oracle text so the base life loss, the
+        // each-player scope, and the unless-discard payment all come from the
+        // shared punisher parser (the payer binds to the per-iteration
+        // ScopedPlayer). The room was wrongly implemented as "each player
+        // sacrifices a creature".
         (DungeonId::TombOfAnnihilation, 1) => {
-            let mut ability = simple(
-                Effect::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: QuantityExpr::Fixed { value: 1 },
-                    min_count: 0,
-                },
-                source_id,
-                controller,
-            );
-            ability.player_scope = Some(PlayerFilter::All);
-            (ability, vec![])
+            const ORACLE: &str = "Each player loses 2 life unless they discard a card.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
         }
         // 2: Oubliette — "Discard a card and sacrifice a creature, an artifact,
         //    and a land."
@@ -463,19 +461,20 @@ pub fn room_effects(
             .sub_ability(sac_creature);
             (discard, vec![])
         }
-        // 3: Sandfall Cell — "You lose 2 life and create a 2/2 black Zombie creature token"
+        // 3: Sandfall Cell — "Each player loses 2 life unless they sacrifice a
+        //    creature, artifact, or land of their choice."
+        // CR 118.12a: a punisher — each player either sacrifices a creature,
+        // artifact, or land, or loses 2 life. Parsed from the Oracle text so the
+        // base life loss, the each-player scope, and the unless-sacrifice
+        // payment all come from the shared punisher parser (the payer binds to
+        // the per-iteration ScopedPlayer). The room was wrongly implemented as
+        // "you lose 2 life and create a 2/2 black Zombie token" — a fabricated
+        // effect that appears nowhere on the card.
         (DungeonId::TombOfAnnihilation, 3) => {
-            let mut lose = simple(
-                Effect::LoseLife { amount: fixed(2), target: None },
-                source_id,
-                controller,
-            );
-            lose.sub_ability = Some(Box::new(simple(
-                creature_token("Zombie", 2, 2, &["Zombie"], &[ManaColor::Black], &[], 1),
-                source_id,
-                controller,
-            )));
-            (lose, vec![])
+            const ORACLE: &str =
+                "Each player loses 2 life unless they sacrifice a creature, artifact, or land of their choice.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
         }
         // 4: Cradle of the Death God — "Create The Atropal, a legendary 4/4 black God Horror
         //    creature token with deathtouch."

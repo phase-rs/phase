@@ -1246,6 +1246,20 @@ pub fn candidate_actions_broad_with_probe(
             choice_type,
             source_id,
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
+        // per FEASIBLE creature type (options already exclude unpayable types).
+        WaitingFor::CostTypeChoice {
+            player,
+            options,
+            choice_type,
+            pending_cast,
+        } => named_choice_actions(
+            state,
+            *player,
+            options,
+            choice_type,
+            Some(pending_cast.object_id),
+        ),
         // Alchemy spellbook draft: one candidate per card in the spellbook list.
         WaitingFor::SpellbookDraft {
             player, options, ..
@@ -1332,21 +1346,40 @@ pub fn candidate_actions_broad_with_probe(
             options,
             actor,
             player,
+            candidate_objects,
             ..
         } => {
             let actor = actor.resolve(*player);
-            options
-                .iter()
-                .map(|opt| {
-                    candidate(
-                        GameAction::ChooseOption {
-                            choice: opt.clone(),
-                        },
-                        TacticalClass::Selection,
-                        Some(actor),
-                    )
-                })
-                .collect()
+            if candidate_objects.is_empty() {
+                // CR 701.38: named vote — each option is a legal ballot.
+                options
+                    .iter()
+                    .map(|opt| {
+                        candidate(
+                            GameAction::ChooseOption {
+                                choice: opt.clone(),
+                            },
+                            TacticalClass::Selection,
+                            Some(actor),
+                        )
+                    })
+                    .collect()
+            } else {
+                // CR 701.38b: object-pool vote — each candidate object is a
+                // legal ballot, submitted by index (disambiguates same-named
+                // candidates that the string path cannot).
+                (0..candidate_objects.len())
+                    .map(|i| {
+                        candidate(
+                            GameAction::SubmitVoteCandidate {
+                                candidate_index: i as u32,
+                            },
+                            TacticalClass::Selection,
+                            Some(actor),
+                        )
+                    })
+                    .collect()
+            }
         }
         WaitingFor::ModeChoice {
             player,

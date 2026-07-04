@@ -19,8 +19,8 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec,
-    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
+    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -1240,6 +1240,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
+            || starts_target_players_subject_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
@@ -1515,6 +1516,23 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
         tag("has "),
     ))
     .parse(predicate)
+    .is_ok()
+}
+
+/// CR 115.1d + CR 608.2c: True when `s` is a distributive "any number of target
+/// player(s) [each] <verb>" clause (Singularity Rupture: "Destroy all creatures,
+/// then any number of target players each mill half their library, rounded
+/// down."). The leading token is a player *subject*, not an imperative verb, so
+/// `starts_clause_text_or_conjugated` misses it and the whole tail is dropped —
+/// even though `parse_subject_application` lowers it to a per-player targeted
+/// effect on its own. Recognize it so the `, then …` splitter peels it off as a
+/// standalone continuation.
+fn starts_target_players_subject_clause(s: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("any number of target player"),
+        alt((tag("s each "), tag(" each "), tag("s "), tag(" "))),
+    )
+    .parse(s)
     .is_ok()
 }
 
@@ -3109,6 +3127,20 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        ContinuationAst::ExcessDamageToController => {
+            // CR 120.4a + CR 608.2c: walk backward to the nearest DealDamage and
+            // attach the excess-redirect rider. The clause may not be adjacent to
+            // the DealDamage effect, mirroring the CantRegenerate walk above.
+            if let Some(def) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+            {
+                if let Effect::DealDamage { excess, .. } = &mut *def.effect {
+                    *excess = Some(ExcessRecipient::TargetController);
+                }
+            }
+        }
         ContinuationAst::PutRest {
             destination,
             reorder_all,
@@ -4013,6 +4045,9 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
+        // CR 120.4a: recognition was gated on a preceding DealDamage, so the
+        // rider is always absorbed into that effect (never a standalone effect).
+        ContinuationAst::ExcessDamageToController => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
@@ -4899,6 +4934,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -5010,6 +5046,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
@@ -5021,6 +5058,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -5102,6 +5140,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // for the Dig-from-among continuation search.
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize
+        // CR 608.2d + CR 122.1: counter-kind choice / consume are their own
+        // resolving effects, not Dig-lookback-transparent.
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5224,6 +5266,32 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     };
     let (filter, _leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
     !matches!(filter, TargetFilter::Any | TargetFilter::None)
+}
+
+/// CR 122.1 + CR 614.1c + CR 608.2c: returns true when `sentence` is a
+/// moved-object put-onto-battlefield-this-way conditional whose counter payoff
+/// is represented by `Effect::ChangeZone.conditional_enter_with_counters`
+/// ("If you put an artifact onto the battlefield this way, put two +1/+1 counters
+/// on it" — Oviya, Automech Artisan). Shared with the `Condition_If` swallow
+/// detector so the represented clause can be located and stripped text-scoped,
+/// reusing the same `parse_you_put_onto_battlefield_this_way_clause` combinator
+/// that produced the gate — not a verbatim Oracle-string match. Mirrors
+/// `is_moved_object_enters_modifier_clause`: it keys on the put-this-way condition
+/// AND a "counter" payoff tail so it drops only the represented clause.
+pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Ok((body, _)) =
+        crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
+            after_if,
+        )
+    else {
+        return false;
+    };
+    nom_primitives::scan_contains(body, "counter")
 }
 
 pub(super) fn parse_followup_continuation_ast(
@@ -5723,6 +5791,21 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
         {
             Some(ContinuationAst::CantRegenerate)
+        }
+        // CR 120.4a: "Excess damage is dealt to that creature's controller
+        // instead." — trailing rider on a `DealDamage` (Flame Spill, Gandalf's
+        // Sanction, Ravenous Tyrannosaurus). The two negative guards defer the
+        // conditional / trample-gated form (Ram Through: "If the creature you
+        // control has trample, excess ...") to `Effect::Unimplemented` — that
+        // form requires a controlled-source trample check we do not model here.
+        Effect::DealDamage { .. }
+            if nom_primitives::scan_contains(&lower, "excess damage")
+                && nom_primitives::scan_contains(&lower, "that creature's controller")
+                && nom_primitives::scan_contains(&lower, "instead")
+                && !nom_primitives::scan_contains(&lower, "has trample")
+                && !nom_primitives::scan_contains(&lower, "if ") =>
+        {
+            Some(ContinuationAst::ExcessDamageToController)
         }
         Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
@@ -7172,6 +7255,40 @@ mod tests {
         // "Each player discards their hand, then draws seven cards."
         let chunks = clause_texts("discards their hand, then draws seven cards");
         assert_eq!(chunks, vec!["discards their hand", "draws seven cards"]);
+    }
+
+    #[test]
+    fn any_number_of_target_players_each_splits_after_then() {
+        // #4783 Singularity Rupture: "Destroy all creatures, then any number of
+        // target players each mill half their library, rounded down." The
+        // subject-led "any number of target players each …" tail lowers to a
+        // per-player Mill, so it must split off as its own clause after ", then"
+        // rather than being dropped.
+        let chunks = clause_texts(
+            "destroy all creatures, then any number of target players each mill half their library, rounded down",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "destroy all creatures",
+                "any number of target players each mill half their library, rounded down",
+            ]
+        );
+    }
+
+    #[test]
+    fn starts_target_players_subject_clause_recognizes_distributive() {
+        assert!(starts_target_players_subject_clause(
+            "any number of target players each mill half their library"
+        ));
+        assert!(starts_target_players_subject_clause(
+            "any number of target players mill two cards"
+        ));
+        // Not a player-subject distributive clause.
+        assert!(!starts_target_players_subject_clause("draw a card"));
+        assert!(!starts_target_players_subject_clause(
+            "any number of target creatures"
+        ));
     }
 
     #[test]

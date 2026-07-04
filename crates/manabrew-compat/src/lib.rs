@@ -735,7 +735,28 @@ pub fn build_prompt(
             insert_json(&mut fields, "validTypes", options);
             match choice_type {
                 ChoiceType::Color { .. } => "chooseColor",
-                ChoiceType::CreatureType
+                ChoiceType::CreatureType { .. }
+                | ChoiceType::CardType { .. }
+                | ChoiceType::LandType
+                | ChoiceType::BasicLandType => "chooseType",
+                ChoiceType::CardName => "chooseCardName",
+                _ => "chooseType",
+            }
+        }
+        // CR 601.2b + CR 701.4a: a pre-cost behold "choose a creature type"
+        // (Celestial Reunion) surfaces the same "pick a type from `validTypes`"
+        // decision as `NamedChoice`, so mirror its mapping — otherwise this
+        // prompt falls through to `UnsupportedPrompt` and the manabrew agent
+        // stalls mid-cast.
+        WaitingFor::CostTypeChoice {
+            choice_type,
+            options,
+            ..
+        } => {
+            insert_json(&mut fields, "validTypes", options);
+            match choice_type {
+                ChoiceType::Color { .. } => "chooseColor",
+                ChoiceType::CreatureType { .. }
                 | ChoiceType::CardType { .. }
                 | ChoiceType::LandType
                 | ChoiceType::BasicLandType => "chooseType",
@@ -1471,6 +1492,9 @@ fn mana_cost_string(cost: &ManaCost) -> String {
         ManaCost::NoCost => String::new(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
         ManaCost::SelfManaValue => "its mana value".to_string(),
+        ManaCost::SelfManaCostReduced { reduction } => {
+            format!("its mana cost reduced by {{{reduction}}}")
+        }
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {
@@ -1635,7 +1659,8 @@ fn source_card_id(waiting_for: &WaitingFor) -> Option<String> {
     match waiting_for {
         WaitingFor::TargetSelection { pending_cast, .. }
         | WaitingFor::ModeChoice { pending_cast, .. }
-        | WaitingFor::ChooseXValue { pending_cast, .. } => {
+        | WaitingFor::ChooseXValue { pending_cast, .. }
+        | WaitingFor::CostTypeChoice { pending_cast, .. } => {
             Some(encode_object_id(pending_cast.object_id))
         }
         WaitingFor::TriggerTargetSelection { source_id, .. } => source_id.map(encode_object_id),
@@ -1668,6 +1693,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::UnlessPayment { .. } => "UnlessPayment",
         WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
         WaitingFor::NamedChoice { .. } => "NamedChoice",
+        WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
         WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
         WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
@@ -2385,7 +2411,7 @@ mod tests {
                 "chooseType",
                 WaitingFor::NamedChoice {
                     player: PlayerId(0),
-                    choice_type: ChoiceType::CreatureType,
+                    choice_type: ChoiceType::creature_type(),
                     options: vec!["Wizard".to_string()],
                     source_id: Some(ObjectId(1)),
                 },
@@ -2443,6 +2469,32 @@ mod tests {
             assert_eq!(prompt.prompt_type, expected_type);
             assert!(prompt.fields.contains_key("availablePlayerActions"));
         }
+    }
+
+    /// Finding #3 (review MED): `WaitingFor::CostTypeChoice` (Celestial Reunion's
+    /// pre-cost behold "choose a creature type") must map like `NamedChoice` — a
+    /// `chooseType` prompt carrying `validTypes` and the casting spell as
+    /// `source_card_id`. Before the fix it fell through to `UnsupportedPrompt`,
+    /// which stalls the manabrew agent mid-cast. Discriminating on all three
+    /// wiring points: reverting the prompt-type arm makes `.expect` panic on the
+    /// `UnsupportedPrompt` error; reverting the `source_card_id` arm drops
+    /// `source_card_id` to `None`.
+    #[test]
+    fn cost_type_choice_prompt_maps_to_choose_type_with_source() {
+        let prompt = prompt_for(WaitingFor::CostTypeChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::creature_type(),
+            options: vec!["Wizard".to_string(), "Goblin".to_string()],
+            pending_cast: dummy_pending_cast(),
+        })
+        .expect("CostTypeChoice must build a prompt, not UnsupportedPrompt");
+        assert_eq!(prompt.prompt_type, "chooseType");
+        assert_eq!(
+            prompt.fields.get("validTypes").unwrap(),
+            &serde_json::json!(["Wizard", "Goblin"])
+        );
+        // `dummy_pending_cast()` carries ObjectId(1) => "card-1".
+        assert_eq!(prompt.source_card_id.as_deref(), Some("card-1"));
     }
 
     #[test]
