@@ -6775,7 +6775,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon));
+        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon), None);
 
         // Exactly one Direction persists, and it is Right.
         assert_eq!(
@@ -6879,7 +6879,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Left", Some(teyo));
+        bind_named_choice(&mut state, &labeled, "Left", Some(teyo), None);
         assert_eq!(
             state.objects.get(&teyo).unwrap().chosen_direction(),
             Some(SeatDirection::Left),

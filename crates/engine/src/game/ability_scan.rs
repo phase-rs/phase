@@ -341,6 +341,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(recipient));
             acc
         }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => Axes::CONSERVATIVE,
         Effect::Draw { count, target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count));
@@ -2342,6 +2346,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             projected: false,
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
@@ -3266,6 +3271,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }

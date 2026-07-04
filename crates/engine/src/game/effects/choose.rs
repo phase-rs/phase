@@ -1312,7 +1312,7 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Center".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
 
         let obj = &state.objects[&src];
         assert_eq!(
@@ -1345,7 +1345,7 @@ mod tests {
             options: vec!["Left".into(), "Right".into()],
         };
         // Lowercase answer proves case-insensitive typing via from_choice_label.
-        bind_named_choice(&mut state, &choice_type, "left", Some(src));
+        bind_named_choice(&mut state, &choice_type, "left", Some(src), None);
 
         let obj = &state.objects[&src];
         assert_eq!(obj.chosen_direction(), Some(SeatDirection::Left));
@@ -1368,8 +1368,8 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
-        bind_named_choice(&mut state, &choice_type, "Right", Some(src));
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
+        bind_named_choice(&mut state, &choice_type, "Right", Some(src), None);
 
         let obj = &state.objects[&src];
         let directions: Vec<_> = obj
