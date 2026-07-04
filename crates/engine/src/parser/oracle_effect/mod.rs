@@ -22925,6 +22925,11 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
+            // trigger context so non-target event anaphors ("that permanent or
+            // player" on Ghyrson) bind to the triggering event instead of being
+            // reparsed as ordinary target phrases.
+            in_trigger: ctx.in_trigger,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -24681,7 +24686,7 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     }
     // CR 118.12a: "unless [target's controller] has [~] deal N damage to them"
     // (Molten Influence and other counter spells with damage alternatives).
-    if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless) {
+    if let Some((cost, _)) = parse_unless_have_deal_damage_cost(after_unless) {
         return Some(cost);
     }
     // CR 118.12a + CR 121.3a: "unless its controller has you draw a card"
@@ -24823,15 +24828,33 @@ fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
 }
 
 /// CR 118.12a: "unless [that object's|its] controller has [~] deal N damage to
-/// them" (Blazing Salvo, Lava Blister, Molten Influence) — the controller may
-/// take the damage instead of the primary effect.
-fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature's controller has "),
-        tag("its controller has "),
-        tag("that permanent's controller has "),
-        tag("that land's controller has "),
-        tag("that spell's controller has "),
+/// them" (Blazing Salvo, Lava Blister, Molten Influence) or "unless that player
+/// has [~] deal N damage to them" (Skullscorch) — the payer may take the
+/// damage instead of the primary effect.
+fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<(AbilityCost, TargetFilter)> {
+    let (rest, payer) = alt((
+        value(
+            TargetFilter::ParentTargetController,
+            tag::<_, _, OracleError<'_>>("that creature's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("its controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that permanent's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that land's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that spell's controller has "),
+        ),
+        value(TargetFilter::Player, tag("that player has ")),
+        value(TargetFilter::Player, tag("that opponent has ")),
     ))
     .parse(after_unless)
     .ok()?;
@@ -24842,14 +24865,17 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
     let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
     parse_deal_damage_to_them_tail(tail)?;
-    Some(AbilityCost::EffectCost {
-        effect: Box::new(Effect::DealDamage {
-            amount,
-            target: TargetFilter::Player,
-            damage_source: None,
-            excess: None,
-        }),
-    })
+    Some((
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::DealDamage {
+                amount,
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+        },
+        payer,
+    ))
 }
 
 /// CR 118.12a + CR 121.3a: "unless [that object's|its] controller has you draw
@@ -24940,15 +24966,9 @@ fn extract_resolution_unless_pay_modifier(
                 );
             }
         }
-        if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+        if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::ParentTargetController,
-                }),
-            );
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
         if let Some(cost) = parse_unless_have_you_draw_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();

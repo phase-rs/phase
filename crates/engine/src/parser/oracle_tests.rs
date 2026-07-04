@@ -15818,6 +15818,16 @@ fn leading_conditional_instead_composes_self_replacement() {
         ),
         "expected AttackedThisTurn >= 1 inside ConditionInstead, got: {inner:?}"
     );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
+    );
 }
 
 #[test]
@@ -15862,6 +15872,16 @@ fn leading_conditional_instead_threshold_graveyard_count() {
             }
         ),
         "expected GraveyardSize >= 7 inside ConditionInstead, got: {inner:?}"
+    );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
     );
 }
 

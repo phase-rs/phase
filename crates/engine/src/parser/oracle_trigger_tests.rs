@@ -13375,6 +13375,78 @@ fn trigger_source_deals_exactly_n_damage_to_player() {
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
 }
 
+#[test]
+fn ghyrson_damage_trigger_parses_mixed_permanent_or_player_recipient() {
+    let parsed = parse_oracle_text(
+        "Ward {2}\nWhenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player.",
+        "Ghyrson Starn, Kelermorph",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+        "Ghyrson must parse without unimplemented abilities: {:?}",
+        parsed.abilities
+    );
+    let trigger = parsed.triggers.first().expect("Ghyrson trigger parses");
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.damage_amount, Some((Comparator::EQ, 1)));
+    assert_eq!(trigger.valid_target, None);
+    match trigger.valid_source.as_ref() {
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) => assert!(
+            properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Another)),
+            "source filter must require another controlled source: {properties:?}"
+        ),
+        other => panic!("expected another source you control filter, got {other:?}"),
+    }
+    let execute = trigger.execute.as_ref().expect("trigger has an effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::EventTarget,
+                damage_source: None,
+                ..
+            }
+        ),
+        "Ghyrson effect must damage the event target, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn damage_trigger_mixed_permanent_or_player_requires_exact_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a permanent or player this turn, draw a card.",
+        "Test",
+    );
+    assert_ne!(
+        def.mode,
+        TriggerMode::DamageDone,
+        "mixed permanent/player recipient must not accept trailing qualifier text"
+    );
+}
+
+#[test]
+fn damage_trigger_creature_or_player_is_not_promoted_to_mixed_recipient() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a creature or player, draw a card.",
+        "Test",
+    );
+    assert_ne!(def.mode, TriggerMode::DamageDone);
+}
+
 // Same general parser must also accept the no-threshold + noncombat-kind
 // form (Virtue of Courage style) — proves the threshold axis is optional
 // and composes orthogonally with the damage-kind axis.

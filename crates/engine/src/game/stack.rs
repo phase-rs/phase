@@ -1,6 +1,7 @@
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectKind, FilterProp, KeywordAction, ObjectScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityKind, ContinuousModification, CopyCountStatus, Duration, Effect, EffectKind, FilterProp,
+    KeywordAction, ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -8,6 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, GameState, MayTriggerAutoChoiceKey,
     MayTriggerOrigin, PendingCounterPostAction, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -1712,6 +1714,15 @@ pub fn resolve_next_with_limit(
                 return resolve_inert_noop_batch(state, consumed, events);
             }
         }
+        if let Some(run_len) = self_counter_run_len(state) {
+            let run_len = run_len.min(max_consumed);
+            if run_len >= 2 {
+                crate::game::perf_counters::record_stack_batch_candidate();
+                if let Some(consumed) = resolve_proven_self_counter_batch(state, events, run_len) {
+                    return consumed;
+                }
+            }
+        }
         if let Some(run_len) = batch_run_len(state) {
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
@@ -1759,6 +1770,300 @@ pub fn resolve_next_with_limit(
     }
     resolve_top(state, events);
     1
+}
+
+/// CR 117.4 + CR 608.2 + CR 704.3: Resolve a finite run of identical
+/// self-counter triggers only after proving that every skipped priority
+/// checkpoint is inert. The proof runs the exact sequential resolution path on
+/// a clone, including the real post-action pipeline after each entry. If any
+/// checkpoint creates events, pushes triggers, pauses, or otherwise consumes
+/// observable work, this returns `None` and the caller falls back to one-entry
+/// stack resolution.
+fn resolve_proven_self_counter_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    if !self_counter_batch_state_is_settled(state) {
+        return None;
+    }
+
+    let mut proof = state.clone();
+    let mut proof_events = Vec::new();
+    let default_wf = WaitingFor::Priority {
+        player: proof.active_player,
+    };
+    let initial_len = proof.stack.len();
+
+    for expected_consumed in 1..=run_len as usize {
+        let event_start = proof_events.len();
+        let stack_before = proof.stack.len();
+        resolve_top(&mut proof, &mut proof_events);
+        if stack_before.saturating_sub(proof.stack.len()) != 1 {
+            return None;
+        }
+        if !matches!(proof.waiting_for, WaitingFor::Priority { .. }) {
+            return None;
+        }
+
+        let events_after_resolution = proof_events.len();
+        let stack_after_resolution = proof.stack.len();
+        let counters_after_resolution = battlefield_counter_snapshot(&proof);
+        let wf = super::engine_priority::run_post_action_pipeline_from(
+            &mut proof,
+            &mut proof_events,
+            event_start,
+            &default_wf,
+            false,
+        )
+        .ok()?;
+        if !matches!(wf, WaitingFor::Priority { .. })
+            || !matches!(proof.waiting_for, WaitingFor::Priority { .. })
+            || proof_events.len() != events_after_resolution
+            || proof.stack.len() != stack_after_resolution
+            || battlefield_counter_snapshot(&proof) != counters_after_resolution
+            || initial_len.saturating_sub(proof.stack.len()) != expected_consumed
+            || !self_counter_batch_state_is_settled(&proof)
+        {
+            return None;
+        }
+    }
+
+    proof.consumed_before_priority_trigger_events =
+        consumed_trigger_event_occurrences(&proof_events);
+    *state = proof;
+    events.extend(proof_events);
+    crate::game::perf_counters::record_stack_batch_plan();
+    crate::game::perf_counters::record_stack_batched_entries(run_len);
+    Some(run_len)
+}
+
+fn battlefield_counter_snapshot(
+    state: &GameState,
+) -> Vec<(ObjectId, std::collections::HashMap<CounterType, u32>)> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|obj| (*id, obj.counters.clone())))
+        .collect()
+}
+
+fn consumed_trigger_event_occurrences(
+    events: &[GameEvent],
+) -> Vec<crate::game::triggers::ConsumedTriggerEventOccurrence> {
+    let mut seen = std::collections::HashMap::new();
+    events
+        .iter()
+        .map(|event| {
+            let key = serde_json::to_string(event).expect("GameEvent serializes");
+            let count = seen.entry(key).or_insert(0);
+            let occurrence = *count;
+            *count += 1;
+            crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence,
+            }
+        })
+        .collect()
+}
+
+fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
+    state.pending_replacement.is_none()
+        && state.pending_trigger.is_none()
+        && state.pending_trigger_event_batch.is_empty()
+        && state.pending_trigger_entry.is_none()
+        && state.deferred_triggers.is_empty()
+        && state.pending_trigger_order.is_none()
+        && state.current_trigger_event.is_none()
+        && state.current_trigger_events.is_empty()
+        && state.current_trigger_match_count.is_none()
+        && state.die_result_this_resolution.is_none()
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+        && state.pending_repeated_optional_payment.is_none()
+        && state.pending_repeat_until.is_none()
+        && state.pending_change_zone_iteration.is_none()
+        && state.pending_change_zone_in_flight.is_none()
+        && state.pending_copy_token_resolution.is_none()
+        && state.pending_vote_ballot_iteration.is_none()
+        && state.pending_per_player_zone_choice.is_none()
+        && state.pending_per_category_zone_choice.is_none()
+        && state.pending_batch_deliveries.is_none()
+        && state.pending_proliferate_actions.is_none()
+        && state.pending_counter_additions.is_none()
+        && state.pending_counter_moves.is_none()
+        && state.pending_optional_effect.is_none()
+        && state.pending_optional_trigger_event.is_none()
+        && state.pending_optional_trigger_match_count.is_none()
+        && state.pending_choose_zone_trigger_context.is_none()
+        && state.pending_miracle_offers.is_empty()
+        && state.pending_paradigm_remaining_offers.is_none()
+        && state.pending_damage_replacements.is_empty()
+        && state.pending_step_end_mana_handlers.is_empty()
+        && state.pending_phase_transition_progress.is_none()
+        && state.deferred_step_trigger_resume.is_none()
+        && state.pending_team_draw_step.is_empty()
+        && state.pending_untap_declines.is_empty()
+}
+
+#[derive(PartialEq)]
+struct SelfCounterRunKey<'a> {
+    source_id: ObjectId,
+    controller: PlayerId,
+    ability: &'a ResolvedAbility,
+    description: Option<&'a str>,
+    paid: Option<&'a StackPaidSnapshot>,
+}
+
+/// CR 603.3b + CR 608.2 + CR 122.1: Length of the top contiguous run of
+/// identical triggered abilities that put one +1/+1 counter on their own
+/// source. The firing event is intentionally not part of this key: this gate
+/// accepts only an event-context-free effect shape, and the clone proof below
+/// still resolves every entry with its exact trigger context before committing.
+fn self_counter_run_len(state: &GameState) -> Option<u32> {
+    let top = state.stack.back()?;
+    let top_key = self_counter_run_key(state, top)?;
+    let mut len = 1u32;
+    for entry in state.stack.iter().rev().skip(1) {
+        match self_counter_run_key(state, entry) {
+            Some(key) if key == top_key => len += 1,
+            _ => break,
+        }
+    }
+    Some(len)
+}
+
+fn self_counter_run_key<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> Option<SelfCounterRunKey<'a>> {
+    let StackEntryKind::TriggeredAbility {
+        source_id,
+        ability,
+        condition,
+        trigger_event: _,
+        description,
+        source_name: _,
+        subject_match_count: _,
+        die_result: _,
+    } = &entry.kind
+    else {
+        return None;
+    };
+
+    if *source_id != entry.source_id
+        || ability.source_id != *source_id
+        || condition.is_some()
+        || !flatten_targets_in_chain(ability).is_empty()
+        || !self_counter_ability_is_batch_candidate(ability)
+    {
+        return None;
+    }
+
+    Some(SelfCounterRunKey {
+        source_id: *source_id,
+        controller: entry.controller,
+        ability,
+        description: description.as_deref(),
+        paid: state.stack_paid_facts.get(&entry.id),
+    })
+}
+
+fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
+    let ResolvedAbility {
+        effect,
+        targets,
+        source_id: _,
+        source_incarnation,
+        controller: _,
+        original_controller,
+        scoped_player,
+        kind,
+        sub_ability,
+        else_ability,
+        duration,
+        condition,
+        context,
+        optional_targeting,
+        optional,
+        optional_for,
+        multi_target,
+        target_constraints,
+        target_choice_timing,
+        description,
+        repeat_for,
+        min_x_value,
+        cant_be_copied,
+        copy_count_status,
+        forward_result,
+        unless_pay,
+        distribution,
+        player_scope,
+        starting_with,
+        chosen_x,
+        cost_paid_object,
+        effect_context_object,
+        ability_index,
+        may_trigger_origin,
+        target_selection_mode,
+        target_chooser,
+        chosen_players,
+        repeat_until,
+        sub_link,
+        modal,
+        mode_abilities,
+        dig_found_nothing_for_parent_target,
+    } = ability;
+
+    let self_counter = matches!(
+        effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+
+    self_counter
+        && targets.is_empty()
+        && source_incarnation.is_none()
+        && original_controller.is_none()
+        && scoped_player.is_none()
+        && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
+        && sub_ability.is_none()
+        && else_ability.is_none()
+        && duration.is_none()
+        && condition.is_none()
+        && *context == SpellContext::default()
+        && !*optional_targeting
+        && !*optional
+        && optional_for.is_none()
+        && multi_target.is_none()
+        && target_constraints.is_empty()
+        && *target_choice_timing == TargetChoiceTiming::Stack
+        && description.is_none()
+        && repeat_for.is_none()
+        && *min_x_value == 0
+        && !*cant_be_copied
+        && *copy_count_status == CopyCountStatus::Pending
+        && !*forward_result
+        && unless_pay.is_none()
+        && distribution.is_none()
+        && player_scope.is_none()
+        && starting_with.is_none()
+        && chosen_x.is_none()
+        && cost_paid_object.is_none()
+        && effect_context_object.is_none()
+        && ability_index.is_none()
+        && may_trigger_origin.is_none()
+        && *target_selection_mode == TargetSelectionMode::Chosen
+        && target_chooser.is_none()
+        && chosen_players.is_empty()
+        && repeat_until.is_none()
+        && *sub_link == SubAbilityLink::ContinuationStep
+        && modal.is_none()
+        && mode_abilities.is_empty()
+        && !*dig_found_nothing_for_parent_target
 }
 
 /// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
@@ -2465,7 +2770,6 @@ struct StackGroupKey {
     description: Option<String>,
     targets: Vec<TargetRef>,
     paid: Option<StackPaidSnapshot>,
-    trigger_context: Vec<String>,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -2492,25 +2796,12 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         .map(flatten_targets_in_chain)
         .unwrap_or_default();
     let paid = state.stack_paid_facts.get(&entry.id).cloned();
-    let trigger_context = state
-        .stack_trigger_event_batches
-        .get(&entry.id)
-        .map(|events| events.iter().map(|event| format!("{event:?}")).collect())
-        .or_else(|| match &entry.kind {
-            StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            } => Some(vec![format!("{event:?}")]),
-            _ => None,
-        })
-        .unwrap_or_default();
     StackGroupKey {
         source_name,
         tag,
         description: description.map(str::to_owned),
         targets,
         paid,
-        trigger_context,
     }
 }
 
@@ -4318,6 +4609,69 @@ mod tests {
     }
 
     #[test]
+    fn stack_display_groups_coalesce_identical_triggers_from_distinct_events() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Honored Dreyleader".to_string(),
+            Zone::Battlefield,
+        );
+        let effect = Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        };
+        for (idx, trigger_event) in [
+            GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: 1,
+            },
+            GameEvent::LifeChanged {
+                player_id: PlayerId(1),
+                amount: 1,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.stack.push_back(StackEntry {
+                id: ObjectId(10_000 + idx as u64),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        effect.clone(),
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(trigger_event),
+                    description: Some("put a +1/+1 counter on this creature".to_string()),
+                    source_name: "Honored Dreyleader".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            });
+        }
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            1,
+            "display grouping must ignore hidden trigger-event identity for identical entries"
+        );
+        assert_eq!(groups[0].count, 2);
+    }
+
+    #[test]
     fn stack_display_groups_distinguish_different_sources() {
         use crate::types::ability::{Effect, ResolvedAbility};
         use crate::types::identifiers::CardId;
@@ -4853,7 +5207,7 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, observers_are_batch_safe, resolve_next,
-            resolve_next_with_limit, resolve_top,
+            resolve_next_with_limit, resolve_top, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -5206,6 +5560,64 @@ mod tests {
             sources
         }
 
+        fn add_self_counter_source(state: &mut GameState, name: &str) -> ObjectId {
+            let source = create_object(
+                state,
+                CardId(9_000 + state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            source
+        }
+
+        fn self_counter_effect() -> Effect {
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        }
+
+        fn push_self_counter_trigger(
+            state: &mut GameState,
+            source: ObjectId,
+            trigger_event: GameEvent,
+        ) {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        self_counter_effect(),
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(trigger_event),
+                    description: Some("put a +1/+1 counter on this creature".to_string()),
+                    source_name: state.objects[&source].name.clone(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            });
+        }
+
+        fn life_event(player_id: PlayerId, amount: i32) -> GameEvent {
+            GameEvent::LifeChanged { player_id, amount }
+        }
+
         /// Drive resolution to empty via the BATCH path (`resolve_next`), running
         /// the real post-action pipeline after each step. Returns the per-step
         /// `consumed` counts.
@@ -5313,6 +5725,127 @@ mod tests {
                     .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
                     .count(),
                 4
+            );
+        }
+
+        #[test]
+        fn self_counter_triggers_batch_same_source_prefix_only() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let lower_source = add_self_counter_source(&mut state, "Other Dreyleader");
+            let top_source = add_self_counter_source(&mut state, "Honored Dreyleader");
+
+            push_self_counter_trigger(&mut state, lower_source, life_event(PlayerId(0), 1));
+            push_self_counter_trigger(&mut state, top_source, life_event(PlayerId(1), 1));
+            push_self_counter_trigger(&mut state, top_source, life_event(PlayerId(0), 2));
+
+            assert_eq!(
+                self_counter_run_len(&state),
+                Some(2),
+                "top contiguous same-source self-counter prefix should be batchable"
+            );
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 2);
+            assert_eq!(state.stack.len(), 1);
+            assert_eq!(
+                state.objects[&top_source]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied(),
+                Some(2)
+            );
+            assert!(
+                !state.objects[&lower_source]
+                    .counters
+                    .contains_key(&CounterType::Plus1Plus1),
+                "different-source trigger below the prefix must remain unresolved"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                2
+            );
+        }
+
+        #[test]
+        fn self_counter_batch_refuses_when_checkpoint_annihilates_counters() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Honored Dreyleader");
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .counters
+                .insert(CounterType::Minus1Minus1, 1);
+
+            push_self_counter_trigger(&mut state, source, life_event(PlayerId(0), 1));
+            push_self_counter_trigger(&mut state, source, life_event(PlayerId(1), 1));
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "CR 704.5q checkpoint work must force single-entry fallback"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
+            );
+        }
+
+        #[test]
+        fn self_counter_batch_refuses_when_counter_added_observer_fires() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Honored Dreyleader");
+            let observer = create_object(
+                &mut state,
+                CardId(9_500),
+                PlayerId(0),
+                "Counter Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trig = TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::NoOp,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_self_counter_trigger(&mut state, source, life_event(PlayerId(0), 1));
+            push_self_counter_trigger(&mut state, source, life_event(PlayerId(1), 1));
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "CounterAdded observer must make the clone checkpoint non-inert"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
             );
         }
 

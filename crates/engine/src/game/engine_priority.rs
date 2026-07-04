@@ -19,7 +19,7 @@ pub(super) fn run_post_action_pipeline(
 /// Run the normal post-action settlement while scanning only events produced at
 /// or after `event_start`. Use for nested resume paths that carry earlier
 /// payment/choice events in the same output buffer.
-pub(super) fn run_post_action_pipeline_from(
+pub(crate) fn run_post_action_pipeline_from(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     event_start: usize,

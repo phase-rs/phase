@@ -3469,7 +3469,6 @@ fn trigger_events_match_for_ordering(
     candidate: &PendingTrigger,
     legacy_uses_trigger_event: bool,
     c2_order_independent: bool,
-    loop_detection_on: bool,
 ) -> bool {
     // Same firing event (CR 603.2c): pre-feature auto-order, UNCHANGED. Gating
     // this on soundness is the C1 CR 603.3b fix — DEFERRED (see inc2a report):
@@ -3499,13 +3498,11 @@ fn trigger_events_match_for_ordering(
         }
     }
 
-    // C2 (GATED on `loop_detection.is_on()`): when the growing-cascade detector
-    // is ON, a distinct-event group the fail-closed C0 walker deems order
-    // independent (reads neither event context nor sibling-mutable state) also
-    // auto-resolves so the loop-detect ring can accumulate the super-critical
-    // fan-out. When OFF this term is false, so distinct-event non-ZoneChanged
-    // groups PROMPT exactly as pre-feature (default gameplay byte-preserved).
-    loop_detection_on && c2_order_independent
+    // Distinct firing events whose ability reads neither event context nor
+    // sibling-mutable state are indistinguishable for CR 603.3b ordering. This
+    // finite ordering UX is intentionally independent from loop detection,
+    // which only controls optional infinite-combo shortcutting.
+    c2_order_independent
 }
 
 /// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
@@ -3541,24 +3538,22 @@ fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
 /// resolution), and the `may_trigger_origin`.
 // CR 603.2c / CR 603.4: `trigger_event` (the firing event itself) is NOT part
 // of the equality check for explicitly simultaneous ZoneChanged departure
-// batches (preserved in all modes) — when N co-departing events all match the
-// same trigger definition and the effect is fixed (e.g. three Liliana,
-// Dreadhorde General draws from one board wipe), placement order is unobservable
-// and a prompt is noise — and, when the growing-cascade detector is ON, for any
-// distinct-event group the C0 walker deems order independent (C2, so the
-// loop-detect ring can accumulate a fan-out). The pre-feature same-event and
-// ZoneChanged paths keep using the legacy allowlist `ability_uses_trigger_event_context`
-// (its exact fail-open semantics are shipped behavior — see that fn's doc). The
-// new gated-C2 term instead consults the fail-closed `ability_scan` walker over
-// TWO distinct axes (categorical-boundary rule): (i) `ability_uses_event_context`
-// — the concrete firing event is resolution-visible, and (ii)
-// `ability_reads_sibling_mutable` — a source/recipient or board-scoped aggregate
-// a sibling copy resolving first could change. `subject_match_count` is kept in
-// the equality because that is the per-batch count the effect reads at resolution
-// and *can* differ across pending triggers if two distinct batched events satisfy
-// the same definition. `is_on` threads `loop_detection.is_on()` down to the
-// one-line C2 gate (the predicate has no `GameState`).
-fn group_is_order_independent(group: &[PendingTriggerContext], is_on: bool) -> bool {
+// batches — when N co-departing events all match the same trigger definition
+// and the effect is fixed (e.g. three Liliana, Dreadhorde General draws from
+// one board wipe), placement order is unobservable and a prompt is noise — and
+// for any distinct-event group the C0 walker deems order independent. The
+// same-event and ZoneChanged paths keep using the legacy allowlist
+// `ability_uses_trigger_event_context` (its exact fail-open semantics are
+// shipped behavior — see that fn's doc). The C2 term instead consults the
+// fail-closed `ability_scan` walker over TWO distinct axes
+// (categorical-boundary rule): (i) `ability_uses_event_context` — the concrete
+// firing event is resolution-visible, and (ii) `ability_reads_sibling_mutable`
+// — a source/recipient or board-scoped aggregate a sibling copy resolving
+// first could change. `subject_match_count` is kept in the equality because
+// that is the per-batch count the effect reads at resolution and *can* differ
+// across pending triggers if two distinct batched events satisfy the same
+// definition.
+fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     let Some((first, rest)) = group.split_first() else {
         return false;
     };
@@ -3586,7 +3581,6 @@ fn group_is_order_independent(group: &[PendingTriggerContext], is_on: bool) -> b
                 t,
                 legacy_uses_trigger_event,
                 c2_order_independent,
-                is_on,
             )
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
@@ -3639,9 +3633,8 @@ fn begin_trigger_ordering(
     // no-input triggers, commute under any permutation — auto-order them so the
     // player isn't prompted for an immaterial choice (matching MTG Arena). Any
     // field divergence is a safe false-negative: the group still prompts.
-    let loop_detection_on = state.loop_detection.is_on();
     for g in groups.iter_mut() {
-        if g.triggers.len() <= 1 || group_is_order_independent(&g.triggers, loop_detection_on) {
+        if g.triggers.len() <= 1 || group_is_order_independent(&g.triggers) {
             g.ordered = true;
         }
     }
@@ -21331,7 +21324,7 @@ pub mod tests {
                     ),
                 ];
                 assert!(
-                    group_is_order_independent(&group, mode.is_on()),
+                    group_is_order_independent(&group),
                     "pre-feature: same-event identical group auto-orders ({mode:?})"
                 );
                 match begin_trigger_ordering(&mut state, group) {
@@ -21344,13 +21337,12 @@ pub mod tests {
         }
     }
 
-    /// C2 (GATED on `loop_detection.is_on()`): two byte-identical no-input SOUND
-    /// triggers off DISTINCT life-loss events (the ≥3p all-opponent-drain fan-out).
-    /// OFF ⇒ still PROMPT (pre-feature preserved); ON ⇒ auto-resolve so the ring
-    /// can accumulate. Revert-fail: dropping the `is_on()` conjunct makes the OFF
-    /// arm auto-resolve, flipping its assertion.
+    /// C2: two byte-identical no-input SOUND triggers off DISTINCT life-loss
+    /// events (the ≥3p all-opponent-drain fan-out) auto-order even when loop
+    /// detection is OFF. Loop detection controls infinite-combo shortcutting;
+    /// it does not gate finite CR 603.3b ordering UX.
     #[test]
-    fn pr625_c2_distinct_event_gate_off_prompts_on_auto_resolves() {
+    fn pr625_c2_distinct_event_auto_orders_even_when_loop_detection_off() {
         let ev_a = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -1,
@@ -21380,13 +21372,13 @@ pub mod tests {
             ),
         ];
         assert!(
-            !group_is_order_independent(&off_group, false),
-            "C2 OFF: distinct-event sound group must PROMPT (pre-feature preserved)"
+            group_is_order_independent(&off_group),
+            "C2 OFF: distinct-event sound group must auto-order"
         );
         match begin_trigger_ordering(&mut off, off_group) {
-            TriggerOrderingDisposition::PromptForChoice(_) => {}
-            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
-                panic!("C2 OFF: distinct-event group must prompt when loop_detection Off")
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("C2 OFF: distinct-event group must auto-order when loop_detection Off")
             }
         }
 
@@ -21410,7 +21402,7 @@ pub mod tests {
             ),
         ];
         assert!(
-            group_is_order_independent(&on_group, true),
+            group_is_order_independent(&on_group),
             "C2 ON: distinct-event sound group must auto-resolve"
         );
         match begin_trigger_ordering(&mut on, on_group) {
@@ -21455,7 +21447,7 @@ pub mod tests {
             ),
         ];
         assert!(
-            !group_is_order_independent(&group, true),
+            !group_is_order_independent(&group),
             "C0: sibling-mutable distinct-event group must NOT auto-resolve even ON"
         );
         match begin_trigger_ordering(&mut on, group) {

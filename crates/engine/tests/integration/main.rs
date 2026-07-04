@@ -413,6 +413,7 @@ mod issue_4831_bloodthorn_flail_equip;
 mod issue_4833_disruptor_flute_oubliette;
 mod issue_4835_intimidation_tactics;
 mod issue_4836_mindskinner;
+mod issue_4921_skullscorch_unless_deal_damage;
 mod issue_4962_volo_guide_to_monsters;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;

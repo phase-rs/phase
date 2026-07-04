@@ -235,6 +235,67 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "needs_review")
 
+    def test_author_followup_after_local_block_resurfaces_same_head(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5014,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "contributor",
+                        "createdAt": "2026-07-04T08:01:22Z",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-04T00:26:33Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_followup_after_local_block")
+
+    def test_local_block_without_author_followup_stays_blocked(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5014,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-04T00:26:33Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "local_block_current_head")
+
     def test_merged_pr_recommends_prune(self) -> None:
         packet = {
             "pr": {
