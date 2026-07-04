@@ -629,7 +629,9 @@ pub(crate) fn attachment_illegality(
 /// effect that granted the protection ALSO carries the matching exemption
 /// modification and names this attachment (`ProtectionDoesntRemoveThisAura` for
 /// the source Aura itself; `ProtectionDoesntRemoveControlledAttachments` for
-/// attachments controlled by the granting effect's controller). Every other
+/// attachments controlled by the granting effect's controller;
+/// `ProtectionDoesntRemoveAuras` for ANY already-attached Aura, CR 702.16n's
+/// all-Auras form). Every other
 /// protection instance of the same quality — from a different effect, from the
 /// host's intrinsic (printed) keywords, or from a transient grant — still
 /// detaches the attachment (CR 702.16n/p: other instances of protection from the
@@ -776,6 +778,11 @@ impl ProtectionExemptionScan<'_> {
                     (self.attacher_is_aura || self.attacher_is_equipment)
                         && self.attachment.controller == source_obj.controller
                 }
+                // CR 702.16n (all-Auras form): "This effect doesn't remove Auras"
+                // (Spectra Ward) — this grant keeps EVERY already-attached Aura of
+                // the quality attached, regardless of who controls it. Equipment is
+                // NOT named by this form, so it is still detached.
+                StaticMode::ProtectionDoesntRemoveAuras => self.attacher_is_aura,
                 _ => false,
             },
             _ => false,
@@ -1314,6 +1321,82 @@ mod tests {
             Some(AttachIllegality::Protection),
             "an unexempted same-quality transient protection grant must still \
              detach the otherwise-exempt Aura (CR 702.16n/p)"
+        );
+    }
+
+    /// CR 702.16n (issue #4964 review): the all-Auras exemption form (Spectra
+    /// Ward: "This effect doesn't remove Auras") keeps EVERY already-attached Aura
+    /// of the granted quality attached — regardless of who controls it (unlike the
+    /// controlled-attachments form) — while still detaching Equipment of that
+    /// quality, since the printed form names only Auras.
+    #[test]
+    fn attachment_illegality_all_auras_exemption_keeps_any_aura() {
+        let mut state = setup();
+        let creature = spawn_creature(&mut state, "Bear");
+
+        // Spectra Ward: grants protection-from-white to the host AND carries the
+        // all-Auras exemption on that same continuous effect.
+        let spectra = spawn_with_subtype(&mut state, "Spectra Ward", "Aura");
+        {
+            let obj = state.objects.get_mut(&spectra).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(ManaColor::White);
+        }
+        attach_protection_grant(
+            &mut state,
+            spectra,
+            creature,
+            ManaColor::White,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveAuras,
+            }],
+        );
+
+        // A white Aura controlled by the OPPONENT attached to the same host. Under
+        // the controlled-attachments form this would be detached (wrong
+        // controller); under the all-Auras form it stays.
+        let foreign_aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
+        {
+            let obj = state.objects.get_mut(&foreign_aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.color.push(ManaColor::White);
+            obj.controller = PlayerId(1);
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(foreign_aura);
+
+        assert_eq!(
+            attachment_illegality(&state, foreign_aura, creature),
+            None,
+            "the all-Auras exemption keeps ANY already-attached Aura of the \
+             quality attached, even one controlled by another player (CR 702.16n)"
+        );
+
+        // Equipment of the same quality is NOT named by the all-Auras form, so it
+        // is still detached.
+        let white_equip = spawn_equipment(&mut state, "White Equip", 99);
+        {
+            let obj = state.objects.get_mut(&white_equip).unwrap();
+            obj.color.push(ManaColor::White);
+            obj.attached_to = Some(AttachTarget::Object(creature));
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(white_equip);
+
+        assert_eq!(
+            attachment_illegality(&state, white_equip, creature),
+            Some(AttachIllegality::Protection),
+            "the all-Auras form names only Auras; Equipment of the quality is \
+             still detached (CR 702.16n)"
         );
     }
 

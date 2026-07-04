@@ -1663,6 +1663,12 @@ pub enum StaticMode {
     /// Auras and Equipment you control that are already attached" keeps those
     /// attachments when protection would otherwise detach them (Benevolent Blessing).
     ProtectionDoesntRemoveControlledAttachments,
+    /// CR 702.16n (all-Auras form): A protection grant whose printed text includes
+    /// "This effect doesn't remove Auras" keeps EVERY already-attached Aura of the
+    /// granted quality attached — not just the source Aura and not just controlled
+    /// ones (Spectra Ward). Equipment is not covered by this form. Other protection
+    /// instances of the same quality still detach normally.
+    ProtectionDoesntRemoveAuras,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
     /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
@@ -1973,6 +1979,7 @@ pub enum StaticModeKind {
     EntersWithAdditionalCounters,
     ProtectionDoesntRemoveThisAura,
     ProtectionDoesntRemoveControlledAttachments,
+    ProtectionDoesntRemoveAuras,
     Other,
 }
 
@@ -2123,6 +2130,7 @@ impl StaticMode {
             StaticMode::ProtectionDoesntRemoveControlledAttachments => {
                 StaticModeKind::ProtectionDoesntRemoveControlledAttachments
             }
+            StaticMode::ProtectionDoesntRemoveAuras => StaticModeKind::ProtectionDoesntRemoveAuras,
             StaticMode::Other(..) => StaticModeKind::Other,
         }
     }
@@ -2436,6 +2444,7 @@ impl StaticMode {
             | StaticMode::LegendRuleDoesntApply
             | StaticMode::ProtectionDoesntRemoveThisAura
             | StaticMode::ProtectionDoesntRemoveControlledAttachments
+            | StaticMode::ProtectionDoesntRemoveAuras
             | StaticMode::SpeedCanIncreaseBeyondFour
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::SkipStep { .. }
@@ -2802,6 +2811,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::ProtectionDoesntRemoveControlledAttachments => {
                 write!(f, "ProtectionDoesntRemoveControlledAttachments")
+            }
+            StaticMode::ProtectionDoesntRemoveAuras => {
+                write!(f, "ProtectionDoesntRemoveAuras")
             }
             StaticMode::SpeedCanIncreaseBeyondFour => write!(f, "SpeedCanIncreaseBeyondFour"),
             StaticMode::DefilerCostReduction { color, .. } => {
@@ -3254,6 +3266,7 @@ impl FromStr for StaticMode {
             "ProtectionDoesntRemoveControlledAttachments" => {
                 StaticMode::ProtectionDoesntRemoveControlledAttachments
             }
+            "ProtectionDoesntRemoveAuras" => StaticMode::ProtectionDoesntRemoveAuras,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
             // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
             "IgnoreLandwalkForBlocking" => {

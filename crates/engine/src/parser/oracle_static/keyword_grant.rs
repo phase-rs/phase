@@ -1406,11 +1406,14 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         // inner " and " that would otherwise fracture the sentence into bogus
         // keyword legs. Gate the peel on a *recognized* exemption
         // (`parse_protection_attachment_exemption_trailing`), NOT on the mere
-        // presence of "doesn't remove": an unrecognized "... doesn't remove
-        // Auras." tail (Spectra Ward) must stay glued so its "protection from
-        // each color" keyword keeps its existing single-grant lowering instead of
-        // being cleaned into the five-color fan-out. This PR adds exemption
-        // statics; it must not alter Spectra Ward's protection parse.
+        // presence of "doesn't remove": an UNRECOGNIZED trailing sentence must
+        // stay glued so it can't clean an unrelated keyword clause. Each modeled
+        // exemption form (this-Aura, controlled-attachments, all-Auras) IS
+        // recognized, so its tail peels and the recovered keyword clause lowers
+        // normally — for Spectra Ward that means "protection from each color"
+        // correctly fans into the five WUBRG grants (the pre-fix baseline emitted
+        // the inert `Protection(CardType("each color"))` because the glued tail
+        // blocked the fan-out) plus the `ProtectionDoesntRemoveAuras` static.
         let (keyword_only, trailing_exemption) =
             match super::oracle_nom::bridge::split_once_on_lower(
                 keyword_text,
@@ -1596,6 +1599,13 @@ pub(crate) fn push_grant_clause_modifications(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn parse_protection_attachment_exemption_trailing_for_test(
+    text: &str,
+) -> Option<StaticMode> {
+    parse_protection_attachment_exemption_trailing(text)
+}
+
 fn parse_protection_attachment_exemption_trailing(text: &str) -> Option<StaticMode> {
     let lower = text.trim().to_ascii_lowercase();
     let mut this_aura = alt((
@@ -1615,6 +1625,25 @@ fn parse_protection_attachment_exemption_trailing(text: &str) -> Option<StaticMo
     ));
     if controlled.parse(lower.as_str()).is_ok() {
         return Some(StaticMode::ProtectionDoesntRemoveControlledAttachments);
+    }
+    // CR 702.16n (all-Auras form): "This effect doesn't remove Auras" (Spectra
+    // Ward) — the granted protection keeps EVERY already-attached Aura of the
+    // quality attached, not just the source Aura or controlled ones. This tag is
+    // a PREFIX of the controlled form above ("... Auras and Equipment you
+    // control") and of Guardian Beast's non-protection "... Auras already
+    // attached to those artifacts", so it is matched LAST and ONLY when it is the
+    // complete trailing sentence (nothing but end punctuation follows) — that
+    // end-anchor is what keeps Guardian Beast (and the controlled form) out.
+    let mut all_auras = alt((
+        tag::<_, _, OracleError<'_>>("this effect doesn't remove auras"),
+        tag("this effect does not remove auras"),
+        tag("doesn't remove auras"),
+        tag("does not remove auras"),
+    ));
+    if let Ok((rest, _)) = all_auras.parse(lower.as_str()) {
+        if rest.trim().trim_end_matches('.').trim().is_empty() {
+            return Some(StaticMode::ProtectionDoesntRemoveAuras);
+        }
     }
     None
 }

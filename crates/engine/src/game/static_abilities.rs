@@ -224,6 +224,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         StaticMode::ProtectionDoesntRemoveControlledAttachments,
         handle_rule_mod,
     );
+    registry.insert(StaticMode::ProtectionDoesntRemoveAuras, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."

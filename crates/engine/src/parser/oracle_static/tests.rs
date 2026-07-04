@@ -22213,39 +22213,59 @@ fn count_protection_grants(mods: &[ContinuousModification]) -> usize {
         .count()
 }
 
-/// CR 702.16 (issue #4964 review): the Benevolent Blessing trailing-prose
-/// exemption splitter must NOT change the parse of a sibling protection grant
-/// whose trailing sentence is NOT a recognized attachment exemption. This uses
-/// Spectra Ward's *production* Oracle line verbatim (MTGJSON `AtomicCards`:
-/// "gets +2/+2 and has protection from each color. This effect doesn't remove
-/// Auras." + reminder) through the production static-line entry — the earlier
-/// fragment test hid the regression because it never exercised the "each color"
-/// fan-out that the exemption peel was inadvertently unblocking. The unrecognized
-/// "... doesn't remove Auras." tail must stay glued so this still lowers to the
-/// same single protection grant as `origin/main` (never the five-color WUBRG
-/// fan-out), and emits NO attachment-exemption static. (fail-if-reverted:
-/// peeling on mere "doesn't remove" reverts this to the fanned-out set.)
+/// CR 702.16n (issue #4964 review): Spectra Ward's "This effect doesn't remove
+/// Auras" is the all-Auras exemption form — it must lower to the
+/// `ProtectionDoesntRemoveAuras` static AND recover the correct protection parse.
+/// This uses Spectra Ward's *production* Oracle line verbatim (MTGJSON
+/// `AtomicCards`: "gets +2/+2 and has protection from each color. This effect
+/// doesn't remove Auras." + reminder) through the production static-line entry.
+///
+/// Before this fix the glued trailing sentence blocked the "each color" fan-out
+/// and the line lowered to a single inert `Protection(CardType("each color"))`
+/// grant (no real color protection, no exemption). Recognizing the all-Auras
+/// exemption peels the tail, so the recovered "protection from each color"
+/// correctly fans into the five WUBRG grants (CR 105.2) and the exemption static
+/// is emitted. (fail-if-reverted: dropping the all-Auras form reverts this to the
+/// single inert CardType grant with no exemption.)
 #[test]
-fn spectra_ward_production_line_protection_not_duplicated_by_exemption_splitter() {
+fn spectra_ward_production_line_emits_all_auras_exemption() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
     let mods = production_line_modifications(
         "Enchanted creature gets +2/+2 and has protection from each color. This effect doesn't remove Auras. (It can't be blocked, targeted, or dealt damage by anything that's white, blue, black, red, or green.)",
     );
+    let prot: Vec<_> = mods
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(pt),
+            } => Some(pt.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        count_protection_grants(&mods),
-        1,
-        "Spectra Ward's production line must keep its single protection grant \
-         (the exemption peel must not unblock the each-color fan-out), got {mods:?}"
+        prot,
+        vec![
+            ProtectionTarget::Color(ManaColor::White),
+            ProtectionTarget::Color(ManaColor::Blue),
+            ProtectionTarget::Color(ManaColor::Black),
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::Color(ManaColor::Green),
+        ],
+        "Spectra Ward's 'protection from each color' must fan into five WUBRG \
+         grants once the all-Auras tail is peeled (never the inert \
+         CardType(\"each color\") grant), got {mods:?}"
     );
     assert!(
-        !mods.iter().any(|m| matches!(
+        mods.iter().any(|m| matches!(
             m,
             ContinuousModification::AddStaticMode {
-                mode: StaticMode::ProtectionDoesntRemoveThisAura
-                    | StaticMode::ProtectionDoesntRemoveControlledAttachments,
+                mode: StaticMode::ProtectionDoesntRemoveAuras,
             }
         )),
-        "Spectra Ward's \"doesn't remove Auras\" is not a modeled attachment \
-         exemption and must emit no exemption static, got {mods:?}"
+        "Spectra Ward's \"This effect doesn't remove Auras\" must emit the \
+         all-Auras exemption static, got {mods:?}"
     );
 }
 
@@ -22283,6 +22303,58 @@ fn benevolent_blessing_production_line_emits_controlled_attachment_exemption() {
         )),
         "expected ProtectionDoesntRemoveControlledAttachments static, got {mods:?}"
     );
+    // The controlled form ("... Auras and Equipment you control ...") must be
+    // matched before the all-Auras prefix — it must NOT also emit the broader
+    // all-Auras exemption.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ProtectionDoesntRemoveAuras,
+            }
+        )),
+        "the controlled-attachment form must not also emit the all-Auras \
+         exemption (ordering/prefix guard), got {mods:?}"
+    );
+}
+
+/// CR 702.16n / CR 702.16p (issue #4964 review): direct coverage of the trailing
+/// SBA-exemption recognizer for all three modeled forms, plus the two negative
+/// guards that keep the all-Auras prefix from over-matching. Exercises the
+/// private `parse_protection_attachment_exemption_trailing` so the end-anchor
+/// (which distinguishes Spectra Ward's terminal "doesn't remove Auras" from
+/// Guardian Beast's "doesn't remove Auras already attached to those artifacts"
+/// and from the controlled-attachment form) is locked in independently of the
+/// larger keyword-grant pipeline.
+#[test]
+fn protection_attachment_exemption_trailing_forms() {
+    use crate::parser::oracle_static::keyword_grant::parse_protection_attachment_exemption_trailing_for_test as parse;
+
+    assert_eq!(
+        parse("This effect doesn't remove this Aura."),
+        Some(StaticMode::ProtectionDoesntRemoveThisAura),
+    );
+    assert_eq!(
+        parse("This effect doesn't remove Auras and Equipment you control that are already attached to it."),
+        Some(StaticMode::ProtectionDoesntRemoveControlledAttachments),
+    );
+    assert_eq!(
+        parse("This effect doesn't remove Auras."),
+        Some(StaticMode::ProtectionDoesntRemoveAuras),
+    );
+    assert_eq!(
+        parse("This effect does not remove Auras"),
+        Some(StaticMode::ProtectionDoesntRemoveAuras),
+    );
+    // Guardian Beast: "doesn't remove Auras already attached to those artifacts"
+    // is a different (non-protection) clause; the end-anchor must reject it so it
+    // is NOT read as the all-Auras protection exemption.
+    assert_eq!(
+        parse("This effect doesn't remove Auras already attached to those artifacts."),
+        None,
+    );
+    // Unrelated trailing prose never matches.
+    assert_eq!(parse("Draw a card."), None);
 }
 
 /// CR 702.16n (issue #4964): the *production* Ward of Lights / Floating Shield /
