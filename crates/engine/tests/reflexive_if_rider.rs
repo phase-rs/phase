@@ -19,8 +19,9 @@
 
 use engine::game::combat::{AttackerInfo, CombatState};
 use engine::game::scenario::GameScenario;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{DamageRecord, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -135,13 +136,13 @@ fn sold_out_no_clue_when_target_undamaged() {
 
 // ---------------------------------------------------------------------------
 // Consuming Ashes — "If it had mana value 3 or less" (Cmc, LKI snapshot).
-// Surveil is not auto-answered by the driver, so the resolved-and-gated surveil
-// surfaces as a `SurveilChoice` halt; an ungated path resolves to Priority.
+// The scenario driver auto-answers SurveilChoice by keeping all cards on top,
+// so the positive case asserts the surveil EffectResolved event.
 // ---------------------------------------------------------------------------
 
 /// RUNTIME (positive) — CR 202.3 + CR 400.7. A mana-value-2 creature exiled by
 /// Consuming Ashes satisfies "had mana value 3 or less" against its LKI snapshot,
-/// so surveil 2 resolves and the pipeline halts at the SurveilChoice prompt.
+/// so surveil 2 resolves and emits its EffectResolved event.
 #[test]
 fn consuming_ashes_surveils_when_target_mana_value_le_3() {
     let mut scenario = GameScenario::new();
@@ -162,12 +163,15 @@ fn consuming_ashes_surveils_when_target_mana_value_le_3() {
 
     outcome.assert_zone(&[victim], Zone::Exile);
     assert!(
-        matches!(
-            outcome.final_waiting_for(),
-            WaitingFor::SurveilChoice { .. }
-        ),
-        "MV-2 target must gate surveil ON (halt at SurveilChoice), got {:?}",
-        outcome.final_waiting_for()
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Surveil,
+                ..
+            }
+        )),
+        "MV-2 target must gate surveil ON; events = {:?}",
+        outcome.events()
     );
 }
 
