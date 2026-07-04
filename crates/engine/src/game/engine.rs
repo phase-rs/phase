@@ -219,8 +219,16 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
+    state.consumed_before_priority_trigger_events.clear();
     check_actor_authorization(state, actor, &action)?;
-    let mut result = apply_action(state, actor, action, stack_resolution_limit)?;
+    let mut result = match apply_action(state, actor, action, stack_resolution_limit) {
+        Ok(result) => result,
+        Err(err) => {
+            state.consumed_before_priority_trigger_events.clear();
+            return Err(err);
+        }
+    };
+    state.consumed_before_priority_trigger_events.clear();
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -2258,6 +2266,32 @@ fn apply_action(
         )?,
         (
             WaitingFor::ActivationCostOneOfChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
+        // behold cost; record it and resume behold payment.
+        (
+            WaitingFor::CostTypeChoice {
+                player,
+                options,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseOption { choice },
+        ) => casting_costs::handle_cost_type_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            options,
+            &choice,
+            &mut events,
+        )?,
+        (
+            WaitingFor::CostTypeChoice {
                 player,
                 pending_cast,
                 ..

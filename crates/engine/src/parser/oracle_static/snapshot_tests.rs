@@ -866,6 +866,68 @@ fn delney_power_suffix_or_is_not_a_disjunction() {
     );
 }
 
+/// CR 603.2d + CR 301.5a: Cloud, Midgar Mercenary — an inverted "As long as ~
+/// is equipped, if a triggered ability of ~ or an Equipment attached to it
+/// triggers, that ability triggers an additional time." BOTH the affected SCOPE
+/// (self + attached Equipment) and the equipped CONDITION must survive the
+/// inverted-as-long-as split.
+///
+/// Discriminating: before the fix the DoubleTriggers branch dropped `affected`
+/// (SelfRef was rejected as non-restrictive, and "an Equipment attached to it"
+/// had no dedicated arm) AND the split condition was never re-attached
+/// (`condition: None`) — so the doubler over-fired on every trigger and never
+/// gated on being equipped. Both assertions below flip to failure on revert.
+#[test]
+fn cloud_midgar_mercenary_self_and_equipment_doubler_gated_on_equipped() {
+    let def = parse_static_line(
+        "As long as ~ is equipped, if a triggered ability of ~ or an Equipment attached to it triggers, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Cloud");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::Any
+        }
+    );
+    // Gate: the "as long as ~ is equipped" clause must re-attach as the condition.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::SourceIsEquipped),
+        "equipped gate must survive the inverted-as-long-as split"
+    );
+    // Scope: Or[SelfRef, Typed(Equipment, AttachedToSource)].
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of self + attached Equipment, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+    assert!(
+        filters.contains(&TargetFilter::SelfRef),
+        "self-reference disjunct (`~`) missing: {filters:?}"
+    );
+    let equip = filters
+        .iter()
+        .find_map(|f| match f {
+            TargetFilter::Typed(tf) => Some(tf),
+            _ => None,
+        })
+        .expect("attached-Equipment disjunct missing");
+    assert!(
+        equip
+            .type_filters
+            .contains(&TypeFilter::Subtype("Equipment".to_string())),
+        "expected Equipment subtype, got {:?}",
+        equip.type_filters
+    );
+    assert!(
+        equip.properties.contains(&FilterProp::AttachedToSource),
+        "expected AttachedToSource property, got {:?}",
+        equip.properties
+    );
+}
+
 /// CR 603.2d: A three-way Oxford-comma type union exercises the `, or ` and bare
 /// `, ` connector arms of `doubler_disjunct_connector`. No live card uses them
 /// yet, but they share the union path with the two-way "or" form — this locks

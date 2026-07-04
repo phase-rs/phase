@@ -3007,6 +3007,7 @@ mod tests {
                 chosen_attributes: vec![],
                 counters: Default::default(),
                 tapped: false,
+                is_suspected: false,
             },
         });
 

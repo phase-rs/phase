@@ -1424,6 +1424,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { .. } => AbilityCost::Composite {
                 costs: vec![AbilityCost::Tap, AbilityCost::PayLife { amount: life }],
@@ -1535,6 +1536,7 @@ mod tests {
                 count: 0,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { costs: vec![] },
             AbilityCost::OneOf { costs: vec![] },

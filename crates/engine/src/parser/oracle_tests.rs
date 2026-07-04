@@ -734,12 +734,12 @@ fn compound_target_player_continuations_share_one_target() {
 
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-    Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange, TargetFilter,
-    TriggerCondition, TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
+    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -5796,6 +5796,81 @@ fn spell_casting_option_parses_trap_alternative_cost() {
         *r.abilities[0].effect,
         Effect::Unimplemented { ref name, .. } if name == "pay"
     ));
+}
+
+// CR 118.9 + CR 601.2b + CR 404.1 + CR 109.5: Ravenous Trap — the leading
+// "If an opponent had three or more cards put into their graveyard from
+// anywhere this turn" gate now decomposes into a typed
+// `ParsedCondition::QuantityComparison` (opponent-owned nontoken cards → any
+// graveyard, GE 3), so the {0} alternative cost is offered when the gate holds.
+// The alt-cost line must be consumed as a casting option (not leak into the
+// ability list as a `PayCost`/"pay" effect); the sole ability is the
+// graveyard-exile effect.
+#[test]
+fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
+    let r = parse(
+        "If an opponent had three or more cards put into their graveyard from anywhere this turn, you may pay {0} rather than pay this spell's mana cost.\nExile target player's graveyard.",
+        "Ravenous Trap",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(
+        r.casting_options[0].cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            },
+        })
+    );
+    match r.casting_options[0].condition.as_ref() {
+        Some(crate::types::ability::ParsedCondition::QuantityComparison {
+            lhs:
+                crate::types::ability::QuantityExpr::Ref {
+                    qty:
+                        crate::types::ability::QuantityRef::ZoneChangeCountThisTurn {
+                            from: None,
+                            to: Some(Zone::Graveyard),
+                            filter: TargetFilter::Typed(filter),
+                        },
+                },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+        }) => {
+            assert!(
+                filter.properties.iter().any(|p| matches!(
+                    p,
+                    crate::types::ability::FilterProp::Owned {
+                        controller: crate::types::ability::ControllerRef::Opponent
+                    }
+                )),
+                "expected Owned(Opponent) filter, got {filter:?}"
+            );
+        }
+        other => panic!("expected opponent-graveyard QuantityComparison GE 3, got {other:?}"),
+    }
+    // The sole ability is the graveyard-exile, not a leaked pay effect.
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        !matches!(*r.abilities[0].effect, Effect::PayCost { .. }),
+        "alt-cost must not leak into abilities as a PayCost effect, got {:?}",
+        r.abilities[0].effect
+    );
+    assert!(
+        !matches!(
+            *r.abilities[0].effect,
+            Effect::Unimplemented { ref name, .. } if name == "pay"
+        ),
+        "alt-cost must not leak into abilities as an unimplemented pay effect, got {:?}",
+        r.abilities[0].effect
+    );
 }
 
 #[test]
@@ -17482,7 +17557,7 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
     assert!(matches!(
         &*execute.effect,
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         }
@@ -17499,4 +17574,373 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
             ..
         } if name == "fellowship"
     ));
+}
+#[test]
+fn oubliette_host_bound_parse_structure() {
+    let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
+    let parsed = parse_oracle_text(text, "Oubliette", &[], &["Enchantment".to_string()], &[]);
+
+    assert_eq!(parsed.triggers.len(), 1);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("Oubliette ETB trigger must have execute");
+
+    assert!(
+        matches!(
+            *execute.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(_),
+            }
+        ),
+        "expected PhaseOut targeting a creature, got {:?}",
+        execute.effect
+    );
+
+    let lock = execute
+        .sub_ability
+        .as_ref()
+        .expect("PhaseOut must chain to CantPhaseIn lock");
+    match lock.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } => {
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(static_abilities[0].mode, StaticMode::CantPhaseIn);
+            assert_eq!(duration.as_ref(), Some(&Duration::UntilHostLeavesPlay));
+            assert_eq!(target.as_ref(), Some(&TargetFilter::ParentTarget));
+        }
+        other => panic!("expected CantPhaseIn GenericEffect, got {other:?}"),
+    }
+
+    let delayed = lock
+        .sub_ability
+        .as_ref()
+        .expect("CantPhaseIn lock must chain to host-leaves delayed trigger");
+    match delayed.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition,
+            effect,
+            uses_tracked_set: false,
+            ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::SelfRef,
+                }
+            );
+            match effect.effect.as_ref() {
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                } => {
+                    let tap = effect
+                        .sub_ability
+                        .as_ref()
+                        .expect("PhaseIn must tap as it phases in");
+                    assert!(matches!(
+                        tap.effect.as_ref(),
+                        Effect::SetTapState {
+                            target: TargetFilter::ParentTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        }
+                    ));
+                }
+                other => panic!("expected delayed PhaseIn, got {other:?}"),
+            }
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+}
+
+#[test]
+fn phase_out_with_unrelated_tap_does_not_upgrade_to_host_bound_lock() {
+    let text = "When this enchantment enters, target creature phases out. Tap that creature.";
+    let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have execute");
+
+    assert!(matches!(*execute.effect, Effect::PhaseOut { .. }));
+    let has_cant_phase_in_lock = execute.sub_ability.as_ref().is_some_and(|sub| {
+        matches!(
+            sub.effect.as_ref(),
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities
+                .iter()
+                .any(|static_def| static_def.mode == StaticMode::CantPhaseIn)
+        )
+    });
+    assert!(
+        !has_cant_phase_in_lock,
+        "a generic tap after PhaseOut must not be rewritten into a host-bound CantPhaseIn lock"
+    );
+}
+
+#[test]
+fn phase_out_preserves_intervening_tap_before_host_bound_rider() {
+    let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature. Tap that creature as it phases in this way.";
+    let parsed = parse_oracle_text(text, "Test Aura", &[], &["Enchantment".to_string()], &[]);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have execute");
+
+    let lock = execute
+        .sub_ability
+        .as_ref()
+        .expect("host-bound PhaseOut must chain to CantPhaseIn lock");
+    assert!(
+        matches!(
+            lock.effect.as_ref(),
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities
+                .iter()
+                .any(|static_def| static_def.mode == StaticMode::CantPhaseIn)
+        ),
+        "expected CantPhaseIn lock, got {:?}",
+        lock.effect
+    );
+
+    let delayed = lock
+        .sub_ability
+        .as_ref()
+        .expect("CantPhaseIn lock must chain to host-leaves delayed trigger");
+    let intervening_tap = delayed
+        .sub_ability
+        .as_ref()
+        .expect("intervening tap must survive before the delayed PhaseIn rider");
+    assert!(
+        matches!(
+            intervening_tap.effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }
+        ),
+        "intervening parent-target tap must be preserved, got {:?}",
+        intervening_tap.effect
+    );
+    assert!(
+        !intervening_tap
+            .description
+            .as_deref()
+            .is_some_and(|text| text
+                .to_ascii_lowercase()
+                .contains("as it phases in this way")),
+        "intervening tap must not be classified as the host-bound rider"
+    );
+}
+
+/// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden's dies trigger — "Whenever
+/// a creature dies, if it had power greater than Drizzt's power, put a number of
+/// +1/+1 counters on Drizzt equal to the difference." The bare anaphoric "the
+/// difference" has no operands in its own clause; they live on the
+/// intervening-if comparison. The trigger must (1) carry the comparison as its
+/// gate and (2) resolve the count to `QuantityExpr::Difference` of the two power
+/// operands — NOT leave the effect `Unimplemented`.
+#[test]
+fn drizzt_dies_trigger_puts_difference_counters_gated_by_power_comparison() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+    use crate::types::counter::CounterType;
+
+    let r = parse(
+        "Double strike\n\
+         When Drizzt enters, create Guenhwyvar, a legendary 4/1 green Cat creature token with trample.\n\
+         Whenever a creature dies, if it had power greater than Drizzt's power, put a number of +1/+1 counters on Drizzt equal to the difference.",
+        "Drizzt Do'Urden",
+        &[],
+        &["Creature"],
+        &["Elf", "Ranger"],
+    );
+
+    // Locate the dies trigger (the one whose body puts counters).
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+        })
+        .unwrap_or_else(|| panic!("no dies PutCounter trigger parsed: {r:#?}"));
+
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "dies trigger body must not be Unimplemented: {execute:#?}"
+    );
+
+    // (1) Effect: PutCounter of +1/+1 counters on ~ with a Difference count over
+    // the dying creature's (EventSource, LKI) power and the source's power.
+    match &*execute.effect {
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Difference { left, right },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*target, TargetFilter::SelfRef, "counters go on ~ (Drizzt)");
+            assert_eq!(
+                **left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+                "left operand is the dying creature's (LKI) power"
+            );
+            assert_eq!(
+                **right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+                "right operand is the source's power"
+            );
+        }
+        other => panic!("expected PutCounter with Difference count, got {other:#?}"),
+    }
+
+    // (2) Intervening-if gate: the trigger only fires when the dying creature's
+    // power exceeded the source's power.
+    fn find_power_gt(cond: &TriggerCondition) -> Option<(&QuantityExpr, &QuantityExpr)> {
+        match cond {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            } => Some((lhs, rhs)),
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().find_map(find_power_gt)
+            }
+            _ => None,
+        }
+    }
+    let condition = dies
+        .condition
+        .as_ref()
+        .unwrap_or_else(|| panic!("dies trigger must carry the power-comparison gate: {dies:#?}"));
+    let (lhs, rhs) = find_power_gt(condition)
+        .unwrap_or_else(|| panic!("gate must be a GT power comparison: {condition:#?}"));
+    assert_eq!(
+        *lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        }
+    );
+    assert_eq!(
+        *rhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }
+    );
+}
+
+/// CR 122.1 coverage-honesty: a "put ... counters equal to the difference" whose
+/// enclosing trigger has NO "if it had <stat> greater than ~'s <stat>"
+/// comparison has nothing to bind the anaphor to. It must surface as a loud
+/// `Unimplemented` residual (mirroring the draw/lose difference siblings), NOT a
+/// silently-zero `PutCounter` that would read as coverage-supported. Fails on
+/// revert of the unbound-placeholder guard in `lower_trigger_ir`.
+#[test]
+fn difference_counter_anaphor_without_comparison_stays_unimplemented() {
+    let r = parse(
+        "Whenever a creature dies, put a number of +1/+1 counters on ~ equal to the difference.",
+        "Test Card",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no dies trigger parsed: {r:#?}"));
+    let execute = dies.execute.as_ref().expect("dies trigger has a body");
+    assert!(
+        !matches!(&*execute.effect, Effect::PutCounter { .. }),
+        "an unbindable 'the difference' must not survive as a silently-zero PutCounter: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "an unbindable difference anaphor must be a loud Unimplemented residual: {execute:#?}"
+    );
+}
+
+/// CR 122.1 + CR 603.4: Conformer Shuriken class — the "equal to the difference"
+/// put-counter sits under a CLAUSE-LEVEL conditional continuation (a
+/// `sub_ability`), not the trigger's hoisted intervening-if, so there is no
+/// `QuantityComparison` on `def.condition` to bind against. The deferred
+/// placeholder is nested one level below the top-level effect, where the
+/// top-level-only `count_expr_mut` guard cannot see it. The recursive resolver
+/// must still downgrade it to an honest Unimplemented so the card does NOT
+/// appear falsely supported (no surviving `PutCounter { Variable{"difference"} }`
+/// anywhere in the tree).
+#[test]
+fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
+    use crate::types::ability::QuantityRef;
+
+    fn surviving_difference_placeholder(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let here = matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } | Effect::PutCounterAll {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                ..
+            } if name == "difference"
+        );
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(surviving_difference_placeholder)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(surviving_difference_placeholder)
+    }
+
+    let r = parse(
+        "Whenever this creature attacks, tap target creature defending player controls. \
+         If that creature has power greater than this creature's power, put a number of \
+         +1/+1 counters on this creature equal to the difference.",
+        "Conformer Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let trig = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no attacks trigger parsed: {r:#?}"));
+    let execute = trig.execute.as_ref().expect("trigger has a body");
+
+    assert!(
+        !surviving_difference_placeholder(execute),
+        "nested unbindable 'the difference' must not survive as a PutCounter placeholder: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented(execute),
+        "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
+    );
 }

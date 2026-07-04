@@ -410,6 +410,20 @@ pub struct PolicyPenalties {
     /// urgency advantage over waiting. Consumed by `AntiSelfHarmPolicy`.
     #[serde(default = "default_tapped_removal_no_urgency_penalty")]
     pub tapped_removal_no_urgency_penalty: f64,
+    /// CR 119.4: Per-point cost of a self-inflicted pay-life activation cost,
+    /// before runtime life-pressure scaling. Mirrors the `player_impact`
+    /// GainLife/LoseLife weight (0.15). Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_pay_life_per_point")]
+    pub self_cost_pay_life_per_point: f64,
+    /// CR 701.9a: Per-card cost of a self-inflicted discard activation cost (one
+    /// card ≈ one unit of expected value). Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_discard_per_card")]
+    pub self_cost_discard_per_card: f64,
+    /// CR 701.13a: Per-card cost of exiling a card from the AI's own graveyard
+    /// as an activation cost — cheap unless the deck is graveyard-committed.
+    /// Consumed by `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_exile_graveyard_per_card")]
+    pub self_cost_exile_graveyard_per_card: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -468,6 +482,9 @@ impl Default for PolicyPenalties {
             untap_opponent_tapped_penalty: default_untap_opponent_tapped_penalty(),
             untap_untapped_penalty: default_untap_untapped_penalty(),
             tapped_removal_no_urgency_penalty: default_tapped_removal_no_urgency_penalty(),
+            self_cost_pay_life_per_point: default_self_cost_pay_life_per_point(),
+            self_cost_discard_per_card: default_self_cost_discard_per_card(),
+            self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
         }
     }
 }
@@ -486,6 +503,15 @@ fn default_untap_untapped_penalty() -> f64 {
 }
 fn default_tapped_removal_no_urgency_penalty() -> f64 {
     -5.0
+}
+fn default_self_cost_pay_life_per_point() -> f64 {
+    0.15
+}
+fn default_self_cost_discard_per_card() -> f64 {
+    1.0
+}
+fn default_self_cost_exile_graveyard_per_card() -> f64 {
+    0.15
 }
 
 fn default_lethality_tapout_penalty() -> f64 {
@@ -697,6 +723,18 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "tapped_removal_no_urgency_penalty",
         "AntiSelfHarmPolicy magnitude lifted from a raw literal (value-preserving); awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_pay_life_per_point",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_discard_per_card",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_exile_graveyard_per_card",
+        "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
 ];
 

@@ -366,6 +366,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -409,6 +410,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -470,6 +472,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -527,6 +530,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -571,6 +575,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -613,6 +618,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -648,6 +654,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {

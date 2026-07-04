@@ -4,15 +4,36 @@ use crate::game::{mana_payment, mana_sources};
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
     ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
-    ManaSpendRestriction, ObjectScope, ResolvedAbility, TargetRef,
+    ManaSpendRestriction, ObjectScope, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
 };
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
+use crate::types::player::PlayerId;
 
-/// Mana effect: adds mana to the controller's mana pool (CR 106.4).
+/// CR 106.4: The player who receives (and, when a color is chosen, chooses) the
+/// mana produced by an `Effect::Mana`. A subject-led / chosen-player clause
+/// ("Choose a player. That player adds one mana of any color they choose" —
+/// Spectral Searchlight, Stadium Vendors) carries a player context-ref in
+/// `recipient_filter`; a non-player-ref filter or `None` leaves the controller
+/// as the recipient. Shared by the immediate `resolve` path, the color-choice
+/// prompt, and the prompt-completion path so all three agree on the recipient.
+fn mana_effect_recipient(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    recipient_filter: &Option<TargetFilter>,
+) -> PlayerId {
+    match recipient_filter {
+        Some(filter) if filter.is_context_ref() => {
+            super::resolve_player_for_context_ref(state, ability, filter)
+        }
+        _ => ability.controller,
+    }
+}
+
+/// Mana effect: adds mana to the recipient's mana pool (CR 106.4).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -48,8 +69,14 @@ pub fn resolve(
         })
         .flatten();
     if let Some(choice) = mana_choice {
+        // CR 106.4: the player who *chooses* the color is the effect's named
+        // recipient — for "that player adds one mana of any color they choose"
+        // (Spectral Searchlight, Stadium Vendors) that is the chosen player, not
+        // the controller. Resolve it here so the prompt is directed correctly;
+        // `handle_choose_mana_effect` re-derives the same recipient for deposit.
+        let prompt_player = mana_effect_recipient(state, ability, &mana_recipient_filter);
         state.waiting_for = WaitingFor::ChooseManaColor {
-            player: ability.controller,
+            player: prompt_player,
             choice,
             context: ManaChoiceContext::ResolvingEffect(Box::new(ability.clone())),
         };
@@ -107,18 +134,10 @@ pub fn resolve(
                 _ => None,
             })
             .unwrap_or(ability.controller),
-        // CR 106.4 + CR 505.1: A subject-led mana clause routes the mana to the
-        // named player ("the active player adds {C}{C} …" on a Phase trigger —
-        // the active player is the trigger's scoped player). Player-only
-        // context-ref filters (`ScopedPlayer`, …) resolve via
-        // `resolve_player_for_context_ref`; a non-player-ref `target` (Jeska's
-        // Will's `TargetZoneCardCount`) leaves the recipient as the controller.
-        _ => match &mana_recipient_filter {
-            Some(filter) if filter.is_context_ref() => {
-                super::resolve_player_for_context_ref(state, ability, filter)
-            }
-            _ => ability.controller,
-        },
+        // CR 106.4: A subject-led mana clause routes the mana to the named
+        // player ("the active player adds {C}{C} …" on a Phase trigger, "that
+        // player adds one mana of any color" on Spectral Searchlight).
+        _ => mana_effect_recipient(state, ability, &mana_recipient_filter),
     };
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
@@ -162,7 +181,7 @@ pub fn handle_choose_mana_effect(
         restrictions,
         grants,
         expiry,
-        target: _,
+        target,
     } = &ability.effect
     else {
         return Err(crate::game::engine::EngineError::InvalidAction(
@@ -179,7 +198,11 @@ pub fn handle_choose_mana_effect(
             produced,
         );
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
-    let recipient = ability.controller;
+    // CR 106.4: deposit the mana into the effect's named recipient's pool (the
+    // same player the color prompt was directed to in `resolve`), not the
+    // controller. Priority still returns to the controller below — only the mana
+    // is redirected.
+    let recipient = mana_effect_recipient(state, ability, target);
     let produced_mana = !mana_types.is_empty();
     for mana_type in mana_types {
         mana_payment::produce_mana_with_attributes_from_source_quality(
@@ -202,8 +225,15 @@ pub fn handle_choose_mana_effect(
         source_id: ability.source_id,
     });
 
-    state.waiting_for = WaitingFor::Priority { player: recipient };
-    state.priority_player = recipient;
+    // Priority is restored to the ability's controller exactly as before this
+    // change (the recipient computed above governs only where the mana lands, a
+    // player receiving mana does not thereby gain priority). Kept as prior
+    // behavior rather than migrated to the active player (CR 117.3b) to stay
+    // scoped to the mana-recipient fix.
+    state.waiting_for = WaitingFor::Priority {
+        player: ability.controller,
+    };
+    state.priority_player = ability.controller;
     super::drain_pending_continuation(state, events);
     Ok(state.waiting_for.clone())
 }
@@ -841,6 +871,97 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    /// CR 106.4: for "Choose a player. That player adds one mana of any color
+    /// they choose" (Spectral Searchlight, Stadium Vendors) the CHOSEN player —
+    /// not the controller — is both prompted to pick the color and receives the
+    /// mana. Driven through the production `resolve` path (which publishes the
+    /// color prompt) into the `handle_choose_mana_effect` completion, so both the
+    /// prompted player and the deposit are asserted. Revert-probe: without the
+    /// recipient derivation the prompt is directed to P0 and the mana lands in
+    /// P0's pool.
+    #[test]
+    fn chosen_player_mana_prompt_and_deposit_go_to_the_recipient() {
+        let mut state = GameState::new_two_player(42);
+        // The mana source on the battlefield, controlled by P0.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spectral Searchlight".to_string(),
+            Zone::Battlefield,
+        );
+
+        // P0 controls the effect and chose opponent P1 as the recipient.
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        // Production path: `resolve` publishes the color prompt to the CHOSEN player.
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let (prompt, ctx_ability) = match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice,
+                context,
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the chosen player (not the controller) must be prompted to pick the color"
+                );
+                let ctx = match context {
+                    ManaChoiceContext::ResolvingEffect(a) => (**a).clone(),
+                    other => panic!("expected ResolvingEffect context, got {other:?}"),
+                };
+                (choice.clone(), ctx)
+            }
+            other => panic!("expected a ChooseManaColor prompt, got {other:?}"),
+        };
+
+        // Completion: P1 picks Blue; the mana lands in P1's pool, not P0's.
+        let mut events2 = Vec::new();
+        handle_choose_mana_effect(
+            &mut state,
+            &ctx_ability,
+            &prompt,
+            ManaChoice::SingleColor(ManaType::Blue),
+            &mut events2,
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Blue),
+            1,
+            "chosen recipient (P1) must receive the mana"
+        );
+        assert_eq!(state.players[1].mana_pool.total(), 1);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "controller (P0) must NOT receive the chosen player's mana"
+        );
     }
 
     /// CR 106.1 + CR 106.5 + CR 202.2c: `AnyCombinationOfObjectColors` (Omnath,

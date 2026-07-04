@@ -1183,4 +1183,78 @@ mod tests {
             on_stack.ability().map(|a| &a.effect)
         );
     }
+
+    /// Cluster J2 (legal-action-seam regression guard): a planeswalker's
+    /// negative-loyalty ability must NOT be offered when the permanent lacks
+    /// enough loyalty counters to pay it. An Ob-Nixilis-shaped planeswalker
+    /// (loyalty abilities +2 / -2 / -8) at 1 loyalty offers ONLY the +2 at the
+    /// `can_activate_ability_now` legal-action seam — the exact layer whose
+    /// leak the report ("Ob Nixilis used -2 at 1 loyalty") alleged.
+    ///
+    /// CR 606.6: A loyalty ability with a negative loyalty cost can't be
+    /// activated unless the permanent has at least that many loyalty counters on
+    /// it. The +2 reach-guard proves the enumerator reaches each ability and the
+    /// gate is loyalty-sensitive (not blanket-false for negatives), and the
+    /// 2-loyalty boundary case proves -2 flips to payable at exactly 2 (2 >= 2).
+    #[test]
+    fn negative_loyalty_ability_not_offered_below_cost() {
+        use crate::game::casting::can_activate_ability_now;
+
+        fn draw(n: i32) -> Effect {
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: n },
+                target: TargetFilter::Controller,
+            }
+        }
+
+        fn ob_nixilis_abilities() -> Vec<AbilityDefinition> {
+            vec![
+                make_loyalty_ability(2, draw(1)),
+                make_loyalty_ability(-2, draw(2)),
+                make_loyalty_ability(-8, draw(7)),
+            ]
+        }
+
+        let mut state = setup();
+
+        // At 1 loyalty: +2 is always payable; -2 and -8 are not (CR 606.6).
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Ob Nixilis of the Black Oath",
+            1,
+            ob_nixilis_abilities(),
+        );
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw, 0),
+            "+2 must be offered at 1 loyalty (reach-guard: the enumerator reaches this ability)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw, 1),
+            "CR 606.6: -2 must NOT be offered at 1 loyalty (1 < 2)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw, 2),
+            "CR 606.6: -8 must NOT be offered at 1 loyalty (1 < 8)"
+        );
+
+        // Boundary: at exactly 2 loyalty, -2 becomes payable (2 >= 2), proving
+        // the gate is loyalty-sensitive rather than blanket-false for negatives.
+        let pw2 = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Ob Nixilis of the Black Oath",
+            2,
+            ob_nixilis_abilities(),
+        );
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw2, 1),
+            "CR 606.6 boundary: -2 becomes payable at exactly 2 loyalty (2 >= 2)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw2, 2),
+            "CR 606.6: -8 still not payable at 2 loyalty (2 < 8)"
+        );
+    }
 }

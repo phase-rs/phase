@@ -140,7 +140,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     // Parse the leading typed clause. A bare controlled permanent
     // ("a permanent you control", Panharmonicon) adds nothing the controller
     // match doesn't already enforce, so an unrestrictive clause yields `None`.
-    let (first, remainder) = parse_type_phrase(source_phrase);
+    let (first, remainder) = parse_doubler_disjunct(source_phrase);
     if !doubler_source_is_restrictive(&first) {
         return None;
     }
@@ -160,7 +160,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
 
     let mut branches = vec![first];
     loop {
-        let (filter, remainder) = parse_type_phrase(rest);
+        let (filter, remainder) = parse_doubler_disjunct(rest);
         // Each disjunct must independently narrow to a restrictive typed clause.
         // If one does not — e.g. a stray "or" inside an unrelated suffix
         // ("power 4 or greater") split the phrase mid-clause — bail so the
@@ -214,8 +214,44 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
             }) || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        // CR 603.2d: "a triggered ability of ~" names the doubler's own source
+        // object — a self-reference that narrows to exactly one permanent, so it
+        // is restrictive (Cloud, Midgar Mercenary).
+        TargetFilter::SelfRef => true,
         _ => false,
     }
+}
+
+/// CR 603.2d + CR 301.5a: Parse one disjunct of a trigger-doubler's source
+/// phrase, handling the two source-relative referents `parse_type_phrase` cannot
+/// express before falling back to it for ordinary typed clauses:
+/// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
+///   "a triggered ability of ~").
+/// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
+///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
+///   `parse_type_phrase` maps "attached to it" to `AttachedToRecipient` (an
+///   enchanted-creature host), which is the wrong referent in a doubler, so this
+///   clause is hand-built.
+fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
+    if let Ok((rest, filter)) = alt((
+        value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+        value(
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Equipment".to_string())
+                    .properties(vec![FilterProp::AttachedToSource]),
+            ),
+            alt((
+                tag("an equipment attached to it"),
+                tag("a equipment attached to it"),
+            )),
+        ),
+    ))
+    .parse(phrase)
+    {
+        return (filter, rest);
+    }
+    parse_type_phrase(phrase)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -255,6 +291,33 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
         .parse(rest)
         .ok()?;
     Some(mode)
+}
+
+/// CR 508.1c: The directional attack restriction (Pramikon, Sky Rampart;
+/// Mystic Barrier; Teyo, Geometric Tactician): "Each player may attack only the
+/// nearest opponent in the [last] chosen direction and planeswalkers controlled
+/// by that opponent." The `opt(tag("last "))` tolerates both the base wording
+/// ("the chosen direction") and Mystic Barrier's re-choosable phrasing ("the
+/// last chosen direction"). The chosen direction is bound separately by the
+/// linked "choose left or right" ability (CR 607.2d); this static is the nullary
+/// marker read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+pub(crate) fn parse_attack_only_neighbor_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("each player may attack only the nearest opponent in the ")
+            .parse(lower)
+            .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("last "))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "chosen direction and planeswalkers controlled by that opponent",
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(StaticMode::AttackOnlyNeighbor)
 }
 
 pub(crate) fn parse_compound_subject_rule_static(

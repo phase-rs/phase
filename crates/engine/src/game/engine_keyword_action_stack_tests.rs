@@ -774,7 +774,9 @@ fn equip_can_be_countered_by_stack_targeting_effect() {
 /// Issue #3660: deferred copy observers must not drop remaining paradigm offers.
 #[test]
 fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
-    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+    use crate::game::triggers::{
+        PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
+    };
     use crate::types::ability::{
         Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     };
@@ -823,6 +825,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
                 die_result: None,
             },
             trigger_events: Vec::new(),
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
         }
     }
 

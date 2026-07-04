@@ -11,11 +11,12 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::identifiers::ObjectId;
 
 /// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
@@ -31,23 +32,16 @@ pub struct ActivationRestrictionStaticGates {
 impl ActivationRestrictionStaticGates {
     pub fn compute(state: &crate::types::game_state::GameState) -> Self {
         crate::game::perf_counters::record_restriction_static_mode_gate_scan();
-        let mut gates = ActivationRestrictionStaticGates {
-            has_modify_activation_limit: false,
-            has_activate_as_instant: false,
-        };
-        for (_, def) in crate::game::functioning_abilities::game_functioning_statics(state) {
-            match def.mode {
-                StaticMode::ModifyActivationLimit { .. } => {
-                    gates.has_modify_activation_limit = true
-                }
-                StaticMode::ActivateAsInstant { .. } => gates.has_activate_as_instant = true,
-                _ => {}
-            }
-            if gates.has_modify_activation_limit && gates.has_activate_as_instant {
-                break;
-            }
+        // Read the two discriminants from the O(1) `StaticModePresence` index (Unit 1)
+        // instead of sweeping `game_functioning_statics`. A post-flush-precise superset:
+        // a spurious `true` falls through to the exact per-ability `check_static_ability`.
+        ActivationRestrictionStaticGates {
+            has_modify_activation_limit: static_kind_present(
+                state,
+                StaticModeKind::ModifyActivationLimit,
+            ),
+            has_activate_as_instant: static_kind_present(state, StaticModeKind::ActivateAsInstant),
         }
-        gates
     }
 }
 
