@@ -14,7 +14,8 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, DamageContextSnapshot, Effect, ExcessRecipient, QuantityExpr,
     QuantityRef, ReplacementDefinition, TargetFilter, TargetRef,
 };
-use engine::types::game_state::WaitingFor;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -204,16 +205,16 @@ fn gain_life_doubler() -> ReplacementDefinition {
     ))
 }
 
-/// T13 — CR 120.4a + CR 614.7: the excess redirect must survive a lifelink
-/// life-gain replacement *choice* pause. P0 controls two life-gain doublers, so
-/// the lifelink gain surfaces a CR 616.1 ordering choice and the resolution
-/// pauses. Because the redirect now runs BEFORE the lifelink gain, the excess is
-/// already dealt to the creature's controller (P1 loses 2) at the pause —
-/// previously the pause returned before the redirect and the excess was never
-/// dealt. The run halts on the pending replacement choice rather than resolving
-/// clean, which is exactly the pause this guards.
+/// T13 — CR 120.4a + CR 614.7 + CR 702.15b: a lifelink life-gain replacement
+/// *choice* must not drop any lifelink portion when the source has the excess
+/// rider. P0 controls two "gain twice that much life" replacements, so the single
+/// combined lifelink gain (creature lethal 2 + redirected 2 = 4) surfaces a CR
+/// 616.1 ordering choice. Driving *through* the choice, P0 must gain the full
+/// total (4 doubled twice = 16) and P1 must take the redirected excess (2). Before
+/// the single-combined-gain model, the redirected leg's own lifelink could pause
+/// and the primary leg's lifelink was dropped.
 #[test]
-fn t13_lifelink_life_gain_replacement_choice_still_redirects_excess() {
+fn t13_lifelink_replacement_choice_resolves_full_combined_total() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let creature = scenario.add_creature(P1, "Victim", 2, 2).id();
@@ -230,16 +231,66 @@ fn t13_lifelink_life_gain_replacement_choice_still_redirects_excess() {
         b.id()
     };
     let mut runner = scenario.build();
-    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
-    // The excess (2) was redirected to P1 before the lifelink gain paused.
-    outcome.assert_life_delta(P1, -2);
-    // Reach-guard (non-vacuous): the lifelink gain genuinely PAUSED — P0 has not
-    // gained any life yet (the CR 616.1 ordering choice is still pending), so the
-    // -2 above is the redirect surviving the pause, not a clean resolution.
-    outcome.assert_life_delta(P0, 0);
+    let p0_before = runner.state().players[0].life;
+    let p1_before = runner.state().players[1].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free lifelink Flame Spill must be accepted");
+
+    // Drive every prompt to resolution: pick the damage target, then order the two
+    // life-gain doublers each time the combined lifelink gain surfaces the CR 616.1
+    // ordering choice, passing priority otherwise.
+    let mut saw_replacement_choice = false;
+    for _ in 0..32 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(creature)],
+                })
+                .map(|_| ())
+                .expect("targeting the creature must succeed"),
+            WaitingFor::ReplacementChoice { .. } => {
+                saw_replacement_choice = true;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .map(|_| ())
+                    .expect("ordering a life-gain doubler must resolve the choice");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("unexpected prompt while resolving lifelink Flame Spill: {other:?}"),
+        }
+    }
+
     assert!(
-        !matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "the lifelink life-gain replacement choice should still be pending, not resolved to priority"
+        saw_replacement_choice,
+        "the combined lifelink gain must surface the CR 616.1 ordering choice"
+    );
+    // The redirected excess (2) was dealt to the creature's controller.
+    assert_eq!(
+        runner.state().players[1].life - p1_before,
+        -2,
+        "P1 takes the excess"
+    );
+    // The single combined lifelink (2 + 2 = 4) resolved through the choice and BOTH
+    // doublers applied (4 -> 8 -> 16); the primary leg's lifelink was not dropped.
+    assert_eq!(
+        runner.state().players[0].life - p0_before,
+        16,
+        "P0 gains the full combined lifelink total (4 doubled twice), not just the redirect leg"
     );
 }
 
