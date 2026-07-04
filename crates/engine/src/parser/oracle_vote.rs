@@ -27,12 +27,18 @@ use nom::combinator::{map, opt, success, value};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter, TargetSelectionMode, VoteTally, VoterScope,
+    AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef, Duration,
+    Effect, PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    TargetSelectionMode, TieResolution, VoteSubject, VoteTally, VoteVisibility, VoterScope,
 };
+use crate::types::keywords::Keyword;
+use crate::types::zones::{EtbTapState, Zone};
 
-use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_keyword::parse_keyword_from_oracle;
+use super::oracle_target::parse_target;
+use super::oracle_util::SELF_REF_TYPE_PHRASES;
 
 /// Detect and parse the entire Council's-dilemma vote block. Returns a single
 /// `AbilityDefinition` whose `effect` is `Effect::Vote` populated with the
@@ -50,19 +56,52 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     // `tag_no_case` in `parse_each_player_votes_clause` short-circuits on the
     // first byte mismatch and no allocation is ever performed.
     let (i, starting_with) = parse_starting_with(text).unwrap_or((text, ControllerRef::You));
-    // Phase 2: opener clause. Two shapes covered:
-    //   * "each player votes for <a> or <b>."         → VoterScope::AllPlayers
-    //   * "each player may vote for <a> or <b>."      → VoterScope::AllPlayers
-    //   * "each player chooses <a> or <b>."           → VoterScope::AllPlayers
-    //   * "each opponent chooses <a> or <b>."         → VoterScope::EachOpponent
-    //   * "each opponent may choose <a> or <b>."      → VoterScope::EachOpponent
+    // Phase 2: opener clause. Shapes covered (see `parse_each_player_votes_clause`):
+    //   * "each player votes for <a> or <b>."           → AllPlayers / Open
+    //   * "each player secretly votes for <a> or <b>."  → AllPlayers / Secret
+    //   * "each player may vote for <a> or <b>."        → AllPlayers / Open
+    //   * "each player chooses <a> or <b>."             → AllPlayers / Open
+    //   * "each opponent chooses <a> or <b>."           → EachOpponent / Open
+    //   * "each opponent may choose <a> or <b>."        → EachOpponent / Open
     // CR 701.38c: "chooses" patterns aren't strict votes per the rules but
     // are mechanically identical for the engine's purposes — the resolver
     // tallies and fans out per-choice effects the same way.
-    let (i, choices, voter_scope) = parse_each_player_votes_clause(i)?;
-    if choices.len() < 2 {
-        return None;
-    }
+    let ParsedVoteOpener {
+        rest: i,
+        choice_text,
+        voter_scope,
+        visibility,
+    } = parse_each_player_votes_clause(i)?;
+    // CR 701.38b: When the "choice list" is a target phrase (e.g. "a nonland
+    // permanent you don't control") rather than an "<a> or <b>" word list,
+    // `split_choices` fails — route to the object-pool vote path (Council's
+    // Judgment, Prime Minister's Cabinet Room).
+    let choices = match split_choices(choice_text) {
+        Some(choices) if choices.len() >= 2 => choices,
+        // Card-name / choice-name collision: a card named after its own vote
+        // choices (Truth or Consequences → choices "truth or consequences")
+        // has its choice list normalized to the self-reference `~`. Recover the
+        // named choices from the body's vote-count references
+        // ("the number of <x> votes" / "for each <y> vote").
+        _ if choice_text.trim() == "~" => {
+            let recovered = recover_choices_from_body(i);
+            if recovered.len() >= 2 {
+                recovered
+            } else {
+                return None;
+            }
+        }
+        _ => {
+            return parse_object_vote_block(
+                i,
+                choice_text,
+                kind,
+                starting_with,
+                voter_scope,
+                visibility,
+            )
+        }
+    };
     // CR 701.38a: Will-of-the-council threshold votes. Shape:
     //   "If <a> gets more votes, <effect-a>. If <b> gets more votes or the
     //    vote is tied, <effect-b>."
@@ -73,9 +112,28 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     // Council's-dilemma per-choice parser. Covers Plea for Power, Split
     // Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, and the
     // Trial of a Time Lord IV chapter clause.
-    if let Some(def) =
-        parse_threshold_vote_clauses(i, &choices, kind, starting_with.clone(), voter_scope)
-    {
+    if let Some(def) = parse_threshold_vote_clauses(
+        i,
+        &choices,
+        kind,
+        starting_with.clone(),
+        voter_scope,
+        visibility,
+    ) {
+        return Some(def);
+    }
+    // CR 701.38a: "...or tied for most votes" all-tied outcome over named
+    // choices (Council Guardian: "This creature gains protection from each
+    // color with the most votes or tied for most votes"). Tried after the
+    // single-winner threshold shape and before the per-vote fan-out loop.
+    if let Some(def) = parse_all_tied_vote_clause(
+        i,
+        &choices,
+        kind,
+        starting_with.clone(),
+        voter_scope,
+        visibility,
+    ) {
         return Some(def);
     }
     // Phase 3: per-choice clauses. Three shapes covered, dispatched by scope:
@@ -96,6 +154,23 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     let mut pre_vote_choose: Option<ChoiceType> = None;
     let mut walk = i.trim_start();
     while !walk.is_empty() {
+        // CR 701.38 (Council's dilemma) + CR 608.2c: conjoined dual-suffix
+        // clause — "Each [subject] [verb-A] for each <a> vote and [verb-B] for
+        // each <b> vote" (Capital Punishment). Tried before the single-suffix
+        // branch; only fires when ≥2 "for each <choice> vote" suffixes are
+        // joined by "and", so the single-suffix + random-setup path (Truth or
+        // Consequences) stays untouched. Fills every conjunct's slot at once.
+        if let Some((rest, pairs)) = parse_conjoined_suffix_clauses(walk, &choices, kind) {
+            for (idx, parsed) in pairs {
+                if slots[idx].is_some() {
+                    // Same choice referenced twice — shape we don't model.
+                    return None;
+                }
+                slots[idx] = Some(parsed);
+            }
+            walk = rest.trim_start();
+            continue;
+        }
         // Each iteration consumes exactly one per-choice clause. Shapes are
         // tried in priority order (ControllerLabels is mutually exclusive with
         // the other two):
@@ -152,7 +227,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             // effect with the wrong (placeholder) count.
             *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
                 qty: QuantityRef::VoteCount {
-                    choice_index: idx as u8,
+                    choice_index: idx as u32,
                 },
             }
             .scaled_by(multiplier);
@@ -172,11 +247,8 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             //   friend-or-foe; no explicit CR section) routes to every
             //   labeled player, re-binding the sub-effect controller to
             //   each labeled player so "they" / "their" refers correctly.
-            //
-            // u8 fits trivially: vote-choice cardinality is bounded by Magic
-            // card design (no card has ever exceeded ~5 choices).
             parsed.player_scope = Some(PlayerFilter::VotedFor {
-                choice_index: idx as u8,
+                choice_index: idx as u32,
             });
         }
         slots[idx] = Some(Box::new(parsed));
@@ -193,6 +265,8 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             starting_with,
             voter_scope,
             tally_mode: VoteTally::PerVote,
+            subject: VoteSubject::Named,
+            visibility,
         },
     );
     match pre_vote_choose {
@@ -241,14 +315,16 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
 /// to its named choice's slot.
 ///
 /// Returns a synthesized `Effect::Vote` with `tally_mode =
-/// VoteTally::Threshold`, or `None` when the body is not in this shape (so the
-/// caller falls through to the classic per-vote fan-out parser).
+/// VoteTally::TopVotes { tie: TieResolution::Breaker(tie_breaker_index) }`, or
+/// `None` when the body is not in this shape (so the caller falls through to the
+/// classic per-vote fan-out parser).
 fn parse_threshold_vote_clauses(
     input: &str,
     choices: &[String],
     kind: AbilityKind,
     starting_with: ControllerRef,
     voter_scope: VoterScope,
+    visibility: VoteVisibility,
 ) -> Option<AbilityDefinition> {
     // Per-choice effect slots, parallel to `choices`, plus the discovered
     // tie-breaker index. Each named clause binds to its choice's slot; unlisted
@@ -311,9 +387,378 @@ fn parse_threshold_vote_clauses(
             per_choice_effect,
             starting_with,
             voter_scope,
-            tally_mode: VoteTally::Threshold { tie_breaker_index },
+            tally_mode: VoteTally::TopVotes {
+                tie: TieResolution::Breaker(tie_breaker_index),
+            },
+            subject: VoteSubject::Named,
+            visibility,
         },
     ))
+}
+
+/// CR 701.38a: Parse the "...or tied for most votes" all-tied outcome over named
+/// choices. Shape (Council Guardian):
+///
+/// ```text
+/// This creature gains protection from each color with the most votes or tied
+/// for most votes.
+/// ```
+///
+/// The outcome sentence carries a self-reference grant template
+/// (`[self-ref] gains <keyword> from each <characteristic>`) followed by the
+/// "with the most votes [or tied for most votes]" suffix. For each named choice
+/// the `each <characteristic>` distributor is substituted with that choice and
+/// the per-choice effect is built via the standard keyword building block
+/// (`parse_keyword_from_oracle`), wrapped in a continuous self-grant.
+///
+/// CR 611.2a: the grant has no stated duration, so it lasts until the end of the
+/// game (`Duration::Permanent`) — NOT the `UntilEndOfTurn` keyword-grant default.
+/// CR 611.2b ("for as long as …") is a different case and is not used here.
+///
+/// Returns `None` (so dispatch falls through) when the outcome is not in this
+/// self-reference keyword-grant shape.
+fn parse_all_tied_vote_clause(
+    input: &str,
+    choices: &[String],
+    kind: AbilityKind,
+    starting_with: ControllerRef,
+    voter_scope: VoterScope,
+    visibility: VoteVisibility,
+) -> Option<AbilityDefinition> {
+    let (sentence, _rest) = read_sentence(input);
+    // Locate the "with the most votes [or tied for most votes]" suffix; `head`
+    // is the grant template preceding it.
+    let (head, (), tail) = scan_preceded(sentence, parse_most_votes_suffix)?;
+    if !tail.trim().is_empty() {
+        // Reject trailing text we are not modeling (keeps the detector tight).
+        return None;
+    }
+    let head = head.trim_end();
+
+    // CR 611.2a: detect any explicit trailing duration; absent → end of game.
+    let (head_no_duration, explicit_duration) = strip_trailing_duration(head);
+
+    // Split "[self-ref] gains <keyword-template>" → (subject, keyword template).
+    let (subject, keyword_template) = split_self_grant(head_no_duration)?;
+    if !is_self_reference(subject.trim()) {
+        // Only a self-reference grant (this creature gains …) is modeled here.
+        return None;
+    }
+
+    // For each named choice, substitute the `each <characteristic>` distributor
+    // with the choice word and parse the resulting keyword phrase.
+    let mut per_choice_effect: Vec<Box<AbilityDefinition>> = Vec::with_capacity(choices.len());
+    for choice in choices {
+        let phrase = substitute_each_noun(keyword_template, choice)?;
+        let keyword = parse_keyword_from_oracle(&phrase.to_lowercase())?;
+        per_choice_effect.push(Box::new(build_self_keyword_grant(
+            kind,
+            keyword,
+            explicit_duration.clone(),
+            &phrase,
+        )));
+    }
+
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::Vote {
+            choices: choices.to_vec(),
+            per_choice_effect,
+            starting_with,
+            voter_scope,
+            tally_mode: VoteTally::TopVotes {
+                tie: TieResolution::AllTied,
+            },
+            subject: VoteSubject::Named,
+            visibility,
+        },
+    ))
+}
+
+/// CR 701.38b: Parse an object-pool vote (Council's Judgment, Prime Minister's
+/// Cabinet Room). The "choice list" was a target phrase (so `split_choices`
+/// failed); parse it into a `candidate_filter`, then parse the
+/// "Exile each <noun> with the most votes [or tied for most votes]" outcome
+/// sentence into a single-target exile `outcome_template`.
+///
+/// `choice_text` is the raw target phrase ("a nonland permanent you don't
+/// control"); `input` is the remainder after the opener sentence.
+///
+/// Returns `None` (strict failure → falls through) when the candidate phrase
+/// does not fully parse, or the outcome is not a top-tally exile.
+fn parse_object_vote_block(
+    input: &str,
+    choice_text: &str,
+    kind: AbilityKind,
+    starting_with: ControllerRef,
+    voter_scope: VoterScope,
+    visibility: VoteVisibility,
+) -> Option<AbilityDefinition> {
+    // Strip a leading article so `parse_target` sees the bare descriptor.
+    let candidate_phrase = strip_leading_article(choice_text.trim());
+    let (candidate_filter, rest) = parse_target(candidate_phrase);
+    if !rest.trim().is_empty() {
+        // The candidate phrase was not fully classified — do not mis-parse.
+        return None;
+    }
+
+    // Outcome sentence: "Exile each <noun> with the most votes [or tied…]".
+    let (sentence, _rest) = read_sentence(input);
+    let (head, (), tail) = scan_preceded(sentence, parse_most_votes_suffix)?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    // Today every object council vote in this class exiles the winner(s). The
+    // parser is the detector: require the "exile " verb via a combinator. A
+    // non-exile outcome is a strict failure rather than a silent mis-parse.
+    let exile_verb: nom::IResult<&str, &str, OracleError<'_>> =
+        tag_no_case("exile ").parse(head.trim());
+    if exile_verb.is_err() {
+        return None;
+    }
+
+    // CR 701.38b + CR 608.2c: single-target exile. The specific winning object
+    // is injected as `chain.targets[0]` by `resolve_top_votes_tally`, so the
+    // template target is `Any` ("exile it") — the enumeration already applied
+    // `candidate_filter`, and a top tie exiles exactly the tied winners.
+    let exile = Effect::ChangeZone {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Exile,
+        target: TargetFilter::Any,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    };
+    let outcome_template = Box::new(AbilityDefinition::new(kind, exile));
+
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::Vote {
+            choices: Vec::new(),
+            per_choice_effect: Vec::new(),
+            starting_with,
+            voter_scope,
+            tally_mode: VoteTally::TopVotes {
+                tie: TieResolution::AllTied,
+            },
+            subject: VoteSubject::Objects {
+                candidate_filter,
+                outcome_template,
+            },
+            visibility,
+        },
+    ))
+}
+
+/// One filled per-choice slot produced by a conjoined-suffix clause:
+/// `(choice_index, parsed_effect)`.
+type VoteChoiceSlot = (usize, Box<AbilityDefinition>);
+
+/// CR 701.38 + CR 608.2c: Parse a conjoined dual-suffix Council's-dilemma clause
+/// (Capital Punishment): "Each [subject] [verb-A] for each <a> vote and [verb-B]
+/// for each <b> vote." Succeeds only when ≥2 `for each <choice> vote` suffixes
+/// are joined by `and`, so the single-suffix / random-setup path (Truth or
+/// Consequences) is left to `parse_vote_for_each_suffix_clause`.
+///
+/// The shared subject text ("Each opponent ") is prepended to every conjunct so
+/// `parse_effect_chain_with_context` derives a uniform `player_scope` (mirroring
+/// the single-clause path). Each conjunct's count slot is bound to
+/// `QuantityRef::VoteCount { choice_index }` scaled by its per-unit magnitude.
+///
+/// Returns `(remainder, [(choice_index, parsed_def)])`, or `None` when the
+/// clause is not in this conjoined shape.
+fn parse_conjoined_suffix_clauses<'a>(
+    input: &'a str,
+    choices: &[String],
+    kind: AbilityKind,
+) -> Option<(&'a str, Vec<VoteChoiceSlot>)> {
+    let (sentence, rest) = read_sentence(input);
+    // Peel the shared subject prefix.
+    let subj_res: nom::IResult<&str, &str, OracleError<'_>> = alt((
+        tag_no_case("each opponent "),
+        tag_no_case("each other player "),
+        tag_no_case("each player "),
+    ))
+    .parse(sentence);
+    let (after_subject, subject) = subj_res.ok()?;
+
+    let mut pairs: Vec<(usize, Box<AbilityDefinition>)> = Vec::new();
+    let mut remaining = after_subject;
+    loop {
+        // Locate the next "for each <choice> vote[s]" suffix; `head` is the
+        // effect fragment before it.
+        let (head, idx, tail) =
+            scan_preceded(remaining, |i| parse_for_each_vote_suffix(i, choices))?;
+        let head = head.trim();
+        if head.is_empty() {
+            return None;
+        }
+        // Rebuild the conjunct with the shared subject so the chain parser
+        // derives `player_scope` uniformly, then bind the scaled vote count.
+        let conjunct_text = format!("{subject}{head}");
+        let mut parsed =
+            parse_effect_chain_with_context(&conjunct_text, kind, &mut ParseContext::default());
+        bind_vote_count_aggregate(&mut parsed, idx)?;
+        pairs.push((idx, Box::new(parsed)));
+
+        let tail = tail.trim_start();
+        if tail.is_empty() {
+            break;
+        }
+        // Require an " and " connector between conjuncts.
+        let conn: nom::IResult<&str, (), OracleError<'_>> =
+            value((), tag_no_case("and ")).parse(tail);
+        let (after_and, ()) = conn.ok()?;
+        remaining = after_and.trim_start();
+    }
+
+    // Conjoined shape requires ≥2 suffixes; one suffix is the single-suffix
+    // path's job.
+    if pairs.len() < 2 {
+        return None;
+    }
+    Some((rest, pairs))
+}
+
+/// CR 120.1 + CR 701.38: Match a trailing "for each <choice> vote[s]" suffix,
+/// returning the matched choice index. Shared by the single-suffix and
+/// conjoined-suffix clause parsers.
+fn parse_for_each_vote_suffix<'a>(
+    i: &'a str,
+    choices: &[String],
+) -> nom::IResult<&'a str, usize, OracleError<'a>> {
+    let (i, _) = tag_no_case("for each ").parse(i)?;
+    let (i, choice) =
+        take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-').parse(i)?;
+    let idx = match choices.iter().position(|c| c.eq_ignore_ascii_case(choice)) {
+        Some(idx) => idx,
+        None => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )))
+        }
+    };
+    let (i, _) = tag_no_case(" vote").parse(i)?;
+    let (i, _) = opt(tag_no_case("s")).parse(i)?;
+    Ok((i, idx))
+}
+
+/// CR 608.2c: Bind a parsed effect's count slot to
+/// `QuantityRef::VoteCount { choice_index }` scaled by its existing per-unit
+/// `Fixed` magnitude ("deals 3 damage" → 3; "sacrifices a creature" → 1). The
+/// aggregate body resolves once and `resolve_ref` sums the full tally. Returns
+/// `None` (strict failure) when the effect exposes no bindable count slot.
+fn bind_vote_count_aggregate(parsed: &mut AbilityDefinition, idx: usize) -> Option<()> {
+    let per_unit = match parsed.effect.count_expr() {
+        Some(QuantityExpr::Fixed { value }) if *value >= 0 => *value as u32,
+        _ => 1,
+    };
+    *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
+        qty: QuantityRef::VoteCount {
+            choice_index: idx as u32,
+        },
+    }
+    .scaled_by(per_unit);
+    Some(())
+}
+
+/// CR 701.38a: Match a "with the most votes[ or tied for most votes]" outcome
+/// suffix. The optional "or tied for most votes" qualifier is the all-tied
+/// signal; the bare form ("each X with the most votes") is likewise all-that-
+/// tie, so both map to `TieResolution::AllTied` (the single-winner "or the vote
+/// is tied" form is recognized by the distinct "If X gets more votes" threshold
+/// shape, not this suffix). Returns `()` — the caller already knows it is
+/// resolving an all-tied vote.
+fn parse_most_votes_suffix(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (i, _) = tag_no_case("with the most votes").parse(i)?;
+    let (i, _) = opt(tag_no_case(" or tied for most votes")).parse(i)?;
+    Ok((i, ()))
+}
+
+/// Split a "[subject] gains <keyword-template>" grant head into its subject and
+/// keyword-template halves. Accepts "gains"/"gain"/"has" as the grant verb. The
+/// verb is matched as a standalone word at a word boundary (via `scan_preceded`),
+/// so the returned template excludes the verb.
+fn split_self_grant(head: &str) -> Option<(&str, &str)> {
+    for verb in ["gains ", "gain ", "has "] {
+        if let Some((subject, (), template)) = scan_preceded(head, |i| {
+            value((), tag_no_case::<_, _, OracleError<'_>>(verb)).parse(i)
+        }) {
+            let template = template.trim();
+            if !template.is_empty() {
+                return Some((subject.trim(), template));
+            }
+        }
+    }
+    None
+}
+
+/// True when `subject` is a self-reference (`~`, or any
+/// `SELF_REF_TYPE_PHRASES` entry such as "this creature").
+fn is_self_reference(subject: &str) -> bool {
+    let lower = subject.to_lowercase();
+    lower == "~"
+        || SELF_REF_TYPE_PHRASES
+            .iter()
+            .any(|p| lower == *p || lower == format!("{p}s"))
+}
+
+/// Substitute the `each <characteristic>` distributor in a keyword template with
+/// a concrete choice word: "protection from each color" + "blue" → "protection
+/// from blue". Returns `None` when no `each <noun>` distributor is present.
+fn substitute_each_noun(template: &str, choice: &str) -> Option<String> {
+    let (before, _, after_each) = scan_preceded(template, |i| {
+        tag_no_case::<_, _, OracleError<'_>>("each ").parse(i)
+    })?;
+    // Drop the `<noun>` word following "each ".
+    let (_noun, after_noun) = read_word(after_each)?;
+    Some(format!("{before}{choice}{after_noun}"))
+}
+
+/// CR 611.2a + CR 702.16: Build a continuous self-grant of `keyword`. With no
+/// stated duration the grant lasts until the end of the game
+/// (`Duration::Permanent`) — for a `SelfRef` grant this naturally ends when the
+/// host leaves play. An explicit trailing duration (e.g. "until end of turn")
+/// is honored when present.
+fn build_self_keyword_grant(
+    kind: AbilityKind,
+    keyword: Keyword,
+    explicit_duration: Option<Duration>,
+    description: &str,
+) -> AbilityDefinition {
+    AbilityDefinition::new(
+        kind,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(description.to_string())],
+            // CR 611.2a: resolution-set continuous effect, no stated duration →
+            // until end of the game (NOT the EOT keyword-grant default, and NOT
+            // CR 611.2b's "for as long as …" case).
+            duration: Some(explicit_duration.unwrap_or(Duration::Permanent)),
+            target: None,
+        },
+    )
+}
+
+/// Strip a leading "a "/"an " article so a bare descriptor reaches `parse_target`
+/// (which only strips articles before "target").
+fn strip_leading_article(text: &str) -> &str {
+    let res: nom::IResult<&str, (), OracleError<'_>> =
+        value((), alt((tag_no_case("a "), tag_no_case("an ")))).parse(text);
+    match res {
+        Ok((rest, ())) => rest,
+        Err(_) => text,
+    }
 }
 
 /// Parse a single `"If <choice> gets more votes[ or the vote is tied], <effect>."`
@@ -390,68 +835,103 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
     }
 }
 
-/// Parse the opener that precedes the vote choice list. Six shapes:
+/// The parsed result of a vote opener clause: the remainder after the choice
+/// sentence, the raw choice-list text (split into named choices or routed to the
+/// object path by the caller), the voter scope, and the ballot visibility.
+struct ParsedVoteOpener<'a> {
+    rest: &'a str,
+    choice_text: &'a str,
+    voter_scope: VoterScope,
+    visibility: VoteVisibility,
+}
+
+/// Parse the opener that precedes the vote choice list. Shapes:
 ///
-/// | Pattern                                      | `VoterScope`            |
-/// |----------------------------------------------|-------------------------|
-/// | `"each player votes for "`                   | `AllPlayers`            |
-/// | `"each player may vote for "`                | `AllPlayers`            |
-/// | `"each player chooses "`                     | `AllPlayers`            |
-/// | `"each opponent chooses "`                   | `EachOpponent`          |
-/// | `"each opponent may choose "`                | `EachOpponent`          |
-/// | `"for each player, choose "`                 | `ControllerLabels`      |
+/// | Pattern                                      | `VoterScope` / visibility    |
+/// |----------------------------------------------|------------------------------|
+/// | `"each player votes for "`                   | `AllPlayers` / `Open`        |
+/// | `"each player secretly votes for "`          | `AllPlayers` / `Secret`      |
+/// | `"each player may vote for "`                | `AllPlayers` / `Open`        |
+/// | `"each player chooses "`                     | `AllPlayers` / `Open`        |
+/// | `"each opponent chooses "`                   | `EachOpponent` / `Open`      |
+/// | `"each opponent may choose "`                | `EachOpponent` / `Open`      |
+/// | `"for each player, choose "`                 | `ControllerLabels` / `Open`  |
 ///
-/// Returns the unconsumed remainder, the lowercase choice list, and the
-/// resolved voter scope.
+/// Returns a [`ParsedVoteOpener`] carrying the unconsumed remainder, the raw
+/// choice-list text, the resolved voter scope, and the ballot visibility.
 ///
-/// Generalized to N>=2 choices via repeated " or " / ", " separators —
-/// covers cards like Capital Punishment that vote on three options.
+/// The secret opener (Truth or Consequences) is now a first-class branch: the
+/// engine withholds per-ballot `VoteCast` events and scrubs running tallies
+/// until the simultaneous reveal (`VoteVisibility::Secret`).
 ///
 /// The `ControllerLabels` opener is Battlebond's friend-or-foe pattern
 /// (no explicit CR section; resolution follows CR 101.4 APNAP + CR 608.2
 /// general spell resolution). The leading `"for each player, "` is
 /// consumed here (mirroring the `"starting with you, "` handling) so the
 /// chain splitter does not bisect the opener.
-fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>, VoterScope)> {
-    let res: nom::IResult<&str, VoterScope, OracleError<'_>> = alt((
+fn parse_each_player_votes_clause(input: &str) -> Option<ParsedVoteOpener<'_>> {
+    let res: nom::IResult<&str, (VoterScope, VoteVisibility), OracleError<'_>> = alt((
         value(
-            VoterScope::AllPlayers,
+            (VoterScope::AllPlayers, VoteVisibility::Secret),
+            tag_no_case("each player secretly votes for "),
+        ),
+        value(
+            (VoterScope::AllPlayers, VoteVisibility::Open),
             tag_no_case("each player votes for "),
         ),
         value(
-            VoterScope::AllPlayers,
+            (VoterScope::AllPlayers, VoteVisibility::Open),
             tag_no_case("each player may vote for "),
         ),
-        // NOTE: "each player secretly votes for" is intentionally NOT handled here.
-        // Secret-ballot votes (Truth or Consequences, Elrond, Orchard Elemental)
-        // require a separate engine waiting-state so ballots are withheld until
-        // all players have voted. The existing WaitingFor::VoteChoice updates
-        // tallies and emits VoteCast immediately, which would expose each player's
-        // choice before the reveal step — violating the Oracle instruction. These
-        // cards fall through to Effect::Unimplemented until a proper secret-ballot
-        // engine seam is added.
         value(
-            VoterScope::EachOpponent,
+            (VoterScope::EachOpponent, VoteVisibility::Open),
             tag_no_case("each opponent chooses "),
         ),
         value(
-            VoterScope::EachOpponent,
+            (VoterScope::EachOpponent, VoteVisibility::Open),
             tag_no_case("each opponent may choose "),
         ),
-        value(VoterScope::AllPlayers, tag_no_case("each player chooses ")),
         value(
-            VoterScope::ControllerLabels,
+            (VoterScope::AllPlayers, VoteVisibility::Open),
+            tag_no_case("each player chooses "),
+        ),
+        value(
+            (VoterScope::ControllerLabels, VoteVisibility::Open),
             tag_no_case("for each player, choose "),
         ),
     ))
     .parse(input);
-    let (rest, voter_scope) = res.ok()?;
+    let (rest, (voter_scope, visibility)) = res.ok()?;
 
-    // Read the choice list: "<a>[, <b>][, <c>] or <last>." — allow "or"
-    // separator for the last item, comma between earlier items.
-    let (after, choice_list_text) = read_until_period(rest)?;
-    let choices = split_choices(choice_list_text)?;
-    Some((after, choices, voter_scope))
+    // Read the choice-list, then the caller splits it into named choices or
+    // routes a target phrase to the object-pool vote path.
+    //
+    // The secret opener ends the choice list with ", then those votes are
+    // revealed" (Truth or Consequences: "...votes for truth or consequences,
+    // then those votes are revealed.") — there is no period before the reveal
+    // marker. Open openers end the choice list at the sentence period.
+    let (after, choice_text) = match visibility {
+        VoteVisibility::Secret => {
+            let (before, _, after_reveal) = scan_preceded(rest, |i| {
+                tag_no_case::<_, _, OracleError<'_>>("then those votes are revealed").parse(i)
+            })?;
+            // allow-noncombinator: structural list-tail trim on a pre-extracted clause
+            let choice_text = before.trim().trim_end_matches(',').trim();
+            // allow-noncombinator: structural sentence-boundary trim after the reveal marker
+            let after = after_reveal
+                .trim_start()
+                .trim_start_matches('.')
+                .trim_start();
+            (after, choice_text)
+        }
+        VoteVisibility::Open => read_until_period(rest)?,
+    };
+    Some(ParsedVoteOpener {
+        rest: after,
+        choice_text,
+        voter_scope,
+        visibility,
+    })
 }
 
 /// Parse a single "For each ..." clause. Two shapes are accepted:
@@ -735,24 +1215,7 @@ fn parse_vote_for_each_suffix_clause<'a>(
     // 2. Read the effect sentence and locate the trailing "for each <choice>
     //    vote" tally at a word boundary; it must be the sentence suffix.
     let (sentence, rest) = read_sentence(after_setup);
-    let suffix = |i: &'a str| -> nom::IResult<&'a str, usize, OracleError<'a>> {
-        let (i, _) = tag_no_case("for each ").parse(i)?;
-        let (i, choice) =
-            take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-').parse(i)?;
-        let idx = match choices.iter().position(|c| c.eq_ignore_ascii_case(choice)) {
-            Some(idx) => idx,
-            None => {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    i,
-                    nom::error::ErrorKind::Verify,
-                )))
-            }
-        };
-        let (i, _) = tag_no_case(" vote").parse(i)?;
-        let (i, _) = opt(tag_no_case("s")).parse(i)?;
-        Ok((i, idx))
-    };
-    let (head, idx, tail) = scan_preceded(sentence, suffix)?;
+    let (head, idx, tail) = scan_preceded(sentence, |i| parse_for_each_vote_suffix(i, choices))?;
     if !tail.trim().is_empty() {
         return None;
     }
@@ -762,22 +1225,11 @@ fn parse_vote_for_each_suffix_clause<'a>(
     }
 
     // 3. Parse the effect head and bind the scaled vote count into its magnitude.
+    //    CR 608.2c: an effect exposing no bindable count slot is a strict-failure
+    //    (fall through via `?`) rather than a silent mis-parse — mirrors the
+    //    prefix aggregate clause.
     let mut parsed = parse_effect_chain_with_context(head, kind, &mut ParseContext::default());
-    // Per-unit multiplier: the parsed effect's existing Fixed count/amount is the
-    // per-vote magnitude ("deals 3 damage" → 3; "create a Treasure token" → 1).
-    let per_unit = match parsed.effect.count_expr() {
-        Some(QuantityExpr::Fixed { value }) if *value >= 0 => *value as u32,
-        _ => 1,
-    };
-    // CR 608.2c: an effect exposing no bindable count slot is a strict-failure
-    // (fall through via `?`) rather than a silent mis-parse with the placeholder
-    // magnitude — mirrors the prefix aggregate clause.
-    *parsed.effect.count_expr_mut()? = QuantityExpr::Ref {
-        qty: QuantityRef::VoteCount {
-            choice_index: idx as u8,
-        },
-    }
-    .scaled_by(per_unit);
+    bind_vote_count_aggregate(&mut parsed, idx)?;
 
     // 4. When a random "choose <player>" setup was hoisted to wrap the Vote, the
     //    "that player" anaphor (lowered to TriggeringPlayer) refers to the
@@ -851,6 +1303,41 @@ fn read_word(input: &str) -> Option<(&str, &str)> {
 fn read_until_period(input: &str) -> Option<(&str, &str)> {
     let idx = input.find('.')?;
     Some((&input[idx + 1..], &input[..idx]))
+}
+
+/// CR 701.38: Recover the named vote choices from a vote body's tally
+/// references when the opener's choice list was lost to card-name normalization
+/// (a card named after its own choices — Truth or Consequences — has "truth or
+/// consequences" replaced by `~`). Scans the body at word boundaries for
+/// "the number of <word> vote[s]" and "for each <word> vote[s]", collecting the
+/// referenced choice words in first-seen order (deduplicated).
+fn recover_choices_from_body(body: &str) -> Vec<String> {
+    let mut choices: Vec<String> = Vec::new();
+    let mut remaining = body;
+    while !remaining.is_empty() {
+        if let Ok((_, word)) = parse_vote_ref_word(remaining) {
+            let w = word.to_lowercase();
+            // allow-noncombinator: Vec membership dedup, not parsing dispatch
+            if !choices.contains(&w) {
+                choices.push(w);
+            }
+        }
+        // allow-noncombinator: word-boundary scan advance (PATTERNS.md §9 scanning loop)
+        remaining = remaining
+            .find(' ')
+            .map_or("", |idx| remaining[idx + 1..].trim_start());
+    }
+    choices
+}
+
+/// Match a leading vote-count reference — "the number of <word> vote[s]" or
+/// "for each <word> vote[s]" — returning the referenced choice word.
+fn parse_vote_ref_word(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    let (i, _) = alt((tag_no_case("the number of "), tag_no_case("for each "))).parse(i)?;
+    let (i, word) = take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-').parse(i)?;
+    let (i, _) = tag_no_case(" vote").parse(i)?;
+    let (i, _) = opt(tag_no_case("s")).parse(i)?;
+    Ok((i, word))
 }
 
 /// Split a list like "evidence or bribery" or "guards, hounds, or dragons"
@@ -1670,8 +2157,8 @@ mod tests {
                 assert_eq!(choices, &vec!["time".to_string(), "knowledge".to_string()]);
                 assert_eq!(
                     tally_mode,
-                    VoteTally::Threshold {
-                        tie_breaker_index: 1
+                    VoteTally::TopVotes {
+                        tie: TieResolution::Breaker(1)
                     }
                 );
                 assert!(matches!(
@@ -1706,8 +2193,8 @@ mod tests {
                 // innocent (index 0) is unlisted → NoOp and the tie-breaker.
                 assert_eq!(
                     tally_mode,
-                    VoteTally::Threshold {
-                        tie_breaker_index: 0
+                    VoteTally::TopVotes {
+                        tie: TieResolution::Breaker(0)
                     }
                 );
                 assert!(matches!(*per_choice_effect[0].effect, Effect::NoOp));
@@ -1788,6 +2275,7 @@ mod tests {
             AbilityKind::Spell,
             ControllerRef::You,
             VoterScope::AllPlayers,
+            VoteVisibility::Open,
         )
         .is_none());
         // The full block falls through to the per-vote parser, which also
@@ -1796,38 +2284,63 @@ mod tests {
         assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 
-    /// Secret-ballot cards (Truth or Consequences, Elrond, Orchard Elemental) are
-    /// intentionally unsupported: the existing WaitingFor::VoteChoice state updates
-    /// public tallies and emits VoteCast immediately after each vote, which would
-    /// expose ballots before the reveal step mandated by the Oracle text. Until a
-    /// proper secret-ballot waiting state is added, these cards fall through to
-    /// Effect::Unimplemented. This test pins that behaviour so a future engine
-    /// change that accidentally regresses to the broken public-tally path is caught.
+    /// CR 701.38 secret ballot (Truth or Consequences): the secret opener parses
+    /// to a `VoteVisibility::Secret` vote. This uses the REAL card-name-normalized
+    /// text — the choices "truth or consequences" ARE the card name and are
+    /// replaced by `~`, so the choices are recovered from the body's vote-count
+    /// references. The draw (aggregate over truth votes) and the random-opponent
+    /// damage (suffix aggregate over consequences votes) both bind to typed
+    /// `VoteCount` quantities.
     #[test]
-    fn secret_vote_opener_is_unsupported() {
-        // Truth or Consequences shape — secret opener must not parse as a Vote.
-        let text = "Each player secretly votes for ~, then those votes are revealed. \
-                    You draw cards equal to the number of truth votes. \
+    fn parses_truth_or_consequences_secret_block() {
+        // Card-name normalization has collapsed "truth or consequences" (opener)
+        // and the "Truth or Consequences deals" clause to `~`; "truth"/"consequences"
+        // in the tally clauses survive because they are not the full card name.
+        let text = "Each player secretly votes for ~, then those votes are \
+                    revealed. You draw cards equal to the number of truth votes. \
                     Then choose an opponent at random. \
                     ~ deals 3 damage to that player for each consequences vote.";
-        assert!(
-            parse_vote_block(text, AbilityKind::Spell).is_none(),
-            "secret-vote cards must not silently parse as a public vote"
-        );
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("secret vote parses");
+        // The random "choose an opponent" setup wraps the Vote in an
+        // Effect::Choose; the Vote itself carries the secret visibility.
+        let vote = match &*def.effect {
+            Effect::Choose { .. } => def
+                .sub_ability
+                .as_ref()
+                .map(|s| s.effect.as_ref())
+                .expect("vote nested under the random Choose setup"),
+            other => other,
+        };
+        match vote {
+            Effect::Vote {
+                choices,
+                visibility,
+                ..
+            } => {
+                assert_eq!(
+                    choices,
+                    &vec!["truth".to_string(), "consequences".to_string()]
+                );
+                assert_eq!(*visibility, VoteVisibility::Secret);
+            }
+            other => panic!("expected secret Vote, got {other:?}"),
+        }
     }
 
-    /// Secret-opener unit: "each player secretly votes for" must be rejected by
-    /// `parse_each_player_votes_clause` because the engine does not yet implement
-    /// a secret-ballot waiting state.
+    /// Secret-opener unit: "each player secretly votes for" parses to a
+    /// `VoteVisibility::Secret` opener whose choice list ends at the reveal
+    /// marker (no period precedes "then those votes are revealed").
     #[test]
-    fn secret_opener_returns_none() {
-        assert!(
-            parse_each_player_votes_clause(
-                "each player secretly votes for ~, then those votes are revealed. rest goes here"
-            )
-            .is_none(),
-            "secret opener must fall through when secret ballot is unsupported"
-        );
+    fn secret_opener_parses_secret_visibility() {
+        let opener = parse_each_player_votes_clause(
+            "each player secretly votes for truth or consequences, then those votes are revealed. \
+             You draw cards.",
+        )
+        .expect("secret opener parses");
+        assert_eq!(opener.visibility, VoteVisibility::Secret);
+        assert_eq!(opener.choice_text, "truth or consequences");
+        assert_eq!(opener.voter_scope, VoterScope::AllPlayers);
+        assert_eq!(opener.rest, "You draw cards.");
     }
 
     /// Suffix-aggregate building block (general, no setup): "<effect> for each
@@ -1891,6 +2404,224 @@ mod tests {
                 assert_eq!(*target, TargetFilter::SourceChosenPlayer);
             }
             other => panic!("expected DealDamage, got {:?}", other),
+        }
+    }
+
+    /// WS-A — Council Guardian: "vote for blue/black/red/green; this creature
+    /// gains protection from each color with the most votes or tied for most
+    /// votes." Parses to a `TopVotes { AllTied }` named vote whose per-choice
+    /// effects each grant protection from the matching color. CR 611.2a: the
+    /// grant has no stated duration, so it lasts until the end of the game
+    /// (`Duration::Permanent`) — the regression guard against the EOT default.
+    #[test]
+    fn parses_council_guardian_all_tied_block() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+        let text = "starting with you, each player votes for blue, black, red, or green. \
+                    This creature gains protection from each color with the most votes or \
+                    tied for most votes.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("all-tied vote parses");
+        match &*def.effect {
+            Effect::Vote {
+                choices,
+                per_choice_effect,
+                tally_mode,
+                subject,
+                ..
+            } => {
+                assert_eq!(
+                    choices,
+                    &vec![
+                        "blue".to_string(),
+                        "black".to_string(),
+                        "red".to_string(),
+                        "green".to_string()
+                    ]
+                );
+                assert_eq!(
+                    *tally_mode,
+                    VoteTally::TopVotes {
+                        tie: TieResolution::AllTied
+                    }
+                );
+                assert_eq!(*subject, VoteSubject::Named);
+                assert_eq!(per_choice_effect.len(), 4);
+                let expected = [
+                    ManaColor::Blue,
+                    ManaColor::Black,
+                    ManaColor::Red,
+                    ManaColor::Green,
+                ];
+                for (i, color) in expected.iter().enumerate() {
+                    match &*per_choice_effect[i].effect {
+                        Effect::GenericEffect {
+                            static_abilities,
+                            duration,
+                            ..
+                        } => {
+                            // CR 611.2a regression guard: indefinite, not EOT.
+                            assert_eq!(duration, &Some(Duration::Permanent));
+                            assert!(matches!(
+                                &static_abilities[0].modifications[0],
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Protection(ProtectionTarget::Color(c))
+                                } if c == color
+                            ));
+                        }
+                        other => panic!("expected protection grant, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Vote, got {other:?}"),
+        }
+    }
+
+    /// WS-B — Capital Punishment: "vote for death or taxes. Each opponent
+    /// sacrifices a creature ... for each death vote and discards a card for
+    /// each taxes vote." The conjoined dual-suffix clause fills BOTH per-choice
+    /// slots with the shared `Each opponent` subject distributed, each bound to
+    /// its own `VoteCount`. `tally_mode` stays `PerVote`.
+    #[test]
+    fn parses_capital_punishment_dual_suffix() {
+        let text = "Starting with you, each player votes for death or taxes. \
+                    Each opponent sacrifices a creature of their choice for each death vote \
+                    and discards a card for each taxes vote.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("dual-suffix vote parses");
+        match &*def.effect {
+            Effect::Vote {
+                choices,
+                per_choice_effect,
+                tally_mode,
+                ..
+            } => {
+                assert_eq!(choices, &vec!["death".to_string(), "taxes".to_string()]);
+                assert_eq!(*tally_mode, VoteTally::PerVote);
+                assert_eq!(per_choice_effect.len(), 2);
+                // death (idx 0): Sacrifice, count VoteCount{0}, scoped to opponents.
+                assert_eq!(
+                    per_choice_effect[0].player_scope,
+                    Some(PlayerFilter::Opponent),
+                    "death conjunct must inherit the 'Each opponent' subject"
+                );
+                assert!(matches!(
+                    &*per_choice_effect[0].effect,
+                    Effect::Sacrifice { .. }
+                ));
+                assert_eq!(
+                    per_choice_effect[0].effect.count_expr(),
+                    Some(&QuantityExpr::Ref {
+                        qty: QuantityRef::VoteCount { choice_index: 0 }
+                    }),
+                    "death sacrifice count must be VoteCount{{death}}, not Fixed{{1}}"
+                );
+                // taxes (idx 1): Discard, count VoteCount{1}, scoped to opponents.
+                assert_eq!(
+                    per_choice_effect[1].player_scope,
+                    Some(PlayerFilter::Opponent),
+                    "taxes conjunct must inherit the 'Each opponent' subject"
+                );
+                assert_eq!(
+                    per_choice_effect[1].effect.count_expr(),
+                    Some(&QuantityExpr::Ref {
+                        qty: QuantityRef::VoteCount { choice_index: 1 }
+                    })
+                );
+            }
+            other => panic!("expected Vote, got {other:?}"),
+        }
+    }
+
+    /// WS-B building block — the conjoined-suffix helper is not Capital
+    /// Punishment-specific: a synthetic dual-suffix dilemma over different
+    /// effects/choices fills both slots.
+    #[test]
+    fn conjoined_suffix_is_general_building_block() {
+        let text = "Starting with you, each player votes for a or b. \
+                    Each player draws a card for each a vote and gains 1 life for each b vote.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("synthetic dual-suffix parses");
+        match &*def.effect {
+            Effect::Vote {
+                per_choice_effect, ..
+            } => {
+                assert_eq!(per_choice_effect.len(), 2);
+                assert_eq!(
+                    per_choice_effect[0].effect.count_expr(),
+                    Some(&QuantityExpr::Ref {
+                        qty: QuantityRef::VoteCount { choice_index: 0 }
+                    })
+                );
+            }
+            other => panic!("expected Vote, got {other:?}"),
+        }
+    }
+
+    /// WS-C — Council's Judgment: object-pool vote. "Each player votes for a
+    /// nonland permanent you don't control. Exile each permanent with the most
+    /// votes or tied for most votes." Parses to a `TopVotes { AllTied }` object
+    /// vote whose `subject` carries the candidate filter and a single-target
+    /// exile `outcome_template`; `choices`/`per_choice_effect` are empty.
+    #[test]
+    fn parses_councils_judgment_object_vote() {
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+        match &*def.effect {
+            Effect::Vote {
+                choices,
+                per_choice_effect,
+                tally_mode,
+                subject,
+                ..
+            } => {
+                assert!(choices.is_empty());
+                assert!(per_choice_effect.is_empty());
+                assert_eq!(
+                    *tally_mode,
+                    VoteTally::TopVotes {
+                        tie: TieResolution::AllTied
+                    }
+                );
+                match subject {
+                    VoteSubject::Objects {
+                        outcome_template, ..
+                    } => {
+                        assert!(matches!(
+                            &*outcome_template.effect,
+                            Effect::ChangeZone {
+                                destination: Zone::Exile,
+                                ..
+                            }
+                        ));
+                    }
+                    other => panic!("expected Objects subject, got {other:?}"),
+                }
+            }
+            other => panic!("expected Vote, got {other:?}"),
+        }
+    }
+
+    /// WS-C — Prime Minister's Cabinet Room (chaos-ensues body): the same object
+    /// vote shape over "a creature you don't control".
+    #[test]
+    fn parses_pmcr_creature_object_vote() {
+        let text = "starting with you, each player votes for a creature you don't control. \
+                    Exile each creature with the most votes or tied for most votes.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+        match &*def.effect {
+            Effect::Vote {
+                subject,
+                tally_mode,
+                ..
+            } => {
+                assert_eq!(
+                    *tally_mode,
+                    VoteTally::TopVotes {
+                        tie: TieResolution::AllTied
+                    }
+                );
+                assert!(matches!(subject, VoteSubject::Objects { .. }));
+            }
+            other => panic!("expected Vote, got {other:?}"),
         }
     }
 }

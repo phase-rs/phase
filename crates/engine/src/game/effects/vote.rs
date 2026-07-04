@@ -20,12 +20,13 @@
 
 use crate::types::ability::{
     AbilityDefinition, ControllerRef, Effect, EffectError, EffectKind, QuantityExpr,
-    ResolvedAbility, VoteTally, VoterScope,
+    ResolvedAbility, TargetRef, TieResolution, VoteSubject, VoteTally, VoterScope,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingContinuation, PendingVoteBallotIteration, VoteActor, WaitingFor,
 };
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 use super::resolve_ability_chain;
@@ -46,6 +47,8 @@ pub fn resolve(
         starting_with,
         voter_scope,
         tally_mode,
+        subject,
+        visibility,
     } = &ability.effect
     else {
         return Err(EffectError::InvalidParam(
@@ -53,25 +56,104 @@ pub fn resolve(
         ));
     };
 
-    // Parser invariant: one sub-effect per choice. Surfaced as a hard error so
-    // misparses fail fast rather than silently dropping ballots.
-    if choices.len() != per_choice_effect.len() {
-        return Err(EffectError::InvalidParam(format!(
-            "Effect::Vote choices/per_choice_effect length mismatch: {} vs {}",
-            choices.len(),
-            per_choice_effect.len()
-        )));
-    }
-    if choices.is_empty() {
-        return Err(EffectError::InvalidParam(
-            "Effect::Vote requires at least one choice".into(),
-        ));
-    }
-
     let controller = ability.controller;
-    let starting_player = resolve_starting_voter(state, controller, starting_with.clone());
     let scope = *voter_scope;
     let tally_mode = *tally_mode;
+    let visibility = *visibility;
+
+    // CR 701.38b: Resolve the ballot options. Named votes (`VoteSubject::Named`)
+    // use the static `choices`/`per_choice_effect`. Object-pool votes
+    // (`VoteSubject::Objects` — Council's Judgment, Prime Minister's Cabinet
+    // Room) enumerate matching battlefield objects at resolution: the options
+    // are those objects' names, `candidate_objects` holds their ids, and the
+    // winner(s) drive `outcome_template` once each.
+    let (options, option_labels, candidate_objects, outcome_template, per_choice_effect) =
+        match subject {
+            VoteSubject::Named => {
+                // Parser invariant: one sub-effect per choice. Surfaced as a
+                // hard error so misparses fail fast rather than silently
+                // dropping ballots.
+                if choices.len() != per_choice_effect.len() {
+                    return Err(EffectError::InvalidParam(format!(
+                        "Effect::Vote choices/per_choice_effect length mismatch: {} vs {}",
+                        choices.len(),
+                        per_choice_effect.len()
+                    )));
+                }
+                if choices.is_empty() {
+                    return Err(EffectError::InvalidParam(
+                        "Effect::Vote requires at least one choice".into(),
+                    ));
+                }
+                // Display labels: title-case each choice for the modal. Engine
+                // compares votes against the lowercase canonical `choices`.
+                let option_labels: Vec<String> =
+                    choices.iter().map(|c| title_case_word(c)).collect();
+                (
+                    choices.clone(),
+                    option_labels,
+                    crate::im::Vector::new(),
+                    None,
+                    per_choice_effect.clone(),
+                )
+            }
+            VoteSubject::Objects {
+                candidate_filter,
+                outcome_template,
+            } => {
+                // CR 701.38b: enumerate the candidate objects relative to the
+                // vote's controller ("a permanent you don't control" is the
+                // controller's perspective). CR 608.2c: with no eligible
+                // objects there is nothing to vote for, so the effect does as
+                // much as possible — no vote occurs.
+                let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    ability.source_id,
+                    controller,
+                );
+                let candidates: Vec<ObjectId> = state
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            *id,
+                            candidate_filter,
+                            &ctx,
+                        )
+                    })
+                    .collect();
+                if candidates.is_empty() {
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Vote,
+                        source_id: ability.source_id,
+                    });
+                    return Ok(());
+                }
+                let option_labels: Vec<String> = candidates
+                    .iter()
+                    .map(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .map(|o| o.name.clone())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                let options: Vec<String> = option_labels.iter().map(|n| n.to_lowercase()).collect();
+                let candidate_objects: crate::im::Vector<ObjectId> =
+                    candidates.iter().copied().collect();
+                (
+                    options,
+                    option_labels,
+                    candidate_objects,
+                    Some(outcome_template.clone()),
+                    Vec::new(),
+                )
+            }
+        };
+
+    let starting_player = resolve_starting_voter(state, controller, starting_with.clone());
 
     // CR 101.4 + CR 701.38a: Build APNAP voter order from the starting player.
     // CR 800.4g: For `EachOpponent`, the controller is excluded from the
@@ -116,10 +198,7 @@ pub fn resolve(
     let (first_player, first_votes) = voter_queue[0];
     let remaining_voters = voter_queue[1..].to_vec();
 
-    // Display labels: title-case each choice for the modal. Engine compares
-    // votes against the lowercase canonical `choices` field.
-    let option_labels: Vec<String> = choices.iter().map(|c| title_case_word(c)).collect();
-    let tallies = vec![0u32; choices.len()];
+    let tallies = vec![0u32; options.len()];
 
     // For `ControllerLabels` (Battlebond friend-or-foe keyword action,
     // no explicit CR section), pin the actor to the spell controller —
@@ -135,20 +214,23 @@ pub fn resolve(
     state.waiting_for = WaitingFor::VoteChoice {
         player: first_player,
         remaining_votes: first_votes,
-        options: choices.clone(),
+        options,
         option_labels,
         remaining_voters,
         tallies,
-        // CR 608.2c: Initialize the ballot ledger empty. Each `ChooseOption`
-        // append in `engine_resolution_choices.rs` extends this vector with
-        // `(voter, choice_index)` — or, under `ControllerLabels`, with
-        // `(labeled_player, choice_index)`.
+        // CR 608.2c: Initialize the ballot ledger empty. Each ballot append in
+        // `engine_resolution_choices.rs` extends this vector with
+        // `(voter, choice_index)` — for object votes the index maps into
+        // `candidate_objects` instead of `options`.
         ballots: crate::im::Vector::new(),
-        per_choice_effect: per_choice_effect.clone(),
+        per_choice_effect,
         controller,
         source_id: ability.source_id,
         actor,
         tally_mode,
+        candidate_objects,
+        outcome_template,
+        visibility,
     };
 
     // Stash the parent's sub_ability tail so it resumes after the tally fans
@@ -183,30 +265,44 @@ pub fn resolve_tally(
     options: &[String],
     per_choice_effect: &[Box<AbilityDefinition>],
     tallies: &[u32],
-    ballots: &crate::im::Vector<(PlayerId, u8)>,
+    ballots: &crate::im::Vector<(PlayerId, u32)>,
     tally_mode: VoteTally,
+    candidate_objects: &[ObjectId],
+    outcome_template: Option<&AbilityDefinition>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    debug_assert_eq!(options.len(), per_choice_effect.len());
+    // For named votes the per-choice slots are parallel to `options`; object
+    // votes carry an empty `per_choice_effect` (winners drive
+    // `outcome_template` instead), so only assert the parallel invariant when
+    // there is no object template.
     debug_assert_eq!(options.len(), tallies.len());
+    debug_assert!(outcome_template.is_some() || options.len() == per_choice_effect.len());
 
-    // CR 701.38a: Will-of-the-council threshold votes resolve exactly ONE
-    // outcome — the choice with strictly more votes, or `tie_breaker_index`
-    // on a tie ("...or the vote is tied"). The strict-majority/tie rule is
-    // card-defined, not a CR subrule. The winning effect resolves once, not
-    // per ballot, so route to a dedicated single-effect path rather than the
-    // per-choice fan-out below.
-    if let VoteTally::Threshold { tie_breaker_index } = tally_mode {
-        return resolve_threshold_tally(
-            state,
-            source_id,
-            controller,
-            per_choice_effect,
-            tallies,
-            ballots,
-            tie_breaker_index,
-            events,
-        );
+    // CR 701.38a: Top-tally votes resolve the winning choice(s) once each —
+    // `TieResolution::Breaker` picks exactly one outcome (the most votes, ties
+    // broken in favor of the index), `TieResolution::AllTied` resolves every
+    // choice tied for the most votes. The winners resolve once (not per
+    // ballot), so route to the dedicated single-pass path rather than the
+    // per-choice fan-out below. The strict-majority/tie rule is card-defined,
+    // not a CR subrule.
+    match tally_mode {
+        VoteTally::TopVotes { tie } => {
+            return resolve_top_votes_tally(
+                state,
+                source_id,
+                controller,
+                per_choice_effect,
+                tallies,
+                ballots,
+                tie,
+                candidate_objects,
+                outcome_template,
+                events,
+            );
+        }
+        // CR 701.38d: per-ballot fan-out (existing loop below) — multiple
+        // votes resolve together; per-ballot dispatch is card-defined.
+        VoteTally::PerVote => {}
     }
 
     // CR 608.2c + CR 701.38: Publish the ballot ledger so per-choice
@@ -365,7 +461,7 @@ pub fn resolve_tally(
             // Punishment), `scoped_player` is harmlessly set but never read.
             let choice_ballots: Vec<PlayerId> = ballots
                 .iter()
-                .filter(|(_, choice)| *choice == idx as u8)
+                .filter(|(_, choice)| *choice == idx as u32)
                 .map(|(voter, _)| *voter)
                 .collect();
             // CR 701.38d: Process per-ballot interactive bodies one at a time.
@@ -401,58 +497,121 @@ pub fn resolve_tally(
     Ok(())
 }
 
-/// CR 701.38a: Resolve a Will-of-the-council threshold vote. Exactly one
-/// outcome resolves — the choice with strictly the most votes. Two-way ties
-/// (and, for symmetry, any non-strict winner) resolve to `tie_breaker_index`,
-/// the choice whose Oracle clause reads "...or the vote is tied". The
-/// strict-majority/tie resolution is card-defined, not a CR subrule.
+/// CR 701.38a: Resolve a top-tally vote (`VoteTally::TopVotes`). The vote
+/// *procedure* is CR 701.38a; the most-votes/tie winner selection is
+/// card-defined, not a CR subrule. `tie` parameterizes winner cardinality:
 ///
-/// The winning sub-effect is controller-performed (it runs once, not per
-/// ballot or per voter), so it is resolved as a single chain with the spell's
-/// controller. The ballot ledger is still published to `state.last_vote_ballots`
-/// for parity with `resolve_tally` (some bodies — e.g. Trial of a Time Lord IV's
-/// "the owner of each card exiled with ~" — read source-linked exile pools, not
-/// the ballots, but publishing is harmless and keeps the seam uniform).
+/// * [`TieResolution::Breaker`] — exactly ONE winner. The unique holder of the
+///   max tally wins; on a tie (or empty ballot set) the breaker index wins
+///   ("...or the vote is tied"). This is the historical `Threshold` behavior.
+/// * [`TieResolution::AllTied`] — every choice tied for the max wins and
+///   resolves once ("...or tied for most votes"). A zero max (everyone passed)
+///   yields no winners.
+///
+/// For object-pool votes (`outcome_template` is `Some`), the per-choice slots
+/// are empty and `outcome_template` resolves once per winning object with that
+/// object injected as its single specific target (CR 701.38b + CR 608.2c), so a
+/// tie exiles exactly the tied winners rather than rescanning the battlefield.
+///
+/// Each winning sub-effect is controller-performed (it runs once, not per
+/// ballot or per voter). The ballot ledger is published to
+/// `state.last_vote_ballots` for parity with `resolve_tally`.
 #[allow(clippy::too_many_arguments)]
-fn resolve_threshold_tally(
+fn resolve_top_votes_tally(
     state: &mut GameState,
-    source_id: crate::types::identifiers::ObjectId,
+    source_id: ObjectId,
     controller: PlayerId,
     per_choice_effect: &[Box<AbilityDefinition>],
     tallies: &[u32],
-    ballots: &crate::im::Vector<(PlayerId, u8)>,
-    tie_breaker_index: u8,
+    ballots: &crate::im::Vector<(PlayerId, u32)>,
+    tie: TieResolution,
+    candidate_objects: &[ObjectId],
+    outcome_template: Option<&AbilityDefinition>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     state.last_vote_ballots = ballots.clone();
 
-    // CR 701.38a: Determine the strict winner. The strict-majority/tie rule is
-    // card-defined, not a CR subrule. `max()` over the tally yields the
-    // top count; a unique holder of that count wins outright, otherwise the
-    // tie-breaker choice ("...or the vote is tied") wins. An empty voter set
-    // (every player passed / eliminated) also routes to the tie-breaker, which
-    // matches the "or the vote is tied" branch of every printed card.
-    let winner = match tallies.iter().copied().max() {
-        Some(top) if tallies.iter().filter(|&&t| t == top).count() == 1 => tallies
-            .iter()
-            .position(|&t| t == top)
-            .map(|i| i as u8)
-            .unwrap_or(tie_breaker_index),
-        _ => tie_breaker_index,
-    };
+    // CR 701.38a: `max()` over the tally yields the top count. The
+    // strict-majority/tie rule below is card-defined, not a CR subrule.
+    let top = tallies.iter().copied().max().unwrap_or(0);
 
-    let Some(winning_effect) = per_choice_effect.get(winner as usize) else {
-        // Defensive: a tie_breaker_index out of range is a parser bug. Emit
-        // EffectResolved rather than panicking so the chain continues.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::Vote,
-            source_id,
-        });
-        return Ok(());
-    };
-
-    let chain = resolved_from_def(winning_effect, source_id, controller);
-    resolve_ability_chain(state, &chain, events, 1)?;
+    match tie {
+        // Card-defined "...or the vote is tied": exactly one winner. A unique
+        // holder of the max wins outright; otherwise (a tie, or an empty/zero
+        // ballot set) the breaker index wins, matching the "or the vote is
+        // tied" branch of every printed card.
+        TieResolution::Breaker(idx) => {
+            let winner = if top > 0 && tallies.iter().filter(|&&t| t == top).count() == 1 {
+                tallies
+                    .iter()
+                    .position(|&t| t == top)
+                    .map(|i| i as u8)
+                    .unwrap_or(idx)
+            } else {
+                idx
+            };
+            // Guard on the object template FIRST for parity with the AllTied
+            // branch: an object-pool vote carries an empty `per_choice_effect`,
+            // so a single-winner object vote must inject the winning ObjectId
+            // into `outcome_template` rather than indexing an empty slot list
+            // (which would silently exile nothing).
+            match outcome_template {
+                // CR 701.38b: single-winner object vote. Inject the SPECIFIC
+                // winning ObjectId as the template's single target so the sole
+                // winner is exiled (not a battlefield rescan).
+                Some(template) => {
+                    if let Some(&winner_obj) = candidate_objects.get(winner as usize) {
+                        let mut chain = resolved_from_def(template, source_id, controller);
+                        chain.targets = vec![TargetRef::Object(winner_obj)];
+                        resolve_ability_chain(state, &chain, events, 1)?;
+                    }
+                }
+                // Named vote: `per_choice_effect` is populated.
+                None => {
+                    if let Some(winning_effect) = per_choice_effect.get(winner as usize) {
+                        let chain = resolved_from_def(winning_effect, source_id, controller);
+                        resolve_ability_chain(state, &chain, events, 1)?;
+                    }
+                }
+            }
+            // (An out-of-range breaker index is a parser bug; emitting
+            // EffectResolved below keeps the chain alive rather than panicking.)
+        }
+        // Card-defined "...or tied for most votes": every choice tied for the
+        // max resolves once. A zero max (everyone passed) yields no winners.
+        TieResolution::AllTied => {
+            if top > 0 {
+                for (idx, &votes) in tallies.iter().enumerate() {
+                    if votes != top {
+                        continue;
+                    }
+                    // Guard on the object template FIRST: object votes carry an
+                    // empty `per_choice_effect`, so indexing it would panic OOB.
+                    match outcome_template {
+                        // CR 701.38b: object vote. Inject the SPECIFIC winning
+                        // ObjectId as the template's single target so a top tie
+                        // exiles exactly the tied winners (not a battlefield
+                        // rescan).
+                        Some(template) => {
+                            if let Some(&winner_obj) = candidate_objects.get(idx) {
+                                let mut chain = resolved_from_def(template, source_id, controller);
+                                chain.targets = vec![TargetRef::Object(winner_obj)];
+                                resolve_ability_chain(state, &chain, events, 1)?;
+                            }
+                        }
+                        // Named vote: `per_choice_effect` is populated.
+                        None => {
+                            if let Some(winning_effect) = per_choice_effect.get(idx) {
+                                let chain =
+                                    resolved_from_def(winning_effect, source_id, controller);
+                                resolve_ability_chain(state, &chain, events, 1)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Vote,
@@ -666,7 +825,7 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::AbilityKind;
+    use crate::types::ability::{AbilityKind, VoteVisibility};
     use crate::types::identifiers::ObjectId;
     use crate::types::zones::Zone;
 
@@ -688,6 +847,8 @@ mod tests {
                 starting_with: ControllerRef::You,
                 voter_scope: VoterScope::AllPlayers,
                 tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
             },
             targets: vec![],
             source_id: ObjectId(1),
@@ -785,6 +946,8 @@ mod tests {
                 starting_with: ControllerRef::You,
                 voter_scope,
                 tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
             },
             targets: vec![],
             source_id: ObjectId(1),
@@ -937,7 +1100,7 @@ mod tests {
                 ))
             })
             .collect();
-        let mut ballots: crate::im::Vector<(PlayerId, u8)> = crate::im::Vector::new();
+        let mut ballots: crate::im::Vector<(PlayerId, u32)> = crate::im::Vector::new();
         ballots.push_back((p0, 0));
         ballots.push_back((p1, 1));
         let tallies = vec![1u32, 1];
@@ -951,6 +1114,8 @@ mod tests {
             &tallies,
             &ballots,
             VoteTally::PerVote,
+            &[],
+            None,
             &mut events,
         )
         .expect("tally resolves");
@@ -1237,6 +1402,8 @@ mod tests {
                 starting_with: ControllerRef::You,
                 voter_scope: VoterScope::ControllerLabels,
                 tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
             },
             targets: vec![],
             source_id,
@@ -1353,6 +1520,9 @@ mod tests {
             source_id: crate::types::identifiers::ObjectId(1),
             actor: VoteActor::Delegated(controller),
             tally_mode: VoteTally::PerVote,
+            candidate_objects: crate::im::Vector::new(),
+            outcome_template: None,
+            visibility: VoteVisibility::Open,
         };
         let err = apply(
             &mut state,
@@ -1393,6 +1563,9 @@ mod tests {
             source_id: crate::types::identifiers::ObjectId(1),
             actor: VoteActor::Delegated(controller),
             tally_mode: VoteTally::PerVote,
+            candidate_objects: crate::im::Vector::new(),
+            outcome_template: None,
+            visibility: VoteVisibility::Open,
         };
         assert_eq!(state.waiting_for.acting_player(), Some(controller));
     }
@@ -1485,7 +1658,7 @@ mod tests {
             .push(CoreType::Land);
 
         // Build ballots: all three players voted "money" (index 1).
-        let ballots: crate::im::Vector<(PlayerId, u8)> =
+        let ballots: crate::im::Vector<(PlayerId, u32)> =
             crate::im::Vector::from(vec![(controller, 1), (opp1, 1), (opp2, 1)]);
         let tallies = vec![0u32, 3];
         let options = choices.clone();
@@ -1501,6 +1674,8 @@ mod tests {
             &tallies,
             &ballots,
             VoteTally::PerVote,
+            &[],
+            None,
             &mut events,
         )
         .expect("resolve_tally succeeds");
@@ -1600,9 +1775,11 @@ mod tests {
             &per_choice,
             &tallies,
             &ballots,
-            VoteTally::Threshold {
-                tie_breaker_index: 0,
+            VoteTally::TopVotes {
+                tie: TieResolution::Breaker(0),
             },
+            &[],
+            None,
             &mut events,
         )
         .expect("threshold tally resolves");
@@ -1644,9 +1821,11 @@ mod tests {
             &per_choice,
             &tallies,
             &ballots,
-            VoteTally::Threshold {
-                tie_breaker_index: 0,
+            VoteTally::TopVotes {
+                tie: TieResolution::Breaker(0),
             },
+            &[],
+            None,
             &mut events,
         )
         .expect("threshold tally resolves");
@@ -1782,6 +1961,603 @@ mod tests {
         assert_eq!(
             state.players[0].life, ctrl_life_before,
             "controller is not the damage recipient"
+        );
+    }
+
+    /// WS-A building block — `TopVotes { AllTied }`: every choice tied for the
+    /// max tally resolves once; a non-tied loser does not. 3 choices with
+    /// tallies [2,2,1] → choices 0 and 1 each resolve their Investigate (2 Clue
+    /// tokens), choice 2 does not.
+    #[test]
+    fn top_votes_all_tied_resolves_all_tied_winners() {
+        let mut state = GameState::new_two_player(7);
+        let controller = state.players[0].id;
+        let clues = |s: &GameState| -> usize {
+            s.battlefield
+                .iter()
+                .filter(|id| {
+                    s.objects
+                        .get(id)
+                        .is_some_and(|o| o.name.to_lowercase().contains("clue"))
+                })
+                .count()
+        };
+        let per_choice: Vec<Box<AbilityDefinition>> = (0..3)
+            .map(|_| {
+                Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Investigate,
+                ))
+            })
+            .collect();
+        let options = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let tallies = vec![2u32, 2, 1];
+        let ballots = crate::im::Vector::new();
+        let mut events = Vec::new();
+        resolve_tally(
+            &mut state,
+            ObjectId(1),
+            controller,
+            &options,
+            &per_choice,
+            &tallies,
+            &ballots,
+            VoteTally::TopVotes {
+                tie: TieResolution::AllTied,
+            },
+            &[],
+            None,
+            &mut events,
+        )
+        .expect("all-tied tally resolves");
+        assert_eq!(clues(&state), 2, "both tied winners' effects resolve once");
+    }
+
+    /// WS-A building block — `TopVotes { AllTied }` with a zero max (everyone
+    /// passed) resolves no outcome.
+    #[test]
+    fn top_votes_all_tied_zero_votes_resolves_no_outcome() {
+        let mut state = GameState::new_two_player(7);
+        let controller = state.players[0].id;
+        let per_choice: Vec<Box<AbilityDefinition>> = (0..2)
+            .map(|_| {
+                Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Investigate,
+                ))
+            })
+            .collect();
+        let options = vec!["a".to_string(), "b".to_string()];
+        let tallies = vec![0u32, 0];
+        let ballots = crate::im::Vector::new();
+        let mut events = Vec::new();
+        resolve_tally(
+            &mut state,
+            ObjectId(1),
+            controller,
+            &options,
+            &per_choice,
+            &tallies,
+            &ballots,
+            VoteTally::TopVotes {
+                tie: TieResolution::AllTied,
+            },
+            &[],
+            None,
+            &mut events,
+        )
+        .expect("zero-tally tally resolves");
+        let clues = state
+            .battlefield
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.name.to_lowercase().contains("clue"))
+            })
+            .count();
+        assert_eq!(clues, 0, "a zero max yields no winners");
+    }
+
+    /// WS-C runtime — object-pool vote (Council's Judgment): both players vote
+    /// the same opponent permanent by index; that permanent is exiled and the
+    /// other opponent permanent is NOT (proves single-target injection, not a
+    /// battlefield rescan). Drives the real `SubmitVoteCandidate` round-trip.
+    #[test]
+    fn object_vote_exiles_most_voted_not_others() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let vote_def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+
+        // Source object (controller's) — the vote's source; excluded from the
+        // candidate set because the controller controls it.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Judge".to_string(),
+            Zone::Battlefield,
+        );
+        // Two opponent creatures — both candidates.
+        let opp_a = create_object(
+            &mut state,
+            CardId(2),
+            opp,
+            "Bear A".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_a)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opp_b = create_object(
+            &mut state,
+            CardId(3),
+            opp,
+            "Bear B".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_b)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = resolved_from_def(&vote_def, source_id, controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Locate opp_a's candidate index (battlefield order may vary).
+        let idx_a = match &state.waiting_for {
+            WaitingFor::VoteChoice {
+                candidate_objects, ..
+            } => candidate_objects
+                .iter()
+                .position(|id| *id == opp_a)
+                .expect("opp_a is a candidate") as u32,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+
+        // Both players vote opp_a (controller first — "starting with you").
+        let first = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            first,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: idx_a,
+            },
+        )
+        .unwrap();
+        let second = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            second,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: idx_a,
+            },
+        )
+        .unwrap();
+
+        assert!(!matches!(state.waiting_for, WaitingFor::VoteChoice { .. }));
+        assert_eq!(
+            state.objects.get(&opp_a).map(|o| o.zone),
+            Some(Zone::Exile),
+            "the most-voted permanent must be exiled"
+        );
+        assert_eq!(
+            state.objects.get(&opp_b).map(|o| o.zone),
+            Some(Zone::Battlefield),
+            "a non-winning permanent must NOT be exiled (single-target injection)"
+        );
+    }
+
+    /// WS-D runtime — secret ballot (Truth or Consequences): a secret vote
+    /// emits NO per-ballot `VoteCast` event (the choice is withheld until the
+    /// reveal), and `filter_state_for_viewer` returns zeroed `tallies` mid-vote
+    /// for every viewer. A single `VoteResolved` is the simultaneous reveal.
+    ///
+    /// NOTE (D6 limitation): the local-AI raw-state visibility is intentionally
+    /// not asserted — `get_ai_action` computes over unfiltered state.
+    #[test]
+    fn secret_vote_suppresses_votecast_and_scrubs_tally() {
+        use crate::game::engine::apply;
+        use crate::game::visibility::filter_state_for_viewer;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+
+        let text = "Each player secretly votes for truth or consequences, then those votes are \
+                    revealed. You draw cards equal to the number of truth votes. \
+                    Then choose an opponent at random. \
+                    ~ deals 3 damage to that player for each consequences vote.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("secret vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+        let ability = resolved_from_def(&def, ObjectId(1), controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Mid-vote, the running tally is scrubbed to zeros for every viewer.
+        let first = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+        let mut ballot_events = Vec::new();
+        let res = apply(
+            &mut state,
+            first,
+            GameAction::ChooseOption {
+                choice: "truth".to_string(),
+            },
+        )
+        .expect("first secret ballot");
+        ballot_events.extend(res.events.iter().cloned());
+
+        // Mid-vote scrub: opponent (and controller) see zeroed tallies.
+        let filtered = filter_state_for_viewer(&state, opp);
+        if let WaitingFor::VoteChoice { tallies, .. } = &filtered.waiting_for {
+            assert!(
+                tallies.iter().all(|&t| t == 0),
+                "secret running tallies must be scrubbed to zero mid-vote"
+            );
+        } else {
+            panic!("expected VoteChoice mid-secret-vote");
+        }
+
+        let second = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+        let res2 = apply(
+            &mut state,
+            second,
+            GameAction::ChooseOption {
+                choice: "consequences".to_string(),
+            },
+        )
+        .expect("second secret ballot");
+        ballot_events.extend(res2.events.iter().cloned());
+
+        // No per-ballot VoteCast was ever emitted; exactly one VoteResolved.
+        assert!(
+            !ballot_events
+                .iter()
+                .any(|e| matches!(e, GameEvent::VoteCast { .. })),
+            "secret ballots must not emit per-ballot VoteCast events"
+        );
+        assert_eq!(
+            ballot_events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::VoteResolved { .. }))
+                .count(),
+            1,
+            "exactly one VoteResolved (the simultaneous reveal) is emitted"
+        );
+    }
+
+    /// WS-C validation — object votes reject `ChooseOption` (string path) and an
+    /// out-of-range `SubmitVoteCandidate` index.
+    #[test]
+    fn object_vote_rejects_choose_option_and_oob_index() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let vote_def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Judge".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_a = create_object(
+            &mut state,
+            CardId(2),
+            opp,
+            "Bear A".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_a)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = resolved_from_def(&vote_def, source_id, controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let voter = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+
+        // ChooseOption is rejected for object votes.
+        assert!(apply(
+            &mut state,
+            voter,
+            GameAction::ChooseOption {
+                choice: "bear a".to_string(),
+            },
+        )
+        .is_err());
+        // Out-of-range candidate index is rejected.
+        assert!(apply(
+            &mut state,
+            voter,
+            GameAction::SubmitVoteCandidate { candidate_index: 9 },
+        )
+        .is_err());
+    }
+
+    /// WS-C runtime — genuine multi-object tie (Council's Judgment): the two
+    /// players vote for DIFFERENT opponent permanents, producing a [1, 1] tie
+    /// for most votes. `TopVotes{AllTied}` must exile EACH tied winner with its
+    /// own injected target, while a third un-voted permanent is left alone.
+    /// This is the load-bearing "exile each permanent tied for most votes"
+    /// behavior that the single-winner test cannot exercise.
+    #[test]
+    fn object_vote_tie_exiles_each_tied_winner_not_others() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let vote_def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Judge".to_string(),
+            Zone::Battlefield,
+        );
+        // Three opponent creatures: two will tie for most, one gets no votes.
+        let make_creature = |state: &mut GameState, card: u64, name: &str| {
+            let id = create_object(
+                state,
+                CardId(card),
+                opp,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let opp_a = make_creature(&mut state, 2, "Bear A");
+        let opp_b = make_creature(&mut state, 3, "Bear B");
+        let opp_c = make_creature(&mut state, 4, "Bear C");
+
+        let ability = resolved_from_def(&vote_def, source_id, controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Resolve candidate indices for opp_a and opp_b (battlefield order varies).
+        let (idx_a, idx_b) = match &state.waiting_for {
+            WaitingFor::VoteChoice {
+                candidate_objects, ..
+            } => (
+                candidate_objects
+                    .iter()
+                    .position(|id| *id == opp_a)
+                    .expect("opp_a is a candidate") as u32,
+                candidate_objects
+                    .iter()
+                    .position(|id| *id == opp_b)
+                    .expect("opp_b is a candidate") as u32,
+            ),
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+
+        // First voter (controller, "starting with you") votes opp_a; the second
+        // voter votes opp_b — a genuine [1, 1] tie for most.
+        let first = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            first,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: idx_a,
+            },
+        )
+        .unwrap();
+        let second = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            second,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: idx_b,
+            },
+        )
+        .unwrap();
+
+        assert!(!matches!(state.waiting_for, WaitingFor::VoteChoice { .. }));
+        assert_eq!(
+            state.objects.get(&opp_a).map(|o| o.zone),
+            Some(Zone::Exile),
+            "each permanent tied for most votes must be exiled (opp_a)"
+        );
+        assert_eq!(
+            state.objects.get(&opp_b).map(|o| o.zone),
+            Some(Zone::Exile),
+            "each permanent tied for most votes must be exiled (opp_b)"
+        );
+        assert_eq!(
+            state.objects.get(&opp_c).map(|o| o.zone),
+            Some(Zone::Battlefield),
+            "an un-voted permanent must NOT be exiled"
+        );
+    }
+
+    /// WS-C regression — object-pool vote with >255 candidates.
+    ///
+    /// `SubmitVoteCandidate::candidate_index` was `u8`, causing index 255+ to
+    /// wrap and alias an earlier candidate on large boards. This test creates
+    /// 257 opponent permanents, votes unanimously for the LAST candidate
+    /// (index 256), and asserts that candidate — and only that candidate — is
+    /// exiled. Regression for the u32 widening of `candidate_index`.
+    #[test]
+    fn object_vote_last_candidate_above_u8_max_is_selectable() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let text = "Starting with you, each player votes for a nonland permanent you don't \
+                    control. Exile each permanent with the most votes or tied for most votes.";
+        let vote_def = parse_vote_block(text, AbilityKind::Spell).expect("object vote parses");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+
+        // Source object (controller's) — excluded from candidate set.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Judge".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Create 257 opponent permanents — the last one (index 256) is the
+        // target. Before the u8 fix, candidate_index 256 wrapped to 0, making
+        // the last candidate unreachable.
+        let mut opp_ids = Vec::new();
+        for n in 0u64..257 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + n),
+                opp,
+                format!("Bear {n}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            opp_ids.push(id);
+        }
+        let last_bear = *opp_ids.last().unwrap();
+
+        let ability = resolved_from_def(&vote_def, source_id, controller);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Locate the last bear's candidate index (>= 255 guaranteed if
+        // candidate_objects preserves insertion order, but we look it up
+        // explicitly so the test is order-agnostic).
+        let last_idx = match &state.waiting_for {
+            WaitingFor::VoteChoice {
+                candidate_objects, ..
+            } => candidate_objects
+                .iter()
+                .position(|id| *id == last_bear)
+                .expect("last bear is a candidate") as u32,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+        assert!(
+            last_idx >= 255,
+            "sanity: last candidate index must be >= 255, got {last_idx}"
+        );
+
+        // Both players vote for the last bear.
+        let first = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            first,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: last_idx,
+            },
+        )
+        .unwrap();
+        let second = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            _ => unreachable!(),
+        };
+        apply(
+            &mut state,
+            second,
+            GameAction::SubmitVoteCandidate {
+                candidate_index: last_idx,
+            },
+        )
+        .unwrap();
+
+        assert!(!matches!(state.waiting_for, WaitingFor::VoteChoice { .. }));
+        assert_eq!(
+            state.objects.get(&last_bear).map(|o| o.zone),
+            Some(Zone::Exile),
+            "the most-voted candidate (index >255) must be exiled"
+        );
+        // Spot-check the first bear was NOT exiled (no votes).
+        let first_bear = opp_ids[0];
+        assert_eq!(
+            state.objects.get(&first_bear).map(|o| o.zone),
+            Some(Zone::Battlefield),
+            "an un-voted permanent must NOT be exiled"
         );
     }
 }

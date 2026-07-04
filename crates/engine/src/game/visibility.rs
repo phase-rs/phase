@@ -392,6 +392,57 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 701.38 secret ballot (Truth or Consequences): withhold the running
+    // tallies and ballots from EVERY viewer until the simultaneous reveal, so
+    // neither later voters nor opponents can infer earlier secret votes. The
+    // acting voter still sees their own `options`/`option_labels`. After
+    // `VoteResolved` fires the public tally lives in the event log, so there is
+    // no residual state leak.
+    //
+    // NOTE (D6 limitation): this scrubs the per-viewer snapshot only. The local
+    // WASM AI computes over the unfiltered thread-local state and can therefore
+    // read a human's earlier secret ballot — an accepted hidden-information gap
+    // (the AI already sees full hidden state for its own search). Multiplayer
+    // human↔human secrecy IS enforced here.
+    if let WaitingFor::VoteChoice {
+        player,
+        remaining_votes,
+        ref options,
+        ref option_labels,
+        ref remaining_voters,
+        ref tallies,
+        ref per_choice_effect,
+        controller,
+        source_id,
+        actor,
+        tally_mode,
+        ref candidate_objects,
+        ref outcome_template,
+        visibility,
+        ..
+    } = state.waiting_for
+    {
+        if visibility == crate::types::ability::VoteVisibility::Secret {
+            filtered.waiting_for = WaitingFor::VoteChoice {
+                player,
+                remaining_votes,
+                options: options.clone(),
+                option_labels: option_labels.clone(),
+                remaining_voters: remaining_voters.clone(),
+                tallies: vec![0; tallies.len()],
+                ballots: crate::im::Vector::new(),
+                per_choice_effect: per_choice_effect.clone(),
+                controller,
+                source_id,
+                actor,
+                tally_mode,
+                candidate_objects: candidate_objects.clone(),
+                outcome_template: outcome_template.clone(),
+                visibility,
+            };
+        }
+    }
+
     if let WaitingFor::SearchChoice {
         player,
         ref cards,
