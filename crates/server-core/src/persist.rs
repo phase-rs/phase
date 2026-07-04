@@ -90,11 +90,7 @@ pub fn restored_draft_lobby_register_request(
         return None;
     }
     let meta = ps.lobby_meta.as_ref()?;
-    let filled = ps
-        .player_tokens
-        .iter()
-        .filter(|t| !t.is_empty())
-        .count();
+    let filled = ps.player_tokens.iter().filter(|t| !t.is_empty()).count();
     Some(RegisterGameRequest {
         host_name: meta.host_name.clone(),
         public: meta.public,

@@ -972,7 +972,12 @@ mod tests {
         });
         assert_eq!(drafting_ps.session.status, DraftStatus::Drafting);
         assert!(
-            drafting_ps.player_tokens.iter().filter(|t| !t.is_empty()).count() < 8,
+            drafting_ps
+                .player_tokens
+                .iter()
+                .filter(|t| !t.is_empty())
+                .count()
+                < 8,
             "started draft should still have open seats"
         );
 
