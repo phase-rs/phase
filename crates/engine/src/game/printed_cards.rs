@@ -790,6 +790,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -1653,7 +1654,10 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
 
 pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
     match mana_cost {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => vec![],
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => vec![],
         ManaCost::Cost { shards, .. } => {
             let mut colors = Vec::new();
             for shard in shards {

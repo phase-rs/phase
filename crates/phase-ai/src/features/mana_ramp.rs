@@ -411,6 +411,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);

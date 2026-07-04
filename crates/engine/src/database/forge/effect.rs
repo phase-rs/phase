@@ -167,6 +167,7 @@ fn translate_deal_damage(
         amount,
         target,
         damage_source: None,
+        excess: None,
     })
 }
 
