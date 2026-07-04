@@ -513,6 +513,7 @@ fn redundancy_delta(
         | Effect::ManifestDread
         | Effect::Cloak { .. }
         | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
@@ -632,6 +633,7 @@ fn redundancy_delta(
         | Effect::Heist { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
+        | Effect::RememberCard { .. }
         | Effect::HeistExile => None,
     }
 }
@@ -1129,6 +1131,7 @@ mod tests {
             config,
             context: ai_ctx,
             cast_facts,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 

@@ -168,6 +168,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let creature_score = SacrificeValuePolicy.score(&creature_ctx);
 
@@ -187,6 +188,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let token_score = SacrificeValuePolicy.score(&token_ctx);
 
@@ -250,6 +252,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         // The raw score must exceed the ceiling, proving the clamp is exercised.
@@ -307,6 +310,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = SacrificeValuePolicy.score(&ctx);

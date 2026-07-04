@@ -127,18 +127,43 @@ fn legal_new_targets_for_stack_ability(
 ) -> Vec<TargetRef> {
     // CR 303.4a: An Aura spell's target is defined by its enchant ability, not
     // by the placeholder effect synthesized for the spell on the stack.
-    let retarget_filter = aura_enchant_filter(state, stack_ability.source_id)
-        .or_else(|| extract_target_filter(&stack_ability.effect).cloned());
-    retarget_filter
-        .map(|filter| {
-            find_legal_targets(
-                state,
-                &filter,
-                stack_ability.controller,
-                stack_ability.source_id,
-            )
-        })
-        .unwrap_or_else(|| stack_ability.targets.clone())
+    if let Some(filter) = aura_enchant_filter(state, stack_ability.source_id) {
+        return find_legal_targets(
+            state,
+            &filter,
+            stack_ability.controller,
+            stack_ability.source_id,
+        );
+    }
+
+    // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
+    // target filter against current game state.
+    if let Some(filter) = extract_target_filter(&stack_ability.effect) {
+        return find_legal_targets(
+            state,
+            filter,
+            stack_ability.controller,
+            stack_ability.source_id,
+        );
+    }
+
+    // CR 109.4: A mass effect that targets a player via a population filter
+    // ("tap all creatures target player controls", "destroy all artifacts that
+    // player controls") surfaces a player target slot, yet its
+    // `Effect::target_filter()` is `None` (the field is a resolution-time scan,
+    // not a targeting filter), so the standard branch above can't reach it.
+    // Enumerate the legal replacement *players* via the same companion-slot
+    // authority the cast path uses so retargeting offers a real alternative
+    // instead of collapsing to the current target.
+    if let Some(players) =
+        crate::game::ability_utils::companion_target_player_retarget_options(state, stack_ability)
+    {
+        return players;
+    }
+
+    // CR 115.7a: No declared or derived target filter (e.g. a placeholder spell
+    // effect) — keep the current targets unchanged.
+    stack_ability.targets.clone()
 }
 
 /// CR 303.4a: An Aura spell's legal targets are defined by its enchant ability —
@@ -449,6 +474,107 @@ mod tests {
             "ChooseTarget board-click must retarget the Aura to the chosen host"
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 115.7 + CR 109.4: Retargeting a mass effect that targets a player via
+    /// a population filter ("tap all creatures target player controls" —
+    /// `SetTapState { scope: All, target: Typed{Creature, controller:
+    /// TargetPlayer} }`) must enumerate the *other* player as a legal new
+    /// target. Such effects surface a player target slot, but their
+    /// `Effect::target_filter()` is `None` (the `target` field is a
+    /// resolution-time population scan). Pre-fix, `legal_new_targets` collapsed
+    /// to the current target, so Deflecting Swat offered the retarget dialog but
+    /// no actual alternative — the player could never redirect the spell.
+    /// Regression test for the reported Deflecting Swat bug.
+    #[test]
+    fn retarget_mass_player_effect_offers_other_player() {
+        use crate::types::ability::{ControllerRef, EffectScope, TapStateChange};
+
+        let mut state = GameState::new_two_player(42);
+
+        // "Tap all creatures target player controls" on the stack, cast by
+        // PlayerId(1), currently targeting PlayerId(0).
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Sleep-like Spell".into(),
+            Zone::Stack,
+        );
+        let population_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        let tap_ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: population_filter,
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            spell_id,
+            PlayerId(1),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(tap_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Deflecting Swat: ChangeTargets (scope All — "choose new targets")
+        // targeting the spell, cast by PlayerId(0).
+        let deflecting_swat = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: TargetFilter::Any,
+                scope: RetargetScope::All,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &deflecting_swat, &mut events).unwrap();
+
+        let WaitingFor::RetargetChoice {
+            current_targets,
+            legal_new_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected RetargetChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(current_targets, &vec![TargetRef::Player(PlayerId(0))]);
+        // Discriminating assertion: the OTHER player must be offered so the
+        // retarget can actually change the target. Pre-fix this was [Player(0)].
+        assert!(
+            legal_new_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "expected the other player offered as a legal new target, got {legal_new_targets:?}"
+        );
+
+        // CR 115.7d: Drive the production retarget action end-to-end — submitting
+        // the new player must actually redirect the spell to PlayerId(1), so the
+        // "tap all creatures" effect will resolve against the opponent's board.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RetargetSpell {
+                new_targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        )
+        .expect("retarget submission should succeed");
+        let new_targets = state
+            .stack
+            .iter()
+            .find(|e| e.id == spell_id)
+            .and_then(|e| e.ability())
+            .map(|a| a.targets.clone())
+            .expect("spell remains on stack with targets");
+        assert_eq!(new_targets, vec![TargetRef::Player(PlayerId(1))]);
     }
 
     /// CR 115.7b: "Change a target ... to this permanent" still has to obey

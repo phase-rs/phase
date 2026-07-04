@@ -1,7 +1,14 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { FormatConfig, GameFormat, LobbyGame, MatchType, PlayerId } from "../adapter/types";
+import type {
+  FormatConfig,
+  GameFormat,
+  LobbyGame,
+  LoopDetectionMode,
+  MatchType,
+  PlayerId,
+} from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
@@ -161,6 +168,8 @@ export interface RememberedHostConfig {
   formatConfig: FormatConfig;
   playerCount: number;
   matchType: MatchType;
+  /** CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation. */
+  loopDetection: LoopDetectionMode;
   isPublic: boolean;
   startWhenFull: boolean;
   ranked: boolean;
@@ -176,6 +185,8 @@ export interface HostingSettings {
   timerSeconds: number | null;
   formatConfig: FormatConfig;
   matchType: MatchType;
+  /** CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation. */
+  loopDetection: LoopDetectionMode;
   aiSeats: AiSeatConfig[];
   startWhenFull: boolean;
   /** Optional per-match label shown in the lobby, distinct from `displayName`
@@ -820,7 +831,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               password: settings.password || null,
               timer_seconds: settings.timerSeconds,
               player_count: settings.formatConfig.max_players,
-              match_config: { match_type: settings.matchType },
+              match_config: {
+                match_type: settings.matchType,
+                loop_detection: settings.loopDetection,
+              },
               format_config: settings.formatConfig,
               ai_seats: aiSeats,
               room_name: settings.roomName,
@@ -946,7 +960,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               password: settings.password || null,
               timerSeconds: null,
               playerCount: settings.formatConfig.max_players,
-              matchConfig: { match_type: settings.matchType },
+              matchConfig: {
+                match_type: settings.matchType,
+                loop_detection: settings.loopDetection,
+              },
               formatConfig: settings.formatConfig,
               aiSeats,
               roomName: opts.roomName ?? null,
@@ -970,7 +987,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             host.onGuestConnected,
             settings.formatConfig.max_players,
             settings.formatConfig,
-            { match_type: settings.matchType },
+            { match_type: settings.matchType, loop_detection: settings.loopDetection },
             undefined,
             broker ?? undefined,
             false,

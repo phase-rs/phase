@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -18,7 +19,7 @@ import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmo
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -239,6 +240,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
+  // Seat the game is currently waiting on (semantic actor). Drives the
+  // decision marker on opponent plates, distinct from the turn ring.
+  const { waitingSeatId } = useTurnStatus();
 
   const primaryOpponentId =
     liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
@@ -290,6 +294,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
           playerId={opponentId}
+          hasPendingDecision={waitingSeatId === opponentId}
           density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={
@@ -315,6 +320,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
+              {[...new Set(opponentDesignations.unboundedResources.map((u) => familyOf(u.axis)))].map(
+                (family) => (
+                  <UnboundedBadge key={family} family={family} />
+                ),
+              )}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
@@ -541,6 +551,8 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
+  const { waitingSeatId } = useTurnStatus();
+  const isWaitingOnThem = waitingSeatId === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
   const isUnderAttack = gameState?.combat?.attackers.some(
     (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
@@ -709,6 +721,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   const statusCluster = (
     <div className="flex shrink-0 items-center gap-1">
+      {isWaitingOnThem && (
+        <span
+          aria-hidden
+          title={t("status.waitingFor", { player: label })}
+          className="h-1.5 w-1.5 rounded-full bg-amber-300 shadow-[0_0_6px_1px_rgba(251,191,36,0.7)] animate-pulse"
+        />
+      )}
       {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />}
       <span className={`flex items-center gap-0.5 text-xs font-semibold tabular-nums @min-[10rem]:text-sm ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
@@ -734,6 +753,9 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
       {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+      {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map((family) => (
+        <UnboundedBadge key={family} family={family} />
+      ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       {onKick && !isEliminated && (
         // Stop propagation so clicking the kick affordance doesn't also fire

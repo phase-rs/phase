@@ -116,6 +116,49 @@ describe("scryfallLegalityKey", () => {
   });
 });
 
+describe("pickOldestPrinting", () => {
+  it("picks the earliest release date and lowest collector number on ties", async () => {
+    const { pickOldestPrinting } = await loadScryfallModule();
+    const printings = [
+      {
+        id: "new",
+        set: "neo",
+        set_name: "Kamigawa: Neon Dynasty",
+        collector_number: "10",
+        released_at: "2022-02-11",
+        border_color: "black",
+        frame_effects: [],
+        full_art: false,
+        faces: [{ normal: "https://img.example/new.jpg", art_crop: "https://img.example/new-art.jpg" }],
+      },
+      {
+        id: "old",
+        set: "lea",
+        set_name: "Limited Edition Alpha",
+        collector_number: "2",
+        released_at: "1993-08-05",
+        border_color: "black",
+        frame_effects: [],
+        full_art: false,
+        faces: [{ normal: "https://img.example/old.jpg", art_crop: "https://img.example/old-art.jpg" }],
+      },
+      {
+        id: "same-day-later-cn",
+        set: "lea",
+        set_name: "Limited Edition Alpha",
+        collector_number: "10",
+        released_at: "1993-08-05",
+        border_color: "black",
+        frame_effects: [],
+        full_art: false,
+        faces: [{ normal: "https://img.example/same-day.jpg", art_crop: "https://img.example/same-day-art.jpg" }],
+      },
+    ];
+
+    expect(pickOldestPrinting(printings).id).toBe("old");
+  });
+});
+
 describe("fetchCardData", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

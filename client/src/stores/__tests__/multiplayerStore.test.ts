@@ -74,6 +74,7 @@ function hostingSettings(
     timerSeconds: null,
     formatConfig: FORMAT_DEFAULTS.Commander,
     matchType: "Bo1",
+    loopDetection: { type: "Off" },
     aiSeats: [],
     startWhenFull: false,
     ranked: false,

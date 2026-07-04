@@ -99,6 +99,15 @@ pub fn resolve_phase_in(
     // skipping the phased-out exclusion.
     let targets = collect_phase_in_targets(state, ability, &target);
     for oid in targets {
+        // CR 101.2: an explicit "phase in" effect can't override an active
+        // "can't phase in" restriction. The restriction is condition-gated
+        // (CR 611.2b), so The Pandorica's own delayed-trigger phase-in — which
+        // resolves only after the source has untapped or left, when the lock has
+        // lapsed — passes, while any phase-in attempted while the lock is active
+        // is a no-op.
+        if crate::game::static_abilities::object_has_active_cant_phase_in(state, oid) {
+            continue;
+        }
         phase_in_object(state, oid, events);
     }
 
@@ -249,6 +258,245 @@ mod tests {
         assert!(
             state.objects[&theirs].is_phased_out(),
             "opponent's phased-out creature must remain phased out"
+        );
+    }
+
+    /// CR 702.26c + CR 101.2 + CR 611.2b: `resolve_phase_in` is the second
+    /// lock-enforcement site (alongside the untap-step TBA). An explicit
+    /// `Effect::PhaseIn` against a permanent held by an active `CantPhaseIn`
+    /// restriction must be a no-op while the lock holds, then succeed once the
+    /// lock lapses — mirroring The Pandorica's own delayed-trigger phase-in,
+    /// which only resolves after the source untaps or leaves. Removing the
+    /// `object_has_active_cant_phase_in` skip in `resolve_phase_in` fails this.
+    #[test]
+    fn resolve_phase_in_respects_cant_phase_in_lock() {
+        use crate::types::ability::{ContinuousModification, Duration, StaticCondition};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "The Pandorica");
+        let target = add_creature(&mut state, PlayerId(0), "Held");
+        state.objects.get_mut(&source).unwrap().tapped = true;
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, target, PhaseOutCause::Directly, &mut events);
+        assert!(state.objects[&target].is_phased_out());
+
+        // CR 611.2b: the lock lives only while the source is tapped (SourceIsTapped).
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsTapped,
+            },
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }],
+            None,
+        );
+
+        // The delayed-trigger phase-in carries a concrete resolved target
+        // (ParentTarget snapshot); model it with an explicit object target.
+        let ability = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        // Lock active: the explicit phase-in must NOT override it (CR 101.2).
+        events.clear();
+        resolve_phase_in(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            state.objects[&target].is_phased_out(),
+            "explicit phase-in must not override an active CantPhaseIn lock"
+        );
+
+        // Lock lapses (source untaps): the same explicit phase-in now succeeds.
+        state.objects.get_mut(&source).unwrap().tapped = false;
+        events.clear();
+        resolve_phase_in(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            state.objects[&target].is_phased_in(),
+            "explicit phase-in must succeed once the lock lapses"
+        );
+    }
+
+    /// CR 603.7c + CR 502.3 + CR 702.26c: The Pandorica's full re-entry
+    /// lifecycle through the production runtime path — registration, end-of-turn
+    /// cleanup, later-turn untap firing, and phase-in resolution.
+    ///
+    /// This is the regression that the isolated `resolve_phase_in`/parser tests
+    /// could not catch: the re-entry delayed trigger is created on the
+    /// activation turn but its qualifying event (the source's untap) occurs on a
+    /// LATER turn. Modeling it with a `ThisTurn` lifetime — as the original
+    /// `WhenNextEvent` did — prunes it at end-of-turn cleanup, so it never fires
+    /// and the permanent only re-enters one untap-cycle late via the phasing TBA.
+    /// The `Persistent` lifetime must survive cleanup and fire on the untap.
+    #[test]
+    fn pandorica_reentry_survives_cleanup_and_fires_on_later_untap() {
+        use crate::game::effects::delayed_trigger;
+        use crate::game::triggers::check_delayed_triggers;
+        use crate::game::turns::execute_cleanup;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
+            DelayedTriggerLifetime, Duration, StaticCondition, TriggerDefinition,
+        };
+        use crate::types::game_state::DelayedTrigger;
+        use crate::types::statics::StaticMode;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "The Pandorica");
+        let target = add_creature(&mut state, PlayerId(0), "Held");
+        // The Pandorica taps to activate; the lock holds "for as long as it
+        // remains tapped" (CR 611.2b).
+        state.objects.get_mut(&source).unwrap().tapped = true;
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, target, PhaseOutCause::Directly, &mut events);
+        assert!(state.objects[&target].is_phased_out());
+
+        // CR 611.2b: the can't-phase-in lock, granted by the activation.
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsTapped,
+            },
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }],
+            None,
+        );
+
+        // CR 603.7c: register the open-ended re-entry trigger through the real
+        // `CreateDelayedTrigger` resolver, mirroring the parsed shape
+        // (Untaps OR LeavesBattlefield, both scoped to the source; inner PhaseIn
+        // bound to the parent target).
+        let untaps = TriggerDefinition::new(TriggerMode::Untaps).valid_card(TargetFilter::SelfRef);
+        let leaves = TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+            .valid_card(TargetFilter::SelfRef);
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(untaps),
+                    or_trigger: Some(Box::new(leaves)),
+                    lifetime: DelayedTriggerLifetime::Persistent,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PhaseIn {
+                        target: TargetFilter::ParentTarget,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        delayed_trigger::resolve(&mut state, &create, &mut events).unwrap();
+
+        // Control: a `ThisTurn` "when you next cast a spell" delayed trigger that
+        // SHOULD be pruned at cleanup, proving the survival below is the lifetime
+        // gate rather than a blanket "keep everything".
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            ability: crate::game::ability_utils::build_resolved_from_def(
+                &AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ),
+                source,
+                PlayerId(0),
+            ),
+            controller: PlayerId(0),
+            source_id: source,
+            one_shot: true,
+        });
+        assert_eq!(state.delayed_triggers.len(), 2);
+
+        // Snapshot the re-entry ability before cleanup/firing consumes it.
+        let reentry = state
+            .delayed_triggers
+            .iter()
+            .find(|dt| {
+                matches!(
+                    dt.condition,
+                    DelayedTriggerCondition::WhenNextEvent {
+                        lifetime: DelayedTriggerLifetime::Persistent,
+                        ..
+                    }
+                )
+            })
+            .expect("re-entry trigger must be registered")
+            .ability
+            .clone();
+        assert!(
+            matches!(reentry.effect, Effect::PhaseIn { .. }),
+            "re-entry ability must be a PhaseIn"
+        );
+        assert_eq!(
+            reentry.targets,
+            vec![TargetRef::Object(target)],
+            "CR 603.7c: re-entry must snapshot the phased-out parent target"
+        );
+
+        // CR 513.2 + CR 603.7b: end-of-turn cleanup. The `ThisTurn` control
+        // trigger is pruned; the `Persistent` re-entry trigger survives.
+        let mut cleanup_events = Vec::new();
+        execute_cleanup(&mut state, &mut cleanup_events);
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "cleanup must prune the ThisTurn trigger but keep the Persistent re-entry"
+        );
+        assert!(
+            state.delayed_triggers.iter().any(|dt| matches!(
+                dt.condition,
+                DelayedTriggerCondition::WhenNextEvent {
+                    lifetime: DelayedTriggerLifetime::Persistent,
+                    ..
+                }
+            )),
+            "the open-ended re-entry trigger must survive end-of-turn cleanup"
+        );
+
+        // CR 502.3: on a later turn's untap step the source untaps (the lock
+        // lapses) and emits `PermanentUntapped`, which fires the re-entry trigger.
+        state.objects.get_mut(&source).unwrap().tapped = false;
+        let fired = check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PermanentUntapped { object_id: source }],
+        );
+        assert!(
+            !fired.is_empty(),
+            "the source's untap must fire the persistent re-entry trigger"
+        );
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "the one-shot re-entry trigger must be consumed once it fires"
+        );
+
+        // CR 702.26c: resolving the fired re-entry (stack resolution) phases the
+        // permanent back in now that the lock has lapsed.
+        let mut phase_in_events = Vec::new();
+        resolve_phase_in(&mut state, &reentry, &mut phase_in_events).unwrap();
+        assert!(
+            state.objects[&target].is_phased_in(),
+            "the held permanent must re-enter on the untap that fires the trigger"
         );
     }
 }

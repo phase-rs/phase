@@ -405,6 +405,12 @@ pub enum TriggerMode {
     /// (e.g., "an ability of an artifact source") live on `valid_card` — both
     /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
     AbilityActivated,
+    /// CR 606.2 + CR 603.2: Triggers when a player activates a loyalty ability
+    /// (a planeswalker activated ability paid with loyalty counters). Listens to
+    /// `GameEvent::AbilityActivated` with `kind == ActivatedAbilityKind::Loyalty`.
+    /// The activated planeswalker is filtered via `valid_card` ("a Chandra
+    /// planeswalker", "enchanted planeswalker"); player scope via `valid_target`.
+    LoyaltyAbilityActivated,
     /// CR 702.100a: Evolve keyword trigger — when a creature enters with greater power/toughness.
     Evolve,
     /// CR 702.100b: Triggers when a creature evolves.
@@ -666,6 +672,7 @@ impl FromStr for TriggerMode {
             "LandPlayed" => TriggerMode::LandPlayed,
             "PlayCard" => TriggerMode::PlayCard,
             "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
+            "LoyaltyAbilityActivated" => TriggerMode::LoyaltyAbilityActivated,
             "LifeChanged" => TriggerMode::LifeChanged,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
@@ -807,6 +814,23 @@ mod tests {
     }
 
     #[test]
+    fn loyalty_ability_activated_mode_string_round_trips() {
+        // CR 606.2: the new mode must survive Display -> from_str without
+        // degrading to `Unknown` (the from-string map has a `_ => Unknown`
+        // fallback, so a missing arm would silently no-fire the trigger).
+        let mode = TriggerMode::LoyaltyAbilityActivated;
+        assert_eq!(mode.to_string(), "LoyaltyAbilityActivated");
+        assert_eq!(
+            TriggerMode::from_str(&mode.to_string()).unwrap(),
+            TriggerMode::LoyaltyAbilityActivated
+        );
+        assert_eq!(
+            TriggerMode::from_str("LoyaltyAbilityActivated").unwrap(),
+            TriggerMode::LoyaltyAbilityActivated
+        );
+    }
+
+    #[test]
     fn trigger_mode_case_sensitive() {
         // Forge uses CamelCase -- lowercase should be Unknown
         assert_eq!(
@@ -940,6 +964,7 @@ mod tests {
             "LifeLost",
             "LifeLostAll",
             "LosesGame",
+            "LoyaltyAbilityActivated",
             "ManaAdded",
             "ManaExpend",
             "ManifestDread",

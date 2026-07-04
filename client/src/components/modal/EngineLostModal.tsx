@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
 
-import { onEngineLost } from "../../game/engineRecovery";
+import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
 import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameState } from "../../adapter/types";
@@ -22,6 +22,10 @@ import type { GameState } from "../../adapter/types";
  * - **Connection lost (no panic):** the legacy transient-loss path —
  *   worker restart, PWA update activation race. Reload restores from IDB.
  *
+ * - **Engine request slow:** the worker has not replied within the watchdog
+ *   window, but the request is still in flight. The player may keep waiting
+ *   without reloading; a late worker response completes the original action.
+ *
  * The listener is de-duped (`shown` latch) so repeated failures within
  * the same tab session don't stack multiple modals.
  */
@@ -32,6 +36,7 @@ import type { GameState } from "../../adapter/types";
  * "Copy diagnostic" or "Report on GitHub".
  */
 interface EngineLostSnapshot {
+  kind: "lost" | "slow";
   reason: string;
   panic: string | null;
   gameId: string | null;
@@ -53,21 +58,33 @@ export function EngineLostModal() {
     // which would double-set state and could double-show the modal
     // after a state reset in dev (StrictMode).
     let fired = false;
-    return onEngineLost((event) => {
-      if (fired) return;
-      fired = true;
+    const snapshotStore = (kind: EngineLostSnapshot["kind"], event: { reason: string; panic?: string }) => {
       // Snapshot store fields right now — recovery / cleanup paths may
       // null these before the user interacts with the modal, which would
       // leave the diagnostic blank exactly when it matters most.
       const { gameId, gameMode, gameState } = useGameStore.getState();
       setSnapshot({
+        kind,
         reason: event.reason,
         panic: event.panic ?? null,
         gameId,
         gameMode,
         gameState,
       });
+    };
+    const unsubscribeLost = onEngineLost((event) => {
+      if (fired) return;
+      fired = true;
+      snapshotStore("lost", event);
     });
+    const unsubscribeSlow = onEngineSlow((event) => {
+      if (fired) return;
+      snapshotStore("slow", event);
+    });
+    return () => {
+      unsubscribeLost();
+      unsubscribeSlow();
+    };
   }, []);
 
   if (!snapshot) return null;
@@ -76,13 +93,16 @@ export function EngineLostModal() {
   const handleReload = () => {
     window.location.reload();
   };
+  const handleContinueWaiting = () => {
+    setSnapshot(null);
+  };
 
   const isPanic = panic !== null;
-  // A getLegalActions/submitAction/getState watchdog timeout (ENGINE_UNRESPONSIVE,
-  // no panic captured) surfaces here with a `*-timeout` reason. It is NOT a lost
-  // connection — the engine is alive but couldn't answer within the budget (e.g.
-  // a very wide board). Show timeout-specific copy instead of the connection text.
-  const isTimeout = !isPanic && reason.endsWith("-timeout");
+  const isSlowRequest = snapshot.kind === "slow";
+  // Legacy timeout events may still arrive through the terminal path (for
+  // example, from an older adapter implementation). Show timeout-specific copy
+  // instead of the connection text when there is no panic payload.
+  const isTimeout = isSlowRequest || (!isPanic && reason.endsWith("-timeout"));
   const diagnostic = buildDiagnostic(snapshot);
 
   const handleCopy = async () => {
@@ -202,10 +222,20 @@ export function EngineLostModal() {
               </a>
             </>
           )}
+          {isSlowRequest && (
+            <button
+              type="button"
+              onClick={handleContinueWaiting}
+              className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-cyan-600"
+              autoFocus
+            >
+              {t("engineLost.continueWaiting")}
+            </button>
+          )}
           <button
             onClick={handleReload}
             className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-rose-500"
-            autoFocus
+            autoFocus={!isSlowRequest}
           >
             {t("engineLost.reload")}
           </button>
@@ -234,7 +264,7 @@ function buildDiagnostic({ reason, panic, gameId, gameMode }: EngineLostSnapshot
     `User agent: ${navigator.userAgent}`,
     "",
     "Panic:",
-    panic ?? "<no panic captured — transient state-loss>",
+    panic ?? "<no panic captured>",
   ];
   return lines.join("\n");
 }

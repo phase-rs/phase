@@ -24,6 +24,7 @@ struct Args {
     current_output: PathBuf,
     games: usize,
     seed: u64,
+    difficulty: AiDifficulty,
     suite_filter: Option<String>,
     refresh_baseline: bool,
 }
@@ -50,7 +51,7 @@ fn main() {
         }
     };
 
-    let mut options = SuiteOptions::new(AiDifficulty::Medium, args.games, args.seed);
+    let mut options = SuiteOptions::new(args.difficulty, args.games, args.seed);
     options.output_path = args.current_output.clone();
     options.filter = args.suite_filter.clone();
     options.git_sha = command_output("git", &["rev-parse", "--short=12", "HEAD"]);
@@ -113,6 +114,7 @@ fn parse_args() -> Result<Args, String> {
     let mut current_output = PathBuf::from(DEFAULT_CURRENT);
     let mut games = 10usize;
     let mut seed = DEFAULT_SEED;
+    let mut difficulty = AiDifficulty::Medium;
     let mut suite_filter = Some(DEFAULT_QUICK_FILTER.to_string());
     let mut refresh_baseline = false;
 
@@ -138,6 +140,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--seed must be an integer".to_string())?;
             }
+            "--difficulty" => {
+                // Case-insensitive; unknown labels fall back to Medium via
+                // `AiDifficulty::from_label`. The determinization gate runs
+                // `--difficulty hard` on both branch and baseline so the pair
+                // isolates the K=2-vs-K=0 delta (§11).
+                difficulty = AiDifficulty::from_label(&next_value(&mut iter, "--difficulty")?);
+            }
             "--suite-filter" => {
                 suite_filter = Some(next_value(&mut iter, "--suite-filter")?);
             }
@@ -154,6 +163,7 @@ fn parse_args() -> Result<Args, String> {
         current_output,
         games,
         seed,
+        difficulty,
         suite_filter,
         refresh_baseline,
     })
@@ -191,6 +201,7 @@ fn write_report(report: &SuiteReport, path: &Path) -> Result<(), std::io::Error>
 
 fn print_usage() {
     eprintln!("Usage: cargo ai-gate [--refresh-baseline] [--games N] [--seed S]");
+    eprintln!("                     [--difficulty {{medium|hard|veryhard|cedh}}]");
     eprintln!("                     [--suite-filter STR[,STR...] | --full-suite]");
     eprintln!("                     [--data-root DIR] [--baseline PATH] [--current-output PATH]");
 }

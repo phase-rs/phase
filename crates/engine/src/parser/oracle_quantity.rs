@@ -42,7 +42,6 @@ use crate::types::ability::{
     PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause, TypeFilter,
     TypedFilter, ZoneRef,
 };
-#[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
 use crate::types::keywords::KeywordKind;
@@ -58,6 +57,60 @@ use crate::types::zones::Zone;
 pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     let mut ctx = ParseContext::default();
     parse_quantity_ref_with_context(text, &mut ctx)
+}
+
+/// CR 122.1: Legacy quantity fallbacks receive the raw words before
+/// "counter(s) on ..." after a suffix split. Keep counter-type canonicalization
+/// local to that quantity seam: strip quantity lead-ins that are not part of the
+/// counter name, but leave atomic counter parsing strict.
+fn parse_counter_quantity_type(raw: &str) -> Option<Option<CounterType>> {
+    let mut counter_text = raw.trim();
+    let mut saw_quantity_lead_in = false;
+
+    if let Some(after_where) = nom_on_lower(counter_text, counter_text, |i| {
+        value(
+            (),
+            (
+                take_until::<_, _, OracleError<'_>>("where x is "),
+                tag("where x is "),
+            ),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest.trim())
+    {
+        counter_text = after_where;
+        saw_quantity_lead_in = true;
+    }
+
+    loop {
+        let stripped = nom_on_lower(counter_text, counter_text, |i| {
+            value(
+                (),
+                alt((
+                    tag::<_, _, OracleError<'_>>("equal to "),
+                    tag("the number of "),
+                    tag("the number of"),
+                    tag("number of "),
+                    tag("number of"),
+                )),
+            )
+            .parse(i)
+        })
+        .map(|((), rest)| rest.trim());
+
+        let Some(next) = stripped else {
+            break;
+        };
+        counter_text = next;
+        saw_quantity_lead_in = true;
+    }
+
+    if counter_text.is_empty() {
+        return saw_quantity_lead_in.then_some(None);
+    }
+
+    Some(Some(normalize_counter_type(counter_text)))
 }
 
 /// CR 119.1 + CR 102.1: "the {highest|lowest} life total among {all players|
@@ -156,15 +209,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         .or_else(|| trimmed.strip_suffix(" counter on ~"))
         .or_else(|| trimmed.strip_suffix(" counter on it"))
     {
-        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
-            .parse(rest)
-            .map_or(rest, |(r, _)| r)
-            .trim();
-        if !raw_type.is_empty() {
-            let counter_type = normalize_counter_type(raw_type);
+        if let Some(counter_type) = parse_counter_quantity_type(rest) {
             return Some(QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
-                counter_type: Some(counter_type),
+                counter_type,
             });
         }
     }
@@ -177,15 +225,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         .or_else(|| trimmed.strip_suffix(" counter on that creature"))
         .or_else(|| trimmed.strip_suffix(" counter on that permanent"))
     {
-        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
-            .parse(rest)
-            .map_or(rest, |(r, _)| r)
-            .trim();
-        if !raw_type.is_empty() {
-            let counter_type = normalize_counter_type(raw_type);
+        if let Some(counter_type) = parse_counter_quantity_type(rest) {
             return Some(QuantityRef::CountersOn {
                 scope: ObjectScope::Target,
-                counter_type: Some(counter_type),
+                counter_type,
             });
         }
     }
@@ -1328,13 +1371,7 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
 /// document "their" / "each player's own" semantics.
 fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, relation) = parse_player_population(input)?;
-    let (input, (attr, count)) = alt((
-        parse_player_counter_attr_clause,
-        parse_hand_size_attr_clause,
-        parse_cards_drawn_attr_clause,
-        parse_battlefield_entries_attr_clause,
-    ))
-    .parse(input)?;
+    let (input, (attr, count)) = parse_player_attribute_attr_clause(input)?;
     Ok((
         input,
         PlayerFilter::PlayerAttribute {
@@ -1361,12 +1398,12 @@ fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
     .parse(input)
 }
 
-/// CR 122.1f + CR 122.1: "who have N or more <kind> counters" → the candidate's
+/// CR 122.1 + CR 122.2: "who have/has N or more <kind> counters" → the candidate's
 /// named player-counter total. Delegates kind recognition to the shared
 /// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
 /// all covered.
 fn parse_player_counter_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
-    let (input, _) = tag("who have ").parse(input)?;
+    let (input, _) = alt((tag("who have "), tag("who has "))).parse(input)?;
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
     let (input, kind) = nom_quantity::parse_player_counter_kind(input)?;
@@ -1442,6 +1479,22 @@ fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (Quant
             n as i32,
         ),
     ))
+}
+
+/// CR 122.1 + CR 402.1 + CR 121.1 + CR 403.3: Shared attribute-clause tail
+/// after an "each player"/"each opponent" subject. Covers counter, hand-size,
+/// cards-drawn, and battlefield-entry predicates — the same class as
+/// `parse_player_attribute_predicate` without the leading population word.
+pub(crate) fn parse_player_attribute_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, i32)> {
+    alt((
+        parse_player_counter_attr_clause,
+        parse_hand_size_attr_clause,
+        parse_cards_drawn_attr_clause,
+        parse_battlefield_entries_attr_clause,
+    ))
+    .parse(input)
 }
 
 fn anaphoric_power_expr() -> QuantityExpr {
@@ -2355,14 +2408,43 @@ fn parse_optional_offer_accepted_clause(
     Ok((input, (relation, PlayerActionKind::AcceptedOptionalEffect)))
 }
 
+/// CR 702.62b: A suspended card is a card in the exile zone that has suspend and
+/// has a time counter on it. This building block composes those observable axes
+/// (`InZone{Exile}` + `HasKeywordKind{Suspend}` + `Counters{Time ≥ 1}`) with an
+/// optional ownership qualifier into a typed card filter — the canonical filter for
+/// both the `for each suspended card you own` count clause (`parse_suspended_card_clause`)
+/// and the "choose a suspended card you own" interactive selection (Amy Pond's
+/// combat-damage trigger). When `owner` is `None` the filter covers any player's
+/// suspended cards (no ownership restriction). Never a one-off `Suspended` tag or a
+/// verbatim string match.
+pub(crate) fn suspended_card_filter(owner: Option<ControllerRef>) -> TargetFilter {
+    use crate::types::counter::{CounterMatch, CounterType};
+    let mut properties = vec![
+        // CR 400.1: in the exile zone.
+        FilterProp::InZone { zone: Zone::Exile },
+        // CR 702.62b: has suspend.
+        FilterProp::HasKeywordKind {
+            value: KeywordKind::Suspend,
+        },
+        // CR 702.62b: bears at least one time counter.
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Time),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+    ];
+    if let Some(o) = owner {
+        // CR 108.3: owned by the given player reference.
+        properties.push(FilterProp::Owned { controller: o });
+    }
+    TargetFilter::Typed(TypedFilter::card().properties(properties))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 /// CR 702.62b: A suspended card is a card in the exile zone with the suspend
 /// keyword and a time counter on it. Counting clauses (`for each suspended card
-/// you own`) compose those observable axes with the ownership qualifier.
-///
-/// Composes existing `FilterProp`s (`InZone`/`HasKeywordKind`/`Owned`/`Counters`)
-/// into a typed card filter — never a one-off `Suspended` tag or a verbatim
-/// string match.
+/// you own`) compose those observable axes with the ownership qualifier via the
+/// shared `suspended_card_filter` building block.
 fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("suspended ")
         .parse(clause)
@@ -2382,26 +2464,8 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
         return None;
     }
 
-    use crate::types::counter::{CounterMatch, CounterType};
     Some(QuantityRef::ObjectCount {
-        filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-            // CR 400.1: in the exile zone.
-            FilterProp::InZone { zone: Zone::Exile },
-            // CR 702.62b: has suspend.
-            FilterProp::HasKeywordKind {
-                value: KeywordKind::Suspend,
-            },
-            // CR 108.3: owned by the ability's controller.
-            FilterProp::Owned {
-                controller: ControllerRef::You,
-            },
-            // CR 702.62b: bears at least one time counter.
-            FilterProp::Counters {
-                counters: CounterMatch::OfType(CounterType::Time),
-                comparator: Comparator::GE,
-                count: QuantityExpr::Fixed { value: 1 },
-            },
-        ])),
+        filter: suspended_card_filter(Some(ControllerRef::You)),
     })
 }
 
@@ -2514,6 +2578,50 @@ fn parse_spell_history_clause(
     }
 
     None
+}
+
+/// CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" → count only the
+/// tracked-set members matching <TYPE> (`FilteredTrackedSetSize`), so
+/// "for each creature card put into a graveyard this way" makes a token per
+/// creature milled, not per card (Dread Summons, #4678-adjacent #4697). A bare
+/// "card" (`TypeFilter::Card`) or a typeless clause is the unfiltered count and
+/// returns `None`, so the caller keeps `TrackedSetSize`. Building block for the
+/// whole "for each <filter> card <verb> this way" class (creature / land /
+/// artifact / … milled / exiled / destroyed / put into a graveyard).
+/// `caused_by: None` counts every filtered member of the most recent tracked set
+/// (the cards moved "this way").
+fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
+    let (filter, rest) = parse_type_phrase(clause);
+    let TargetFilter::Typed(ref typed) = filter else {
+        return None;
+    };
+    // Only a SPECIFIC card type filters the set; a typeless clause or the generic
+    // "card" (`TypeFilter::Card`) is the unfiltered `TrackedSetSize` count.
+    if typed.type_filters.is_empty()
+        || typed
+            .type_filters
+            .iter()
+            .all(|t| matches!(t, TypeFilter::Card))
+    {
+        return None;
+    }
+    // The remainder must be a "<zone-move verb> this way" tracked-set phrase
+    // (e.g. "put into a graveyard this way", "milled this way", "exiled this
+    // way"): nom `take_until("this way") + tag`, with nothing after it.
+    let terminates_this_way = (
+        take_until::<_, _, OracleError<'_>>("this way"),
+        tag::<_, _, OracleError<'_>>("this way"),
+    )
+        .parse(rest.trim())
+        .map(|(after, _)| after.trim().is_empty())
+        .unwrap_or(false);
+    if !terminates_this_way {
+        return None;
+    }
+    Some(QuantityRef::FilteredTrackedSetSize {
+        filter: Box::new(filter),
+        caused_by: None,
+    })
 }
 
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
@@ -2685,6 +2793,14 @@ fn parse_for_each_clause_with_they_controller(
         if let Ok(("", qty)) =
             crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(&lower)
         {
+            return Some(qty);
+        }
+        // CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" for the remaining
+        // zone-move verbs (put into a graveyard / milled / exiled …) — count only
+        // the members of that card type (Dread Summons #4697). Mirrors the
+        // revealed/destroyed helpers above; a bare "card" returns `None` and keeps
+        // the unfiltered `TrackedSetSize` fallback below.
+        if let Some(qty) = parse_filtered_tracked_set_this_way(&lower) {
             return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
@@ -3282,6 +3398,30 @@ mod tests {
                 counter_type: Some(ref counter_type),
             } => assert_eq!(*counter_type, CounterType::Age),
             other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantity_ref_counter_type_strips_quantity_lead_ins() {
+        for (phrase, expected) in [
+            (
+                "equal to the number of verse counters on it",
+                Some(CounterType::Generic("verse".to_string())),
+            ),
+            (
+                "x life, where x is the number of +1/+1 counters on it",
+                Some(CounterType::Plus1Plus1),
+            ),
+            ("equal to the number of counters on it", None),
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap_or_else(|| panic!("failed: {phrase}"));
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type,
+                } => assert_eq!(counter_type, expected, "phrase: {phrase}"),
+                other => panic!("Expected CountersOn{{Source, _}} for {phrase}, got {other:?}"),
+            }
         }
     }
 
@@ -5449,6 +5589,61 @@ mod tests {
         }));
     }
 
+    /// CR 508.1 + CR 608.2c: Mondassian Colony Ship's attack trigger — "for each
+    /// other creature its controller controls that shares a creature type with
+    /// it". The anaphoric "its controller controls" suffix binds the count to
+    /// the triggering (attacking) player, and the shared-quality clause
+    /// references the triggering source. Before the `parse_controller_suffix`
+    /// arm, "its controller controls" was unrecognized, the type-phrase fallback
+    /// left a non-empty remainder, and the whole for-each multiplier was
+    /// swallowed (the trigger became a flat +1/+1). Reverting the arm re-swallows
+    /// the clause and this `.expect` fails.
+    #[test]
+    fn for_each_other_creature_its_controller_controls_shares_type() {
+        use crate::types::ability::SharedQuality;
+        let ctx = ParseContext {
+            // Trigger subject = the attacking creature (a typed, non-source object).
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context(
+            "other creature its controller controls that shares a creature type with it",
+            &ctx,
+        )
+        .expect("Mondassian for-each clause should parse to an ObjectCount");
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::TriggeringPlayer),
+            "\"its controller controls\" must bind to the attacking player"
+        );
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "\"other creature\" must contribute FilterProp::Another"
+        );
+        let (quality, reference) = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::SharesQuality {
+                    quality, reference, ..
+                } => Some((quality, reference)),
+                _ => None,
+            })
+            .expect("\"shares a creature type with it\" must contribute SharesQuality");
+        assert!(matches!(quality, SharedQuality::CreatureType));
+        assert!(
+            matches!(reference.as_deref(), Some(TargetFilter::TriggeringSource)),
+            "shared-quality reference must be the triggering source, got {reference:?}"
+        );
+    }
+
     #[test]
     fn quantity_number_of_nonland_cards_milled_this_way_uses_event_count() {
         assert_eq!(
@@ -6616,6 +6811,37 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 400.7 (#4697): "for each CREATURE card put into a graveyard
+    /// this way" (Dread Summons) counts only the creature cards milled, not every
+    /// card. The generic ref parser dropped the "creature" type and yielded the
+    /// unfiltered `TrackedSetSize`; it must now be `FilteredTrackedSetSize`.
+    #[test]
+    fn creature_card_put_into_graveyard_this_way_uses_filtered_tracked_set() {
+        let qty = parse_for_each_clause("creature card put into a graveyard this way")
+            .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "filter must be Creature; got {tf:?}"
+                ),
+                other => panic!("expected Typed(Creature), got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Regression: a bare "card put into a graveyard this way" (no card type)
+    /// counts EVERY tracked-set member and must keep the unfiltered
+    /// `TrackedSetSize`.
+    #[test]
+    fn bare_card_put_into_graveyard_this_way_keeps_tracked_set_size() {
+        assert_eq!(
+            parse_for_each_clause("card put into a graveyard this way"),
+            Some(QuantityRef::TrackedSetSize),
+        );
+    }
+
     /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"
     /// (Murktide Regent's Delve ETB counter). The type-phrase prefix intersects
     /// the linked-exile set; `ExiledBySource.extract_in_zone()` is Exile, so the
@@ -6821,6 +7047,63 @@ mod tests {
             }),
             "must require at least one time counter (CR 702.62b)"
         );
+    }
+
+    // CR 702.62b: the shared `suspended_card_filter` building block is owner-
+    // parameterized — `Some(You)` for "a suspended card you own" (Amy Pond),
+    // `Some(Opponent)` for other ownership scopes, and `None` for "any player's
+    // suspended card" (no ownership restriction).
+    #[test]
+    fn suspended_card_filter_is_owner_parameterized() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        for owner in [
+            Some(ControllerRef::You),
+            Some(ControllerRef::Opponent),
+            None,
+        ] {
+            let TargetFilter::Typed(tf) = suspended_card_filter(owner.clone()) else {
+                panic!("expected a Typed filter for owner {owner:?}");
+            };
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }),
+                "owner {owner:?}: must require exile zone"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::HasKeywordKind {
+                    value: KeywordKind::Suspend,
+                }),
+                "owner {owner:?}: must require Suspend keyword"
+            );
+            // Check the counter requirement BEFORE the ownership match so that
+            // `owner` is not moved before this final assert.
+            assert!(
+                tf.properties.contains(&FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Time),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
+                "owner {owner:?}: must require at least one time counter (CR 702.62b)"
+            );
+            // Ownership check: `if let` moves `owner`, so it must come last.
+            // Clone `o` into the `contains` argument so the format string can
+            // still borrow it for the failure message.
+            if let Some(o) = owner {
+                assert!(
+                    tf.properties.contains(&FilterProp::Owned {
+                        controller: o.clone()
+                    }),
+                    "owner {o:?}: must require ownership by that player"
+                );
+            } else {
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Owned { .. })),
+                    "owner None: must NOT restrict by ownership"
+                );
+            }
+        }
     }
 
     // Rose Tyler's compound: "suspended card you own and each other permanent you

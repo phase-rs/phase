@@ -164,9 +164,13 @@ fn create_gift_token(
         obj.base_card_types = card_type;
     }
 
+    // CR 613.7d: the gift token enters the battlefield, so it receives a
+    // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+    let entry_timestamp = state.next_timestamp();
+
     // CR 400.7 + CR 302.6 + CR 603.6a: Single authority for ETB state.
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.reset_for_battlefield_entry(state.turn_number);
+        obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
     }
 
     crate::game::layers::mark_layers_full(state);

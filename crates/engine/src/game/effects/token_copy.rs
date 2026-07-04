@@ -462,6 +462,10 @@ pub(crate) fn apply_copy_token_after_replacement(
             Zone::Battlefield,
         );
 
+        // CR 613.7d: a copy token enters the battlefield, so it receives a
+        // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
+
         let token = state.objects.get_mut(&token_id).unwrap();
         token.is_token = true;
         token.display_source = display_source;
@@ -499,7 +503,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
         // below via `extra_keywords` (Twinflame, etc.) is folded in at query
         // time by `has_summoning_sickness`.
-        token.reset_for_battlefield_entry(state.turn_number);
+        token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
 
         // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
         // keywords on top of the copied characteristics. Twinflame's haste
@@ -3604,5 +3608,128 @@ mod tests {
         assert_eq!(token.toughness, Some(2));
         assert_eq!(token.name, "Sawed Beast");
         assert!(token.is_token);
+    }
+
+    /// Count copy-tokens of `copied_name` controlled by `player` on the
+    /// battlefield (CR 111.2 — the player who creates a token is its owner and
+    /// the token enters under that player's control).
+    fn copy_tokens_for(state: &GameState, player: PlayerId, copied_name: &str) -> usize {
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token && obj.name == copied_name && obj.controller == player)
+            .count()
+    }
+
+    /// CR 707.2 + CR 608.2c + CR 109.4 + CR 608.2h: Fractured Identity end-to-end
+    /// in a 3-player game. Exile a permanent P1 controls, then EACH PLAYER OTHER
+    /// THAN ITS CONTROLLER (P1) creates a token copy. P0 and P2 each get exactly
+    /// one copy; P1 (the exiled permanent's controller) gets none. The exclusion
+    /// anchor resolves through the ability-aware `players_for_filter` using the
+    /// exiled object's preserved last-known controller.
+    #[test]
+    fn fractured_identity_three_player_excludes_exiled_controller() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // The exile target: a creature P1 owns and controls.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Exile,
+            "the targeted permanent must be exiled"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            1,
+            "P0 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p2, "Grizzly Bears"),
+            1,
+            "P2 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            0,
+            "P1 (the exiled permanent's controller) must NOT create a copy"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2h: "its controller" should anchor on the exiled
+    /// permanent's last-known battlefield CONTROLLER, not its owner. A creature
+    /// P1 owns but P0 controls (Mind Control style) is exiled; "each player other
+    /// than its controller" should exclude P0, so only P1 creates a copy.
+    ///
+    /// `parent_target_controller` now prefers the LKI snapshot (captured before
+    /// `reset_for_battlefield_exit` reverts the controller to the owner) for any
+    /// object that is no longer on the battlefield (CR 608.2h).
+    #[test]
+    fn fractured_identity_its_controller_excludes_controller_not_owner() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A creature P1 OWNS but P0 CONTROLS.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // Simulate a stolen-control effect: P0 controls the P1-owned creature.
+        // `base_controller` is the layer-stable control anchor (layers reset
+        // `controller` to `base_controller.unwrap_or(owner)`), so both must be set
+        // for the control change to survive recomputation.
+        {
+            let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
+            obj.base_controller = Some(p0);
+            obj.controller = p0;
+        }
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            1,
+            "P1 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            0,
+            "P0 (the controller of the exiled permanent) must NOT create a copy"
+        );
     }
 }

@@ -72,6 +72,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
@@ -144,6 +145,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
@@ -552,10 +554,25 @@ impl AbilityCost {
                     }
                 }
             }
-            AbilityCost::Behold { count, filter, .. } => {
-                super::casting_costs::eligible_behold_choices(state, player, source, filter).len()
-                    >= *count as usize
-            }
+            AbilityCost::Behold {
+                count,
+                filter,
+                type_choice,
+                ..
+            } => match type_choice {
+                // Fixed-quality behold: >= count candidates of the fixed filter.
+                None => {
+                    super::casting_costs::eligible_behold_choices(state, player, source, filter)
+                        .len()
+                        >= *count as usize
+                }
+                // CR 601.2h: pre-choice behold — payable iff SOME creature type is
+                // feasible (∃ a type with >= count beholdable creatures of it).
+                Some(_) => !super::filter::feasible_behold_creature_types(
+                    state, player, source, filter, *count,
+                )
+                .is_empty(),
+            },
             // CR 601.2b: Every sub-cost must be payable. When the composite
             // includes {T}, the source is committed to the tap cost and must be
             // excluded from any TapCreatures eligibility count — it will be

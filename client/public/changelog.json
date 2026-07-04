@@ -1,6 +1,90 @@
 {
   "entries": [
     {
+      "id": 160,
+      "date": "2026-07-03",
+      "title": "Directional attacks and modal forms",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Directional attack restrictions now work — Pramikon Sky Rampart, Mystic Barrier, and Teyo Geometric Tactician can force attacks toward the nearest opponent to the left or right\n• Creatures that choose a form as they enter now apply the chosen profile correctly (Primal Plasma, Primal Clay, Corrupted Shapeshifter, and Aquamorph Entity's enters mode)\n• New cards and card classes now work: Plague Drone, Corrupted Resolve, Ravenous Trap's trap cost, and activated-ability cost modifiers like Suppression Field and Zirda\n• Copy effects can now keep their “choose new targets” option even when another clause sits between the copy and the retarget sentence\n\n🛠️ Cards That Now Work Right\n• Dungeon rooms are more faithful: Lost Level now scries 2, The Atropal has deathtouch, Storeroom can target any creature, and Fungi Cavern lasts until your next turn\n• Iona, Shield of Emeria now stops only the chosen color, not every spell your opponents could cast\n• Disruptor Flute taxes the named spell correctly, and Oubliette-style phase-out now taps the creature only when it phases back in this way\n• Lure-style permanents now actually force all able creatures to block them (Ochran Assassin, Breaker of Armies, Prized Unicorn, and Lure)\n• Jabari's Influence now targets only a creature that attacked you this turn and also puts the -1/-0 counter on it\n• Shauku, Seer of the Bright Side, Entourage of Trest, Tadeas, Tromokratis, Cairn Wanderer, Tarmogoyf, Ixhel, Denry Klin, The Ozolith, Drizzt, Radiant, and Pride of the Clouds all read their conditional text more accurately\n• “That player adds mana” effects now prompt and give mana to the chosen player, not the controller (Spectral Searchlight, Stadium Vendors, Mad Science Fair Project)\n• One-shot spell discounts now get used once, and negative discard, mill, and exile-top counts now become zero instead of draining whole hands or libraries\n• X plus or minus a number now resolves with the right amount, and target phrases like “an opponent's graveyard” now point at cards in that graveyard\n\n⚔️ Combat & Gameplay\n• Resolve All now works in multiplayer, and local hotseat no longer lets AI take over another human player's priority window\n• The infinite-combo detector can now recognize growing multiplayer cascades instead of grinding through repeated loops\n\n🖥️ Interface\n• During target and board-choice prompts, attached Auras and Equipment can be selected in place, with a fan view for crowded permanents\n• Manual mana and Undo now ride with the player HUD, and mobile landscape layouts no longer use portrait-only controls\n\n🤖 AI\n• Very large token boards are much faster to search and target — full-board static scans are now skipped when no matching static exists",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522668927291887788"
+    },
+    {
+      "id": 159,
+      "date": "2026-07-02",
+      "title": "Split attackers across multiple defenders",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Regenerate now works — the card named after its own keyword action correctly regenerates its target\n• Role Reversal exchanges control of two permanents that share a permanent type\n• Coastal Wizard (and Lady Sun) can now return themselves plus another target creature to hand\n• Bound in Gold now shuts off the enchanted permanent's activated abilities and stops it attacking or blocking\n• Tinfoil Helm now grants +2/+2 along with its full protection-from list\n\n🛠️ Cards That Now Work Right\n• Hama Pashar no longer doubles dungeon-room triggers\n• Eidolon of Countless Battles now scales both its power and toughness from the same count\n• Valakut Fireboar switches its power and toughness when it attacks\n• Multani's Presence now triggers when you counter your own spell\n• Molecule Man's miracle now works on your first draw of the turn\n• Wrenn and Realmbreaker's emblem now lets you play lands and cast permanent spells from your graveyard\n• Orvar now copies the permanent you targeted instead of copying itself\n• Isochron Scepter can now cast the copy of its imprinted spell\n• Zenith Chronicler now draws on your first multicolored spell each turn\n• Intimidation Tactics now exiles the chosen card from the target's hand\n• Mindskinner now mills the right amount when its combat damage is prevented\n• For the Ancestors now digs for cards of the chosen creature type\n• Kraken of the Straits now stops low-power creatures from blocking it\n• Savor the Moment now correctly skips your untap step that turn\n• Bloodthorn Flail's either-or equip cost now works\n• Nahiri, the Lithomancer no longer freezes the game when you have no Equipment to attach\n• A batch of conditional-restriction and cost-reduction parser fixes (Rock Jockey, Wirecat, Hour of Revelation, Lashwhip Predator, and more)\n\n⚔️ Combat & Gameplay\n• You can now split your attackers across multiple defenders — attack several planeswalkers, battles, or players at once\n\n🖥️ Interface\n• New hand organizing controls — sort and filter your hand\n• Board HUD polish — the priority indicator now sits on the Hand row with a per-reason glyph (attack / block / target / pay …) tinted to the waiting player's seat color, plus new lands/support collapse controls on the board and in Preferences\n• Consolidated the mobile action dock so bottom controls no longer overlap your hand and piles\n• Mana symbols and card backs now load reliably again after a service-worker caching regression\n• More game data is now cached for offline play\n\n🤖 AI\n• Faster AI turns from a search-performance overhaul — per-game session caching, a transposition table with iterative deepening, and determinized sampling (play is unchanged, just quicker)",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522275112370311288"
+    },
+    {
+      "id": 158,
+      "date": "2026-07-01",
+      "title": "Make mana on an opponent's turn",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• 11 new Standard-set cards across 7 mechanics — including Torch the Witness, Orbital Plunge, Full Bore, Throw from the Saddle, Kylox's Voltstrider, Quistis Trepe, Tinybones the Pickpocket, and Summoner's Grimoire\n• Identity Crisis now exiles a target player's entire hand and graveyard at once\n• Alchemy \"perpetually gains\" effects now stick — permanently granting keywords or setting base power/toughness for the rest of the game\n\n🛠️ Cards That Now Work Right\n• Slaughter the Strong now lets each player keep creatures with total power 4 or less and sacrifices only the rest (previously it sacrificed everything)\n• Effects that set a creature's base power or toughness now resolve, including toughness-only and \"change … to\" wordings (Riptide Mangler, Arni Brokenbrow, Shape Stealer, Eldrazi Mimic, Wall of Tombstones)\n• Amalia Benavides Aguirre now wipes the board only when her power reaches 20, not on every life gain\n• Twilight Prophet's caster now gains life equal to the revealed card's mana value\n• Boros Battleshaper now applies both of its combat effects, not just the \"can't attack or block\" half\n• \"Target permanent's controller sacrifices it\" abilities now target and sacrifice correctly (Arcum Dagsson)\n• Dread Summons now creates a Zombie only for each creature card milled, not every card\n• Scarblade's Malice's delayed dies trigger now makes its token\n• Agatha now lets you spend mana as any color for the abilities it powers\n• Season of the Burrow now enforces its pawprint budget across modes\n• \"Can't cast until your next turn\" restrictions now last their full duration (Sphinx's Decree, Azor, the Lawbringer)\n• Divided damage and counters no longer freeze spells that also have other targets (Magma Opus)\n• Final Parting now shows the correct destination zones, and Bribery correctly takes control\n• \"Reveal the card\" wording now reveals as intended\n\n⚔️ Combat & Gameplay\n• You can now hold priority to make mana during an opponent's turn\n• Paying {X} to attack is no longer capped at the number of attackers\n• Combat roles are now cleared when a creature leaves the battlefield, so a returning creature can't inherit stale attacking/blocking status\n\n🤖 AI\n• Fixed AI-vs-AI games stalling (\"game won't advance\") on large multiplayer boards\n\n🖥️ Interface\n• You can now back out of a modal activated ability's \"Choose one\" prompt after clicking the permanent, instead of being locked in\n• Replacement-effect prompts now show which card or rule is offering each option\n• The \"waiting for\" indicator now tints the player's name and dot with their seat color",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522013396021547059"
+    },
+    {
+      "id": 157,
+      "date": "2026-06-30",
+      "title": "Mother of Runes protects again",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• New cards: Athreos, God of Passage and Aven Mindcensor\n• Newly released sets now unlock automatically once their release date passes — Marvel Super Heroes cards are now playable\n• \"Whenever you roll a [number]\" dice-roll triggers now fire on the matching result\n• \"Whenever you activate a loyalty ability of a planeswalker\" triggers now work\n\n🛠️ Cards That Now Work Right\n• Protection and hexproof \"from the color of your choice\" now grant real protection instead of doing nothing — you're prompted to pick a color when it resolves (Mother of Runes, Aven Liberator, Blessed Breath, and ~60 more)\n• Abilities that add bonus mana when a permanent is tapped now fire and give the extra mana to the player who tapped it\n• Turning a creature face down into a fixed 2/2 now snapshots its true printed stats, so anthems and other continuous effects no longer compound its power/toughness after it flips back up\n• Returning several targeted cards and then doing something \"that many\" times now uses the right count (Vengeful Regrowth makes one Plant Warrior per land returned)\n• Tokens created from the token catalog now pick up their static abilities\n• Optional \"you may attach\" choices for Auras and Equipment are now offered correctly\n• Modal triggers that refer to \"that player\" in bullet-list choices now point at the correct player\n• \"Where X is…\" target filters now bind correctly\n\n🤖 AI\n• Fixed AI turn timeouts on very large boards\n\n🖥️ Interface\n• A new turn and priority indicator shows who currently holds the pending decision and why the game is waiting — distinct from whose turn it is\n• Long animation sequences are now collapsed so big multi-event turns play back smoothly",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521707004790575237"
+    },
+    {
+      "id": 156,
+      "date": "2026-06-30",
+      "title": "Infinite combos end the game (∞)",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Infinite combos can now be detected and resolved: enable the combo detector when creating a game, and confirmed infinite loops end the game (or draw it) and show an ∞ badge for unbounded mana, tokens, damage, life drain, mill, poison, counters, draws, casts, and triggers\n• Alchemy perpetual effects now cover spells that perpetually cost more or less to cast and permanents that perpetually change types (e.g. Second Little Pig)\n• Greymond, Avacyn's Stalwart grants two chosen keywords and anthems your Humans\n• Koh, the Face Stealer now gains all activated and triggered abilities of the last card you exiled face down (with Sandswirl Wanderglyph)\n• New card: Endangered Armodon\n• Fractured Identity now works\n\n🛠️ Cards That Now Work Right\n• Thassa's Oracle now wins even when reanimated with an empty library (e.g. via Dread Return after milling out)\n• Incubate tokens now set off \"a permanent enters\" abilities like Soul Warden, Altar of the Brood, and Panharmonicon\n• Heartwood Storyteller now lets each of the casting player's opponents draw, each choosing independently — and never your teammate in Two-Headed Giant\n• Three Blind Mice's later chapters can now copy a token you control\n• Solitude's \"exile up to one target creature\" no longer soft-locks the game\n• Winter Soldier's attack trigger and graveyard Hero +1/+1 counter now resolve correctly\n• Bite Down and other one-sided fights no longer ask for an extra target\n• Kari Zev's Ragavan token (and similar delayed exiles) no longer crash when the token already died\n• Urza's Saga's second chapter, and other nested token-granting abilities, now create their token instead of misreading the inner ability\n• Per-opponent effects now respect hexproof\n• Ethereal Valkyrie's foretold cards are no longer castable for free\n• Many conditional cards now read their gates correctly: \"you lost life this turn\" (The Book of Vile Darkness), \"more cards in hand than each opponent\", \"any player / no opponent controls X\", and \"choose a creature you don't control\" (~193 cards)\n• \"Choose a number\" effects now parse when the phrase ends a sentence, and \"sacrifice another X or Y\" correctly excludes the source on every option\n\n⚔️ Combat & Gameplay\n• Continuous effects are more rules-accurate (CR 613): face-down overrides, timestamp ordering, and granted-ability timestamps now layer correctly\n\n🖥️ Interface\n• The hand fan now sizes itself by the total cards shown, so Delve and other graveyard/exile payments no longer spill cards off-screen — and Delve now glows the graveyard pile to open its selection modal\n\n🌐 Multiplayer\n• Fixed a server hang when creating multiplayer games",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521565348745314395"
+    },
+    {
+      "id": 155,
+      "date": "2026-06-29",
+      "title": "Fblthp plots from the library",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Fblthp, Lost on the Range can now plot the top card of your library, with plot resolving as a true special action instead of using the stack\n• Words of Worship and Words of Wilding work: pay {1} to replace your next draw this turn with life gain or a Bear token\n• Locus of Enlightenment now has the activated abilities of the cards used to craft it\n• Nowhere to Run now lets you target opponents' hexproof creatures and shuts off their ward triggers\n• Fastbond-style extra land-play permission now parses as a continuous effect\n• Plot, unlock, and activated-ability cost reducers now apply to cards like Doc Aurlock, Inquisitive Glimmer, and Agatha of the Vile Cauldron\n\n🛠️ Cards That Now Work Right\n• Deflecting Swat, Bolt Bend, and Redirect can now retarget mass \"target player\" spells instead of offering only the current target\n• She-Hulk, Wallbreaker now puts counters on the blocked Hero, not a missing blocker binding\n• Mishra, Eminent One and similar temporary-token makers now sacrifice or tuck the created token at end step, not the source permanent\n• Ashling, the Limitless and Satya, Aetherflux Genius now ask for their delayed payment at the next end step, not when the token is created\n• Tamiyo, Inquisitive Student now returns from exile transformed after the third-card draw trigger\n• Super-Soldier Serum's \"attach any number\" trigger can now be declined by choosing zero Equipment\n• Captain America, Team Leader now puts +1/+1 counters on the entering Heroes\n• Heroic Defiance now checks the enchanted creature's color against the most common color among permanents\n• Brackish Blunder and similar \"if it was tapped\" riders now use last known tap state after the creature leaves\n• Faller's Faithful and similar \"up to one target\" riders no longer fire when you declined the target\n• Namor the Sub-Mariner now counts blue mana symbols and creates the right number of Merfolk\n• Jocasta Nu, Kishla Skimmer, Stridehangar, Weeping Angel, and counter-removal cards like Magma Pummeler now parse and resolve their missing riders more accurately\n\n⚔️ Combat & Gameplay\n• Reflexive \"if it/that...\" riders now stay conditional instead of firing unconditionally\n• Discard-then-draw \"that many\" effects now remember how many cards were actually discarded\n• Counter-removal costs and token-counting costs now preserve the correct counts\n• Auto-pass timers no longer fire after they go stale\n\n🖥️ Interface\n• Oldest-printing art requests now sort by release date and collector number, so old-frame art choices are more reliable\n• Top-of-library play and plot permissions now expose your own top card so the action has a visible card to click\n\n🌐 Multiplayer\n• Full-mode multiplayer game creation no longer deadlocks",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1521243864479043617"
+    },
+    {
       "id": 154,
       "date": "2026-06-28",
       "title": "Alchemy perpetual buffs arrive",

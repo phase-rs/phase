@@ -13,12 +13,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
@@ -79,6 +79,20 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: the two nullary
+            // plot-from-library markers (Fblthp's L3 "has plot" grant and L4
+            // "you may plot nonland cards" permission). The nonland scope is the
+            // permission's printed L4 filter (NOT a CR 702.170f clause) on
+            // `affected`; the plot cost is the top card's mana cost, computed
+            // live at synthesis. Runtime enforcement is end-to-end:
+            // casting.rs::top_of_library_plot_source requires both roles,
+            // runtime_granted_top_of_library_plot_abilities synthesizes the
+            // plot special action on the top card, candidates.rs offers it as
+            // ActivateAbility, and the existing Plotted later-cast lifecycle
+            // (CR 702.170d) is reused. Not registry-keyed (mirrors the
+            // cast-permission cluster).
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             | StaticMode::CastFromHandFree { .. }
             // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
             // play_mode, and the `without_paying_mana_cost` flag. Runtime
@@ -133,6 +147,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
+            // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop carries `who` +
+            // `count`. Runtime enforcement is in
+            // game/effects/search_library.rs::library_search_top_limit.
+            | StaticMode::RestrictLibrarySearchToTop { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -498,6 +516,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -806,6 +825,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::PermanentType => "permanent type",
                     SharedQuality::LandType => "land type",
                 };
                 let prefix = match relation {
@@ -826,7 +846,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 from.map_or("any".into(), |zone| format!("{zone:?}")),
                 to.map_or("any".into(), |zone| format!("{zone:?}"))
             )),
-            FilterProp::AttackedThisTurn => parts.push("attacked this turn".into()),
+            FilterProp::AttackedThisTurn { defender } => match defender {
+                None => parts.push("attacked this turn".into()),
+                Some(ControllerRef::You) => parts.push("attacked you this turn".into()),
+                Some(ControllerRef::Opponent) => {
+                    parts.push("attacked your opponents this turn".into())
+                }
+                Some(_) => parts.push("attacked scoped player this turn".into()),
+            },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
@@ -854,6 +881,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
+            FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));
@@ -1402,6 +1430,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
         }
@@ -1447,7 +1476,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
-            excess_only,
+            channel,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1458,7 +1487,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
-            let excess_tag = if *excess_only { " excess" } else { "" };
+            let excess_tag = match channel {
+                crate::types::ability::DamageChannel::Excess => " excess",
+                crate::types::ability::DamageChannel::Total => "",
+            };
             format!(
                 "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
@@ -1553,6 +1585,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {kind} counters {scope_s}")
         }
+        QuantityRef::TargetControllerCounter { kind } => {
+            format!("# of {kind} counters its controller has")
+        }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
@@ -1595,12 +1630,14 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             }
         },
         PlayerFilter::All => "each player",
+        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayer => "each of that player's opponents",
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
@@ -1759,7 +1796,7 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
 
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
-        ChoiceType::CreatureType => "creature type",
+        ChoiceType::CreatureType { .. } => "creature type",
         ChoiceType::Color { excluded } => {
             if excluded.is_empty() {
                 "color"
@@ -1786,7 +1823,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
         // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
-        ChoiceType::Keyword { options } => {
+        ChoiceType::Keyword { options, .. } => {
             return format!(
                 "ability from: {}",
                 options
@@ -1818,6 +1855,10 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         }
         DelayedTriggerCondition::WhenDiesOrExiled { .. } => "when dies or exiled".into(),
         DelayedTriggerCondition::WheneverEvent { .. } => "whenever event this turn".into(),
+        DelayedTriggerCondition::WhenNextEvent {
+            lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+            ..
+        } => "when next event (persistent)".into(),
         DelayedTriggerCondition::WhenNextEvent { .. } => "when next event this turn".into(),
     }
 }
@@ -2092,6 +2133,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
         Effect::TurnFaceUp { .. } => {}
+        Effect::TurnFaceDown { .. } => {}
         Effect::DestroyAll { target, .. }
         // CR 613.1b: mass gain-control reports its population `filter` like the
         // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
@@ -2157,20 +2199,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             // CR 701.6a + CR 614.1a: countered-spell destination redirect.
             match countered_spell_zone {
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 }) => d.push(("redirect".into(), "library top".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 }) => d.push(("redirect".into(), "library bottom".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::NthFromTop { n },
                 }) => d.push(("redirect".into(), format!("library #{n} from top"))),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
-                Some(CounteredSpellDestination::Hand) => {
+                Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
+                }
+                // CR 614.1a: `Exile` is shared with the cast-this-way rider; the
+                // counter parser never emits it (exile-on-counter is a separate
+                // sub-ability rider), but the arm keeps the match exhaustive.
+                Some(SpellStackToGraveyardReplacement::Exile) => {
+                    d.push(("redirect".into(), "exile".into()))
                 }
                 None => {}
             }
@@ -2755,6 +2803,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
+        Effect::RememberCard { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::ForEachCategoryExile { category, zone, .. } => {
             d.push((
                 "category".into(),
@@ -3254,8 +3305,16 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
-        AbilityCondition::PreviousEffectAmount { comparator, rhs } => format!(
-            "previous amount {} {}",
+        AbilityCondition::PreviousEffectAmount {
+            comparator,
+            rhs,
+            channel,
+        } => format!(
+            "previous {}amount {} {}",
+            match channel {
+                crate::types::ability::DamageChannel::Excess => "excess ",
+                crate::types::ability::DamageChannel::Total => "",
+            },
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
@@ -3299,6 +3358,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
+        AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
         AbilityCondition::ZoneChangedThisWay { filter } => {
             format!("{} changed zones this way", fmt_target(filter))
         }
@@ -3614,6 +3674,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
             "grant all activated abilities of".into()
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {
+            "grant all triggered abilities of".into()
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
@@ -6304,6 +6367,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
         AbilityCondition::FirstEndStepOfTurn => ("FirstEndStepOfTurn", Handled),
+        // CR 505.1 + CR 500.1 + CR 608.2c: live current-phase check; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::CurrentPhaseIs { .. } => ("CurrentPhaseIs", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
@@ -6479,6 +6545,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
         QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
@@ -6520,6 +6587,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::TargetControllerCounter { .. } => ("TargetControllerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
         QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
@@ -6531,6 +6599,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     use FeatureSupport::*;
     match scope {
         PlayerFilter::All => ("All", Handled),
+        PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -6546,6 +6615,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::OpponentOfTriggeringPlayer => ("OpponentOfTriggeringPlayer", Handled),
         // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
         // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
@@ -7773,6 +7843,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
+            // CR 702.170a grant + CR 702.170f permission: plot-from-library
+            // (Fblthp). Both descriptions ("the top card of your library has
+            // plot" / "you may plot nonland cards from the top of your library")
+            // carry "plot" + "library". The role/discriminator is already
+            // enforced by the parser; coverage just needs a phrase the
+            // description will contain.
+            StaticMode::TopOfLibraryHasPlot | StaticMode::TopOfLibraryPlotPermission => {
+                effective_lower.contains("plot") && effective_lower.contains("library")
+            }
             // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
             // discriminator phrase ("from among cards exiled with") is
             // already enforced by the parser; coverage just needs a phrase
@@ -7863,9 +7942,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantUntap => {
                 effective_lower.contains("doesn't untap") || effective_lower.contains("don't untap")
             }
+            // CR 702.26a + CR 101.2: The Pandorica's "It can't phase in for as
+            // long as ~ remains tapped".
+            StaticMode::CantPhaseIn => effective_lower.contains("can't phase in"),
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            // CR 508.1c: Pramikon/Mystic Barrier/Teyo directional restriction.
+            StaticMode::AttackOnlyNeighbor => {
+                effective_lower.contains("attack only the nearest opponent")
+            }
             // CR 701.60a + CR 701.60d: Airtight Alibi's "can't become suspected".
             StaticMode::CantBecomeSuspected => effective_lower.contains("can't become suspected"),
             StaticMode::CantCrew => {
@@ -8949,9 +9035,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "unless [it/they] attacked or blocked" — combat state check
             || lower.contains("unless it attacked")
             || lower.contains("unless it blocked")
-            // "unless target opponent pays" — payment alternative
-            || lower.contains("unless target opponent pays")
-            || lower.contains("unless target opponent sacrifices")
             // "if you have a card in hand" — resolve-time hand check
             || lower.contains("if you have a card in hand")
             // "if you pay {N} more to cast" — additional cost condition (casting option)
@@ -11510,6 +11593,7 @@ mod tests {
                 AbilityCondition::TargetMatchesFilter {
                     filter: TargetFilter::Any,
                     use_lki: false,
+                    subject_slot: None,
                 },
                 "TargetMatchesFilter",
             ),

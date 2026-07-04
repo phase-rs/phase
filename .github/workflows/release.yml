@@ -346,9 +346,9 @@ jobs:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
           # the directory holding every shared JSON. CARD_DATA_URL pins the
           # WASM bundle to its content-addressed card-data forever.
-          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
-          AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          DATA_BASE_URL: "https://data.phase-rs.dev"
+          CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
           # deploy (deploy.yml) deliberately omits this so it never self-links.
@@ -402,12 +402,17 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+          BASE="https://data.phase-rs.dev"
           fail=0
           check() {
             local f="$1"
             local status
-            status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
+            status=$(curl -sS -I -o /dev/null -w "%{http_code}" \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --retry 3 \
+              --retry-all-errors \
+              "$BASE/$f" || true)
             if [ "$status" != "200" ]; then
               echo "::error::R2 upload verification failed: $BASE/$f returned $status"
               fail=1
@@ -419,7 +424,7 @@ jobs:
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
-          curl -s --compressed "$BASE/scryfall-sets.json" | jq empty \
+          curl -fsS --compressed --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$BASE/scryfall-sets.json" | jq empty \
             || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
       - name: Remove R2-hosted data files from dist (Pages ships only the shell)

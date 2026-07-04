@@ -157,6 +157,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
             tapped: false,
+            is_suspected: false,
         },
     });
 

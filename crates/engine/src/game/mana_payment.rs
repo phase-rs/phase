@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::quantity::{
     continuous_modification_uses_unspent_mana, static_condition_uses_unspent_mana,
 };
@@ -33,6 +34,20 @@ const INFINITE_MANA_TYPES: [ManaType; 6] = [
     ManaType::Colorless,
 ];
 
+/// The six `ResourceAxis::Mana(_)` axes the infinite-mana debug toggle records in
+/// `GameState::unbounded_resources` (parallel to `INFINITE_MANA_TYPES`). Storing
+/// all six faithfully says "all six colors are unbounded"; the refill/keep gates
+/// trigger on ANY `Mana(_)` axis, so the byte-preserved top-up of all six colors
+/// is independent of exactly which mana axes are stored.
+pub(crate) const INFINITE_MANA_AXES: [ResourceAxis; 6] = [
+    ResourceAxis::Mana(ManaType::White),
+    ResourceAxis::Mana(ManaType::Blue),
+    ResourceAxis::Mana(ManaType::Black),
+    ResourceAxis::Mana(ManaType::Red),
+    ResourceAxis::Mana(ManaType::Green),
+    ResourceAxis::Mana(ManaType::Colorless),
+];
+
 pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     state.transient_continuous_effects.iter().any(|effect| {
         effect
@@ -58,8 +73,9 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     })
 }
 
-/// Debug-only: top every player in `GameState::debug_infinite_mana` back up to
-/// `INFINITE_MANA_PER_TYPE` unrestricted, non-expiring units of each mana type.
+/// Debug-only: top every player whose `GameState::unbounded_resources` entry
+/// contains any `ResourceAxis::Mana(_)` axis back up to `INFINITE_MANA_PER_TYPE`
+/// unrestricted, non-expiring units of each mana type.
 ///
 /// Idempotent — only the shortfall is added — and returns immediately when no
 /// player is flagged, so it is cheap to call after every action. Paired with the
@@ -73,10 +89,19 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
 /// NOT a rules-legal effect — a developer convenience gated behind the same
 /// debug-action permission as every other `DebugAction`.
 pub fn refill_infinite_mana(state: &mut GameState) {
-    if state.debug_infinite_mana.is_empty() {
+    // Flagged = players whose unbounded-resource set names ANY Mana axis. The
+    // per-player top-up below still seeds all six `INFINITE_MANA_TYPES` colors, so
+    // the body is byte-for-byte the pre-PR-6 behavior regardless of which mana
+    // colors are stored.
+    let flagged: Vec<PlayerId> = state
+        .unbounded_resources
+        .iter()
+        .filter(|(_, axes)| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))))
+        .map(|(pid, _)| *pid)
+        .collect();
+    if flagged.is_empty() {
         return;
     }
-    let flagged: Vec<PlayerId> = state.debug_infinite_mana.iter().copied().collect();
     for &player_id in &flagged {
         let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
             continue;
@@ -3977,7 +4002,7 @@ mod tests {
         assert!(state.players[0].mana_pool.mana.is_empty());
 
         // Flag P0 → seeded to the cap for each of the six types; P1 untouched.
-        state.debug_infinite_mana.insert(state.players[0].id);
+        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
         refill_infinite_mana(&mut state);
         for color in INFINITE_MANA_TYPES {
             let n = state.players[0]
@@ -4016,9 +4041,9 @@ mod tests {
         );
     }
 
-    /// The `SetInfiniteMana` debug handler must add the player to
-    /// `debug_infinite_mana` and seed the pool immediately on enable (so the next
-    /// affordability probe reads full), and remove the flag on disable.
+    /// The `SetInfiniteMana` debug handler must record the player's six Mana axes
+    /// in `unbounded_resources` and seed the pool immediately on enable (so the
+    /// next affordability probe reads full), and clear the entry on disable.
     #[test]
     fn set_infinite_mana_handler_toggles_flag_and_seeds() {
         use crate::game::engine_debug::apply_debug_action;
@@ -4038,7 +4063,14 @@ mod tests {
             &mut events,
         )
         .expect("enable infinite mana");
-        assert!(state.debug_infinite_mana.contains(&p0));
+        // The toggle records all six Mana axes for P0 (membership read adapted).
+        let p0_axes = state
+            .unbounded_resources
+            .get(&p0)
+            .expect("P0 marked unbounded on enable");
+        for axis in INFINITE_MANA_AXES {
+            assert!(p0_axes.contains(&axis), "{axis:?} recorded on enable");
+        }
         for color in INFINITE_MANA_TYPES {
             assert!(
                 state.players[0]
@@ -4060,6 +4092,45 @@ mod tests {
             &mut events,
         )
         .expect("disable infinite mana");
-        assert!(!state.debug_infinite_mana.contains(&p0));
+        assert!(!state.unbounded_resources.contains_key(&p0));
+    }
+
+    /// Mana byte-preservation regression (PR-6 lead item #2 + plan tests 2/3).
+    ///
+    /// The refill gate triggers on ANY `ResourceAxis::Mana(_)` axis and tops up all
+    /// six colors to the cap — and a NON-mana axis must NOT cause any top-up.
+    ///
+    /// REVERT-PROBE (mana axis): break the `matches!(a, ResourceAxis::Mana(_))`
+    /// gate in `refill_infinite_mana` (e.g. to `matches!(a, ResourceAxis::Casts)`)
+    /// → `flagged` is empty → the six-color assertion below fails.
+    /// REVERT-PROBE (non-mana axis): broaden the gate to `!axes.is_empty()` →
+    /// the `TokensCreated`-only player tops up → the empty-pool assertion fails.
+    #[test]
+    fn refill_infinite_mana_gated_on_mana_axis_only() {
+        let mut state = GameState::new_two_player(0);
+        let p0 = state.players[0].id;
+        let p1 = state.players[1].id;
+
+        // P0 marked with the six Mana axes → all six colors seeded to the cap.
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        // P1 marked with ONLY a non-mana axis → must never receive mana.
+        state.mark_unbounded_loop(p1, &[ResourceAxis::TokensCreated]);
+
+        refill_infinite_mana(&mut state);
+
+        for color in INFINITE_MANA_TYPES {
+            let n = state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .filter(|u| u.color == color)
+                .count();
+            assert_eq!(n, INFINITE_MANA_PER_TYPE, "{color:?} seeded for mana axis");
+        }
+        let p1_pool = state.players.iter().find(|p| p.id == p1).unwrap();
+        assert!(
+            p1_pool.mana_pool.mana.is_empty(),
+            "a non-mana unbounded axis must not trigger any mana top-up"
+        );
     }
 }

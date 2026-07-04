@@ -543,15 +543,42 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
-/// effect? This single Effect variant simultaneously encodes a replacement
-/// effect (CR 614.1a "instead"), a conditional gate ("if [target] would die"),
-/// and an EOT duration (the carried replacement's `expiry: EndOfTurn`). Its
-/// presence satisfies the Replacement_Instead, Condition_If, and
-/// Duration_ThisTurn detectors when the original text matches the
-/// "die this turn, exile instead" rider grammar.
+/// or `CreateDamageReplacement` effect? This single Effect variant simultaneously
+/// encodes a replacement effect (CR 614.1a "instead"), a conditional gate
+/// ("if [target] would die"), and an EOT duration (the carried replacement's
+/// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
+/// Condition_If, and Duration_ThisTurn detectors when the original text matches
+/// the "die this turn, exile instead" rider grammar. Flip-coin branches
+/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// Flip-coin branch payloads may carry one-shot damage replacements.
+fn flip_branch_has_target_replacement(
+    win_effect: &Option<Box<AbilityDefinition>>,
+    lose_effect: &Option<Box<AbilityDefinition>>,
+) -> bool {
+    win_effect
+        .as_deref()
+        .is_some_and(def_tree_has_target_replacement)
+        || lose_effect
+            .as_deref()
+            .is_some_and(def_tree_has_target_replacement)
+}
+
 fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::AddTargetReplacement { .. }) {
-        return true;
+    match def.effect.as_ref() {
+        Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
+            return true
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } if flip_branch_has_target_replacement(win_effect, lose_effect) => return true,
+        _ => {}
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_target_replacement(sub) {
@@ -601,6 +628,12 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             | StaticMode::MayPlayAdditionalLand
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.170a grant + CR 702.170f permission: "The top card of your
+            // library has plot" / "You may plot [filter] cards from the top of
+            // your library" — opt-in plot-from-library (Fblthp). The plot special
+            // action (CR 702.170b) is taken at the player's discretion.
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
             // CR 702.8: "You may cast this spell as though it had flash" —
             // opt-in cast-timing permission.
             | StaticMode::CastWithFlash
@@ -649,6 +682,14 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
             // activated abilities; the permission is opt-in by the "you may" surface.
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            // CR 118.9 + CR 118.9b: "You may cast [this] without paying its mana
+            // cost" / "you may pay {0} rather than pay the mana cost" is an
+            // alternative cost, and alternative costs are generally optional — the
+            // "you may" permission is the static's entire semantic content
+            // (Omniscience, As Foretold, Zaffai). Mirrors the sibling permission
+            // modes above; without it the swallow auditor false-positives an
+            // Optional_YouMay clause and demotes the card from "supported."
+            | StaticMode::CastFromHandFree { .. }
     )
 }
 
@@ -781,6 +822,72 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
         .any(def_tree_has_exile_parent_rider)
 }
 
+/// CR 614.1a + CR 608.2n: True when any node is a `CastFromZone` (or `Counter`)
+/// whose sub-ability / else-ability chain carries a graveyard-redirect rider
+/// targeting the cast/countered spell (`ParentTarget`) — to exile, a library
+/// position (Kylox's Voltstrider → bottom), or the owner's hand. This is the
+/// "if that spell would be put into a graveyard, [dest] instead" rider; its
+/// leading conditional is represented by the structural pairing, not swallowed.
+///
+/// SCOPED to the cast/counter parent on purpose: a bare
+/// `PutAtLibraryPosition { ParentTarget }` / `ChangeZone { Hand, ParentTarget }`
+/// is a COMMON standalone effect (Conundrum Sphinx "puts it on the bottom of
+/// their library", etc.) and must NOT suppress an unrelated condition swallow.
+/// The exile case is also covered narrowly by `def_tree_has_exile_parent_rider`
+/// (Exile-to-parent is rare outside riders); this adds the library/hand
+/// destinations only inside the redirect-rider context.
+fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::CastFromZone { .. } | Effect::Counter { .. }
+    ) && (def
+        .sub_ability
+        .as_deref()
+        .is_some_and(def_is_graveyard_redirect_to_parent)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(def_is_graveyard_redirect_to_parent))
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_cast_graveyard_redirect_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_cast_graveyard_redirect_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_cast_graveyard_redirect_rider)
+}
+
+/// A graveyard-redirect rider body: a move of the cast/countered spell
+/// (`ParentTarget`) to exile, the owner's hand, or a library position. Walks the
+/// sub-ability chain so an intervening continuation does not hide the rider.
+fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: crate::types::zones::Zone::Exile | crate::types::zones::Zone::Hand,
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            ..
+        } | Effect::PutAtLibraryPosition {
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(def_is_graveyard_redirect_to_parent)
+}
+
 /// CR 119.7 + CR 608.2c: True when any ability/trigger tree contains a
 /// `CantGainLife` grant scoped to `ParentTarget` — the structural encoding of
 /// Screaming Nemesis's "If a player is dealt damage this way, they can't gain
@@ -835,13 +942,65 @@ fn any_ability_has_dealt_damage_this_way_life_lock(parsed: &ParsedAbilities) -> 
         })
 }
 
-fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
-    parsed.abilities.iter().any(def_tree_has_exile_parent_rider)
+/// CR 608.2c: True when any ability/trigger tree contains an `Effect::Discard`
+/// whose target is `ParentTarget` — the structural encoding of Sonic Shrieker's
+/// "If a player is dealt damage this way, they discard a card" rider. The
+/// `ParentTarget` target IS the CR 608.2c "this way" back-reference: it resolves
+/// to the damage recipient and only forces a discard when that recipient is a
+/// player (a creature/planeswalker target no-ops), so the leading "if" is
+/// represented, not swallowed. Mirrors `def_tree_has_parent_target_cant_gain_life`.
+/// ponytail: prevented-damage ceiling (CR 615.5) not gated — a fully prevented
+/// hit still discards here, the identical fidelity ceiling Screaming Nemesis
+/// ships; upgrade path = damage-recipient AbilityCondition when a card forces it.
+fn def_tree_has_parent_target_discard(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::Discard {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_parent_target_discard(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_parent_target_discard(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_parent_target_discard)
+}
+
+fn any_ability_has_parent_target_discard(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_parent_target_discard)
         || parsed.triggers.iter().any(|t| {
             t.execute
                 .as_deref()
-                .is_some_and(def_tree_has_exile_parent_rider)
+                .is_some_and(def_tree_has_parent_target_discard)
         })
+}
+
+fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
+    let has = |f: fn(&AbilityDefinition) -> bool| {
+        parsed.abilities.iter().any(f)
+            || parsed
+                .triggers
+                .iter()
+                .any(|t| t.execute.as_deref().is_some_and(f))
+    };
+    // Exile-to-parent matched anywhere (narrow); library/hand only in the
+    // cast/counter redirect-rider context (CR 614.1a) so a standalone library
+    // placement does not falsely suppress an unrelated condition swallow.
+    has(def_tree_has_exile_parent_rider) || has(def_tree_has_cast_graveyard_redirect_rider)
 }
 
 fn target_filter_has_zone(filter: &TargetFilter, zone: Zone) -> bool {
@@ -1026,6 +1185,46 @@ fn any_replacement_has_may_cost_decline(parsed: &ParsedAbilities) -> bool {
                 ..
             }
         )
+    })
+}
+
+/// CR 614.1a + CR 120.8: "If a [source] would deal damage ..., it deals double
+/// that damage instead" is an UNCONDITIONAL value-modifier replacement (CR 120.8
+/// damage-increase replacement). The leading "if" is CR 614.1a replacement
+/// syntax introducing the replacement's applicability — NOT an independent
+/// CR 608.2c game-state gate — and is fully represented by the
+/// `ReplacementDefinition`'s `damage_modification`/`quantity_modification` with
+/// no `condition`. Only false-positives on ability-word-prefixed lines
+/// ("Flare Star — if a wizard ...") where the `— if` injects the leading space
+/// the bare-" if " marker keys on. The single-`if` + no-residual-gate guard
+/// keeps a genuinely gated value-modifier (a delirium/threshold clause that DOES
+/// want a `condition` field) from being masked here.
+fn unconditional_valmod_leading_if_is_only_if_marker(
+    stripped: &str,
+    parsed: &ParsedAbilities,
+) -> bool {
+    let Some(body) = super::oracle_modal::strip_ability_word(stripped) else {
+        return false;
+    };
+    let body = body.trim_start();
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !body.starts_with("if ") {
+        return false;
+    }
+    // A residual while/as-long-as/only-if is a genuine second gate (card 2's
+    // delirium threshold) that must still flag / be captured as `condition`.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if body.contains("while") || body.contains("as long as") || body.contains("only if") {
+        return false;
+    }
+    // Exactly the single leading replacement-`if`; a future value-modifier card
+    // carrying a SECOND genuine if-gate must still flag.
+    if body.split_whitespace().filter(|w| *w == "if").count() != 1 {
+        return false;
+    }
+    parsed.replacements.iter().any(|r| {
+        (r.damage_modification.is_some() || r.quantity_modification.is_some())
+            && r.condition.is_none()
     })
 }
 
@@ -1428,10 +1627,10 @@ fn detect_dynamic_qty(
         // `Effect::ProliferateTarget`. The counter-kind iteration is intrinsic to
         // the proliferate operation, not a swallowed `QuantityExpr` count.
         "\"type\":\"ProliferateTarget\"",
-        // CR 702.122: Strive — "this spell costs {N} more for each target
+        // CR 207.2c + CR 601.2f: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
-        "\"strive_cost\":{",
+        "\"striveCost\":{",
         // CR 702.139 / CR 702.41: Affinity / Improvise / Convoke style
         // built-in cost mods — captured as `keywords` entries with cost
         // payload, not as in-AST quantity expressions.
@@ -1442,6 +1641,13 @@ fn detect_dynamic_qty(
         "SelfManaCost",
         "SelfManaValue",
         "TargetManaCost",
+        // CR 702.170a: "The plot cost is equal to its mana cost" — the plot cost
+        // is intrinsic to the `TopOfLibraryHasPlot` static (computed at synthesis
+        // from the live top card's mana_cost), not a stored `QuantityExpr`. The
+        // static's presence in the AST is the coverage marker, mirroring the
+        // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
+        // cost" (Fblthp, Lost on the Range).
+        "TopOfLibraryHasPlot",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -1890,6 +2096,238 @@ fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
 }
 
+/// CR 614.12: "[you may] put a creature card from your hand onto the
+/// battlefield. If that card is an enchantment card, it enters tapped and
+/// attacking." (Summoner's Grimoire). The leading moved-object type condition
+/// is represented by the typed `Effect::ChangeZone.enters_modified_if` gate, so
+/// it is not a swallowed condition.
+///
+/// Unlike `plotted_grant_linkage_is_only_if_marker` / `dig_if_you_do_is_only_if_marker`
+/// (which AST-gate externally via a parsed-tree walk), this folds the AST gate
+/// INSIDE via a `"enters_modified_if":` JSON probe — the same JSON-substring
+/// pattern the `source_rider` / `countered_spell_zone` / `PreventDamage` gates in
+/// `detect_condition_if` use. Because the field carries `skip_serializing_if =
+/// Option::is_none`, `None` never serializes, so the substring appears ONLY when
+/// the gate is `Some` (N4). It is text-scoped: the represented enters-modifier
+/// clause is located and dropped via the shared `is_moved_object_enters_modifier_clause`
+/// combinator, and suppression fires ONLY when no OTHER bare " if " remains — so
+/// a compound card carrying the gate AND a separate dropped " if " still flags.
+fn enters_modified_if_is_only_if_marker(stripped: &str, ast_json: &str) -> bool {
+    // allow-noncombinator: structural AST-shape JSON probe (mirrors source_rider / countered_spell_zone)
+    if !ast_json.contains("\"enters_modified_if\":") {
+        return false;
+    }
+    // Text-scoped: drop the represented moved-object enters-modifier clause(s)
+    // sentence-by-sentence (mirrors `strip_cr_implicit_if_phrases`), then check
+    // whether any OTHER bare " if " survives.
+    let residual: String = stripped
+        .split('.')
+        .filter(|sentence| {
+            !crate::parser::oracle_effect::sequence::is_moved_object_enters_modifier_clause(
+                sentence,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
+/// CR 614.1a: A replacement effect's antecedent ("If [subject] would
+/// [event], [effect] instead.") is not an independent CR 608.2c conditional
+/// gate — the leading "if" is part of the replacement's event description.
+/// Detector G (`detect_condition_if`) must not flag it.
+///
+/// Unlike the card-wide gate this replaces, the exemption here is
+/// structural and per-sentence: a sentence is only stripped when it is
+/// actually shaped like a represented replacement antecedent AND (where a
+/// `ReplacementDefinition` exists to check against) its text is actually
+/// backed by one of `parsed.replacements`. This keeps compound replacement
+/// text honest — a card that pairs one *represented* replacement sentence
+/// with a second " instead" sentence carrying an unrepresented conditional
+/// still gets flagged for the second sentence, and a single sentence that
+/// smuggles in a second, unrelated "if" clause is not exempted either.
+///
+/// Conditions for stripping a given sentence (ALL must hold):
+///   (a) the sentence contains " instead" (CR 614.1a marker);
+///   (b) the sentence structurally matches a replacement antecedent shape:
+///       after skipping any leading ability-word / keyword-line prefix (text
+///       up to and including the last CR 207.2c ability-word em-dash "— " or
+///       newline that appears before the clause), the remainder starts with
+///       "if " and contains " would ". Ability-word lines (e.g. "Rot Fly —
+///       If an opponent would gain life, ...") and preceding keyword lines
+///       ("Flying\n...") are extremely common on replacement-bearing cards,
+///       so the shape check is anchored to the clause itself, not to
+///       byte-offset 0 of the whole (possibly multi-line) `.`-delimited
+///       sentence;
+///   (c) the sentence contains exactly one "if" clause — i.e. no second bare
+///       " if " later in the sentence, counting from the start of the
+///       antecedent clause located in (b). A second bare "if" means a real,
+///       additional conditional clause is riding along with the replacement
+///       and must survive to be checked by the rest of `detect_condition_if`;
+///   (d) it corresponds to an actually-parsed replacement: either
+///       - some entry in `parsed.replacements` has a `description` whose
+///         normalized (lowercased, whitespace-collapsed) text contains the
+///         sentence's normalized text or vice versa, or
+///       - no such entry exists, but `any_ability_has_target_replacement`
+///         is true for this card (CR 614.1a `AddTargetReplacement` riders —
+///         e.g. "if [target] would die" — register their replacement at
+///         resolution time on the parent target and never appear in the
+///         static `parsed.replacements` collection, so they have no
+///         description to match against). This fallback is intentionally
+///         narrow: it only ever accepts sentences that already satisfied
+///         (a)-(c), so it cannot paper over a genuinely-unrepresented
+///         compound conditional.
+fn strip_represented_replacement_instead_sentences(
+    stripped: &str,
+    parsed: &ParsedAbilities,
+) -> String {
+    // `stripped` is derived from `check_swallowed_clauses`'s `cleaned`, which
+    // is already `to_ascii_lowercase()`'d — sentences pulled from it are
+    // already lowercase. Only the replacement `description` (raw builder
+    // text, case-preserved, and NOT split on '.' so it still carries its
+    // trailing period) needs lower-casing and trailing-punctuation trimming
+    // before comparison against a clause pulled out of `stripped`.
+    // allow-noncombinator: swallow detector phrase scan on normalized description text
+    fn normalize_for_match(s: &str) -> String {
+        s.trim()
+            .trim_end_matches('.')
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // CR 207.2c: locate where the actual antecedent clause begins by
+    // skipping past any leading ability-word / keyword-line prefix. Returns
+    // the byte offset (into `sentence`) of the last "— " or "\n" separator
+    // that occurs before the clause, or `0` if there is none (the whole
+    // sentence IS the clause). Only ever walks forward from a separator to
+    // the next one — it does not itself require an "if" to be present.
+    fn antecedent_clause_start(sentence: &str) -> usize {
+        // allow-noncombinator: structural ability-word em-dash boundary scan on cleaned text
+        let em_dash_pos = sentence.rfind("— ").map(|i| i + "— ".len());
+        let newline_pos = sentence.rfind('\n').map(|i| i + 1);
+        em_dash_pos
+            .into_iter()
+            .chain(newline_pos)
+            .max()
+            .unwrap_or(0)
+    }
+
+    // Structural shape check per condition (b): after skipping any leading
+    // ability-word / keyword-line prefix, the clause must start with "if "
+    // and contain " would ".
+    fn matches_replacement_antecedent_shape(sentence: &str) -> bool {
+        let clause = &sentence[antecedent_clause_start(sentence)..];
+        // allow-noncombinator: swallow detector phrase scan on cleaned sentence
+        clause.starts_with("if ") && clause.contains(" would ")
+    }
+
+    // Condition (c): exactly one "if" clause from the antecedent clause
+    // start onward. The clause already starts with "if " (checked by the
+    // caller via (b)); reject it if a *second* bare " if " appears later —
+    // that is an additional, independent conditional clause riding along
+    // with the replacement and must not be silently swallowed. Text BEFORE
+    // the antecedent clause (ability-word / keyword-line prefix) is not
+    // scanned — an "if" there would belong to a different line entirely.
+    fn has_single_if_clause(sentence: &str) -> bool {
+        let clause = &sentence[antecedent_clause_start(sentence)..];
+        let after_leading_if = &clause[3.min(clause.len())..];
+        !after_leading_if.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+    }
+
+    // Condition (d): match against a parsed replacement's description, or
+    // fall back to the target-replacement carve-out. `clause_norm` is the
+    // normalized *antecedent clause* (ability-word / keyword-line prefix
+    // already stripped by the caller) — comparing against the clause rather
+    // than the whole (possibly multi-line, multi-keyword) sentence avoids
+    // false negatives from unrelated leading keyword lines that never made
+    // it into the replacement's `description` (which is set from the single
+    // source line the replacement was parsed from).
+    fn is_backed_by_parsed_replacement(clause_norm: &str, parsed: &ParsedAbilities) -> bool {
+        let matched_by_description = parsed.replacements.iter().any(|r| {
+            r.description.as_deref().is_some_and(|d| {
+                let d_norm = normalize_for_match(d);
+                // allow-noncombinator: swallow detector description-vs-clause containment check
+                d_norm.contains(clause_norm) || clause_norm.contains(&d_norm)
+            })
+        });
+        if matched_by_description {
+            return true;
+        }
+        // CR 614.1a: AddTargetReplacement riders (e.g. "if [target] would
+        // die, exile it instead") register their replacement at resolution
+        // time on the parent target and carry no top-level
+        // `ReplacementDefinition`/description to match against. Only accept
+        // this fallback when there is no matching description AND no
+        // top-level replacement at all could plausibly correspond to this
+        // sentence — i.e. when the card's *only* evidence of a replacement
+        // is the target-replacement rider itself.
+        parsed.replacements.is_empty() && any_ability_has_target_replacement(parsed)
+    }
+
+    let mut out = String::with_capacity(stripped.len());
+    for sentence in stripped.split('.') {
+        let s = sentence.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // allow-noncombinator: swallow detector phrase scan on cleaned sentence
+        let has_instead = s.contains(" instead");
+        let clause = &s[antecedent_clause_start(s)..];
+        let strip_this_sentence = has_instead
+            && matches_replacement_antecedent_shape(s)
+            && has_single_if_clause(s)
+            && is_backed_by_parsed_replacement(&normalize_for_match(clause), parsed);
+        if strip_this_sentence {
+            continue;
+        }
+        out.push_str(sentence);
+        out.push('.');
+    }
+    out
+}
+
+/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: "If you put a[n] <type> onto the
+/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan)
+/// is represented by the typed `Effect::ChangeZone.conditional_enter_with_counters`
+/// gate — the moved object's entry-time counters are applied only when it matches
+/// the carried filter (runtime-verified in
+/// `change_zone::enter_with_counters_for_object`), so the leading "if" is a
+/// representation marker, not a swallowed condition.
+///
+/// Mirrors `enters_modified_if_is_only_if_marker`: an inside AST probe
+/// (`conditional_enter_with_counters` carries `skip_serializing_if = Vec::is_empty`,
+/// so the key serializes ONLY when non-empty — keying tightly on the
+/// ChangeScope→Battlefield-with-counters shape the resolver handles) plus
+/// text-scoping — the represented put-onto-battlefield-this-way counter clause is
+/// located via the shared `is_moved_object_put_onto_battlefield_counters_clause`
+/// combinator and dropped sentence-by-sentence, and suppression fires ONLY when no
+/// OTHER bare " if " survives, so a compound card carrying the gate AND a separate
+/// unrelated " if " still flags.
+fn conditional_enter_counters_if_is_only_if_marker(stripped: &str, ast_json: &str) -> bool {
+    // allow-noncombinator: structural AST-shape JSON probe (mirrors enters_modified_if)
+    if !ast_json.contains("\"conditional_enter_with_counters\":") {
+        return false;
+    }
+    let residual: String = stripped
+        .split('.')
+        .filter(|sentence| {
+            !crate::parser::oracle_effect::sequence::is_moved_object_put_onto_battlefield_counters_clause(
+                sentence,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -1950,8 +2388,23 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 614.1a: strip sentences that are structurally a *represented*
+    // replacement antecedent ("if [subject] would [event], ... instead").
+    // See `strip_represented_replacement_instead_sentences` doc comment for
+    // the full per-sentence exemption criteria — this is intentionally NOT
+    // a card-wide gate (a card having *some* replacement no longer exempts
+    // *every* " instead" sentence on it).
+    let stripped = strip_represented_replacement_instead_sentences(&stripped, parsed);
     let stripped =
         strip_represented_tiered_enters_with_additional_counter_if_pairs(&stripped, parsed);
+    // CR 608.2c: "if a player is dealt damage this way, they discard" — the ParentTarget
+    // discard rider is structurally represented (Effect::Discard{target:ParentTarget}); the
+    // leading "if" is the CR 608.2c back-reference, not a swallowed game-state condition.
+    // Mirrors the Screaming Nemesis "dealt damage this way" life-lock exemption above.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if stripped.contains("dealt damage this way") && any_ability_has_parent_target_discard(parsed) {
+        return;
+    }
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
     // the "if you do" is the optional-exile linkage, represented by the
     // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
@@ -1965,6 +2418,20 @@ fn detect_condition_if(
     // same `Dig`; the "if you do" linkage IS represented by the optional `Dig`
     // (declining the look stops the whole chain), not swallowed.
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
+        return;
+    }
+    // CR 614.12: "[you may] put a creature card ... If that card is an
+    // enchantment card, it enters tapped and attacking" (Summoner's Grimoire).
+    // The leading moved-object type condition is represented by the typed
+    // `enters_modified_if` gate on the absorbed ChangeZone. Text-scoped: only
+    // suppresses when that enters-modifier clause is the card's only bare " if ".
+    if enters_modified_if_is_only_if_marker(&stripped, ast_json) {
+        return;
+    }
+    // CR 122.1 + CR 614.1c + CR 608.2c: "If you put a[n] <type> onto the
+    // battlefield this way, put [N] +1/+1 counters on it" (Oviya) is represented
+    // by `Effect::ChangeZone.conditional_enter_with_counters`.
+    if conditional_enter_counters_if_is_only_if_marker(&stripped, ast_json) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -2020,6 +2487,14 @@ fn detect_condition_if(
     // payment trigger, not a conditional check on game state.
     let has_pay_phrase = stripped.contains("if you pay "); // allow-noncombinator: swallow detector marker scan on classified text
     if parsed.casting_options.iter().any(|o| o.cost.is_some()) && has_pay_phrase {
+        return;
+    }
+    // CR 614.1a + CR 120.8: unconditional value-modifier replacement whose
+    // ability-word-stripped line leads with its own CR 614.1a applicability "if"
+    // ("Flare Star — if a wizard you control would deal damage ... it deals
+    // double that damage instead") — represented by the replacement's
+    // damage/quantity modification, not a swallowed conditional gate.
+    if unconditional_valmod_leading_if_is_only_if_marker(&stripped, parsed) {
         return;
     }
     // Bare " if " — covers prefix conditional ("if X, do Y") and suffix
@@ -2653,6 +3128,9 @@ fn detect_duration_this_turn(
         "CardsDrawnThisTurn",
         "BattlefieldEntriesThisTurn",
         "PlayerActionsThisTurn",
+        // CR 603.4: "if you've done all four this turn" — the distinct-bend-count
+        // intervening-if condition consumes the "this turn" scope (Avatar Aang).
+        "BendTypesThisTurn",
         "OpponentLostLife",
         "OpponentDealtCombatDamage",
         // CR 611.3: a condition slot serialized as the typed `Unrecognized`
@@ -3174,6 +3652,84 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
+    /// CR 611.3: equipment and creature statics that fold "as long as" qualifiers
+    /// into attached-subject filters must not trip Condition_AsLongAs warnings
+    /// (issue #2234).
+    #[test]
+    fn condition_as_long_as_accepts_bronze_horse_and_champions_helm() {
+        use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::ContinuousModification;
+
+        let bronze = parse_named(
+            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
+            "Bronze Horse",
+            &["Artifact", "Creature"],
+        );
+        assert!(
+            !bronze
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Bronze Horse replacement must parse without Unimplemented"
+        );
+        let as_long_as = "as long as";
+        assert!(
+            bronze.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && matches!(r.shield_kind, ShieldKind::Prevention { .. })
+                    && r.description
+                        .as_deref()
+                        .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
+            }),
+            "expected gated damage-prevention replacement, got {:#?}",
+            bronze.replacements
+        );
+        assert!(!has_swallowed_detector(&bronze, "Condition_AsLongAs"));
+
+        let helm = parse_named(
+            "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
+            "Champion's Helm",
+            &["Artifact", "Equipment"],
+        );
+        assert!(
+            !helm.abilities.iter().any(def_tree_has_unimplemented)
+                && !helm
+                    .triggers
+                    .iter()
+                    .any(|t| t.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Champion's Helm must parse without Unimplemented"
+        );
+        assert!(
+            helm.statics.iter().any(|s| {
+                matches!(s.mode, crate::types::statics::StaticMode::Continuous)
+                    && matches!(
+                        &s.affected,
+                        Some(TargetFilter::Typed(TypedFilter {
+                            properties,
+                            ..
+                        })) if properties.contains(&FilterProp::EquippedBy)
+                            && properties.contains(&FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary
+                            })
+                    )
+                    && s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Hexproof
+                            }
+                        )
+                    })
+            }),
+            "expected legendary-equipped hexproof static, got {:#?}",
+            helm.statics
+        );
+        assert!(!has_swallowed_detector(&helm, "Condition_AsLongAs"));
+    }
+
     #[test]
     fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
         // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
@@ -3290,7 +3846,10 @@ mod tests {
         assert!(
             parsed.statics.iter().any(|s| matches!(
                 s.mode,
-                StaticMode::SpendManaAsAnyColor { spell_filter: None }
+                StaticMode::SpendManaAsAnyColor {
+                    spell_filter: None,
+                    activation_source_filter: None,
+                }
             )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
             parsed.statics
@@ -3646,6 +4205,68 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 611.2a: Amplifire — upkeep P/T set uses "until your next turn" duration
+    /// on a layer effect; must not trip Duration_NextTurn swallow warnings (issue #2239).
+    #[test]
+    fn duration_next_turn_accepts_amplifire_upkeep_pt_set() {
+        use crate::types::ability::{ContinuousModification, Duration, PlayerScope};
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, reveal cards from the top of your library until you reveal a creature card. Until your next turn, this creature's base power becomes twice that card's power and its base toughness becomes twice that card's toughness. Put the revealed cards on the bottom of your library in a random order.",
+            "Amplifire",
+            &["Creature"],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Amplifire upkeep trigger");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Amplifire trigger must parse without Unimplemented"
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::RevealUntil { .. }),
+            "Amplifire head must be RevealUntil, got {:?}",
+            execute.effect
+        );
+        fn find_timed_pt_layer(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            let has_pt_layer = matches!(
+                def.effect.as_ref(),
+                Effect::GenericEffect {
+                    static_abilities,
+                    ..
+                } if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::SetPowerDynamic { .. }
+                                | ContinuousModification::SetToughnessDynamic { .. }
+                        )
+                    })
+                })
+            );
+            if has_pt_layer
+                && matches!(
+                    def.duration,
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller
+                    })
+                )
+            {
+                return Some(def);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_timed_pt_layer)
+                .or_else(|| def.else_ability.as_deref().and_then(find_timed_pt_layer))
+        }
+        assert!(
+            find_timed_pt_layer(execute).is_some(),
+            "expected until-your-next-turn duration on the P/T layer clause, got {execute:#?}",
+        );
+        assert!(!has_swallowed_detector(&parsed, "Duration_NextTurn"));
+    }
+
     /// CR 400.11 + CR 701.23j: Wish-cycle and planeswalker wishboard fetches must
     /// lower to SearchOutsideGame without Optional_YouMay swallow warnings (issue #2276).
     #[test]
@@ -3877,6 +4498,58 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 614.1c + CR 608.2c: Oviya's "If you put an artifact onto the
+    /// battlefield this way, put two +1/+1 counters on it" rider is represented by
+    /// `Effect::ChangeZone.conditional_enter_with_counters`, so the leading "if"
+    /// must NOT be reported as a swallowed condition. REVERT: without the
+    /// `conditional_enter_counters_if_is_only_if_marker` guard the false
+    /// `Condition_If` swallow returns and this assertion flips.
+    #[test]
+    fn condition_if_accepts_conditional_enter_with_counters_put_this_way() {
+        let parsed = parse_named(
+            "Each creature that's attacking one of your opponents has trample.\n\
+             {G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+            "Oviya, Automech Artisan",
+            &["Creature"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "represented conditional_enter_with_counters put-this-way rider must not report Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The put-this-way counter guard is text-scoped: a card carrying the
+    /// represented rider PLUS a separate, genuinely-unrepresented " if " must still
+    /// flag Condition_If (mirrors `represented_tiered_counter_pair_does_not_hide_unrelated_if`).
+    #[test]
+    fn conditional_enter_counters_does_not_hide_unrelated_if() {
+        let parsed = parse_named(
+            "{G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+            "Oviya, Automech Artisan",
+            &["Creature"],
+        );
+        let synthetic = format!(
+            "{}\nDraw a card if the moon is bright.",
+            "You may put a creature card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it."
+        );
+        let mut diagnostics = Vec::new();
+
+        check_swallowed_clauses(&synthetic, &parsed, &mut diagnostics);
+
+        assert!(
+            diagnostics.iter().any(|warning| matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )),
+            "separate unrelated if text must remain visible to Condition_If, got {diagnostics:?}"
+        );
+    }
+
     #[test]
     fn represented_tiered_counter_pair_does_not_hide_unrelated_if() {
         let tiered_line = "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
@@ -3914,6 +4587,61 @@ mod tests {
             !has_swallowed_detector(&parsed, "Condition_If"),
             "lost-life-this-way result-reference draw must not report a swallowed condition: {:?}",
             parsed.parse_warnings
+        );
+    }
+
+    /// CR 614.1a + CR 120.8: An UNCONDITIONAL value-modifier replacement whose
+    /// ability-word-stripped body leads with its own CR 614.1a applicability
+    /// "if" ("Flare Star — If a Wizard you control would deal damage ..., it
+    /// deals double that damage instead") is fully represented by the
+    /// `ReplacementDefinition`'s `damage_modification` — the leading "if" is
+    /// replacement syntax, not a swallowed CR 608.2c gate. Revert discriminator:
+    /// removing the `unconditional_valmod_leading_if_is_only_if_marker` exemption
+    /// re-emits the `Condition_If` warning and this assertion flips.
+    #[test]
+    fn condition_if_accepts_unconditional_valmod_leading_if() {
+        let parsed = parse_named(
+            "Flare Star — If a Wizard you control would deal damage to a permanent \
+             or player, it deals double that damage instead.",
+            "Trance Kuja, Fate Defied",
+            &["Legendary", "Creature", "Wizard"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "unconditional value-modifier replacement's leading applicability-if \
+             must not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The exemption is guarded: a value-modifier replacement that ALSO carries a
+    /// genuine `while` gate (The Rollercrusher Ride's delirium threshold) does
+    /// NOT take the unconditional carve-out — its residual `while` blocks it. The
+    /// gate is instead captured as a `condition`, which self-suppresses
+    /// `Condition_If` via the `"condition":{` marker. Either way the warning must
+    /// be absent, but for the RIGHT reason (captured gate, not blanket exemption).
+    #[test]
+    fn condition_if_gated_valmod_captures_condition_not_blanket_exemption() {
+        let parsed = parse_named(
+            "Delirium — If a source you control would deal noncombat damage to a \
+             permanent or player while there are four or more card types among \
+             cards in your graveyard, it deals double that damage instead.",
+            "The Rollercrusher Ride",
+            &["Legendary", "Enchantment"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "gated value-modifier must capture its while-gate as a condition and \
+             not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.replacements.iter().any(|r| r.condition.is_some()),
+            "the delirium while-gate must be captured as a replacement condition, \
+             not dropped: {:?}",
+            parsed.replacements
         );
     }
 
@@ -4153,6 +4881,23 @@ mod tests {
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
+    /// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore's "If that creature was cast
+    /// for its warp cost, it also gains trample and haste" rider is represented as
+    /// a grant sub-ability with `condition: CastVariantPaid { variant: Warp,
+    /// subject: Target }`, so the `Condition_If` detector must not flag it. Before
+    /// the parser arm was added the condition was dropped and this swallow fired
+    /// (the measured coverage gap). Reverting the parser arm re-fires it.
+    #[test]
+    fn condition_if_accepts_full_bore_target_warp_grant() {
+        let full_bore = parse_named(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was \
+             cast for its warp cost, it also gains trample and haste until end of turn.",
+            "Full Bore",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&full_bore, "Condition_If"));
+    }
+
     /// CR 701.6a: "If that spell is countered this way, put it [somewhere]"
     /// — the redirect destination is encoded as `countered_spell_zone` on the
     /// Counter effect.  Its presence IS the conditional gate (Memory Lapse,
@@ -4260,6 +5005,51 @@ mod tests {
         ));
         assert!(!super::dig_if_you_do_is_only_if_marker(
             "you may look at the top five cards. if you do, reveal a land. if you control a forest, draw a card."
+        ));
+    }
+
+    /// CR 614.12: Summoner's Grimoire — the granted ability's "if that card is
+    /// an enchantment card" clause materializes the typed `enters_modified_if`
+    /// gate, so it is represented, not swallowed. With that as the card's only
+    /// " if ", `Swallow:Condition_If` must clear (the card flips supported).
+    /// Revert (field never set / marker absent) re-flags Condition_If.
+    #[test]
+    fn condition_if_accepts_grimoire_moved_type_enter_modifier() {
+        let grimoire = parse_named(
+            "Job select\nEquipped creature is a Shaman in addition to its other types and \
+             has \"Whenever this creature attacks, you may put a creature card from your hand \
+             onto the battlefield. If that card is an enchantment card, it enters tapped and \
+             attacking.\"\nAbraxas — Equip {3}",
+            "Summoner's Grimoire",
+            &["Artifact", "Equipment"],
+        );
+        assert!(!has_swallowed_detector(&grimoire, "Condition_If"));
+    }
+
+    /// CR 614.12 (N-A non-vacuity): the enters-modifier exemption is
+    /// text-scoped — it clears only the represented clause, so a card carrying
+    /// the gate AND a separate unrelated dropped " if " still flags. This FAILS
+    /// if the marker is implemented whole-AST instead of text-scoped.
+    #[test]
+    fn enters_modified_if_exemption_is_text_scoped() {
+        let ast = "{\"enters_modified_if\":{\"type\":\"Typed\"}}";
+        // The represented enters-modifier clause is the card's only " if " -> suppress.
+        assert!(super::enters_modified_if_is_only_if_marker(
+            "you may put a creature card from your hand onto the battlefield. if that card \
+             is an enchantment card, it enters tapped and attacking.",
+            ast,
+        ));
+        // Gate present BUT a separate unrelated " if " survives -> do NOT suppress.
+        assert!(!super::enters_modified_if_is_only_if_marker(
+            "you may put a creature card from your hand onto the battlefield. if that card \
+             is an enchantment card, it enters tapped and attacking. if you control a \
+             forest, draw a card.",
+            ast,
+        ));
+        // No AST gate (clause not structurally represented) -> do NOT suppress.
+        assert!(!super::enters_modified_if_is_only_if_marker(
+            "if that card is an enchantment card, it enters tapped and attacking.",
+            "{}",
         ));
     }
 
@@ -4810,6 +5600,24 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
+    /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
+    /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
+    /// raise a DynamicQty swallow warning — the static's presence is the carrier
+    /// (mirrors the SelfManaCost precedent). Reverting the marker re-reds Fblthp.
+    #[test]
+    fn dynamic_qty_accepts_plot_cost_equal_to_mana_cost() {
+        let parsed = parse_named(
+            "You may look at the top card of your library any time.\n\
+             The top card of your library has plot. The plot cost is equal to its mana cost.\n\
+             You may plot nonland cards from the top of your library.",
+            "Fblthp, Lost on the Range",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
@@ -5592,5 +6400,486 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 
         // No swallowed-clause diagnostic for the dropped EOT duration.
         assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    fn flip_branch_has_create_damage_replacement(
+        win_effect: &Option<Box<AbilityDefinition>>,
+        lose_effect: &Option<Box<AbilityDefinition>>,
+    ) -> bool {
+        win_effect
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || lose_effect
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+    }
+
+    fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
+        match def.effect.as_ref() {
+            Effect::CreateDamageReplacement { .. } => return true,
+            Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            }
+            | Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } if flip_branch_has_create_damage_replacement(win_effect, lose_effect) => return true,
+            _ => {}
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_has_create_damage_replacement)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement)
+    }
+
+    /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
+    /// one-shot damage replacements; the Replacement_Instead detector must walk
+    /// `FlipCoin` payloads (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
+        let parsed = parse_named(
+            "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
+            "Desperate Gambit",
+            &["Instant"],
+        );
+        assert!(
+            !parsed.abilities.iter().any(def_tree_has_unimplemented),
+            "Desperate Gambit must parse without Unimplemented"
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(def_tree_has_create_damage_replacement),
+            "expected CreateDamageReplacement in flip-coin branches, got {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    /// CR 614.1a: Edge of Malacol untap replacement and Jinnie Fay token
+    /// replacement choice must not trip Replacement_Instead (issue #2236).
+    #[test]
+    fn replacement_instead_accepts_untap_and_token_choice_replacements() {
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let edge = parse_named(
+            "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+            "Edge of Malacol",
+            &["Enchantment"],
+        );
+        assert!(
+            !edge
+                .replacements
+                .iter()
+                .any(|r| { r.execute.as_deref().is_some_and(def_tree_has_unimplemented) }),
+            "Edge of Malacol replacement must parse without Unimplemented"
+        );
+        assert!(
+            edge.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::Untap
+                    && r.condition == Some(ReplacementCondition::DuringUntapStep)
+                    && r.execute.is_some()
+            }),
+            "expected untap-step replacement AST, got {:#?}",
+            edge.replacements
+        );
+        assert!(!has_swallowed_detector(&edge, "Replacement_Instead"));
+
+        let doubling = parse_named(
+            "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.",
+            "Doubling Season",
+            &["Enchantment"],
+        );
+        assert!(
+            doubling.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken && r.quantity_modification.is_some()
+            }),
+            "expected CreateToken quantity-modifier replacement AST, got {:#?}",
+            doubling.replacements
+        );
+        assert!(!has_swallowed_detector(&doubling, "Replacement_Instead"));
+
+        let jinnie = parse_named(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !jinnie
+                .replacements
+                .iter()
+                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
+            "Jinnie Fay replacement must parse without Unimplemented"
+        );
+        fn def_tree_has_create_token_choice(def: &AbilityDefinition) -> bool {
+            match &*def.effect {
+                Effect::ChooseOneOf { branches, .. } => branches
+                    .iter()
+                    .any(|branch| matches!(&*branch.effect, Effect::Token { .. })),
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    def_tree_has_create_token_choice(effect)
+                }
+                _ => {
+                    def.sub_ability
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+                        || def
+                            .else_ability
+                            .as_deref()
+                            .is_some_and(def_tree_has_create_token_choice)
+                }
+            }
+        }
+        assert!(
+            jinnie.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::CreateToken
+                    && r.execute
+                        .as_deref()
+                        .is_some_and(def_tree_has_create_token_choice)
+            }),
+            "expected CreateToken replacement-choice AST, got {:#?}",
+            jinnie.replacements
+        );
+        assert!(!has_swallowed_detector(&jinnie, "Replacement_Instead"));
+    }
+
+    /// CR 601.2 + CR 609.4b + CR 614.1a: Quistis Trepe's ETB must lower to a real
+    /// `Effect::CastFromZone` carrying `mana_spend_permission: Some(AnyTypeOrColor)`
+    /// (full-cost graveyard cast with the any-type concession), with the trailing
+    /// "exile it instead" rider rebound onto the cast spell as a
+    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT degraded to a bare
+    /// `GenericEffect{SpendManaAsAnyColor}` that drops the cast.
+    ///
+    /// DISCRIMINATING: reverting the Q1 head parser
+    /// (`try_parse_cast_target_from_graveyard_any_mana`) flips the effect back to
+    /// `GenericEffect{SpendManaAsAnyColor}` (no `CastFromZone`), failing the
+    /// effect-type assertion; reverting Commit 1's rider rebind generalization
+    /// binds the exile rider to the triggering source (Quistis), so the
+    /// sub-ability target is no longer `ParentTarget`.
+    #[test]
+    fn quistis_cast_from_graveyard_is_castfromzone_with_any_type_mana_and_exile_rider() {
+        use crate::types::ability::{Effect, ManaSpendPermission, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let parsed = parse_named(
+            "Blue Magic — When Quistis Trepe enters, you may cast target instant or sorcery \
+             card from a graveyard, and mana of any type can be spent to cast that spell. \
+             If that spell would be put into a graveyard, exile it instead.",
+            "Quistis Trepe",
+            &["Legendary", "Creature"],
+        );
+
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Quistis must carry an ETB trigger effect");
+
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            mana_spend_permission,
+            driver,
+            ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            !without_paying_mana_cost,
+            "Quistis casts at full cost (CR 609.4b is payment-mode, not free)"
+        );
+        // CR 608.2g: the graveyard any-mana cast is a during-resolution paid cast,
+        // routed by the explicit driver — not a lingering permission.
+        assert_eq!(
+            *driver,
+            crate::types::ability::CastFromZoneDriver::DuringResolution,
+            "Quistis lowers to a during-resolution cast (CR 608.2g)"
+        );
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor),
+            "the any-type concession must ride the CastFromZone grant"
+        );
+        // Cast from a graveyard (any controller) — InZone Graveyard, no owner.
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard));
+
+        // Exile rider rebound onto the cast spell (ParentTarget), not Quistis.
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .expect("the exile-instead rider must attach as a sub-ability");
+        match &*rider.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert_eq!(*target, TargetFilter::ParentTarget);
+            }
+            other => panic!("expected ChangeZone{{Exile, ParentTarget}} rider, got {other:?}"),
+        }
+
+        // No node degrades to GenericEffect{SpendManaAsAnyColor}.
+        fn chain_has_spend_mana_generic(def: &AbilityDefinition) -> bool {
+            let here = matches!(
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        crate::types::statics::StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            );
+            here || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_spend_mana_generic)
+        }
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(chain_has_spend_mana_generic),
+            "the cast must not degrade to GenericEffect{{SpendManaAsAnyColor}}"
+        );
+        // The reflexive-if swallow marker must clear.
+        assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 611.2a + CR 108.3 (multiplayer FINDING-4): Tinybones the Pickpocket casts
+    /// "from that player's graveyard" — the combat-damaged player's. The
+    /// `CastFromZone` target MUST carry `Owned{TriggeringPlayer}` so a 3+ player
+    /// game restricts the cast to that one player's graveyard, never any
+    /// opponent's. Also carries `mana_spend_permission: Some(AnyTypeOrColor)`.
+    ///
+    /// DISCRIMINATING: reverting the FINDING-4 owner-add in
+    /// `try_parse_cast_target_from_graveyard_any_mana` drops the
+    /// `Owned{TriggeringPlayer}` property; reverting the Q1 head parser degrades
+    /// the whole clause to `GenericEffect{SpendManaAsAnyColor}` (no CastFromZone).
+    #[test]
+    fn tinybones_cast_from_damaged_player_graveyard_owned_triggering_player_any_mana() {
+        use crate::types::ability::{
+            ControllerRef, Effect, FilterProp, ManaSpendPermission, TargetFilter,
+        };
+        use crate::types::zones::Zone;
+
+        let parsed = parse_named(
+            "Deathtouch\nWhenever Tinybones deals combat damage to a player, you may cast \
+             target nonland permanent card from that player's graveyard, and mana of any \
+             type can be spent to cast that spell.",
+            "Tinybones, the Pickpocket",
+            &["Legendary", "Creature"],
+        );
+
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Tinybones must carry a combat-damage trigger effect");
+
+        let Effect::CastFromZone {
+            target,
+            mana_spend_permission,
+            without_paying_mana_cost,
+            ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                execute.effect
+            );
+        };
+        assert!(!without_paying_mana_cost, "full-cost cast");
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor)
+        );
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard));
+
+        // FINDING-4: owner constraint bound to the triggering (damaged) player.
+        fn has_owned_triggering(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+                    matches!(
+                        p,
+                        FilterProp::Owned {
+                            controller: ControllerRef::TriggeringPlayer
+                        }
+                    )
+                }),
+                TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                    filters.iter().any(has_owned_triggering)
+                }
+                TargetFilter::Not { filter } => has_owned_triggering(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            has_owned_triggering(target),
+            "Tinybones must restrict the cast to the damaged player's graveyard \
+             via Owned{{TriggeringPlayer}}; got {target:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detect_condition_if_replacement_exemption_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::replacements::ReplacementEvent;
+
+    /// Plague Drone-class text: a single represented gain-life replacement,
+    /// preceded by a keyword line and an ability-word line. The structural
+    /// per-sentence exemption must still recognize and strip this sentence's
+    /// leading "if" even though it isn't at byte offset 0 of the sentence
+    /// (it follows "Flying\nRot Fly — ").
+    const PLAGUE_DRONE_TEXT: &str =
+        "Flying\nRot Fly — If an opponent would gain life, that player loses that much life instead.";
+
+    fn has_condition_if_swallow(diagnostics: &[OracleDiagnostic]) -> bool {
+        diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+    }
+
+    /// Positive, end-to-end through the real parser: Plague Drone's
+    /// represented gain-life replacement must NOT trip Condition_If. This is
+    /// the exact regression the reviewer's original card-wide gate was
+    /// (over-broadly) fixing, exercised here through `parse_oracle_text` +
+    /// `check_swallowed_clauses` exactly as production code calls them.
+    #[test]
+    fn plague_drone_replacement_antecedent_is_not_swallowed_condition() {
+        let parsed = parse_oracle_text(
+            PLAGUE_DRONE_TEXT,
+            "Plague Drone",
+            &[],
+            &["Creature".to_string()],
+            &["Phyrexian".to_string(), "Insect".to_string()],
+        );
+        let mut diagnostics = Vec::new();
+        check_swallowed_clauses(PLAGUE_DRONE_TEXT, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "Plague Drone's represented replacement antecedent must not be flagged \
+             as a swallowed Condition_If; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Builds a minimal, otherwise-empty `ParsedAbilities` carrying exactly
+    /// one `ReplacementDefinition` whose `description` is `description`.
+    /// Field list is taken verbatim from the `ParsedAbilities` struct
+    /// definition in `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_one_replacement_description(description: &str) -> ParsedAbilities {
+        let mut def = ReplacementDefinition::new(ReplacementEvent::GainLife);
+        def.description = Some(description.to_string());
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: vec![def],
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// Negative (compound-replacement honesty): one sentence's antecedent IS
+    /// backed by a `ReplacementDefinition.description` in `parsed.replacements`;
+    /// a second " instead" sentence, structurally shaped the same way, has NO
+    /// matching description anywhere in `parsed.replacements` (simulating a
+    /// card whose second replacement clause the parser failed to represent).
+    /// The card-wide gate this PR originally shipped would have exempted
+    /// BOTH sentences once `parsed.replacements` was non-empty; the
+    /// structural per-sentence exemption must still flag the unrepresented
+    /// second one.
+    #[test]
+    fn compound_replacement_with_unrepresented_second_instead_sentence_is_flagged() {
+        let represented_sentence =
+            "If an opponent would gain life, that player loses that much life instead.";
+        let unrepresented_sentence = "If a player would sacrifice a permanent, exile it instead.";
+        // A neutral leading sentence keeps the unrepresented "if" clause off
+        // byte offset 0 of the cleaned text: the detector's bare-" if " scan
+        // (like every marker scan in this file) requires a preceding space,
+        // which sentence-initial text at offset 0 never has.
+        let text = format!("You gain 1 life. {represented_sentence} {unrepresented_sentence}");
+        let parsed = parsed_with_one_replacement_description(represented_sentence);
+
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, "{}", &parsed, &mut diagnostics);
+
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "the unrepresented second replacement sentence's 'if' must still be \
+             flagged as a swallowed Condition_If; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Negative (extra real conditional riding on a represented sentence):
+    /// even when the leading antecedent IS represented (its description
+    /// matches), a second bare "if" later in the SAME sentence is a real,
+    /// additional conditional gate that must not be silently swallowed by
+    /// the replacement exemption.
+    #[test]
+    fn represented_replacement_with_trailing_extra_conditional_is_flagged() {
+        let sentence = "If an opponent would gain life, that player loses that much life \
+             instead if that player controls no lands.";
+        let parsed = parsed_with_one_replacement_description(
+            "If an opponent would gain life, that player loses that much life instead.",
+        );
+
+        let cleaned = sentence.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, sentence, "{}", &parsed, &mut diagnostics);
+
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a second, independent 'if' clause riding on an otherwise-represented \
+             replacement sentence must still be flagged; diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Sanity check on the helper in isolation: a represented sentence
+    /// (matching description present) has its leading "if" fully stripped,
+    /// while an unrepresented one survives untouched.
+    #[test]
+    fn strip_helper_only_removes_sentences_backed_by_a_parsed_replacement() {
+        let represented =
+            "if an opponent would gain life, that player loses that much life instead";
+        let unrepresented = "if a player would sacrifice a permanent, exile it instead";
+        let combined = format!("{represented}. {unrepresented}.");
+        let parsed = parsed_with_one_replacement_description(&format!("{represented}."));
+
+        let result = strip_represented_replacement_instead_sentences(&combined, &parsed);
+
+        assert_eq!(
+            result, " if a player would sacrifice a permanent, exile it instead.",
+            "only the represented sentence should have been stripped"
+        );
     }
 }

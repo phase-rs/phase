@@ -312,6 +312,18 @@ fn try_peel_opponent_may_prefix(
     }
     nom_on_lower(text, &lower, |input| {
         alt((
+            // CR 102.2 + CR 603.2: "each of that player's opponents may" — the
+            // caster's opponents, fanned out per-player. Must precede the bare
+            // "each opponent may" arm (which scopes to the controller's
+            // opponents). Apostrophe variants: ASCII ' and curly U+2019 '.
+            value(
+                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
+                tag("each of that player's opponents may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
+                tag("each of that player\u{2019}s opponents may "),
+            ),
             value(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("each opponent may "),

@@ -1410,6 +1410,86 @@ pub(crate) fn parse_subject_is_color(
     )
 }
 
+/// CR 205.4b + CR 613.1d (Layer 4): Parse a supertype-defining static of the form
+/// "[subject] is/are [no longer|not] [supertype]." — the supertype sibling of
+/// [`parse_subject_is_color`]. Adds a supertype (Leyline of Singularity: "All
+/// nonland permanents are legendary"; Sixth Stage of Magic Design: "All creatures
+/// are legendary") or removes one via a "no longer"/"not" negation (Melting: "All
+/// lands are no longer snow").
+///
+/// Reuses the shared subject grammar (`parse_continuous_subject_filter`, which
+/// handles "All"/"Each", "nonland permanents", controller suffixes), the shared
+/// `parse_supertype_word` token (the full CR 205.4a set: legendary/basic/snow/
+/// world/ongoing), and the existing
+/// `ContinuousModification::AddSupertype`/`RemoveSupertype` runtime (applied at
+/// Layer 4 in `game/layers.rs`) — no new variant or runtime. Dispatched after the
+/// color/land-type branches; the supertype predicate is disjoint from color and
+/// land-type words, so no branch is stolen. `all_consuming` on the supertype word
+/// keeps this to the BARE form ("… are legendary."): a trailing tail ("… in
+/// addition to their other types") or unrecognized predicate leaves the line
+/// unsupported (returns `None`) rather than being mis-claimed. A self-referential
+/// subject is declined — it would be a CDA, not a plain Layer-4 static.
+pub(crate) fn parse_subject_is_supertype(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp
+        .split_around(" is ")
+        .or_else(|| tp.split_around(" are "))?;
+    let subject = subject_tp.original.trim();
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+
+    let affected = parse_continuous_subject_filter(subject)?;
+    // CR 604.3: a self-referential line would be a CDA, not a Layer-4 static.
+    if matches!(affected, TargetFilter::SelfRef) {
+        return None;
+    }
+    // CR 613 dispatch ownership: the attached "Enchanted/Equipped [type] is
+    // [supertype]" Aura/Equipment form is owned by the predicate seam
+    // (`parse_supertype_grant` via `parse_continuous_gets_has` — Glittering Frost,
+    // In Bolas's Clutches). Decline an attached-subject filter here so this general
+    // "[subject] is/are [supertype]" static path owns only the standalone-subject
+    // form and never double-handles an attached-subject grant.
+    if let TargetFilter::Typed(ref tf) = affected {
+        if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::EnchantedBy | FilterProp::EquippedBy))
+        {
+            return None;
+        }
+    }
+
+    // CR 205.4b: an object can gain or lose a supertype ("When an object gains or
+    // loses a supertype…") — an optional "no longer"/"not" negation flips this
+    // parse to a supertype REMOVAL.
+    let predicate_lower = predicate.to_lowercase();
+    let (supertype_input, is_remove) = match opt(alt((
+        tag::<_, _, OracleError<'_>>("no longer "),
+        tag("not "),
+    )))
+    .parse(predicate_lower.as_str())
+    {
+        Ok((rest, negation)) => (rest, negation.is_some()),
+        Err(_) => (predicate_lower.as_str(), false),
+    };
+    let (_, supertype) = all_consuming(nom_target::parse_supertype_word)
+        .parse(supertype_input)
+        .ok()?;
+
+    let modification = if is_remove {
+        ContinuousModification::RemoveSupertype { supertype }
+    } else {
+        ContinuousModification::AddSupertype { supertype }
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![modification])
+            .description(description.to_string()),
+    )
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control

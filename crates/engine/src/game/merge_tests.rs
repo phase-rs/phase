@@ -838,7 +838,9 @@ fn graveyard_exile_replacement() -> crate::types::ability::ReplacementDefinition
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         ))
         .description(
@@ -1016,7 +1018,9 @@ fn graveyard_exile_replacement_card_scoped() -> crate::types::ability::Replaceme
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         ))
         .description(

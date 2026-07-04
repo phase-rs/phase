@@ -109,10 +109,20 @@ pub fn decrease_speed(
 
 /// CR 702.179a: Start your engines checks whether a player controls a permanent with the keyword.
 pub fn controls_start_your_engines(state: &GameState, player: PlayerId) -> bool {
-    state.battlefield.iter().any(|id| {
+    controls_start_your_engines_in(state, player, &state.battlefield_phased_in_ids())
+}
+
+/// CR 702.179a: Snapshot-backed Start your engines predicate for SBA evaluation.
+pub fn controls_start_your_engines_in(
+    state: &GameState,
+    player: PlayerId,
+    battlefield_snapshot: &[ObjectId],
+) -> bool {
+    battlefield_snapshot.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
             // CR 702.26b: a phased-out permanent is treated as though it does not exist.
-            obj.controller == player
+            obj.zone == crate::types::zones::Zone::Battlefield
+                && obj.controller == player
                 && obj.is_phased_in()
                 && obj.has_keyword(&Keyword::StartYourEngines)
         })
