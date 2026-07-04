@@ -1795,6 +1795,7 @@ fn resolve_proven_self_counter_batch(
 
         let events_after_resolution = proof_events.len();
         let stack_after_resolution = proof.stack.len();
+        let counters_after_resolution = battlefield_counter_snapshot(&proof);
         let wf = super::engine_priority::run_post_action_pipeline_from(
             &mut proof,
             &mut proof_events,
@@ -1807,6 +1808,7 @@ fn resolve_proven_self_counter_batch(
             || !matches!(proof.waiting_for, WaitingFor::Priority { .. })
             || proof_events.len() != events_after_resolution
             || proof.stack.len() != stack_after_resolution
+            || battlefield_counter_snapshot(&proof) != counters_after_resolution
             || initial_len.saturating_sub(proof.stack.len()) != expected_consumed
             || !self_counter_batch_state_is_settled(&proof)
         {
@@ -1821,6 +1823,16 @@ fn resolve_proven_self_counter_batch(
     crate::game::perf_counters::record_stack_batch_plan();
     crate::game::perf_counters::record_stack_batched_entries(run_len);
     Some(run_len)
+}
+
+fn battlefield_counter_snapshot(
+    state: &GameState,
+) -> Vec<(ObjectId, std::collections::HashMap<CounterType, u32>)> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|obj| (*id, obj.counters.clone())))
+        .collect()
 }
 
 fn consumed_trigger_event_occurrences(
