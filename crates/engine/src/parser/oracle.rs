@@ -2632,6 +2632,11 @@ pub(crate) fn parse_oracle_ir(
         // zero parsed abilities for these cards.
         let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
         let raw_line: &str = reminder_body_owned.as_deref().unwrap_or(raw_line);
+        let activation_timing_parenthetical_owned =
+            preserve_activation_timing_parenthetical(raw_line);
+        let raw_line: &str = activation_timing_parenthetical_owned
+            .as_deref()
+            .unwrap_or(raw_line);
 
         let line = strip_reminder_text(raw_line);
         let ability_cant_be_copied = x_annotation_marks_ability_uncopyable(&line);
@@ -5277,6 +5282,49 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
     None
 }
 
+fn parse_activation_speed_parenthetical_body(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let lower = phrase.to_lowercase();
+    let (_, rest_original) = nom_on_lower(phrase, &lower, |i| {
+        value((), tag("activate only ")).parse(i)
+    })?;
+    let restrictions = parse_activation_timing_restriction(rest_original)?;
+    restrictions
+        .iter()
+        .all(|restriction| {
+            matches!(
+                restriction,
+                ActivationRestriction::AsInstant | ActivationRestriction::AsSorcery
+            )
+        })
+        .then_some(restrictions)
+}
+
+fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
+    let lower = raw_line.to_lowercase();
+    let (_, parenthetical_original) = nom_on_lower(raw_line, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>(" (activate only ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" (").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = raw_line.len() - parenthetical_original.len() - " (".len();
+    let prefix = raw_line[..prefix_len].trim_end();
+
+    let parenthetical_lower = parenthetical_original.to_lowercase();
+    let Ok((tail, inner_lower)) = terminated(take_until::<_, _, OracleError<'_>>(")"), tag(")"))
+        .parse(parenthetical_lower.as_str())
+    else {
+        return None;
+    };
+    if !tail.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let inner_original = parenthetical_original[..inner_lower.len()].trim();
+    let timing_text = inner_original.trim_end_matches('.').trim();
+    parse_activation_speed_parenthetical_body(timing_text)?;
+    Some(format!("{prefix} {timing_text}."))
+}
+
 fn opponents_turn_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(opponents_turn_activation_condition()),
@@ -5371,6 +5419,17 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 }
                 continue;
             }
+        }
+
+        if let Some((before, restrictions)) = split_legacy_play_this_ability_timing(&remaining) {
+            remaining = before
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.restrictions.extend(restrictions);
+            if remaining.is_empty() {
+                break;
+            }
+            continue;
         }
 
         const OPPONENTS_ACTIVATE_SUFFIX: &str = "only your opponents may activate this ability";
@@ -5645,6 +5704,31 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     }
 
     (remaining, constraints)
+}
+
+fn split_legacy_play_this_ability_timing(text: &str) -> Option<(&str, Vec<ActivationRestriction>)> {
+    let lower = text.to_lowercase();
+    let (_, restriction_original) = nom_on_lower(text, &lower, |i| {
+        let (i, before) = take_until::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        if !is_empty_or_sentence_boundary(before) {
+            return Err(nom::Err::Error(OracleError::new(
+                before,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+        let (i, _) = tag::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = text.len() - restriction_original.len() - "play this ability ".len();
+    let restrictions = parse_activation_timing_restriction(restriction_original)?;
+    Some((&text[..prefix_len], restrictions))
+}
+
+fn is_empty_or_sentence_boundary(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .next_back()
+        .is_none_or(|ch| ch == '.')
 }
 
 /// CR 602.5b: Recognize a standalone `"Activate only once each turn"` cadence
