@@ -30,12 +30,13 @@ export function EachPlayerCopyChosenModal({
   const hoverProps = useInspectHoverProps();
 
   const [selected, setSelected] = useState<TargetRef[]>([]);
+  const eligibleKey = data.eligible.map(targetKey).join("|");
 
   // Reset when a fresh prompt arrives (back-to-back per-player prompts from one
   // resolution don't remount this component).
   useEffect(() => {
     setSelected([]);
-  }, [data.eligible]);
+  }, [eligibleKey]);
 
   const handleToggle = useCallback(
     (target: TargetRef) => {
