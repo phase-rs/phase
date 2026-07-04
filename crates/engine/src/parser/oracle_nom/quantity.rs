@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::combinator::{all_consuming, map, map_opt, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -4016,12 +4016,30 @@ fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> 
         value(FilterProp::IsChosenCreatureType, tag(" of the chosen type")),
     )))
     .parse(rest)?;
+    // CR 109.4 + issues #5018 / #5058: an optional trailing "with <keyword>"
+    // qualifier on the controller-scoped count ("creature you control with
+    // flying" — Skycat Sovereign; "creature you control with defender" —
+    // Axebane Guardian / Doorkeeper / Vent Sentinel). Mirrors the
+    // battlefield-scoped `parse_for_each_battlefield_type_with_keyword` (#5008)
+    // for the "you control" scope. `map_opt` consumes the tail only when it is a
+    // recognized keyword; a "with " + non-keyword tail is left unconsumed so the
+    // clause fails to fully consume rather than silently mis-counting.
+    let (rest, keyword) = opt(preceded(
+        tag(" with "),
+        map_opt(parse_keyword_name, |name: &str| {
+            name.parse::<Keyword>().ok()
+        }),
+    ))
+    .parse(rest)?;
     let mut properties = Vec::new();
     if has_other.is_some() {
         properties.push(FilterProp::Another);
     }
     if let Some(prop) = chosen_type_prop {
         properties.push(prop);
+    }
+    if let Some(keyword) = keyword {
+        properties.push(FilterProp::WithKeyword { value: keyword });
     }
     if !properties.is_empty() {
         return Ok((
@@ -4424,6 +4442,74 @@ mod tests {
                 }
                 other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
             }
+        }
+    }
+
+    /// Issues #5018 / #5058: the controller-scoped "for each" counterpart of
+    /// `parse_for_each_battlefield_type_with_keyword` — "<type> you control with
+    /// <keyword>" (Skycat Sovereign "creature you control with flying"; Axebane
+    /// Guardian / Doorkeeper / Vent Sentinel "creature you control with
+    /// defender"). The bare and "other" forms must still round-trip.
+    #[test]
+    fn parse_for_each_controlled_type_with_keyword() {
+        for (clause, other, kw) in [
+            (
+                "other creature you control with flying",
+                true,
+                Keyword::Flying,
+            ),
+            (
+                "creature you control with defender",
+                false,
+                Keyword::Defender,
+            ),
+            (
+                "creature you control with vigilance",
+                false,
+                Keyword::Vigilance,
+            ),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::You),
+                        "{clause:?}: you-control scope"
+                    );
+                    assert_eq!(
+                        tf.properties.contains(&FilterProp::Another),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+        // Bare "you control" (no keyword) still round-trips with no stray gate.
+        let (rest, q) = parse_for_each_clause_ref("creature you control").unwrap();
+        assert_eq!(rest, "", "bare form should fully consume");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+                    "bare form must not fabricate a keyword gate"
+                );
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
         }
     }
 
