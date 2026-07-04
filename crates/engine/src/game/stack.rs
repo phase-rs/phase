@@ -1826,20 +1826,14 @@ fn resolve_proven_self_counter_batch(
 fn consumed_trigger_event_occurrences(
     events: &[GameEvent],
 ) -> Vec<crate::game::triggers::ConsumedTriggerEventOccurrence> {
-    let mut seen: Vec<(GameEvent, usize)> = Vec::new();
+    let mut seen = std::collections::HashMap::new();
     events
         .iter()
         .map(|event| {
-            let occurrence = if let Some((_, count)) =
-                seen.iter_mut().find(|(seen_event, _)| seen_event == event)
-            {
-                let occurrence = *count;
-                *count += 1;
-                occurrence
-            } else {
-                seen.push((event.clone(), 1));
-                0
-            };
+            let key = serde_json::to_string(event).expect("GameEvent serializes");
+            let count = seen.entry(key).or_insert(0);
+            let occurrence = *count;
+            *count += 1;
             crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
                 occurrence,
