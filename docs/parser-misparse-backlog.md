@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 32
-- **Distinct cards implicated:** 4814
-- **Total card appearances across root causes:** 4848 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 31
+- **Distinct cards implicated:** 4813
+- **Total card appearances across root causes:** 4847 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -43,7 +43,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 29 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
 | 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 3 | manual triage |
-| 32 | Static pay/action-to-ignore-effect clause dropped | 1 | add-static-ability / add-interactive-effect — model "ignore this effect until end of turn" exceptions |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -5227,20 +5226,8 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Merfolk Falconer
+- Flaccify
 - Rush of Dread
 - The Goose Mother
-
-</details>
-
-### 32. Static pay/action-to-ignore-effect clause dropped  (1 card)
-
-**Signature.** A static restriction or lock effect is modeled, but a player-facing payment or action that lets that player ignore "this effect" until end of turn is absent.
-
-**Fix hint.** add-static-ability / add-interactive-effect — represent temporary ignore-effect exceptions for static restrictions
-
-<details><summary>Cards</summary>
-
-- Lost in Thought
 
 </details>

@@ -386,6 +386,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::TurnFaceUp { .. }
         | GameAction::ChoosePlayDraw { .. }
         | GameAction::ChoosePile { .. }
+        | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }

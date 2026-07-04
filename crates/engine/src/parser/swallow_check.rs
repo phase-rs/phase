@@ -2530,7 +2530,14 @@ fn detect_condition_if(
         // `ForceBlock`/`ForceAttack` effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
         "\"mode\":\"MustBlock\"",
-        "\"mode\":\"MustBeBlocked\"",
+        // `MustBeBlocked` is data-carrying (`MustBeBlocked { by: Option<_> }`).
+        // The `by` field has no `skip_serializing_if`, so serde emits the object
+        // form `{"MustBeBlocked":{"by":...}}` for BOTH shapes: `{"by":null}` for
+        // the bare "must be blocked if able" rider (`by: None`) and
+        // `{"by":{...}}` for typed riders (Ace's Baseball Bat, Slayer's Cleaver).
+        // Match the quoted variant key `"MustBeBlocked"`, which is common to both
+        // serializations, so both suppress the "if able" Condition_If marker.
+        "\"MustBeBlocked\"",
         "\"type\":\"ForceBlock\"",
         "\"type\":\"ForceAttack\"",
         // CR 305.9: "as ~ enters, you may pay X. If you don't, it enters
@@ -4464,6 +4471,54 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 509.1c: "must be blocked if able" riders are represented by
+    /// `StaticMode::MustBeBlocked { by }`, so the trailing "if able" must not be
+    /// reported as a swallowed `Condition_If`. The `by` field has no
+    /// `skip_serializing_if`, so serde emits the object form for BOTH shapes:
+    /// `{"MustBeBlocked":{"by":null}}` for the bare rider (`by: None`, Gaea's
+    /// Protector) and `{"MustBeBlocked":{"by":{...}}}` for the typed form
+    /// (`by: Some(filter)`, Slayer's Cleaver). The suppression marker matches the
+    /// quoted variant key `"MustBeBlocked"` common to both serializations.
+    #[test]
+    fn condition_if_accepts_must_be_blocked_rider() {
+        let bare = parse_named(
+            "This creature must be blocked if able.",
+            "Gaea's Protector",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&bare, "Condition_If"),
+            "bare must-be-blocked static must not report Condition_If: {:?}",
+            bare.parse_warnings
+        );
+        assert!(
+            bare.statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: None })),
+            "expected bare MustBeBlocked static, got {:?}",
+            bare.statics
+        );
+
+        let typed = parse_named(
+            "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.\nEquip {4}",
+            "Slayer's Cleaver",
+            &["Artifact"],
+        );
+        assert!(
+            !has_swallowed_detector(&typed, "Condition_If"),
+            "typed must-be-blocked static must not report Condition_If: {:?}",
+            typed.parse_warnings
+        );
+        assert!(
+            typed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: Some(_) })),
+            "expected typed MustBeBlocked static, got {:?}",
+            typed.statics
+        );
     }
 
     #[test]
