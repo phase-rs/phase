@@ -29801,6 +29801,67 @@ fn perpetual_modify_cost_anaphor_that_card() {
     );
 }
 
+#[test]
+fn perpetual_modify_cost_bound_it_uses_prior_referent() {
+    use crate::types::ability::PerpetualModification;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
+
+    fn assert_sub_cost(def: &AbilityDefinition, mode: CostModifyMode, amount: ManaCost) {
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("bound-it chain must produce a perpetual sub-ability");
+        match &*sub.effect {
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification:
+                    PerpetualModification::ModifyCost {
+                        mode: actual_mode,
+                        amount: actual_amount,
+                    },
+            } if *actual_mode == mode && *actual_amount == amount => {}
+            other => panic!(
+                "expected bound-it ApplyPerpetual ParentTarget {mode:?} {amount:?}, got {other:?}"
+            ),
+        }
+    }
+
+    let bloodsprout = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(&bloodsprout, CostModifyMode::Reduce, ManaCost::generic(1));
+
+    let geistchanneler = parse_effect_chain(
+        "choose an instant or sorcery card in your hand with mana value 3 or greater. It perpetually gains \"This spell costs {2} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(
+        &geistchanneler,
+        CostModifyMode::Reduce,
+        ManaCost::generic(2),
+    );
+
+    let nightclub = parse_effect_chain(
+        "return target nonland permanent an opponent controls to its owner's hand. It perpetually gains \"This spell costs {2} more to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(&nightclub, CostModifyMode::Raise, ManaCost::generic(2));
+
+    let standalone = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
+    assert!(
+        !matches!(
+            standalone,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::ModifyCost { .. },
+                ..
+            }
+        ),
+        "standalone bound-it clause must stay honest-red, got {standalone:?}"
+    );
+}
+
 /// Mass-hand arm: the EXACT real Oracle clauses (verified against
 /// `data/mtgjson/AtomicCards.json`) for the four covered cards →
 /// `ApplyPerpetual` over `cards_in_hand_filter`:

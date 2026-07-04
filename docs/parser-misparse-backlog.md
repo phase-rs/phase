@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4792
-- **Total card appearances across root causes:** 4826 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4789
+- **Total card appearances across root causes:** 4823 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -30,7 +30,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 16 | Keyword payload / multiplicity / mis-tokenization | 84 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
-| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 71 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
+| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 68 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
@@ -4624,7 +4624,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (71 cards)
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (68 cards)
 
 **Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
 
@@ -4632,7 +4632,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Bloodsprout Talisman
 - By Elspeth's Command
 - Chronicler of Worship
 - Cottontail Caretaker
@@ -4646,7 +4645,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Emperor Apatzec Intli IV
 - Ethereal Escort
 - Garruk, Wrath of the Wilds
-- Geistchanneler
 - Gitrog, Horror of Zhava
 - Goblin Trapfinder
 - Grow Old Together
@@ -4674,7 +4672,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Mentor of Evos Isle
 - Mischievous Lookout
 - Niambi, Beloved Protector
-- Nightclub Bouncer
 - Paths of Tuinvale
 - Plaguecrafter's Familiar
 - Prairie Survivalist

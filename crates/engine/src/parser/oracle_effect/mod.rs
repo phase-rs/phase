@@ -6723,7 +6723,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // less/more to cast\"" — persistent self-spell cost modifier (CR 601.2f).
     // Tried before the keyword grant: disjoint (this requires a quoted body, the
     // keyword grant a bare keyword list), but the quote guard keeps it explicit.
-    if let Some(effect) = try_parse_perpetual_modify_cost(tp) {
+    if let Some(effect) = try_parse_perpetual_modify_cost(tp, ctx) {
         return parsed_clause(effect);
     }
 
@@ -7202,6 +7202,33 @@ fn parse_perpetual_self_subject(lower: &str) -> Option<(&str, TargetFilter)> {
     Some((rest, TargetFilter::Any))
 }
 
+/// Cost-grant-only bound pronoun form: "It perpetually gains ...".
+///
+/// Standalone "it" must not silently fall back to the source. It is accepted
+/// only when the effect-chain context has a prior object referent that runtime
+/// target propagation can expose as [`TargetFilter::ParentTarget`]: either a
+/// typed target from an earlier clause or an immediately preceding
+/// [`Effect::ChooseFromZone`] choice.
+fn parse_bound_it_perpetual_gain_cost_subject<'a>(
+    lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<&'a str> {
+    if !(ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some()) {
+        return None;
+    }
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>("it perpetually ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("gains "),
+        tag::<_, _, OracleError<'_>>("gain "),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
 /// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
 /// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
 fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
@@ -7251,12 +7278,15 @@ fn parse_quoted_self_spell_cost_body(
 /// [`PerpetualModification::ModifyCost`]. The quoted self-spell cost modifier is
 /// realized at resolution by injecting a synthetic [`StaticMode::ModifyCost`]
 /// into the card's persistent static baseline.
-fn try_parse_perpetual_modify_cost(tp: TextPair) -> Option<Effect> {
+fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
 
-    let (rest, target) = parse_perpetual_self_subject(tp.lower)?;
+    let (rest, target) = parse_perpetual_self_subject(tp.lower).or_else(|| {
+        parse_bound_it_perpetual_gain_cost_subject(tp.lower, ctx)
+            .map(|rest| (rest, TargetFilter::ParentTarget))
+    })?;
 
     // Quoted body: "this spell costs {N} less/more to cast[.,]".
     let ((amount, mode), rest) = nom_on_lower(rest, rest, |input| {
