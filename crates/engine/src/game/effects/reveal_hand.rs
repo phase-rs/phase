@@ -58,7 +58,8 @@ pub fn resolve(
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
         })
-        // CR 800.4a: "an opponent" is a controller choice; resolving the first
+        // CR 608.2d: "an opponent" is a choice the controller announces while
+        // resolving the effect; resolving the first
         // opponent is exact in two-player and a known multiplayer simplification
         // (no interactive opponent choice yet). Only reached for non-targeted
         // LookAt shapes (e.g. Anointed Peacekeeper's "look at an opponent's
@@ -193,7 +194,7 @@ mod tests {
         )
     }
 
-    /// CR 701.20e + CR 800.4a: A non-targeted "look at an opponent's hand"
+    /// CR 701.20e + CR 608.2d: A non-targeted "look at an opponent's hand"
     /// (Anointed Peacekeeper) carries a controller-scoped `Typed(Opponent)`
     /// target and an Object source slot (no explicit player target). The
     /// resolver must fall back to `collect_player_targets` and privately look at

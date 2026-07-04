@@ -38598,7 +38598,7 @@ fn teyo_minus_two_grants_temporary_attack_only_neighbor() {
     );
 }
 
-// CR 701.20e + CR 800.4a: "Look at an opponent's hand" (Anointed Peacekeeper
+// CR 701.20e + CR 608.2d: "Look at an opponent's hand" (Anointed Peacekeeper
 // ETB) is a private look at a non-targeted opponent — reveal:false, no card
 // filter, controller-scoped `Typed(Opponent)` target. The new possessive arm
 // must not perturb the existing "target opponent's hand" / "target player's
@@ -38647,7 +38647,7 @@ fn parse_look_at_an_opponents_hand_is_private_opponent_look() {
     );
 }
 
-// CR 201.3: "choose any card name" (Anointed Peacekeeper) is the same CardName
+// CR 201.4: "choose any card name" (Anointed Peacekeeper) is the same CardName
 // choice as the "a card name" forms — the alt-list must accept the "any"
 // determiner. Regression: the existing "a card name" / "a nonland card name"
 // forms still resolve. Negative: a "card <X>" phrase that is NOT a name (a
