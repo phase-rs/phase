@@ -5,7 +5,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::parse_cda_quantity;
-use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
+use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
 };
@@ -640,6 +640,56 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// CR 107.1a: Parse a standalone trailing rounding marker left after another
+/// parser consumed the fractional quantity's noun phrase.
+///
+/// Examples include token text (`"half X Food tokens, rounded up"`) and
+/// sacrifice-choice text (`"half the creatures they control of their choice,
+/// rounded up"`), where `parse_count_expr` correctly builds `DivideRounded`
+/// from the leading fraction but cannot see the suffix until the token/choice
+/// parser peels its own grammar.
+pub(crate) fn parse_rounding_suffix_only(text: &str) -> Option<RoundingMode> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_lowercase();
+    nom_on_lower(trimmed, &lower, |input| {
+        let (rest, rounding) = super::oracle_nom::quantity::parse_explicit_rounding_suffix(input)?;
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest)?;
+        let (rest, _) = eof::<_, OracleError<'_>>(rest)?;
+        Ok((rest, rounding))
+    })
+    .map(|(rounding, _)| rounding)
+}
+
+/// CR 107.1a: Apply an explicit rounding mode to every fractional quantity
+/// nested inside `expr`.
+pub(crate) fn rewrite_quantity_expr_rounding(expr: &mut QuantityExpr, mode: RoundingMode) {
+    match expr {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor: _,
+            rounding,
+        } => {
+            *rounding = mode;
+            rewrite_quantity_expr_rounding(inner, mode);
+        }
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr_rounding(inner, mode),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rewrite_quantity_expr_rounding(inner, mode);
+            }
+        }
+        QuantityExpr::UpTo { max } => rewrite_quantity_expr_rounding(max, mode),
+        QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr_rounding(exponent, mode),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_quantity_expr_rounding(left, mode);
+            rewrite_quantity_expr_rounding(right, mode);
+        }
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+    }
 }
 
 /// Typed signal distinguishing which count-word `parse_count_expr` consumed.
@@ -2782,6 +2832,19 @@ mod tests {
             }
             other => panic!("Expected DivideRounded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_rounding_suffix_only_accepts_standalone_suffixes() {
+        assert_eq!(
+            parse_rounding_suffix_only(", rounded up."),
+            Some(crate::types::ability::RoundingMode::Up)
+        );
+        assert_eq!(
+            parse_rounding_suffix_only(", round down"),
+            Some(crate::types::ability::RoundingMode::Down)
+        );
+        assert_eq!(parse_rounding_suffix_only("Food tokens, rounded up"), None);
     }
 
     #[test]

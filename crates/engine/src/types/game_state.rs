@@ -4154,7 +4154,7 @@ pub enum WaitingFor {
         /// `state.last_vote_ballots`. Append-only; the lifecycle matches
         /// `last_zone_changed_ids` (cleared at chain depth 0).
         #[serde(default)]
-        ballots: im::Vector<(PlayerId, u8)>,
+        ballots: im::Vector<(PlayerId, u32)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -4176,16 +4176,39 @@ pub enum WaitingFor {
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
         /// CR 701.38a: How the completed tally maps to effects (the
-        /// strict-majority/tie outcome of `Threshold` is card-defined, not a
+        /// top-tally/tie outcome of `TopVotes` is card-defined, not a
         /// CR subrule). Carried on the WaitingFor (not re-derived from the
         /// source ability) so the final `resolve_tally` can branch between
-        /// per-vote fan-out (`VoteTally::PerVote`) and single-outcome
-        /// Will-of-the-council resolution (`VoteTally::Threshold`) once the
-        /// voter queue empties.
+        /// per-vote fan-out (`VoteTally::PerVote`) and Will-of-the-council
+        /// winner resolution (`VoteTally::TopVotes`) once the voter queue
+        /// empties. `TopVotes` itself resolves either a single winner
+        /// (`TieResolution::Breaker`) or every tied winner
+        /// (`TieResolution::AllTied`, multi-outcome).
         /// Defaults to `PerVote` so pre-existing serialized vote states
         /// deserialize unchanged.
         #[serde(default)]
         tally_mode: super::ability::VoteTally,
+        /// CR 701.38b: For object-pool votes (`VoteSubject::Objects` —
+        /// Council's Judgment, Prime Minister's Cabinet Room), the candidate
+        /// objects enumerated at resolution. Parallel to `options` /
+        /// `option_labels`: a ballot `(PlayerId, u8)` indexes into this vector.
+        /// Empty for named votes; ballots there carry the `options` index.
+        #[serde(default)]
+        candidate_objects: im::Vector<ObjectId>,
+        /// CR 701.38b + CR 608.2c: For object-pool votes, the per-winner
+        /// outcome template (e.g. single-target Exile). `resolve_top_votes_tally`
+        /// resolves it once per winning object with that object injected as the
+        /// single target. `None` for named votes (which use `per_choice_effect`).
+        #[serde(default)]
+        outcome_template: Option<Box<super::ability::AbilityDefinition>>,
+        /// Card-defined: whether this vote is public (`Open`) or secret
+        /// (`Secret` — Truth or Consequences). Under `Secret`, per-ballot
+        /// `VoteCast` events are suppressed and `filter_state_for_viewer`
+        /// scrubs running tallies/ballots until the simultaneous reveal.
+        /// Defaults to `Open` so pre-existing serialized states deserialize
+        /// unchanged.
+        #[serde(default)]
+        visibility: super::ability::VoteVisibility,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -7149,7 +7172,7 @@ pub struct GameState {
     /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
     /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
     #[serde(default)]
-    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+    pub last_vote_ballots: im::Vector<(PlayerId, u32)>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like

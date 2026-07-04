@@ -172,8 +172,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // overrides the phase-in turn-based action. Runtime enforcement lives in
     // phasing.rs (untap-step TBA) and effects/phase_out.rs (explicit PhaseIn).
     registry.insert(StaticMode::CantPhaseIn, handle_rule_mod);
-    // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
-    registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 509.1c: MustBeBlocked is now a parameterized, data-carrying variant
+    // (`by: Option<TargetFilter>`) — it cannot be an exact HashMap key, so it is
+    // NOT registry-keyed (mirrors CantBeBlockedBy). Coverage support is via
+    // coverage::is_data_carrying_static; runtime enforcement is direct-match in
+    // combat.rs declare-blockers validation.
     // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
     // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
     registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);

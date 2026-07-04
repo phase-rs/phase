@@ -558,6 +558,8 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        // CR 118.9: borrowed keyword cost — generic mana-payment label.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => "Pay cost".to_string(),
     }
 }
