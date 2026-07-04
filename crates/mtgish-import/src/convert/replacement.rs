@@ -713,6 +713,7 @@ pub fn convert_replace_would_put_into_graveyard(
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -962,6 +963,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -1781,7 +1783,7 @@ fn build_replacement_exec(
         // the native parser shape in `oracle_replacement.rs`
         // (`parse_as_enters_choose`).
         A::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },

@@ -1,10 +1,10 @@
 use crate::game::zones;
 use crate::types::ability::{
-    CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
@@ -67,6 +67,7 @@ fn open_private_zone_cast_selection(
         count_param: 0,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
     Ok(())
 }
@@ -95,6 +96,7 @@ pub fn resolve(
         constraint,
         duration,
         driver,
+        mana_spend_permission,
     ) = match &ability.effect {
         Effect::CastFromZone {
             target,
@@ -104,6 +106,7 @@ pub fn resolve(
             constraint,
             duration,
             driver,
+            mana_spend_permission,
             ..
         } => (
             target,
@@ -113,6 +116,7 @@ pub fn resolve(
             constraint.clone(),
             duration.clone(),
             *driver,
+            *mana_spend_permission,
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
@@ -293,7 +297,45 @@ pub fn resolve(
             .get(&target_ids[0])
             .is_some_and(|obj| obj.zone == Zone::Graveyard);
 
+    // CR 608.2g + CR 609.4b: paid during-resolution graveyard cast (Quistis Trepe,
+    // Tinybones the Pickpocket). Not without_paying — the caster pays the real cost
+    // with any-type mana. Offered accept/decline, resolved by
+    // initiate_cast_during_resolution with ResolutionCastCost::FullCost. Replaces
+    // the wrong lingering-permission path (#2884: the offer was inert on
+    // opponent-graveyard targets, and own-graveyard targets deferred the cast to a
+    // later priority window instead of a resolution-time offer).
+    let graveyard_paid_cast = !without_paying
+        && mana_spend_permission.is_some()
+        && driver.is_during_resolution()
+        && alt_ability_cost.is_none()
+        && duration.is_none()
+        && target_ids.len() == 1
+        && state
+            .objects
+            .get(&target_ids[0])
+            .is_some_and(|o| o.zone == Zone::Graveyard);
+    if graveyard_paid_cast {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+        });
+        state.waiting_for = WaitingFor::CastOffer {
+            player: ability.controller,
+            kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                hit_card: target_ids[0],
+                mana_spend_permission,
+                graveyard_replacement: cast_from_zone_graveyard_destination(ability),
+                cast_transformed,
+                constraint: constraint.clone(),
+            },
+        };
+        return Ok(());
+    }
+
     if driver_free_cast || immediate_graveyard_free_cast {
+        if is_stack_spell_copy(state, target_ids[0]) {
+            return cast_stack_spell_copy_during_resolution(state, ability, target_ids[0], events);
+        }
         return cast_single_target_during_resolution(
             state,
             ability,
@@ -388,6 +430,72 @@ fn effective_cast_from_zone_constraint(
     })
 }
 
+/// CR 707.10 + CR 608.2g: A `CopySpell` that put a spell copy onto the stack
+/// (Isochron Scepter / Spellbinder) is not yet cast. A chained `CastFromZone {
+/// ParentTarget, DuringResolution }` completes that cast without moving zones.
+fn is_stack_spell_copy(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Stack && state.stack.iter().any(|entry| entry.id == object_id)
+    })
+}
+
+/// CR 707.10 + CR 118.9: Finish casting a spell copy that `CopySpell` already
+/// placed on the stack — emit `SpellCast`, open CR 707.10c retarget selection
+/// when needed, and do not route through `initiate_cast_during_resolution`
+/// (Stack is not a castable origin zone).
+fn cast_stack_spell_copy_during_resolution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    copy_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+    });
+
+    let Some(obj) = state.objects.get(&copy_id).cloned() else {
+        return Err(EffectError::InvalidParam(format!(
+            "stack spell copy {copy_id:?} not found"
+        )));
+    };
+    if obj.zone != Zone::Stack {
+        return Err(EffectError::InvalidParam(format!(
+            "ParentTarget {copy_id:?} is not a stack spell copy"
+        )));
+    }
+
+    let origin = obj.cast_from_zone.unwrap_or(Zone::Exile);
+    events.push(GameEvent::SpellCast {
+        card_id: obj.card_id,
+        controller: ability.controller,
+        object_id: copy_id,
+    });
+    crate::game::restrictions::record_spell_cast_from_zone(
+        state,
+        ability.controller,
+        &obj,
+        origin,
+        CastingVariant::Normal,
+    );
+
+    if crate::game::effects::prepare::open_copy_target_selection(
+        state,
+        copy_id,
+        ability.controller,
+        None,
+    )
+    .map_err(EffectError::InvalidParam)?
+    {
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::Priority {
+        player: ability.controller,
+    };
+    Ok(())
+}
+
 /// CR 608.2g + CR 601.2a–i: Cast a single targeted card DURING the resolution of
 /// this effect, for free, via the same authority Cascade/Discover/Suspend use.
 ///
@@ -420,7 +528,7 @@ fn cast_single_target_during_resolution(
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
     };
-    let exile_instead_of_graveyard_on_resolve = cast_from_zone_has_graveyard_exile_rider(ability);
+    let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     state.waiting_for = crate::game::casting::initiate_cast_during_resolution(
         state,
         ability.controller,
@@ -429,7 +537,8 @@ fn cast_single_target_during_resolution(
             constraint,
             cast_transformed,
             cleanup,
-            exile_instead_of_graveyard_on_resolve,
+            graveyard_replacement,
+            cost: crate::types::ability::ResolutionCastCost::Free,
         },
         events,
     )
@@ -437,26 +546,58 @@ fn cast_single_target_during_resolution(
     Ok(())
 }
 
-/// CR 614.1a: Toshiro / Torrential Gearhulk class — the parser currently
-/// represents "If that spell would be put into a graveyard, exile it instead"
-/// as a sequential `ChangeZone` rider on `CastFromZone`. Runtime consumes that
-/// rider as permission metadata, not as an immediate zone move.
-pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> bool {
-    matches!(
-        &ability.effect,
+/// CR 614.1a + CR 608.2n: Torrential Gearhulk / Kylox's Voltstrider class — the
+/// parser represents "If that spell would be put into a graveyard, [exile it /
+/// put it on the bottom of its owner's library / return it to its owner's hand]
+/// instead" as a sequential rider sub-ability on `CastFromZone`, targeting the
+/// cast spell (`ParentTarget`). Runtime consumes that rider as permission
+/// metadata (the CR 608.2n redirect destination), not as an immediate zone
+/// move. Returns the redirect destination the rider encodes, or `None` when the
+/// sub-ability is not such a rider.
+pub(crate) fn graveyard_destination_rider(
+    ability: &ResolvedAbility,
+) -> Option<SpellStackToGraveyardReplacement> {
+    match &ability.effect {
         Effect::ChangeZone {
             destination: Zone::Exile,
             target: TargetFilter::ParentTarget,
             ..
-        }
+        } => Some(SpellStackToGraveyardReplacement::Exile),
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            ..
+        } => Some(SpellStackToGraveyardReplacement::Hand),
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            position,
+            ..
+        } => Some(SpellStackToGraveyardReplacement::Library {
+            position: position.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Exile-only view of [`graveyard_destination_rider`] — the structural marker
+/// that suppresses the counter path's immediate graveyard→exile sub-ability and
+/// is the only destination the COUNTER rider ever encodes (Force of Negation,
+/// No More Lies; the counter library/hand redirect rides `countered_spell_zone`
+/// instead, never a sub-ability).
+pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> bool {
+    matches!(
+        graveyard_destination_rider(ability),
+        Some(SpellStackToGraveyardReplacement::Exile)
     )
 }
 
-fn cast_from_zone_has_graveyard_exile_rider(ability: &ResolvedAbility) -> bool {
+fn cast_from_zone_graveyard_destination(
+    ability: &ResolvedAbility,
+) -> Option<SpellStackToGraveyardReplacement> {
     ability
         .sub_ability
         .as_deref()
-        .is_some_and(is_graveyard_exile_rider_subability)
+        .and_then(graveyard_destination_rider)
 }
 
 /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class — the
@@ -496,25 +637,33 @@ pub(crate) fn grant_lingering_permissions(
     target_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (without_paying, cast_transformed, alt_ability_cost, constraint, duration) =
-        match &ability.effect {
-            Effect::CastFromZone {
-                without_paying_mana_cost,
-                cast_transformed,
-                alt_ability_cost,
-                constraint,
-                duration,
-                ..
-            } => (
-                *without_paying_mana_cost,
-                *cast_transformed,
-                alt_ability_cost.clone(),
-                constraint.clone(),
-                duration.clone(),
-            ),
-            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
-        };
-    let exile_instead_of_graveyard_on_resolve = cast_from_zone_has_graveyard_exile_rider(ability);
+    let (
+        without_paying,
+        cast_transformed,
+        alt_ability_cost,
+        constraint,
+        duration,
+        mana_spend_permission,
+    ) = match &ability.effect {
+        Effect::CastFromZone {
+            without_paying_mana_cost,
+            cast_transformed,
+            alt_ability_cost,
+            constraint,
+            duration,
+            mana_spend_permission,
+            ..
+        } => (
+            *without_paying_mana_cost,
+            *cast_transformed,
+            alt_ability_cost.clone(),
+            constraint.clone(),
+            duration.clone(),
+            *mana_spend_permission,
+        ),
+        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+    };
+    let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
     // counter on it" — recorded on the granted permission so the cast
     // finalization (`casting_costs::finalize`) registers a pending ETB counter
@@ -592,8 +741,14 @@ pub(crate) fn grant_lingering_permissions(
                         matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
                             .then_some(Duration::UntilEndOfTurn)
                     }),
-                    exile_instead_of_graveyard_on_resolve,
+                    graveyard_replacement: graveyard_replacement.clone(),
                     enters_with_counter: enters_with_counter.clone(),
+                    // CR 609.4b: Forward "mana of any type can be spent to cast
+                    // that spell" (Quistis Trepe, Tinybones the Pickpocket) onto
+                    // the grant so the concession is scoped to this specific
+                    // cast, read at payment by
+                    // `player_can_spend_as_any_color_for_optional_spell`.
+                    mana_spend_permission,
                 }
             };
             if !obj.casting_permissions.contains(&permission) {
@@ -669,6 +824,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             ObjectId(999),
@@ -691,6 +847,7 @@ mod tests {
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -742,6 +899,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -815,6 +973,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -890,6 +1049,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -917,6 +1077,138 @@ mod tests {
         assert!(
             state.players.iter().all(|p| p.mana_pool.total() == 0),
             "the free cast must not require or consume mana"
+        );
+    }
+
+    /// CR 707.10 + CR 608.2g (issue #4792): Isochron Scepter copies an imprinted
+    /// instant onto the stack, then a chained `CastFromZone { ParentTarget,
+    /// DuringResolution }` completes the free cast. The copy must not be routed
+    /// through `initiate_cast_during_resolution` — Stack is not a castable zone.
+    #[test]
+    fn stack_spell_copy_parent_target_casts_without_zone_move() {
+        use std::sync::Arc;
+
+        use crate::game::effects::copy_spell;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CopyRetargetPermission, QuantityExpr,
+        };
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = make_test_state();
+        let scepter_id = ObjectId(5);
+        let target_creature = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let imprint_spell = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        );
+        let imprint_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&imprint_id).unwrap().abilities = Arc::new(vec![imprint_spell]);
+        state
+            .tracked_object_sets
+            .insert(crate::types::identifiers::TrackedSetId(0), vec![imprint_id]);
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            scepter_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        copy_spell::resolve(&mut state, &copy_ability, &mut events).unwrap();
+        let copy_id = state.stack.back().expect("copy on stack").id;
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(copy_id)],
+            scepter_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &cast_ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&imprint_id).map(|o| o.zone),
+            Some(Zone::Exile),
+            "imprinted card stays in exile"
+        );
+        assert_eq!(
+            state.objects.get(&copy_id).map(|o| o.zone),
+            Some(Zone::Stack),
+            "copy remains on the stack"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == copy_id)
+            }),
+            "CastFromZone must complete the copy cast with SpellCast"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CopyRetarget { copy_id: cid, .. } if cid == copy_id
+            ),
+            "targeted copy must open retarget selection, got {:?}",
+            state.waiting_for
+        );
+
+        // Choose a target and finalize the cast.
+        let _ = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_creature)),
+            },
+        )
+        .expect("choose shock target");
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    entry,
+                    StackEntry {
+                        id,
+                        kind: StackEntryKind::Spell { .. },
+                        ..
+                    } if *id == copy_id
+                )
+            }),
+            "copy spell must remain on the stack after targeting"
         );
     }
 
@@ -961,6 +1253,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
             },
             vec![], // empty — the bug: source is the card to cast, not a named target
             siege_id,
@@ -1007,6 +1300,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -1048,6 +1342,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -1081,6 +1376,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -1150,6 +1446,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             source,
@@ -1223,6 +1520,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             source,
@@ -1378,6 +1676,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             ObjectId(999),
@@ -1417,6 +1716,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(instant)],
             ObjectId(999),
@@ -1436,6 +1736,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(999),
@@ -1451,7 +1752,7 @@ mod tests {
                 matches!(
                     p,
                     CastingPermission::ExileWithAltCost {
-                        exile_instead_of_graveyard_on_resolve: true,
+                        graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
                         ..
                     }
                 )
@@ -1479,6 +1780,7 @@ mod tests {
                 constraint: Some(constraint.clone()),
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

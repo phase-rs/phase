@@ -702,7 +702,13 @@ pub(crate) fn try_parse_cost_modification(
             let cond_text = lower[cond_pos + marker.len()..]
                 .trim()
                 .trim_end_matches('.');
-            if let Some(sc) = parse_cost_modifier_condition(cond_text) {
+            // CR 601.2f + CR 611.3a: try the cost-specific predicates first, then
+            // fall back to the shared static-condition grammar so board-state
+            // gates ("if there are ten or more nonland permanents on the
+            // battlefield", Hour of Revelation) attach instead of being swallowed.
+            if let Some(sc) = parse_cost_modifier_condition(cond_text)
+                .or_else(|| parse_static_condition(cond_text))
+            {
                 definition.condition = Some(sc);
             } else if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
                 if rest.trim().is_empty() || rest.trim() == "." {
@@ -1233,6 +1239,115 @@ pub(crate) fn strip_in_addition_suffix(text: &str) -> Option<&str> {
     ]
     .iter()
     .find_map(|suffix| text.strip_suffix(suffix)) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+}
+
+/// CR 611.3a: Classification of a trailing parenthetical on a static line.
+/// Must be evaluated on the **raw** Oracle line before `strip_reminder_text`
+/// removes parenthetical spans — rules-bearing gates like Alhammarret's
+/// `(as long as this creature is on the battlefield)` share the same surface
+/// syntax as reminder prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParentheticalGateExtract<'a> {
+    /// No trailing parenthetical on the line.
+    Absent,
+    /// Trailing parenthetical is reminder prose, not a rules-bearing gate.
+    Benign,
+    /// `(as long as/if <condition>)` with a parseable `StaticCondition`.
+    Recognized(&'a str),
+    /// Gate-shaped parenthetical whose condition is not recognized — caller must decline.
+    Unrecognized,
+}
+
+fn parse_parenthetical_gate_condition_body(i: &str) -> OracleResult<'_, &str> {
+    preceded(
+        alt((tag::<_, _, OracleError<'_>>("as long as "), tag("if "))),
+        rest,
+    )
+    .parse(i)
+}
+
+fn parse_trailing_parenthetical_pieces(i: &str) -> OracleResult<'_, (&str, &str)> {
+    let (i, body) = take_until::<_, _, OracleError<'_>>(" (").parse(i)?;
+    let (i, inner) = preceded(tag(" ("), terminated(take_until(")"), tag(")"))).parse(i)?;
+    Ok((i, (body.trim(), inner.trim())))
+}
+
+/// CR 611.3a: Peel a trailing parenthetical gate from the raw (pre-reminder-strip)
+/// lowercase line. `as long as` is tried before `if` inside the parenthetical.
+/// Unrecognized gate conditions return `Unrecognized` so callers decline rather
+/// than enforce the restriction unconditionally.
+pub(crate) fn extract_trailing_parenthetical_gate_condition(
+    lower: &str,
+) -> ParentheticalGateExtract<'_> {
+    let input = lower.trim().trim_end_matches('.');
+    let Ok((rest, (body, inner))) = parse_trailing_parenthetical_pieces(input) else {
+        return ParentheticalGateExtract::Absent;
+    };
+    if !rest.is_empty() || body.is_empty() {
+        return ParentheticalGateExtract::Absent;
+    }
+    if let Ok(("", condition_text)) =
+        all_consuming(parse_parenthetical_gate_condition_body).parse(inner)
+    {
+        return if parse_static_condition(condition_text).is_some() {
+            ParentheticalGateExtract::Recognized(condition_text)
+        } else {
+            ParentheticalGateExtract::Unrecognized
+        };
+    }
+    ParentheticalGateExtract::Benign
+}
+
+/// CR 611.3a: Oracle dispatch strips reminder parentheticals before the general
+/// static parser runs. Re-attach cant-cast gate conditions from the raw line
+/// without feeding benign parentheticals through unrelated static parsers
+/// (Varolz / Underworld Breach graveyard-keyword grants, etc.).
+pub(crate) fn apply_raw_parenthetical_cant_cast_gate(
+    defs: Vec<StaticDefinition>,
+    raw_line: &str,
+    card_name: &str,
+) -> Vec<StaticDefinition> {
+    use crate::parser::oracle_special::normalize_self_refs_for_static;
+    use crate::types::statics::StaticMode;
+
+    let normalized_raw = normalize_self_refs_for_static(raw_line, card_name);
+    match extract_trailing_parenthetical_gate_condition(&normalized_raw.to_lowercase()) {
+        ParentheticalGateExtract::Unrecognized => defs
+            .into_iter()
+            .filter(|def| !matches!(def.mode, StaticMode::CantBeCast { .. }))
+            .collect(),
+        ParentheticalGateExtract::Recognized(condition_text) => {
+            let Some(condition) = parse_static_condition(condition_text) else {
+                return defs
+                    .into_iter()
+                    .filter(|def| !matches!(def.mode, StaticMode::CantBeCast { .. }))
+                    .collect();
+            };
+            defs.into_iter()
+                .map(|mut def| {
+                    if matches!(def.mode, StaticMode::CantBeCast { .. }) && def.condition.is_none()
+                    {
+                        def.condition = Some(condition.clone());
+                    }
+                    def
+                })
+                .collect()
+        }
+        ParentheticalGateExtract::Absent | ParentheticalGateExtract::Benign => defs,
+    }
+}
+
+/// CR 611.3a: Attach an optional parsed static gate to a prohibition static.
+/// When `gate_condition_text` is present but `parse_static_condition` declines,
+/// return `None` so the caller does not enforce the restriction unconditionally.
+pub(crate) fn attach_parsed_static_gate(
+    def: StaticDefinition,
+    gate_condition_text: Option<&str>,
+) -> Option<StaticDefinition> {
+    match gate_condition_text {
+        None => Some(def),
+        Some(text) => Some(def.condition(parse_static_condition(text)?)),
+    }
 }
 
 /// CR 502.3: Extract a trailing condition from a "doesn't untap during [untap step]" clause.

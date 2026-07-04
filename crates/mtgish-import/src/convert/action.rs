@@ -35,9 +35,10 @@ use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
     CreatableToken, CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget,
-    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player,
-    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
-    SearchLibraryAction, Spell, Spells, Target, TokenCopyEffects, TokenFlag,
+    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent,
+    PhasedOutEffect, Player, Players, ReplacementActionWouldEnter,
+    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, Target,
+    TokenCopyEffects, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -2364,6 +2365,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ])
         }
@@ -2395,6 +2397,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
             Ok(vec![
@@ -2411,7 +2414,54 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(return_ability),
+                    uses_tracked_set: false,
+                },
+            ])
+        }
+
+        // CR 702.26a + CR 603.7c: "Phase out target creature until [host]
+        // leaves the battlefield. Tap that creature as it phases in this way."
+        // (Oubliette). Immediate phase-out plus a host-scoped CantPhaseIn lock,
+        // then a delayed PhaseIn (+ optional tap-on-entry) when the host leaves.
+        Action::PhaseOutPermanentUntilWithEffects(perm, expiration, phased_out_effect) => {
+            let target = convert_permanent(perm)?;
+            let condition = expiration_to_delayed_trigger_condition(expiration)?;
+
+            let cant_phase_in = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }])],
+                duration: Some(Duration::UntilHostLeavesPlay),
+                target: Some(TargetFilter::ParentTarget),
+            };
+
+            let mut return_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                },
+            );
+            if matches!(phased_out_effect, PhasedOutEffect::TapAsPhasesIn) {
+                return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::ParentTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )));
+            }
+
+            Ok(vec![
+                Effect::PhaseOut { target },
+                cant_phase_in,
                 Effect::CreateDelayedTrigger {
                     condition,
                     effect: Box::new(return_ability),
@@ -2851,6 +2901,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
             origin: Some(engine::types::zones::Zone::Battlefield),
@@ -2865,6 +2916,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13 + CR 400.7: Mass exile — "Exile each <filter>"
@@ -2885,6 +2937,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
@@ -2908,6 +2961,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3015,6 +3069,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7: Mass return-from-graveyard-to-hand — "Return each <filter>
@@ -3036,6 +3091,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7 + CR 614.12: Mass reanimate from a specific player's
@@ -3066,6 +3122,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3092,6 +3149,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3277,6 +3335,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 122.1: Mass counter placement — "Put a [counter] on each
@@ -3494,6 +3553,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3515,6 +3575,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 111.1 + CR 111.5: Token creation with attached `TokenFlag`s.
@@ -3727,6 +3788,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_with_counters: r.enter_with_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3905,7 +3967,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 608.2d: choose a creature type — the bounded creature-type
         // registry resolves the option set at runtime.
         Action::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -5411,10 +5473,18 @@ fn players_to_scope_opt(players: &Players) -> ScopeOutcome {
             engine_type: "PlayerFilter",
             needed_variant: "OpponentOf(reference)".to_string(),
         }),
-        Ps::Other(_) => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "PlayerFilter",
-            needed_variant: "OtherThan(reference)".to_string(),
-        }),
+        // CR 102.1 + CR 603.2c: "each other player" relative to the trigger
+        // event's named player (the caster on spell-cast triggers). Zenith
+        // Chronicler, Hive Mind, Curse of Echoes class.
+        Ps::Other(inner) => match inner.as_ref() {
+            Player::Trigger_ThatPlayer => Ok(Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })),
+            other => Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "PlayerFilter",
+                needed_variant: format!("OtherThan({other:?})"),
+            }),
+        },
         Ps::Ref_TargetPlayers => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "PlayerFilter",
             needed_variant: "target-ref via Effect::*::target_player (Ref_TargetPlayers)"
@@ -6224,6 +6294,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enter_with_counters: enter_repls.enter_with_counters,
         conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     });
     if shuffle {
         out.push(Effect::Shuffle {
@@ -6289,6 +6360,7 @@ fn convert_multi_filter_search_library(
             enter_with_counters: enter_repls.enter_with_counters.clone(),
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         });
     }
     if shuffle {
@@ -6993,6 +7065,28 @@ mod tests {
             &PtValue::Quantity(QuantityExpr::Fixed { value: 5 })
         );
         assert_eq!(count, &QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn each_other_player_than_triggering_player_scopes_all_except() {
+        use crate::schema::types::{Action, Actions, Player, Players};
+        use engine::types::ability::{Effect, PlayerFilter};
+
+        let actions = Actions::ActionList(vec![Action::EachPlayerAction(
+            Box::new(Players::Other(Box::new(Player::Trigger_ThatPlayer))),
+            Box::new(Action::DrawACard),
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.player_scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })
+        );
+        assert!(matches!(*ability.effect, Effect::Draw { .. }));
     }
 
     #[test]

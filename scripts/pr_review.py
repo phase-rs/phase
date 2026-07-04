@@ -1,24 +1,51 @@
 #!/usr/bin/env python3
 """Portable PR review intelligence helper.
 
-This tool keeps durable review memory as an append-only JSONL event log and
-maintains a derived SQLite index for cheap queries. It is advisory: GitHub
-mutations stay in the maintainer handling skills.
+This tool keeps durable review memory as an append-only JSONL event log
+(`review-events.jsonl`), the sole canonical store; `review-summary.json` is a
+derived artifact. It is advisory: GitHub mutations stay in the maintainer
+handling skills.
+
+Architecture (one-way data flow, top to bottom):
+
+    GitHub GraphQL (read-only, via `gh`)      Event log (JSONL, append-only)
+        fetch_open_prs / gh_pr_view               all_events -> normalize_event
+        normalize_graphql_pr                      |         |
+              |                                   |    build_analytics_model
+              |                                   |    collect_signal_occurrences
+              |                              latest_events_by_pr_head
+              v                                   v
+        make_packet  <---  ReviewContext (policy + overrides + local history)
+              |             build_contributor_summary (standing/scrutiny)
+              v
+        recommend_from_packet (ordered advisory-action ladder)
+
+Commands: `scan` (triage every open PR), `inspect`/`recommend` (one PR),
+`record` (validated event append), `import` (legacy TSV/markdown), `compact`
+(summary artifact), `analytics` (contributor tables), `check-skill-sync`.
+
+Invariants:
+- All GitHub access is read-only and goes through run_json (retried).
+- The event log is the only mutable store; append_event is its only writer.
+- Every tunable threshold lives in the constants block below, not inline.
+- Recommendations are advisory; precedence is the elif ladder in
+  recommend_from_packet, ordered so safety (hard_stop) always wins.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -58,20 +85,123 @@ PR_ATTRIBUTED_EVENTS = {
     "tracker_row",
     "update_branch",
 }
-QUALITY_SIGNAL_WEIGHTS = {
+# Closed vocabulary enforced at record time (see command_record). New events must
+# use one of these event types; legacy events already in the log are read via
+# canonical_from_text without validation.
+ALLOWED_EVENT_TYPES = PR_ATTRIBUTED_EVENTS | {"observation", "quality_entry", "tracker_row"}
+# Closed vocabulary for the optional `outcome` field, derived from the high-confidence
+# states canonical_from_text recognizes. Enforced (lowercased) at record time.
+ALLOWED_OUTCOMES = {
+    "changes_requested",
+    "blocked",
+    "hard_stop",
+    "merged",
+    "closed",
+    "deferred",
+    "defer-fe",
+    "ci_failed",
+    "hold_ci",
+    "held",
+    "held_ci",
+    "approved",
+    "approved_enqueued",
+    "enqueued",
+    "review",
+    "pending",
+    "accepted",
+    "queued",
+    "pruned",
+}
+# Defect signals subtract from the contributor score and are the ONLY signals
+# that feed windowed recurrence / scrutiny elevation.
+DEFECT_SIGNAL_WEIGHTS = {
     "wrong-seam": 14,
     "false-green": 12,
     "runtime-test-gap": 10,
     "scope-contamination": 10,
     "rebase-not-fix": 8,
     "build-for-card": 8,
+    "inert-fix": 8,
     "fmt/clippy-slip": 5,
     "stale-approval": 4,
     "low-effort-risk": 8,
     "author-created-issue-high-bar": 6,
+    "no-repro": 6,
     "value-bar": 6,
     "careful-watch": 4,
 }
+# Praise signals add to the contributor score (credit, capped below). They never
+# affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
+# risk gauge, it does not launder defects.
+PRAISE_SIGNAL_WEIGHTS = {
+    "right-seam": 6,
+    "scope-discipline": 5,
+    "discriminating-runtime-test": 5,
+    "parameterized-not-proliferated": 6,
+    "evidence-backed-pushback": 4,
+}
+# Total praise credit a contributor's score can earn; keeps volume of praise
+# from masking real defect penalties.
+PRAISE_CREDIT_CAP = 15
+# Write-time vocabulary: `record` accepts exactly these signal tokens.
+QUALITY_SIGNAL_VOCAB = frozenset(DEFECT_SIGNAL_WEIGHTS) | frozenset(PRAISE_SIGNAL_WEIGHTS)
+# Read-side normalization for tokens already in the append-only log from before
+# write-time validation existed. Aliases map to canonical vocabulary; anything
+# still non-canonical after aliasing is dropped from derived metrics (and
+# surfaced in the analytics model's unknown_signals audit field).
+SIGNAL_ALIASES = {
+    "runtime-test-present": "discriminating-runtime-test",
+    "discriminating-parser-test": "discriminating-runtime-test",
+    "gemini-case-finding-refuted": "evidence-backed-pushback",
+}
+# Recurrence ("same defect, multiple PRs after feedback") and the derived-trusted
+# gate both read signal occurrences within this window, so an improving contributor
+# ages out of elevation instead of carrying lifetime signals forever.
+RECURRENCE_WINDOW_DAYS = 60
+# Shared by the analytics CLI default and the packet-path contributor summary so a
+# contributor's score/confidence (and thus scrutiny) never diverges between the two.
+ANALYTICS_DEFAULT_MIN_PRS = 3
+# Closed vocabulary for private-overrides.json contributor_standing entries. Only
+# "skip" changes the advisory action; watch/probation force elevated scrutiny;
+# trusted marks light-touch eligibility. Anything else in the file is ignored.
+ALLOWED_STANDINGS = {"skip", "probation", "watch", "trusted"}
+# Score bands. SCORE_WATCH_FLOOR is shared by the score_label display bands and
+# the scrutiny ladder (score below it at medium/high confidence elevates).
+SCORE_EXCELLENT = 90
+SCORE_STRONG = 75
+SCORE_WATCH_FLOOR = 55
+# Derived-trusted gate: enough terminal history, high success, and a clean
+# recurrence window (see build_contributor_summary).
+TRUSTED_MIN_TERMINAL_PRS = 5
+TRUSTED_MIN_SUCCESS_RATE = 0.85
+# Same signal on this many distinct PRs inside RECURRENCE_WINDOW_DAYS.
+RECURRENCE_ELEVATED_PRS = 2
+RECURRENCE_ATTENTION_PRS = 3
+# Non-terminal states that still advance a head's "latest known posture".
+PROGRESS_STATES = {"held", "held_ci", "deferred", "review", "pending"}
+# GitHub read retry policy (see run_json).
+RUN_JSON_ATTEMPTS = 3
+RUN_JSON_BACKOFF_SECONDS = (2, 5)
+# Sticky-comment marker posted by .github/workflows/coverage-parse-diff-comment.yml
+# as the first (HTML-comment) line of the parse-detail diff body.
+PARSE_DIFF_MARKER = "<!-- coverage-parse-diff -->"
+# Sweep-priority order for scan output buckets (lower sorts first).
+CANDIDATE_ACTION_ORDER = {
+    "dequeue_stale_for_handler": 0,
+    "update_branch_for_handler": 1,
+    "approve_ready_for_handler": 2,
+    "review": 3,
+    "hold_ci": 4,
+    "request_changes": 5,
+    "blocked": 6,
+    "defer": 7,
+    "queued": 8,
+    "merged_prune": 9,
+    "skip": 10,
+}
+
+
+# ─── Config, overrides, and small helpers ────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -88,7 +218,6 @@ class PrAccumulator:
     contributor_login: str
     events: list[dict[str, Any]]
     head_events: dict[str, list[dict[str, Any]]]
-    quality_signals: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -116,6 +245,11 @@ class Policy:
     @property
     def default_tier(self) -> str:
         return str(self.raw.get("defaults", {}).get("tier", "T2"))
+
+    @property
+    def frontend_deferred_label(self) -> str | None:
+        value = self.raw.get("labels", {}).get("frontend_deferred")
+        return str(value) if value else None
 
 
 def now_iso() -> str:
@@ -146,12 +280,41 @@ def load_private_overrides(state_dir: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def fold_login(login: str) -> str:
+    """Case-fold a GitHub login for grouping/lookup; GitHub logins are case-insensitive."""
+    return login.lower()
+
+
+def canonical_signal(token: str) -> str | None:
+    """Normalize a logged signal token to canonical vocabulary.
+
+    Single read-side authority: applies legacy aliases, then returns the token
+    only if it is canonical (defect or praise). Returns None for anything else —
+    the log is append-only, so pre-validation strays are neutralized here rather
+    than rewritten.
+    """
+    resolved = SIGNAL_ALIASES.get(token, token)
+    return resolved if resolved in QUALITY_SIGNAL_VOCAB else None
+
+
 def frontend_review_allowed(author_login: str | None, overrides: dict[str, Any]) -> bool:
     if not author_login:
         return False
     authors = overrides.get("frontend_review_authors", [])
-    normalized = {str(author).lower() for author in authors}
-    return author_login.lower() in normalized
+    normalized = {fold_login(str(author)) for author in authors}
+    return fold_login(author_login) in normalized
+
+
+def contributor_standing_override(
+    author_login: str, overrides: dict[str, Any]
+) -> dict[str, Any] | None:
+    standings = overrides.get("contributor_standing") or {}
+    folded = fold_login(author_login)
+    for login, entry in standings.items():
+        if fold_login(str(login)) == folded and isinstance(entry, dict):
+            if entry.get("standing") in ALLOWED_STANDINGS:
+                return entry
+    return None
 
 
 def json_dumps(value: Any) -> str:
@@ -176,6 +339,54 @@ def excerpt(value: str | None, limit: int = 500) -> str:
 def event_id(event: dict[str, Any]) -> str:
     clean = {key: value for key, value in event.items() if key != "event_id"}
     return hashlib.sha256(json_dumps(clean).encode("utf-8")).hexdigest()
+
+
+# ─── GitHub subprocess helpers (read-only) ───────────────────────────────────
+
+
+def run_json(command: list[str]) -> Any:
+    """Run a read-only gh query, retrying transient failures with backoff.
+
+    Every caller is a GitHub read (scan pagination, PR view, refresh chunk,
+    identity), so retries are idempotent. The expensive scan GraphQL query
+    (100 comments/reviews/files per PR node) intermittently times out
+    server-side ("Something went wrong" / HTTP 5xx), which `gh` reports as a
+    non-zero exit — one such blip must not kill a whole sweep.
+    """
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(RUN_JSON_ATTEMPTS):
+        try:
+            result = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            return json.loads(result.stdout or "null")
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt < RUN_JSON_ATTEMPTS - 1:
+                delay = RUN_JSON_BACKOFF_SECONDS[min(attempt, len(RUN_JSON_BACKOFF_SECONDS) - 1)]
+                print(
+                    f"gh query failed (attempt {attempt + 1}/{RUN_JSON_ATTEMPTS}), "
+                    f"retrying in {delay}s: {(exc.stderr or '').strip()[:300]}",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+    # Surface gh's captured stderr before re-raising — CalledProcessError's own
+    # message shows only the command and exit code, which is undiagnosable.
+    assert last_error is not None
+    print((last_error.stderr or "").strip(), file=sys.stderr)
+    raise last_error
+
+
+def gh_user() -> str:
+    return str(run_json(["gh", "api", "user"])["login"])
+
+
+# ─── Event log (the sole mutable store) ──────────────────────────────────────
 
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -206,135 +417,54 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def run_json(command: list[str]) -> Any:
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return json.loads(result.stdout or "null")
-
-
-def run_text(command: list[str]) -> str:
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return result.stdout
-
-
-def gh_user() -> str:
-    return str(run_json(["gh", "api", "user"])["login"])
-
-
-def ensure_state(state_dir: Path) -> sqlite3.Connection:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(state_dir / "review-state.sqlite")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            event_id TEXT PRIMARY KEY,
-            event_type TEXT NOT NULL,
-            pr INTEGER,
-            head_sha TEXT,
-            author TEXT,
-            timestamp TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS leases (
-            pr INTEGER NOT NULL,
-            head_sha TEXT NOT NULL,
-            acting_login TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            acquired_at TEXT NOT NULL,
-            PRIMARY KEY (pr, head_sha, acting_login)
-        )
-        """
-    )
-    return conn
-
-
 def append_event(state_dir: Path, event: dict[str, Any]) -> bool:
     normalized = normalize_event(event)
-    conn = ensure_state(state_dir)
-    inserted = False
-    with conn:
-        cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO events
-              (event_id, event_type, pr, head_sha, author, timestamp, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                normalized["event_id"],
-                normalized["event_type"],
-                normalized.get("pr"),
-                normalized.get("head_sha"),
-                normalized.get("author"),
-                normalized["timestamp"],
-                json_dumps(normalized),
-            ),
-        )
-        inserted = cursor.rowcount == 1
-    if inserted:
-        with (state_dir / "review-events.jsonl").open("a", encoding="utf-8") as file:
-            file.write(json_dumps(normalized) + "\n")
-    conn.close()
-    return inserted
-
-
-def rebuild_index(state_dir: Path) -> None:
-    conn = ensure_state(state_dir)
-    with conn:
-        conn.execute("DELETE FROM events")
-        event_log = state_dir / "review-events.jsonl"
-        if event_log.exists():
-            for line in event_log.read_text(encoding="utf-8").splitlines():
+    state_dir.mkdir(parents=True, exist_ok=True)
+    log_path = state_dir / "review-events.jsonl"
+    # An exclusive flock makes the read-existing-ids-then-append sequence atomic
+    # across concurrent agent processes, so simultaneous records can't both write
+    # the same event or interleave a partial line into the canonical log.
+    with log_path.open("a+", encoding="utf-8") as file:
+        fcntl.flock(file, fcntl.LOCK_EX)
+        try:
+            file.seek(0)
+            for line in file:
                 if not line.strip():
                     continue
-                event = normalize_event(json.loads(line))
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO events
-                      (event_id, event_type, pr, head_sha, author, timestamp, payload_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event["event_id"],
-                        event["event_type"],
-                        event.get("pr"),
-                        event.get("head_sha"),
-                        event.get("author"),
-                        event["timestamp"],
-                        json_dumps(event),
-                    ),
-                )
-    conn.close()
+                if json.loads(line).get("event_id") == normalized["event_id"]:
+                    return False
+            file.write(json_dumps(normalized) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+            return True
+        finally:
+            fcntl.flock(file, fcntl.LOCK_UN)
 
 
 def all_events(state_dir: Path) -> list[dict[str, Any]]:
-    conn = ensure_state(state_dir)
-    rows = conn.execute(
-        "SELECT payload_json FROM events ORDER BY timestamp, event_id"
-    ).fetchall()
-    conn.close()
-    return [json.loads(row[0]) for row in rows]
+    log_path = state_dir / "review-events.jsonl"
+    if not log_path.exists():
+        return []
+    events = []
+    with log_path.open("r", encoding="utf-8") as file:
+        # Shared lock pairs with append_event's exclusive lock: a reader can't
+        # observe a partially flushed line from a concurrent agent's append.
+        fcntl.flock(file, fcntl.LOCK_SH)
+        try:
+            for line in file:
+                if not line.strip():
+                    continue
+                events.append(normalize_event(json.loads(line)))
+        finally:
+            fcntl.flock(file, fcntl.LOCK_UN)
+    # Preserve the previous SELECT ... ORDER BY timestamp, event_id semantics that
+    # downstream aggregation relies on.
+    return sorted(events, key=event_sort_key)
 
 
-def latest_events_by_pr_head(state_dir: Path) -> dict[tuple[int, str], dict[str, Any]]:
+def latest_events_by_pr_head(events: list[dict[str, Any]]) -> dict[tuple[int, str], dict[str, Any]]:
     latest: dict[tuple[int, str], dict[str, Any]] = {}
-    for event in all_events(state_dir):
+    for event in events:
         pr = event.get("pr")
         head_sha = event.get("head_sha")
         if pr is None or not head_sha:
@@ -359,6 +489,12 @@ def parse_event_datetime(value: str | None) -> datetime | None:
     return parsed
 
 
+def timestamp_after(candidate: str | None, baseline: str | None) -> bool:
+    candidate_dt = parse_event_datetime(candidate)
+    baseline_dt = parse_event_datetime(baseline)
+    return candidate_dt is not None and baseline_dt is not None and candidate_dt > baseline_dt
+
+
 def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> list[dict[str, Any]]:
     if days is None:
         return events
@@ -371,7 +507,14 @@ def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> l
     return filtered
 
 
+# ─── Canonical outcome mapping (read-side, legacy-tolerant) ──────────────────
+
+
 def canonical_from_text(value: str | None) -> tuple[str, str] | None:
+    # Read-side legacy mapper: collapses the free-form strings already present in
+    # historical events (and in the `import` path) into canonical states. New
+    # events are validated against ALLOWED_EVENT_TYPES/ALLOWED_OUTCOMES at write
+    # time (see command_record), so this is not a write-side authority.
     if not value:
         return None
     text = value.lower().replace("_", "-")
@@ -488,6 +631,9 @@ def unknown_event_values(events: list[dict[str, Any]]) -> dict[str, dict[str, in
     return {name: values for name, values in unknowns.items() if values}
 
 
+# ─── Analytics aggregation (events → PR rows → contributor rows) ─────────────
+
+
 def head_analytics(pr: int, head_sha: str, events: list[dict[str, Any]]) -> dict[str, Any]:
     sorted_events = sorted(events, key=event_sort_key)
     ever_states: dict[str, int] = {}
@@ -497,13 +643,7 @@ def head_analytics(pr: int, head_sha: str, events: list[dict[str, Any]]) -> dict
         ever_states[outcome.state] = ever_states.get(outcome.state, 0) + 1
         if outcome.state in TERMINAL_STATES:
             terminal = outcome
-        elif terminal.state not in TERMINAL_STATES and outcome.state in {
-            "held",
-            "held_ci",
-            "deferred",
-            "review",
-            "pending",
-        }:
+        elif terminal.state not in TERMINAL_STATES and outcome.state in PROGRESS_STATES:
             terminal = outcome
     return {
         "pr": pr,
@@ -519,10 +659,6 @@ def head_analytics(pr: int, head_sha: str, events: list[dict[str, Any]]) -> dict
     }
 
 
-def no_head_analytics(pr: int, events: list[dict[str, Any]]) -> dict[str, Any]:
-    return head_analytics(pr, "", events)
-
-
 def pr_analytics(accumulator: PrAccumulator) -> dict[str, Any]:
     head_rows = [
         head_analytics(accumulator.pr, head_sha, events)
@@ -530,7 +666,7 @@ def pr_analytics(accumulator: PrAccumulator) -> dict[str, Any]:
     ]
     no_head_events = [event for event in accumulator.events if not event.get("head_sha")]
     if not head_rows and no_head_events:
-        head_rows.append(no_head_analytics(accumulator.pr, no_head_events))
+        head_rows.append(head_analytics(accumulator.pr, "", no_head_events))
     head_rows.sort(key=lambda item: (item.get("last_seen") or "", item.get("head_sha") or ""))
     latest = head_rows[-1] if head_rows else {
         "terminal_state": "unknown",
@@ -554,7 +690,6 @@ def pr_analytics(accumulator: PrAccumulator) -> dict[str, Any]:
         "terminal_state_source": latest["terminal_state_source"],
         "terminal_state_reason": latest["terminal_state_reason"],
         "ever_states": ever_states,
-        "quality_signals": accumulator.quality_signals,
         "first_seen": all_events_for_pr[0].get("timestamp") if all_events_for_pr else None,
         "last_seen": all_events_for_pr[-1].get("timestamp") if all_events_for_pr else None,
         "is_open_or_pending": latest["terminal_state"] not in TERMINAL_STATES,
@@ -568,7 +703,7 @@ def rate(numerator: int, denominator: int) -> float | None:
     return numerator / denominator
 
 
-def percentile(value: float | None) -> str:
+def format_percent(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{round(value * 100):d}%"
@@ -593,11 +728,11 @@ def confidence_for(total_prs: int, terminal_prs: int, unclassified_ratio: float,
 def score_label(score: int, confidence: str) -> str:
     if confidence == "low":
         return "Insufficient Data"
-    if score >= 90:
+    if score >= SCORE_EXCELLENT:
         return "Excellent Signal"
-    if score >= 75:
+    if score >= SCORE_STRONG:
         return "Strong Signal"
-    if score >= 55:
+    if score >= SCORE_WATCH_FLOOR:
         return "Watch"
     return "Elevated Scrutiny"
 
@@ -612,12 +747,31 @@ def contributor_score(
     success_component = 0 if success_rate is None else round((success_rate - 0.5) * 30)
     block_penalty = 0 if block_rate is None else round(block_rate * 30)
     observed_head_penalty = max(0, round((avg_observed_heads - repo_median_heads) * 6))
+    # quality_signals arrives canonical (see canonical_signal), so direct
+    # per-vocabulary lookups are safe; defects penalize, praise credits (capped).
     signal_penalty = sum(
-        QUALITY_SIGNAL_WEIGHTS.get(signal, 5) * count
+        DEFECT_SIGNAL_WEIGHTS[signal] * count
         for signal, count in quality_signals.items()
+        if signal in DEFECT_SIGNAL_WEIGHTS
+    )
+    praise_credit = min(
+        PRAISE_CREDIT_CAP,
+        sum(
+            PRAISE_SIGNAL_WEIGHTS[signal] * count
+            for signal, count in quality_signals.items()
+            if signal in PRAISE_SIGNAL_WEIGHTS
+        ),
     )
     clean_bonus = 5 if success_rate is not None and success_rate >= 0.85 and signal_penalty == 0 else 0
-    score = 65 + success_component - block_penalty - observed_head_penalty - signal_penalty + clean_bonus
+    score = (
+        65
+        + success_component
+        - block_penalty
+        - observed_head_penalty
+        - signal_penalty
+        + praise_credit
+        + clean_bonus
+    )
     score = min(100, max(0, score))
     return {
         "score": score,
@@ -627,6 +781,7 @@ def contributor_score(
             "block_penalty": block_penalty,
             "observed_head_penalty": observed_head_penalty,
             "quality_signal_penalty": signal_penalty,
+            "praise_credit": praise_credit,
             "clean_bonus": clean_bonus,
         },
     }
@@ -667,10 +822,21 @@ def contributor_analytics(
     confidence = confidence_for(len(prs), len(terminal), unclassified_ratio, refreshed)
     if len(prs) < min_prs:
         confidence = "low"
+    # top_signals is the "what to dig into" list for scrutiny consumers, so it
+    # carries defects only; praise is reported separately.
     top_signals = sorted(
-        quality_signals.items(),
+        (
+            (signal, count)
+            for signal, count in quality_signals.items()
+            if signal in DEFECT_SIGNAL_WEIGHTS
+        ),
         key=lambda item: (-item[1], item[0]),
     )[:5]
+    praise_signals = {
+        signal: count
+        for signal, count in sorted(quality_signals.items())
+        if signal in PRAISE_SIGNAL_WEIGHTS
+    }
     return {
         "login": login,
         "prs": len(prs),
@@ -684,6 +850,7 @@ def contributor_analytics(
         "deferred": len(deferred),
         "quality_signals": quality_signals,
         "top_signals": [{"signal": signal, "count": count} for signal, count in top_signals],
+        "praise_signals": praise_signals,
         "local_signal_score": score_data["score"],
         "score_components": score_data["components"],
         "confidence": confidence,
@@ -719,7 +886,7 @@ def contributor_rows_from_prs(
             )
         )
     for login, signals in contributor_quality.items():
-        if author and login.lower() != author.lower():
+        if author and fold_login(login) != fold_login(author):
             continue
         if login not in contributor_prs:
             contributors.append(
@@ -765,54 +932,61 @@ def build_analytics_model(
     filtered_events = filtered_events_by_days(all_sorted_events, days)
     pr_accumulators: dict[int, PrAccumulator] = {}
     contributor_quality: dict[str, dict[str, int]] = {}
+    unknown_signals: dict[str, int] = {}
+    # GitHub logins are case-insensitive, so all grouping keys are folded; the
+    # first-seen original casing is kept for display and restored on the final rows.
+    display_names: dict[str, str] = {}
+
+    def add_signals(folded_login: str, raw_signals: list[Any]) -> None:
+        # Canonicalize every logged token; non-canonical strays are excluded from
+        # derived metrics but counted in unknown_signals so they stay auditable.
+        for raw in raw_signals:
+            canonical = canonical_signal(str(raw))
+            if canonical is None:
+                add_counter(unknown_signals, str(raw))
+            else:
+                add_counter(contributor_quality.setdefault(folded_login, {}), canonical)
+
     for event in filtered_events:
         event_type = event.get("event_type")
         login = contributor_login_for_event(event)
         if event_type == "quality_entry":
             if login:
-                signals = event.get("quality", {}).get("signals", [])
-                quality = contributor_quality.setdefault(str(login), {})
-                for signal in signals:
-                    add_counter(quality, str(signal))
+                folded = fold_login(str(login))
+                display_names.setdefault(folded, str(login))
+                add_signals(folded, (event.get("quality") or {}).get("signals") or [])
             continue
         pr = event.get("pr")
         if pr is None:
             continue
         pr_number = int(pr)
-        contributor = login or pr_contributors.get(pr_number)
-        if contributor is None:
+        raw_contributor = login or pr_contributors.get(pr_number)
+        if raw_contributor is None:
             continue
-        if author and contributor.lower() != author.lower():
+        contributor = fold_login(str(raw_contributor))
+        display_names.setdefault(contributor, str(raw_contributor))
+        if author and contributor != fold_login(author):
             continue
+        # Signals recorded on PR-attributed outcome events join the same lifetime
+        # aggregate the legacy quality_entry import feeds (per-occurrence recurrence
+        # is collected separately by collect_signal_occurrences).
+        add_signals(contributor, event.get("signals") or [])
         accumulator = pr_accumulators.setdefault(
             pr_number,
-            PrAccumulator(pr_number, contributor, [], {}, {}),
+            PrAccumulator(pr_number, contributor, [], {}),
         )
         accumulator.events.append(event)
         head_sha = event.get("head_sha")
         if head_sha:
             accumulator.head_events.setdefault(str(head_sha), []).append(event)
-    for pr_number, accumulator in pr_accumulators.items():
-        quality = contributor_quality.get(accumulator.contributor_login, {})
-        accumulator.quality_signals.update(quality)
     prs = [pr_analytics(accumulator) for accumulator in pr_accumulators.values()]
     if not include_open:
         prs = [pr for pr in prs if not pr["is_open_or_pending"]]
-    observed_head_values = [pr["observed_heads"] for pr in prs if pr["observed_heads"] > 0]
-    repo_median_heads = median(observed_head_values) if observed_head_values else 0
     contributor_signals = {
         login: dict(signals) for login, signals in contributor_quality.items()
-        if author is None or login.lower() == author.lower()
+        if author is None or login == fold_login(author)
     }
-    contributors = contributor_rows_from_prs(
-        prs,
-        contributor_signals,
-        repo_median_heads,
-        refreshed,
-        min_prs,
-        author,
-    )
-    return {
+    model = {
         "generated_at": now_iso(),
         "mode": "github_refreshed" if refreshed else "local_observed",
         "title": "Local Observed Review Analytics",
@@ -822,14 +996,178 @@ def build_analytics_model(
             "min_prs": min_prs,
             "include_open": include_open,
         },
-        "repo_medians": {"observed_heads": repo_median_heads},
-        "contributors": contributors,
+        "repo_medians": {"observed_heads": 0},
+        "contributors": [],
+        "display_names": display_names,
         "prs": prs,
         "quality_by_contributor": contributor_signals,
+        "unknown_signals": unknown_signals,
         "unclassified_counts": unknown_event_values(filtered_events),
         "audit_counts": audit_event_values(filtered_events),
         "warnings": [],
     }
+    finalize_contributor_model(model, min_prs=min_prs, author=author, refreshed=refreshed)
+    return model
+
+
+def finalize_contributor_model(
+    model: dict[str, Any], *, min_prs: int, author: str | None, refreshed: bool
+) -> None:
+    """Recompute repo medians and contributor rows from the current PR rows.
+
+    Called once after all PR-row mutations (github refresh, open-PR filter) so the
+    expensive contributor aggregation happens a single time rather than per stage.
+    """
+    observed_head_values = [pr["observed_heads"] for pr in model["prs"] if pr["observed_heads"] > 0]
+    repo_median_heads = median(observed_head_values) if observed_head_values else 0
+    model["repo_medians"]["observed_heads"] = repo_median_heads
+    model["contributors"] = contributor_rows_from_prs(
+        model["prs"],
+        model.get("quality_by_contributor", {}),
+        float(repo_median_heads),
+        refreshed,
+        min_prs,
+        author,
+    )
+    # Rows are grouped by folded login; restore first-seen casing for display.
+    display_names = model.get("display_names", {})
+    for row in model["contributors"]:
+        row["login"] = display_names.get(row["login"], row["login"])
+
+
+# ─── Contributor intelligence (recurrence, standing, scrutiny) ───────────────
+
+
+def collect_signal_occurrences(
+    events: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Collect dated, PR-attributed DEFECT-signal occurrences per folded login.
+
+    Only top-level `signals` on PR-attributed events qualify: legacy quality_entry
+    imports carry neither a PR nor a real observation date (their timestamp is the
+    import time), so they can never feed windowed recurrence. Praise signals are
+    excluded by design — recurrence exists to elevate scrutiny and gate derived
+    trust, and repeated praise must do neither.
+    """
+    occurrences: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("event_type") not in PR_ATTRIBUTED_EVENTS:
+            continue
+        signals = event.get("signals") or []
+        pr = event.get("pr")
+        login = contributor_login_for_event(event)
+        if not signals or pr is None or not login:
+            continue
+        entries = occurrences.setdefault(fold_login(str(login)), [])
+        for signal in signals:
+            canonical = canonical_signal(str(signal))
+            if canonical not in DEFECT_SIGNAL_WEIGHTS:
+                continue
+            entries.append(
+                {"signal": canonical, "pr": int(pr), "timestamp": event.get("timestamp")}
+            )
+    return occurrences
+
+
+def windowed_recurrence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce signal occurrences to per-signal distinct-PR counts within the window."""
+    cutoff = datetime.now(UTC) - timedelta(days=RECURRENCE_WINDOW_DAYS)
+    per_signal: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        timestamp = parse_event_datetime(entry.get("timestamp"))
+        if timestamp is None or timestamp < cutoff:
+            continue
+        info = per_signal.setdefault(entry["signal"], {"prs": set(), "last_seen": ""})
+        info["prs"].add(entry["pr"])
+        info["last_seen"] = max(info["last_seen"], str(entry.get("timestamp") or ""))
+    return [
+        {
+            "signal": signal,
+            "distinct_prs_window": len(info["prs"]),
+            "last_seen": info["last_seen"] or None,
+        }
+        for signal, info in sorted(per_signal.items())
+    ]
+
+
+def build_contributor_summary(
+    author_login: str | None,
+    current_pr: int | None,
+    model: dict[str, Any],
+    occurrences: dict[str, list[dict[str, Any]]],
+    private_overrides: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the packet's advisory `contributor` block from local observed history.
+
+    Single authority for standing/scrutiny: make_packet and recommend_from_packet
+    both read this block rather than re-deriving from overrides. Only an override
+    standing of "skip" ever changes the advisory action; everything else informs
+    review posture (scrutiny wins over light-touch when they disagree).
+    """
+    if not author_login:
+        return None
+    folded = fold_login(author_login)
+    row = next(
+        (r for r in model["contributors"] if fold_login(r["login"]) == folded), None
+    )
+    prior_prs = {
+        pr["pr"]
+        for pr in model["prs"]
+        if pr["contributor_login"] == folded and pr["pr"] != current_pr
+    }
+    recurrence = windowed_recurrence(occurrences.get(folded, []))
+    override = contributor_standing_override(author_login, private_overrides)
+    derived_trusted = bool(
+        row
+        and row["terminal_prs"] >= TRUSTED_MIN_TERMINAL_PRS
+        and (row["observed_success_rate"] or 0) >= TRUSTED_MIN_SUCCESS_RATE
+        and not recurrence
+    )
+    if override:
+        standing, standing_source = str(override["standing"]), "override"
+    elif derived_trusted:
+        standing, standing_source = "trusted", "derived"
+    else:
+        standing, standing_source = "unknown", "derived"
+    score = row["local_signal_score"] if row else None
+    confidence = row["confidence"] if row else None
+    scrutiny_reasons = []
+    if score is not None and score < SCORE_WATCH_FLOOR and confidence in {"medium", "high"}:
+        scrutiny_reasons.append(f"low_score_{score}_{confidence}_confidence")
+    for entry in recurrence:
+        if entry["distinct_prs_window"] >= RECURRENCE_ELEVATED_PRS:
+            scrutiny_reasons.append(
+                f"recurrence_{entry['signal']}_{entry['distinct_prs_window']}_prs_in_window"
+            )
+    if standing in {"watch", "probation"}:
+        scrutiny_reasons.append(f"standing_{standing}")
+    if any(entry["distinct_prs_window"] >= RECURRENCE_ATTENTION_PRS for entry in recurrence):
+        scrutiny = "maintainer_attention"
+    elif scrutiny_reasons:
+        scrutiny = "elevated"
+    else:
+        scrutiny = "normal"
+    return {
+        "login": author_login,
+        "first_contribution": not prior_prs,
+        "prior_prs": len(prior_prs),
+        "score": score,
+        "confidence": confidence,
+        "top_signals": row["top_signals"] if row else [],
+        "praise_signals": row["praise_signals"] if row else {},
+        "recurrence": recurrence,
+        "standing": standing,
+        "standing_source": standing_source,
+        "standing_note": override.get("note") if override else None,
+        "scrutiny": scrutiny,
+        "scrutiny_reasons": scrutiny_reasons,
+        # Scrutiny wins: trusted standing never grants light touch while any
+        # elevation reason is live.
+        "light_touch_eligible": standing == "trusted" and scrutiny == "normal",
+    }
+
+
+# ─── ASCII rendering for analytics ───────────────────────────────────────────
 
 
 def score_bar(score: int, width: int = 12) -> str:
@@ -845,27 +1183,19 @@ def sorted_contributors(
     def confidence_rank(item: dict[str, Any]) -> int:
         return {"high": 0, "medium": 1, "low": 2}.get(item["confidence"], 3)
 
-    if sort_key == "activity":
-        key = lambda item: (confidence_rank(item), -item["prs"], item["login"].lower())
-    elif sort_key == "acceptance":
-        key = lambda item: (
-            confidence_rank(item),
-            -(item["observed_success_rate"] or 0),
-            item["login"].lower(),
-        )
-    elif sort_key == "observed-heads":
-        key = lambda item: (
-            confidence_rank(item),
-            -item["observed_heads_avg"],
-            item["login"].lower(),
-        )
-    else:
-        key = lambda item: (
-            confidence_rank(item),
-            -item["local_signal_score"],
-            item["login"].lower(),
-        )
-    rows = sorted(contributors, key=key)
+    # Sort metric per --sort choice; every ordering tiebreaks on confidence first
+    # and folded login last so rows are stable across runs.
+    metrics = {
+        "activity": lambda item: -item["prs"],
+        "acceptance": lambda item: -(item["observed_success_rate"] or 0),
+        "observed-heads": lambda item: -item["observed_heads_avg"],
+        "score": lambda item: -item["local_signal_score"],
+    }
+    metric = metrics.get(sort_key, metrics["score"])
+    rows = sorted(
+        contributors,
+        key=lambda item: (confidence_rank(item), metric(item), fold_login(item["login"])),
+    )
     return rows[:limit] if limit is not None else rows
 
 
@@ -894,7 +1224,7 @@ def render_analytics_table(model: dict[str, Any], *, sort_key: str, limit: int |
             f"{row['login'][:20]:20} "
             f"{row['prs']:4d} "
             f"{row['terminal_prs']:4d} "
-            f"{percentile(row['observed_success_rate']):>5} "
+            f"{format_percent(row['observed_success_rate']):>5} "
             f"{row['observed_heads_avg']:5.1f} "
             f"{row['blocks']:6d} "
             f"{row['holds']:5d} "
@@ -917,7 +1247,7 @@ def render_count_bar(label: str, value: int, max_value: int) -> str:
 def render_contributor_detail(model: dict[str, Any], login: str) -> str:
     matches = [
         contributor for contributor in model["contributors"]
-        if contributor["login"].lower() == login.lower()
+        if fold_login(contributor["login"]) == fold_login(login)
     ]
     if not matches:
         return f"No analytics found for {login}."
@@ -929,7 +1259,7 @@ def render_contributor_detail(model: dict[str, Any], login: str) -> str:
         "Note: local observed data; use --refresh-github for authoritative merge/close state.",
         "",
         f"Local Signal Score: {row['local_signal_score']} / 100 ({row['score_label']}, confidence: {row['confidence']})",
-        f"PRs: {row['prs']}  Terminal: {row['terminal_prs']}  Observed success: {percentile(row['observed_success_rate'])}",
+        f"PRs: {row['prs']}  Terminal: {row['terminal_prs']}  Observed success: {format_percent(row['observed_success_rate'])}",
         f"Observed heads avg: {row['observed_heads_avg']}  median: {row['observed_heads_median']}",
         "",
         "Score Components",
@@ -954,6 +1284,13 @@ def render_contributor_detail(model: dict[str, Any], login: str) -> str:
     else:
         lines.append("  -")
     lines.append("")
+    lines.append("Praise")
+    if row["praise_signals"]:
+        for signal, count in row["praise_signals"].items():
+            lines.append(f"  {signal}: {count}")
+    else:
+        lines.append("  -")
+    lines.append("")
     lines.append("Recent PRs")
     for pr in row["recent_prs"]:
         lines.append(
@@ -971,68 +1308,75 @@ def render_analytics_ascii(model: dict[str, Any], args: argparse.Namespace) -> s
     return render_analytics_table(model, sort_key=args.sort, limit=args.limit)
 
 
-def gh_pr_analytics_state(repo: str, pr_number: int) -> dict[str, Any]:
-    fields = "number,state,author,headRefOid,reviewDecision,mergedAt,closedAt"
-    return run_json(["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", fields])
+# ─── GitHub live refresh (analytics --refresh-github) ────────────────────────
 
 
-def apply_github_refresh(model: dict[str, Any], repo: str, min_prs: int, author: str | None) -> None:
+def gh_pr_refresh_chunk(repo: str, numbers: list[int]) -> dict[str, dict[str, Any] | None]:
+    """Fetch live terminal state for up to 50 PRs in one aliased GraphQL query.
+
+    Alias names (q0, q1, ...) are generated and the PR numbers are cast with int()
+    before formatting, so they cannot carry injection; owner/name stay as variables.
+    """
+    owner, name = repo.split("/", 1)
+    aliases = " ".join(
+        f"q{index}: pullRequest(number: {int(number)}){{"
+        "number state author{login} headRefOid reviewDecision mergedAt closedAt}"
+        for index, number in enumerate(numbers)
+    )
+    query = f"query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{aliases}}}}}"
+    result = run_json(
+        ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"query={query}"]
+    )
+    # GraphQL can answer HTTP 200 with `"data": null` plus an errors array, so
+    # every level of the response is guarded with `or {}`, not a .get default.
+    repository = (result.get("data") or {}).get("repository") or {}
+    return {str(number): repository.get(f"q{index}") for index, number in enumerate(numbers)}
+
+
+def apply_github_refresh(model: dict[str, Any], repo: str) -> None:
     warnings = model.setdefault("warnings", [])
     refreshed = 0
-    for pr in model["prs"]:
+    prs_by_number = {str(pr["pr"]): pr for pr in model["prs"]}
+    numbers = [int(pr["pr"]) for pr in model["prs"]]
+    for start in range(0, len(numbers), 50):
+        chunk = numbers[start : start + 50]
         try:
-            live = gh_pr_analytics_state(repo, int(pr["pr"]))
+            live_by_number = gh_pr_refresh_chunk(repo, chunk)
         except subprocess.CalledProcessError as exc:
-            warnings.append(f"failed to refresh PR {pr['pr']}: {exc}")
+            warnings.append(f"failed to refresh PRs {chunk[0]}-{chunk[-1]}: {exc}")
             continue
-        if not isinstance(live, dict):
-            warnings.append(f"failed to refresh PR {pr['pr']}: empty or invalid response")
-            continue
-        refreshed += 1
-        state = str(live.get("state") or "").upper()
-        pr["github"] = {
-            "state": state,
-            "author_login": (live.get("author") or {}).get("login"),
-            "headRefOid": live.get("headRefOid"),
-            "reviewDecision": live.get("reviewDecision"),
-            "mergedAt": live.get("mergedAt"),
-            "closedAt": live.get("closedAt"),
-        }
-        if state == "MERGED":
-            pr["terminal_state"] = "merged"
-            pr["terminal_state_source"] = "github.state"
-            pr["terminal_state_reason"] = "merged"
-            pr["is_open_or_pending"] = False
-        elif state == "CLOSED":
-            pr["terminal_state"] = "closed"
-            pr["terminal_state_source"] = "github.state"
-            pr["terminal_state_reason"] = "closed"
-            pr["is_open_or_pending"] = False
+        for number in chunk:
+            pr = prs_by_number[str(number)]
+            live = live_by_number.get(str(number))
+            if not isinstance(live, dict):
+                warnings.append(f"failed to refresh PR {number}: empty or invalid response")
+                continue
+            refreshed += 1
+            state = str(live.get("state") or "").upper()
+            pr["github"] = {
+                "state": state,
+                "author_login": (live.get("author") or {}).get("login"),
+                "headRefOid": live.get("headRefOid"),
+                "reviewDecision": live.get("reviewDecision"),
+                "mergedAt": live.get("mergedAt"),
+                "closedAt": live.get("closedAt"),
+            }
+            if state == "MERGED":
+                pr["terminal_state"] = "merged"
+                pr["terminal_state_source"] = "github.state"
+                pr["terminal_state_reason"] = "merged"
+                pr["is_open_or_pending"] = False
+            elif state == "CLOSED":
+                pr["terminal_state"] = "closed"
+                pr["terminal_state_source"] = "github.state"
+                pr["terminal_state_reason"] = "closed"
+                pr["is_open_or_pending"] = False
     model["mode"] = "github_refreshed"
     model["title"] = "GitHub Refreshed Review Analytics"
     model["github_refreshed_prs"] = refreshed
-    model["contributors"] = contributor_rows_from_prs(
-        model["prs"],
-        model.get("quality_by_contributor", {}),
-        float(model["repo_medians"]["observed_heads"]),
-        True,
-        min_prs,
-        author,
-    )
 
 
-def filter_open_prs(model: dict[str, Any], min_prs: int, author: str | None, refreshed: bool) -> None:
-    model["prs"] = [pr for pr in model["prs"] if not pr["is_open_or_pending"]]
-    observed_head_values = [pr["observed_heads"] for pr in model["prs"] if pr["observed_heads"] > 0]
-    model["repo_medians"]["observed_heads"] = median(observed_head_values) if observed_head_values else 0
-    model["contributors"] = contributor_rows_from_prs(
-        model["prs"],
-        model.get("quality_by_contributor", {}),
-        float(model["repo_medians"]["observed_heads"]),
-        refreshed,
-        min_prs,
-        author,
-    )
+# ─── Path classification, CI summary, and packet assembly ────────────────────
 
 
 def matches_any(path: str, patterns: list[str]) -> bool:
@@ -1160,6 +1504,9 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
     }
 
 
+# ─── Advisory recommendation (ordered precedence ladder) ─────────────────────
+
+
 def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     pr = packet["pr"]
     head = pr.get("headRefOid")
@@ -1172,6 +1519,13 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event = packet.get("local_current_event") or {}
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
+    local_event_timestamp = local_event.get("timestamp")
+    author_login = pr.get("author_login")
+    author_followup_after_local_event = any(
+        comment.get("author") == author_login
+        and timestamp_after(comment.get("createdAt"), local_event_timestamp)
+        for comment in pr.get("comments", [])
+    )
     author_policy = packet.get("author_policy", {})
     local_block_event = local_outcome != "ci_failed" and local_event_type in {
         "review_blocked",
@@ -1196,9 +1550,26 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif classification.get("hard_stop_paths"):
         action = "request_changes"
         reason = "hard_stop"
-    elif local_outcome == "DEFER-FE":
+    elif (packet.get("contributor") or {}).get("standing") == "skip":
+        # Explicit maintainer standing override (private-overrides.json). Ordered
+        # after hard_stop deliberately: a skip-listed contributor touching guarded
+        # paths still surfaces as request_changes — safety wins over the skip.
+        action = "skip"
+        reason = "contributor_standing_skip"
+    elif classification.get("files_truncated"):
+        # A truncated file list may hide a hard-stop path, so it must never silently
+        # defer or pass to a handler — force a manual review before any softer branch.
+        action = "review"
+        reason = "files_truncated_needs_manual_classification"
+    elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
+    elif (local_event_type == "held" or local_outcome in HOLD_STATES) and author_followup_after_local_event:
+        action = "review"
+        reason = "author_followup_after_local_hold"
+    elif local_event_type == "held" or local_outcome in HOLD_STATES:
+        action = "hold_ci"
+        reason = "local_hold_current_head"
     elif local_block_event or local_block_outcome:
         action = "blocked"
         reason = "local_block_current_head"
@@ -1236,14 +1607,61 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         action = "review"
         reason = "needs_review"
 
-    return {
+    # Advisory-only parse-diff hint (the comment job is continue-on-error/non-blocking):
+    # a stale merge-base whose R2 baseline aged out shows "Baseline pending" forever, so
+    # flag engine-surface review candidates to consider update-branch first. The
+    # files_truncated safety reason from make_packet is preserved — it must not be masked.
+    parse_diff = packet.get("parse_diff") or {}
+    if (
+        action == "review"
+        and reason != "files_truncated_needs_manual_classification"
+        and "engine" in (classification.get("path_classes") or {})
+        and parse_diff.get("state") == "baseline_pending"
+    ):
+        reason = "review_parse_baseline_pending"
+
+    recommendation = {
         "pr": pr.get("number"),
         "head_sha": head,
         "advisory_action": action,
         "reason": reason,
         "requires_live_verification": action.endswith("_for_handler"),
         "policy_trace": packet.get("policy_trace", []),
+        # The `recommend` command prints only this dict, so the advisory contributor
+        # block (standing/scrutiny/recurrence) must ride along for skill consumers.
+        "contributor": packet.get("contributor"),
     }
+    if action == "defer" and reason == "frontend_policy":
+        label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
+        if label:
+            recommendation["label_to_apply"] = label
+    return recommendation
+
+
+def parse_diff_comment_state(
+    comments: list[dict[str, Any]], trusted_authors: set[str]
+) -> dict[str, Any]:
+    """Classify the parse-diff sticky comment from FULL comment bodies.
+
+    Must run on raw (un-excerpted) comments — compact_pr_view truncates bodies to
+    300 chars, which can drop the "signature(s)"/"Baseline pending" markers. The
+    comment is edited in place on re-push, so updatedAt (not createdAt) is freshness.
+    """
+    for comment in comments:
+        author_login = (comment.get("author") or {}).get("login")
+        if author_login not in trusted_authors:
+            continue
+        body = comment.get("body") or ""
+        if not body.lstrip().startswith(PARSE_DIFF_MARKER):
+            continue
+        if "Baseline pending" in body:
+            state = "baseline_pending"
+        elif "signature(s)" in body:
+            state = "real_changes"
+        else:
+            state = "no_changes"
+        return {"present": True, "state": state, "updated_at": comment.get("updatedAt")}
+    return {"present": False, "state": "absent", "updated_at": None}
 
 
 def make_packet(
@@ -1252,10 +1670,24 @@ def make_packet(
     acting_login: str,
     mode: str,
     private_overrides: dict[str, Any],
+    local_event: dict[str, Any] | None = None,
+    contributor_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
+    changed_files = pr.get("changedFiles")
+    if isinstance(changed_files, int) and changed_files > len(files):
+        # GitHub truncated the file list (files(first:100) caps at 100), so the
+        # classification is untrusted — a hard-stop path may be hidden past the cap.
+        classification["surface"] = "files_truncated"
+        classification["gate"] = "review"
+        classification["files_truncated"] = True
     checks = status_summary(pr.get("statusCheckRollup", []))
+    # Classify the parse-diff sticky comment from raw bodies, before compact_pr_view
+    # excerpts them to 300 chars and would drop the marker substrings.
+    parse_diff = parse_diff_comment_state(
+        pr.get("comments", []), {"github-actions", acting_login}
+    )
     compact_pr = compact_pr_view(pr, acting_login)
     author_policy = {
         "frontend_review_allowed": frontend_review_allowed(
@@ -1270,19 +1702,34 @@ def make_packet(
         "files": files,
         "classification": classification,
         "ci": checks,
+        "parse_diff": parse_diff,
         "latest_maintainer_review_commit": latest_review_commit(pr, acting_login),
         "domain": {"rules_domain": policy.rules_domain},
+        "policy": {
+            "labels": {
+                "frontend_deferred": policy.frontend_deferred_label,
+            }
+        },
         "author_policy": author_policy,
-        "policy_trace": policy_trace(classification),
+        "contributor": contributor_summary,
+        "policy_trace": policy_trace(
+            classification, (contributor_summary or {}).get("standing")
+        ),
+        "local_current_event": local_event,
     }
     packet["recommendation"] = recommend_from_packet(packet)
     return packet
 
 
-def policy_trace(classification: dict[str, Any]) -> list[str]:
+def policy_trace(classification: dict[str, Any], standing: str | None = None) -> list[str]:
+    # Trace records MATCHED patterns, not fired actions: a merged PR with hard-stop
+    # paths still traces matched:hard_stop, and a skip-standing contributor traces
+    # matched:standing_skip even when hard_stop wins the action ladder.
     trace = ["hard_stop", "safety_queue_freshness", "private_override", "standing", "path_policy", "default"]
     if classification.get("hard_stop_paths"):
         trace.append("matched:hard_stop")
+    if standing == "skip":
+        trace.append("matched:standing_skip")
     if classification.get("surface") == "frontend":
         trace.append("matched:frontend")
     if classification.get("surface") == "mixed":
@@ -1290,183 +1737,355 @@ def policy_trace(classification: dict[str, Any]) -> list[str]:
     return trace
 
 
-def gh_pr_view(repo: str, pr_number: int) -> dict[str, Any]:
-    fields = (
-        "number,title,body,state,isDraft,url,author,createdAt,updatedAt,headRefName,headRefOid,"
-        "baseRefName,mergeStateStatus,reviewDecision,labels,assignees,"
-        "statusCheckRollup,latestReviews,reviews,comments,files"
-    )
-    pr = run_json(["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", fields])
-    pr.update(gh_queue_state(repo, pr_number))
-    return pr
+# ─── GraphQL queries and PR-node normalization ───────────────────────────────
 
 
-def gh_queue_state(repo: str, pr_number: int) -> dict[str, Any]:
-    owner, name = repo.split("/", 1)
-    query = (
-        "query($owner:String!,$repo:String!,$number:Int!){"
-        "repository(owner:$owner,name:$repo){"
-        "pullRequest(number:$number){"
-        "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt}"
-        "}}}"
+def pr_node_fields(*, comments_last: int, include_full_reviews: bool) -> str:
+    """GraphQL selection set for a PR node, shared by the scan and single-PR queries.
+
+    Only static field names are interpolated (comment count, whether to fetch the
+    full review history) — never user input, which travels as GraphQL variables.
+    """
+    full_reviews = (
+        "reviews(first:50){nodes{author{login} state submittedAt commit{oid} body}} "
+        if include_full_reviews
+        else ""
     )
-    try:
-        result = run_json(
-            [
-                "gh",
-                "api",
-                "graphql",
-                "-f",
-                f"owner={owner}",
-                "-f",
-                f"repo={name}",
-                "-F",
-                f"number={pr_number}",
-                "-f",
-                f"query={query}",
-            ]
-        )
-    except subprocess.CalledProcessError:
-        return {"isInMergeQueue": None, "mergeQueueEntry": None, "autoMergeRequest": None}
-    pull = result.get("data", {}).get("repository", {}).get("pullRequest", {})
+    return (
+        "number title body state isDraft url createdAt updatedAt headRefName headRefOid "
+        "baseRefName mergeStateStatus reviewDecision changedFiles "
+        "author{login} "
+        "labels(first:20){nodes{name}} "
+        "assignees(first:10){nodes{login}} "
+        "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
+        "files(first:100){nodes{path}} "
+        "latestReviews(first:20){nodes{author{login} state submittedAt commit{oid} body}} "
+        f"{full_reviews}"
+        f"comments(last:{comments_last}){{nodes{{author{{login}} createdAt updatedAt body}}}} "
+        "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:80){nodes{__typename "
+        "... on CheckRun{name status conclusion} "
+        "... on StatusContext{context state}}}}}}}"
+    )
+
+
+SCAN_PR_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!,$after:String){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequests(states:[OPEN], first:$first, after:$after,"
+    " orderBy:{field:CREATED_AT, direction:DESC}){"
+    "pageInfo{hasNextPage endCursor}"
+    f"nodes{{{pr_node_fields(comments_last=15, include_full_reviews=False)}}}"
+    "}}}"
+)
+
+SINGLE_PR_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){"
+    f"pullRequest(number:$number){{{pr_node_fields(comments_last=30, include_full_reviews=True)}}}"
+    "}}"
+)
+
+
+def graphql_nodes(container: Any) -> list[dict[str, Any]]:
+    if not isinstance(container, dict):
+        return []
+    return [node for node in container.get("nodes", []) if isinstance(node, dict)]
+
+
+def graphql_rollup_contexts(node: dict[str, Any]) -> list[dict[str, Any]]:
+    commits = graphql_nodes(node.get("commits"))
+    if not commits:
+        return []
+    rollup = (commits[0].get("commit") or {}).get("statusCheckRollup")
+    if not isinstance(rollup, dict):
+        return []
+    checks = []
+    for ctx in graphql_nodes(rollup.get("contexts")):
+        if ctx.get("__typename") == "StatusContext":
+            # Map legacy commit statuses onto the CheckRun shape status_summary expects:
+            # a terminal state becomes COMPLETED with its state as the conclusion.
+            state = ctx.get("state")
+            checks.append(
+                {
+                    "name": ctx.get("context"),
+                    "status": "COMPLETED" if state in {"SUCCESS", "ERROR", "FAILURE"} else "IN_PROGRESS",
+                    "conclusion": state,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": ctx.get("name"),
+                    "status": ctx.get("status"),
+                    "conclusion": ctx.get("conclusion"),
+                }
+            )
+    return checks
+
+
+def graphql_reviews(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "author": {"login": (review.get("author") or {}).get("login")},
+            "state": review.get("state"),
+            "submittedAt": review.get("submittedAt"),
+            "commit": review.get("commit"),
+            "body": review.get("body"),
+        }
+        for review in nodes
+    ]
+
+
+def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
+    """Adapt a GraphQL PR node into the gh `--json`-style shape downstream code reads."""
+    latest_reviews = graphql_reviews(graphql_nodes(node.get("latestReviews")))
+    full_reviews = graphql_nodes(node.get("reviews"))
     return {
-        "isInMergeQueue": pull.get("isInMergeQueue"),
-        "mergeQueueEntry": pull.get("mergeQueueEntry"),
-        "autoMergeRequest": pull.get("autoMergeRequest"),
+        "number": node.get("number"),
+        "title": node.get("title"),
+        "body": node.get("body"),
+        "state": node.get("state"),
+        "isDraft": node.get("isDraft"),
+        "url": node.get("url"),
+        "createdAt": node.get("createdAt"),
+        "updatedAt": node.get("updatedAt"),
+        "headRefName": node.get("headRefName"),
+        "headRefOid": node.get("headRefOid"),
+        "baseRefName": node.get("baseRefName"),
+        "mergeStateStatus": node.get("mergeStateStatus"),
+        "reviewDecision": node.get("reviewDecision"),
+        "changedFiles": node.get("changedFiles"),
+        "author": {"login": (node.get("author") or {}).get("login")},
+        "labels": [{"name": label.get("name")} for label in graphql_nodes(node.get("labels"))],
+        "assignees": [{"login": a.get("login")} for a in graphql_nodes(node.get("assignees"))],
+        "isInMergeQueue": node.get("isInMergeQueue"),
+        "mergeQueueEntry": node.get("mergeQueueEntry"),
+        "autoMergeRequest": node.get("autoMergeRequest"),
+        "files": [{"path": f.get("path")} for f in graphql_nodes(node.get("files"))],
+        "comments": [
+            {
+                "author": {"login": (c.get("author") or {}).get("login")},
+                "createdAt": c.get("createdAt"),
+                "updatedAt": c.get("updatedAt"),
+                "body": c.get("body"),
+            }
+            for c in graphql_nodes(node.get("comments"))
+        ],
+        "latestReviews": latest_reviews,
+        "reviews": graphql_reviews(full_reviews) if full_reviews else latest_reviews,
+        "statusCheckRollup": graphql_rollup_contexts(node),
+    }
+
+
+def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
+    owner, name = repo.split("/", 1)
+    nodes: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while len(nodes) < limit:
+        page_size = min(limit - len(nodes), 100)
+        variables = [
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"first={page_size}",
+        ]
+        if cursor:
+            variables += ["-f", f"after={cursor}"]
+        result = run_json(["gh", "api", "graphql", "-f", f"query={SCAN_PR_QUERY}", *variables])
+        connection = ((result.get("data") or {}).get("repository") or {}).get("pullRequests") or {}
+        nodes.extend(graphql_nodes(connection))
+        page_info = connection.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+    return nodes[:limit]
+
+
+def gh_pr_view(repo: str, pr_number: int) -> dict[str, Any]:
+    owner, name = repo.split("/", 1)
+    result = run_json(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={int(pr_number)}",
+            "-f",
+            f"query={SINGLE_PR_QUERY}",
+        ]
+    )
+    node = ((result.get("data") or {}).get("repository") or {}).get("pullRequest")
+    return normalize_graphql_pr(node or {})
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReviewContext:
+    """Everything a packet needs besides the PR node itself, loaded once per command.
+
+    One event-log read feeds the head-freshness index, contributor analytics, and
+    signal recurrence for every packet a command builds — scan amortizes it across
+    the whole sweep; inspect/recommend build it for their single PR.
+    """
+
+    policy: Policy
+    private_overrides: dict[str, Any]
+    acting_login: str
+    local_events: dict[tuple[int, str], dict[str, Any]]
+    analytics_model: dict[str, Any]
+    signal_occurrences: dict[str, list[dict[str, Any]]]
+
+
+def load_review_context(args: argparse.Namespace) -> ReviewContext:
+    events = all_events(args.state_dir)
+    return ReviewContext(
+        policy=load_policy(args.config),
+        private_overrides=load_private_overrides(args.state_dir),
+        acting_login=args.acting_login or gh_user(),
+        local_events=latest_events_by_pr_head(events),
+        analytics_model=build_analytics_model(
+            events,
+            days=None,
+            author=None,
+            min_prs=ANALYTICS_DEFAULT_MIN_PRS,
+            include_open=True,
+        ),
+        signal_occurrences=collect_signal_occurrences(events),
+    )
+
+
+def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Assemble the full packet for one normalized PR view."""
+    pr_number = int(pr.get("number") or 0)
+    local_event = context.local_events.get((pr_number, pr.get("headRefOid") or ""))
+    contributor_summary = build_contributor_summary(
+        (pr.get("author") or {}).get("login"),
+        pr_number,
+        context.analytics_model,
+        context.signal_occurrences,
+        context.private_overrides,
+    )
+    return make_packet(
+        pr,
+        context.policy,
+        context.acting_login,
+        mode,
+        context.private_overrides,
+        local_event,
+        contributor_summary,
+    )
+
+
+def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    action = candidate.get("advisory_action") or ""
+    created = candidate.get("created_at") or ""
+    updated = candidate.get("updated_at") or ""
+    pr_number = candidate.get("pr") or 0
+    order = CANDIDATE_ACTION_ORDER.get(action, 99)
+    if action == "review":
+        return (order, created, pr_number)
+    if action in {"dequeue_stale_for_handler", "update_branch_for_handler", "approve_ready_for_handler"}:
+        return (order, updated, created, pr_number)
+    return (order, pr_number)
+
+
+def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
+    """Project a full packet down to the token-minimal triage row scan prints."""
+    contributor = packet.get("contributor") or {}
+    return {
+        "pr": pr.get("number"),
+        "title": pr.get("title"),
+        "created_at": pr.get("createdAt"),
+        "updated_at": pr.get("updatedAt"),
+        "head_sha": pr.get("headRefOid"),
+        "author_login": packet["pr"].get("author_login"),
+        "self_authored": packet["pr"].get("self_authored"),
+        "surface": packet["classification"]["surface"],
+        "gate": packet["classification"]["gate"],
+        "hard_stop_paths": packet["classification"]["hard_stop_paths"],
+        "ci": packet["ci"]["state"],
+        "parse_diff": packet["parse_diff"],
+        "review_decision": pr.get("reviewDecision"),
+        "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
+        "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
+        "auto_merge_request": packet["pr"].get("autoMergeRequest"),
+        "advisory_action": packet["recommendation"]["advisory_action"],
+        "reason": packet["recommendation"]["reason"],
+        "policy_trace": packet["policy_trace"],
+        "standing": contributor.get("standing"),
+        "scrutiny": contributor.get("scrutiny"),
+        "first_contribution": contributor.get("first_contribution"),
     }
 
 
 def command_scan(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
-    local_events = latest_events_by_pr_head(args.state_dir)
-    prs = run_json(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            args.repo,
-            "--state",
-            "open",
-            "--limit",
-            str(args.limit),
-            "--json",
-            "number,title,author,createdAt,updatedAt,headRefOid,isDraft,mergeStateStatus,reviewDecision,latestReviews,labels,statusCheckRollup,files",
-        ]
-    )
+    context = load_review_context(args)
+    # One paginated GraphQL query returns every field a full packet needs (files,
+    # comments, reviews, queue state, CI), so there is no light/full escalation:
+    # each packet is built once, mode "full".
+    nodes = fetch_open_prs(args.repo, args.limit)
     candidates = []
-    for pr in prs:
-        pr_number = int(pr["number"])
-        packet = make_packet(pr, policy, acting_login, "light", private_overrides)
-        packet["local_current_event"] = local_events.get((pr_number, pr.get("headRefOid") or ""))
-        packet["recommendation"] = recommend_from_packet(packet)
-        if packet["recommendation"]["reason"] in {
-            "stale_changes_requested",
-            "stale_approval",
-        } or packet["recommendation"]["advisory_action"] in {
-            "approve_ready_for_handler",
-            "update_branch_for_handler",
-            "dequeue_stale_for_handler",
-        }:
-            pr = gh_pr_view(args.repo, pr_number)
-            packet = make_packet(pr, policy, acting_login, "full", private_overrides)
-            packet["local_current_event"] = local_events.get(
-                (pr_number, pr.get("headRefOid") or "")
-            )
-            packet["recommendation"] = recommend_from_packet(packet)
-        candidates.append(
-            {
-                "pr": pr.get("number"),
-                "title": pr.get("title"),
-                "created_at": pr.get("createdAt"),
-                "updated_at": pr.get("updatedAt"),
-                "head_sha": pr.get("headRefOid"),
-                "author_login": packet["pr"].get("author_login"),
-                "self_authored": packet["pr"].get("self_authored"),
-                "surface": packet["classification"]["surface"],
-                "gate": packet["classification"]["gate"],
-                "hard_stop_paths": packet["classification"]["hard_stop_paths"],
-                "ci": packet["ci"]["state"],
-                "review_decision": pr.get("reviewDecision"),
-                "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
-                "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
-                "auto_merge_request": packet["pr"].get("autoMergeRequest"),
-                "advisory_action": packet["recommendation"]["advisory_action"],
-                "reason": packet["recommendation"]["reason"],
-                "policy_trace": packet["policy_trace"],
-            }
-        )
-
-    action_order = {
-        "dequeue_stale_for_handler": 0,
-        "update_branch_for_handler": 1,
-        "approve_ready_for_handler": 2,
-        "review": 3,
-        "hold_ci": 4,
-        "request_changes": 5,
-        "blocked": 6,
-        "defer": 7,
-        "queued": 8,
-        "merged_prune": 9,
-        "skip": 10,
-    }
-
-    def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-        action = candidate.get("advisory_action") or ""
-        created = candidate.get("created_at") or ""
-        updated = candidate.get("updated_at") or ""
-        pr_number = candidate.get("pr") or 0
-        if action == "review":
-            return (action_order.get(action, 99), created, pr_number)
-        if action in {"dequeue_stale_for_handler", "update_branch_for_handler", "approve_ready_for_handler"}:
-            return (action_order.get(action, 99), updated, created, pr_number)
-        return (action_order.get(action, 99), pr_number)
+    for node in nodes:
+        pr = normalize_graphql_pr(node)
+        packet = packet_for_pr(context, pr, "full")
+        candidates.append(scan_candidate(pr, packet))
 
     candidates.sort(key=candidate_sort_key)
     candidates_by_action: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         candidates_by_action.setdefault(candidate["advisory_action"], []).append(candidate)
     action_counts = {action: len(items) for action, items in candidates_by_action.items()}
-    print(
-        json_dumps(
-            {
-                "acting_login": acting_login,
-                "completeness": "triage",
-                "action_counts": action_counts,
-                "candidates_by_action": candidates_by_action,
-                "candidates": candidates,
-            }
-        )
-    )
+    output = {
+        "acting_login": context.acting_login,
+        "completeness": "triage",
+        "action_counts": action_counts,
+        "candidates_by_action": candidates_by_action,
+    }
+    if len(candidates) == args.limit:
+        output["warnings"] = [
+            f"open PR count reached --limit {args.limit}; increase --limit"
+        ]
+    print(json_dumps(output))
     return 0
 
 
+def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]:
+    # Timestamp is prefilled because event_id hashes it: an agent that fills the
+    # skeleton and pipes it to `record --event-json -` gets idempotent retries.
+    return {
+        "event_type": "<FILL: review|changes_requested|blocked|approved_enqueued|deferred|held>",
+        "pr": pr_number,
+        "head_sha": compact_pr.get("headRefOid"),
+        "author": compact_pr.get("author_login"),
+        "timestamp": now_iso(),
+        "outcome": "<FILL or omit>",
+        "summary": "<FILL>",
+        "signals": f"<FILL or omit: [] or subset of {sorted(QUALITY_SIGNAL_VOCAB)}>",
+    }
+
+
 def command_inspect(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
+    context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    packet = make_packet(pr, policy, acting_login, args.mode, private_overrides)
-    packet["local_current_event"] = latest_events_by_pr_head(args.state_dir).get(
-        (args.pr, pr.get("headRefOid") or "")
-    )
-    packet["recommendation"] = recommend_from_packet(packet)
+    packet = packet_for_pr(context, pr, args.mode)
+    if args.emit_event:
+        packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
     print(json_dumps(packet))
     return 0
 
 
 def command_recommend(args: argparse.Namespace) -> int:
-    policy = load_policy(args.config)
-    private_overrides = load_private_overrides(args.state_dir)
-    acting_login = args.acting_login or gh_user()
+    context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    packet = make_packet(pr, policy, acting_login, "full", private_overrides)
-    packet["local_current_event"] = latest_events_by_pr_head(args.state_dir).get(
-        (args.pr, pr.get("headRefOid") or "")
-    )
-    packet["recommendation"] = recommend_from_packet(packet)
+    packet = packet_for_pr(context, pr, "full")
     recommendation = packet["recommendation"]
     if packet["completeness"] != "complete" and recommendation["advisory_action"].endswith("_for_handler"):
         recommendation = {
@@ -1476,7 +2095,11 @@ def command_recommend(args: argparse.Namespace) -> int:
             "reason": "insufficient_data",
             "requires_live_verification": False,
             "policy_trace": packet.get("policy_trace", []),
+            "contributor": packet.get("contributor"),
         }
+    if args.emit_event:
+        recommendation = dict(recommendation)
+        recommendation["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
     print(json_dumps(recommendation))
     return 0
 
@@ -1487,11 +2110,53 @@ def read_event_arg(value: str) -> dict[str, Any]:
     return json.loads(Path(value).read_text(encoding="utf-8"))
 
 
+def event_validation_error(event: dict[str, Any]) -> str | None:
+    event_type = event.get("event_type")
+    if event_type not in ALLOWED_EVENT_TYPES:
+        return f"event_type {event_type!r} is not in the allowed vocabulary"
+    outcome = event.get("outcome")
+    if outcome is not None and outcome not in ALLOWED_OUTCOMES:
+        return f"outcome {outcome!r} is not in the allowed vocabulary"
+    if event_type != "quality_entry" and not isinstance(event.get("pr"), int):
+        return "pr (int) is required for non-quality_entry events"
+    signals = event.get("signals")
+    if signals is not None:
+        if not isinstance(signals, list) or not all(
+            isinstance(signal, str) for signal in signals
+        ):
+            return "signals must be a list of strings"
+        unknown = sorted(set(signals) - QUALITY_SIGNAL_VOCAB)
+        if unknown:
+            return f"signals {unknown} are not in the allowed vocabulary"
+    return None
+
+
 def command_record(args: argparse.Namespace) -> int:
     event = read_event_arg(args.event_json)
-    state_dir = args.state_dir
-    inserted = append_event(state_dir, event)
-    print(json_dumps({"inserted": inserted, "event_id": normalize_event(event)["event_id"]}))
+    # Lower-case the outcome before normalization so the write-time value (and the
+    # event_id that hashes it) is the canonical lowercase form.
+    if isinstance(event.get("outcome"), str):
+        event["outcome"] = event["outcome"].lower()
+    normalized = normalize_event(event)
+    error = event_validation_error(normalized)
+    if error is not None and not args.force:
+        print(
+            json_dumps(
+                {
+                    "inserted": False,
+                    "error": error,
+                    "allowed_event_types": sorted(ALLOWED_EVENT_TYPES),
+                    "allowed_outcomes": sorted(ALLOWED_OUTCOMES),
+                    "allowed_signals": sorted(QUALITY_SIGNAL_VOCAB),
+                }
+            )
+        )
+        return 1
+    inserted = append_event(args.state_dir, normalized)
+    result = {"inserted": inserted, "event_id": normalized["event_id"]}
+    if error is not None:
+        result["forced"] = True
+    print(json_dumps(result))
     return 0
 
 
@@ -1540,19 +2205,9 @@ def quality_import_events(path: Path) -> list[dict[str, Any]]:
 
 def quality_entry(path: Path, line_number: int, login: str, lines: list[str]) -> dict[str, Any]:
     body = "\n".join(lines).strip()
-    signals = []
-    for token in [
-        "runtime-test-gap",
-        "false-green",
-        "fmt/clippy-slip",
-        "wrong-seam",
-        "rebase-not-fix",
-        "scope-contamination",
-        "build-for-card",
-        "stale-approval",
-    ]:
-        if token in body:
-            signals.append(token)
+    # The recognized tokens are the signal vocabulary itself — one authority with
+    # record-time validation and the event_skeleton hint.
+    signals = [token for token in sorted(QUALITY_SIGNAL_VOCAB) if token in body]
     return {
         "event_type": "quality_entry",
         "timestamp": now_iso(),
@@ -1579,25 +2234,28 @@ def command_import(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_rebuild_index(args: argparse.Namespace) -> int:
-    rebuild_index(args.state_dir)
-    print(json_dumps({"rebuilt": True, "state_dir": str(args.state_dir)}))
-    return 0
-
-
 def command_check_skill_sync(args: argparse.Namespace) -> int:
-    canonical = args.canonical
-    mirror = args.mirror
-    canonical_bytes = canonical.read_bytes()
-    mirror_bytes = mirror.read_bytes()
-    synced = canonical_bytes == mirror_bytes
-    print(json_dumps({"synced": synced, "canonical": str(canonical), "mirror": str(mirror)}))
+    # `.agents/skills` is a symlink to `.claude/skills`, so a byte-compare is
+    # vacuous. Verify the symlink still points at the canonical directory instead.
+    link = REPO_ROOT / ".agents/skills"
+    expected = (REPO_ROOT / ".claude/skills").resolve()
+    is_symlink = link.is_symlink()
+    resolved_target = link.resolve() if is_symlink else None
+    synced = is_symlink and resolved_target == expected
+    print(
+        json_dumps(
+            {
+                "synced": synced,
+                "is_symlink": is_symlink,
+                "target": str(resolved_target) if resolved_target is not None else None,
+            }
+        )
+    )
     return 0 if synced else 1
 
 
 def command_compact(args: argparse.Namespace) -> int:
-    rebuild_index(args.state_dir)
-    events = all_events(args.state_dir)
+    events = filtered_events_by_days(all_events(args.state_dir), args.days)
     prs: dict[str, dict[str, Any]] = {}
     contributors: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -1614,13 +2272,18 @@ def command_compact(args: argparse.Namespace) -> int:
             }
         if author:
             entry = contributors.setdefault(
-                author,
+                fold_login(str(author)),
                 {"login": author, "events": 0, "signals": {}, "latest_timestamp": None},
             )
             entry["events"] += 1
             entry["latest_timestamp"] = event.get("timestamp")
-            for signal in event.get("quality", {}).get("signals", []):
-                entry["signals"][signal] = entry["signals"].get(signal, 0) + 1
+            for signal in list((event.get("quality") or {}).get("signals") or []) + list(
+                event.get("signals") or []
+            ):
+                canonical = canonical_signal(str(signal))
+                if canonical is None:
+                    continue
+                entry["signals"][canonical] = entry["signals"].get(canonical, 0) + 1
     summary = {
         "generated_at": now_iso(),
         "prs": sorted(prs.values(), key=lambda item: item["pr"]),
@@ -1633,7 +2296,6 @@ def command_compact(args: argparse.Namespace) -> int:
 
 
 def command_analytics(args: argparse.Namespace) -> int:
-    rebuild_index(args.state_dir)
     events = all_events(args.state_dir)
     model = build_analytics_model(
         events,
@@ -1643,16 +2305,22 @@ def command_analytics(args: argparse.Namespace) -> int:
         include_open=args.include_open or args.refresh_github,
     )
     if args.refresh_github:
-        apply_github_refresh(model, args.repo, args.min_prs, args.author)
+        # Refresh and open-PR filtering only mutate the PR rows; contributor
+        # aggregation + repo medians are recomputed exactly once afterward.
+        apply_github_refresh(model, args.repo)
         if not args.include_open:
-            filter_open_prs(model, args.min_prs, args.author, True)
+            model["prs"] = [pr for pr in model["prs"] if not pr["is_open_or_pending"]]
         model["filters"]["include_open"] = args.include_open
+        finalize_contributor_model(model, min_prs=args.min_prs, author=args.author, refreshed=True)
     model["contributors"] = sorted_contributors(model["contributors"], args.sort, args.limit)
     if args.format == "json":
         print(json.dumps(model, indent=2, sort_keys=True))
     else:
         print(render_analytics_ascii(model, args))
     return 0
+
+
+# ─── CLI wiring ──────────────────────────────────────────────────────────────
 
 
 def existing_path(value: str) -> Path:
@@ -1693,16 +2361,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(inspect)
     inspect.add_argument("pr", type=int)
     inspect.add_argument("--mode", choices=["light", "full"], default="light")
+    inspect.add_argument("--emit-event", action="store_true")
     inspect.set_defaults(func=command_inspect)
 
     recommend = sub.add_parser("recommend")
     add_common(recommend)
     recommend.add_argument("pr", type=int)
+    recommend.add_argument("--emit-event", action="store_true")
     recommend.set_defaults(func=command_recommend)
 
     record = sub.add_parser("record")
     add_state(record)
     record.add_argument("--event-json", required=True)
+    record.add_argument("--force", action="store_true")
     record.set_defaults(func=command_record)
 
     import_cmd = sub.add_parser("import")
@@ -1713,13 +2384,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     compact = sub.add_parser("compact")
     add_state(compact)
+    compact.add_argument("--days", type=int, default=None)
     compact.set_defaults(func=command_compact)
 
     analytics = sub.add_parser("analytics")
     add_state(analytics)
     analytics.add_argument("--author")
     analytics.add_argument("--days", type=int, default=None)
-    analytics.add_argument("--min-prs", type=int, default=3)
+    analytics.add_argument("--min-prs", type=int, default=ANALYTICS_DEFAULT_MIN_PRS)
     analytics.add_argument("--format", choices=["ascii", "json"], default="ascii")
     analytics.add_argument(
         "--sort",
@@ -1731,21 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
     analytics.add_argument("--refresh-github", action="store_true")
     analytics.set_defaults(func=command_analytics)
 
-    rebuild = sub.add_parser("rebuild-index")
-    add_state(rebuild)
-    rebuild.set_defaults(func=command_rebuild_index)
-
     skill_sync = sub.add_parser("check-skill-sync")
-    skill_sync.add_argument(
-        "--canonical",
-        type=Path,
-        default=REPO_ROOT / ".agents/skills/pr-review-loop/SKILL.md",
-    )
-    skill_sync.add_argument(
-        "--mirror",
-        type=Path,
-        default=REPO_ROOT / ".claude/skills/pr-review-loop/SKILL.md",
-    )
     skill_sync.set_defaults(func=command_check_skill_sync)
     return parser
 

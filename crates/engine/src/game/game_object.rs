@@ -8,7 +8,7 @@ use crate::types::ability::{
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1232,6 +1232,10 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            // CR 701.60b: Snapshot suspected status at the moment of the move,
+            // before `move_to_zone` resets the live flag — so an LTB / cost-paid
+            // look-back ("the sacrificed creature was suspected") reads it.
+            is_suspected: self.is_suspected,
         }
     }
 
@@ -1452,6 +1456,10 @@ impl GameObject {
             // object is still in its public zone (mana-spent / attack-declaration
             // captures), so `self.tapped` is authoritative.
             tapped: self.tapped,
+            // CR 701.60b: Capture live suspected status. Taken while the object is
+            // still on the battlefield (cost-paid snapshot precedes the sacrifice
+            // zone-change that resets the flag), so `self.is_suspected` is authoritative.
+            is_suspected: self.is_suspected,
         }
     }
 
@@ -1785,6 +1793,18 @@ impl GameObject {
     pub fn chosen_label(&self) -> Option<&str> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Label(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// CR 607.2d + CR 508.1c: Look up the persisted chosen seat direction
+    /// (left/right) for a directional attack-restriction source (Pramikon,
+    /// Sky Rampart; Mystic Barrier; Teyo, Geometric Tactician). Returns `None`
+    /// until a direction has been chosen, in which case the restriction is
+    /// inert. Read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+    pub fn chosen_direction(&self) -> Option<SeatDirection> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Direction(d) => Some(*d),
             _ => None,
         })
     }

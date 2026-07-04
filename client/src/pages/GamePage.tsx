@@ -109,6 +109,7 @@ import { ResolutionProgressOverlay } from "../components/board/ResolutionProgres
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
+import { AttachmentFan } from "../components/board/AttachmentFan.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
@@ -1278,9 +1279,11 @@ function GamePageContent({
           style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
           data-flex-zone="player-row"
         >
-          <div className="flex items-end justify-center">
+          <div className="flex items-end justify-center" data-flex-zone="playerHandRow">
             {/* Castable graveyard/exile cards now render as colored wings inside
-                PlayerHand's own fan (see ZoneFanCard), so the row is just the hand. */}
+                PlayerHand's own fan (see ZoneFanCard), so the row is just the hand.
+                The `playerHandRow` flex-zone hook drives the mobile hand-lift
+                transform in index.css. */}
             <PlayerHand />
           </div>
           <DraggableWidget
@@ -1318,13 +1321,13 @@ function GamePageContent({
         </div>
       </div>
 
-      {/* Right-side fixed UI stack: combat phases → full control → action buttons → log */}
+      {/* Bottom UI: mobile splits hand/full-control (left) from phases + pass (right). */}
       <DraggableWidget
         target={{ kind: "widget", key: "actionRail" }}
         flexZone="actionRail"
         scaleKey="actionRail"
         resizeCorner="bl"
-        className="fixed z-30 flex flex-col items-end gap-1.5"
+        className="fixed z-30 flex flex-col items-end gap-1.5 max-lg:portrait:w-full max-lg:portrait:flex-row max-lg:portrait:items-end max-lg:portrait:justify-between max-lg:portrait:gap-2"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
@@ -1332,19 +1335,43 @@ function GamePageContent({
           transformOrigin: "bottom right",
         }}
       >
-        {showFlowHelpNudge && <FlowHelpNudge />}
-        {showSandboxToolsNudge && <SandboxToolsNudge />}
-        <CombatPhaseIndicator />
-        <TurnStatusLine />
         {!isSpectatorMode && (
-          <>
-            <div className="flex items-center gap-1.5">
-              <HandBadge />
-              <FullControlToggle />
+          <div
+            data-mobile-action-left
+            className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
+          >
+            <div className="flex flex-col gap-1 max-lg:gap-1">
+              <CombatPhaseIndicator />
+              <HandBadge className="w-full" />
             </div>
-            <ActionButton />
-          </>
+            <FullControlToggle className="w-full" />
+          </div>
         )}
+        <div
+          data-mobile-action-right
+          className="flex flex-col items-end gap-1.5 max-lg:min-w-0 max-lg:portrait:items-stretch lg:items-end"
+        >
+          {showFlowHelpNudge && <FlowHelpNudge />}
+          {showSandboxToolsNudge && <SandboxToolsNudge />}
+          <div className="hidden max-lg:landscape:block lg:block">
+            <CombatPhaseIndicator />
+          </div>
+          {isSpectatorMode ? (
+            <TurnStatusLine />
+          ) : (
+            <>
+              <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
+                <TurnStatusLine />
+              </div>
+              <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
+                <TurnStatusLine />
+                <HandBadge />
+                <FullControlToggle />
+              </div>
+              <ActionButton />
+            </>
+          )}
+        </div>
       </DraggableWidget>
 
       <GameLogPanel />
@@ -1591,6 +1618,14 @@ function GamePageContent({
             so the dialog's `fixed inset-0` shell anchors to the viewport
             instead of HudPlate's transform-CB bounding box. */}
         <PlayerEnchantmentsDialog />
+
+        {/* Permanent-attachment fan (Equipment / Aura / Fortification on a
+            battlefield object): a centered spread of the host + attachments,
+            each with its live selection affordance. Opened by clicking a
+            permanent-with-attachments during a target/board-choice prompt or by
+            the host's ⧉ badge. Self-portals to document.body, so its mount point
+            here is incidental. */}
+        <AttachmentFan />
 
         {/* Optional additional cost choice (kicker, blight, "or pay") */}
         {waitingFor?.type === "OptionalCostChoice" &&

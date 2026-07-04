@@ -45,6 +45,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             // turn.
             duration: Some(Duration::UntilEndOfTurn),
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         },
         vec![TargetRef::Object(exiled_id)],
         exiled_id,
@@ -176,6 +177,7 @@ mod tests {
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(exiled)],
             exiled,

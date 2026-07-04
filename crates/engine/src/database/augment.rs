@@ -208,6 +208,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                     enter_with_counters: Vec::new(),
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .sub_ability(
@@ -221,6 +222,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                 .condition(AbilityCondition::TargetMatchesFilter {
                     filter: augment_card_filter(),
                     use_lki: false,
+                    subject_slot: None,
                 })
                 .with_else_ability(AbilityDefinition::new(
                     AbilityKind::Spell,
@@ -237,6 +239,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                         enter_with_counters: Vec::new(),
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 )),
             ),

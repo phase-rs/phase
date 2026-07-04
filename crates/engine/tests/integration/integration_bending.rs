@@ -838,6 +838,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -854,6 +855,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source_id,
@@ -1176,6 +1178,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -1192,6 +1195,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             enchantment_id,
@@ -2000,6 +2004,7 @@ fn build_earthbend_ability(
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
 

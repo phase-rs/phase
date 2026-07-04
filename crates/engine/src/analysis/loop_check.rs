@@ -55,7 +55,8 @@
 //! soundness guarantee: no certificate for a non-loop or a non-progressing cycle.
 
 use crate::analysis::resource::{
-    loop_states_equal_modulo_resources, CounterClass, ObjectClass, ResourceAxis, ResourceVector,
+    loop_states_cover_modulo_growth, loop_states_equal_modulo_resources, CounterClass, ObjectClass,
+    ResourceAxis, ResourceVector,
 };
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -214,66 +215,168 @@ pub(crate) fn live_mandatory_loop_winner(
     cycle_end: &GameState,
     delta: &ResourceVector,
 ) -> Option<PlayerId> {
-    // CR 104.2a: a forced single-loser outcome is unambiguous only in a 2-player
-    // game; multiplayer player-elimination is deferred (offline-covered by PR-2).
+    // CR 104.1: the living players (not eliminated).
     let living: Vec<PlayerId> = cycle_end
         .players
         .iter()
         .filter(|p| !p.is_eliminated)
         .map(|p| p.id)
         .collect();
-    if living.len() != 2 {
+    // Need at least one opponent to force a loss on.
+    if living.len() < 2 {
         return None;
     }
 
-    // CR 704.5a: the per-player attributable life axis — who is draining out.
-    let life_fallers: Vec<PlayerId> = living
+    // CR 704.5a: partition living into strict life fallers vs. non-fallers (life
+    // delta ≥ 0, an absent key reading 0). Exactly one non-faller is the sole
+    // survivor candidate; since fallers/non-fallers partition `living`, that single
+    // non-faller condition IS "every other living player falls" (CR 104.2a).
+    let fallers: Vec<PlayerId> = living
         .iter()
         .copied()
         .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
         .collect();
-    // CR 704.5b: any decking (library going down) is a SECOND determinate-loss path.
-    let any_library_loss = living
+    let nonfallers: Vec<PlayerId> = living
         .iter()
-        .any(|p| delta.library_delta.get(p).copied().unwrap_or(0) < 0);
-    // CR 704.5c: poison is keyed by an aggregate (Poison, Player) pair in `snapshot`
-    // (unattributable per player), so treat any poison gain conservatively.
-    let any_poison_gain = delta
+        .copied()
+        .filter(|p| !fallers.contains(p))
+        .collect();
+    if nonfallers.len() != 1 {
+        return None;
+    }
+    let winner = nonfallers[0];
+
+    // Second-loss-path firewall (life axis only), over ALL living players — keep the
+    // 2p behavior generalized to the pod. CR 704.5b / CR 121.4: any library loss is a
+    // second determinate-loss path.
+    if living
+        .iter()
+        .any(|p| delta.library_delta.get(p).copied().unwrap_or(0) < 0)
+    {
+        return None;
+    }
+    // CR 704.5c: poison is keyed by an aggregate (Poison, Player) pair (unattributable
+    // per player), so any poison gain is conservatively a second loss path.
+    if delta
         .counters
         .get(&(CounterClass::Poison, ObjectClass::Player))
         .copied()
         .unwrap_or(0)
-        > 0;
-    // Single-faller firewall: reject dual-faller (mutual drain), the Niv shape
-    // (opponent life ↓ AND a controller library ↓), and any second determinate-loss
-    // path. PR-3 wins ONLY on the CR 704.5a life axis.
-    if life_fallers.len() != 1 || any_library_loss || any_poison_gain {
-        return None;
-    }
-    let faller = life_fallers[0];
-    let winner = living.iter().copied().find(|&p| p != faller)?;
-
-    // CR 101.2 + CR 104.3b + CR 704.5a: a player who can't lose the game can't be the
-    // faller of a forced loss (Platinum Angel / "you can't lose the game"). CR 101.2 +
-    // CR 104.2b: a player who can't win can't be named winner (Abyssal Persecutor:
-    // "your opponents can't win the game"). Reuse the SBA-layer predicates on the LIVE
-    // `cycle_end` so static effects are evaluated against the real board. (This
-    // firewall is strict 2-player — the Two-Headed Giant team rule CR 810.8a does not
-    // apply here.)
-    if crate::game::sba::player_has_cant_lose(cycle_end, faller)
-        || crate::game::static_abilities::player_has_cant_win(cycle_end, winner)
+        > 0
     {
         return None;
     }
 
-    // Confirm via the PR-2 classifier: `detect_loop` re-runs
-    // `loop_states_equal_modulo_resources` (so the board-equality gate is enforced
-    // here, no redundant pre-check) and `is_progress`. Holds by construction —
-    // `is_progress` passes (winner life Δ≥0), and `classify_win_kind` sees `faller`
-    // life<0 with faller≠winner ⇒ `LethalDamage`. Require exactly that win kind so the
-    // live shortcut is scoped to the CR 704.5a life axis.
-    let cert = detect_loop(cycle_start, cycle_end, delta, winner, true)?;
-    matches!(cert.win_kind, WinKind::LethalDamage).then_some(winner)
+    // CR 101.2 firewalls, generalized. CR 104.3b + CR 101.2: NO faller may be a player
+    // who can't lose the game (Platinum Angel). CR 104.2b + CR 101.2: the winner can't
+    // be named if they can't win (Abyssal Persecutor). Evaluated on the LIVE
+    // `cycle_end` so static effects see the real board.
+    if fallers
+        .iter()
+        .any(|&p| crate::game::sba::player_has_cant_lose(cycle_end, p))
+    {
+        return None;
+    }
+    if crate::game::static_abilities::player_has_cant_win(cycle_end, winner) {
+        return None;
+    }
+
+    // CR 732.2a board-recurrence gate: constant-depth exact recurrence OR a
+    // growing-cascade covering pair (the ≥3p fan-out grows the stack without bound,
+    // so the exact-depth equality never matches — the coverability path is required).
+    if !(loop_states_equal_modulo_resources(cycle_start, cycle_end)
+        || loop_states_cover_modulo_growth(cycle_start, cycle_end))
+    {
+        return None;
+    }
+
+    // CR 732.2a: net progress for the winner (≥1 unbounded axis, no consumed-axis
+    // deficit on the winner's own life/mana). Replaces the former `detect_loop(...)`
+    // delegation, which re-ran only the exact-depth equality and would reject the
+    // growing-cascade board the gate above just accepted.
+    //
+    // The measured per-cycle drain is a LOWER BOUND on the actual drain rate: it is
+    // at least the delta observed between the two compared frames. A super-critical
+    // (μ>1) cascade only ACCELERATES from here — each cycle spawns more drain than
+    // the last — so proving progress on the measured floor is sufficient; the real
+    // trajectory reaches lethal no later than the linear extrapolation implies.
+    if !delta.net_progress_for(winner) {
+        return None;
+    }
+    // Scope the live shortcut to the CR 704.5a life axis (a drain, not an advantage
+    // engine or a mill): `classify_win_kind` sees ≥1 faller life<0 ⇒ `LethalDamage`.
+    if classify_win_kind(winner, delta) != WinKind::LethalDamage {
+        return None;
+    }
+
+    // R5-B2 simultaneity floor (CR 704.3 / CR 800.4a / CR 104.2a): with ≥2 fallers,
+    // require EQUAL per-cycle life deltas so all fallers cross lethal in the SAME
+    // resolution's CR 704.3 SBA batch — then the sole CR 104.2a elimination is
+    // terminal and no post-CR-800.4a continuation is ever modeled. The seam adds the
+    // complementary per-frame pairwise-equality check ([`fallers_lives_pairwise_equal`]).
+    // `fallers.len() == 1` needs no gate: the sole opponent's elimination IS the
+    // terminal event (2p behavior byte-preserved).
+    if fallers.len() >= 2 {
+        let first = delta.life.get(&fallers[0]).copied().unwrap_or(0);
+        if fallers
+            .iter()
+            .any(|p| delta.life.get(p).copied().unwrap_or(0) != first)
+        {
+            return None;
+        }
+    }
+    Some(winner)
+}
+
+/// CR 704.5a + CR 104.4a: the loop's winner (the sole strict non-faller) must never
+/// dip below its prior life at ANY per-resolution ring frame. Named for the winner,
+/// NOT the loop's controller: a mandatory-loop trigger can be controlled by a faller,
+/// so the controller is not necessarily the player this guard protects — the winner
+/// (the one non-faller) is. A transient intra-cycle dip that recovers to a
+/// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
+/// absolute life before the extrapolated win — a net-delta check cannot see it.
+/// Per-resolution granularity IS SBA granularity here (CR 704.3 checks whenever a
+/// player would get priority, between resolutions), and consecutive ring frames are
+/// consecutive resolutions (a non-sampling beat clears the ring), so requiring
+/// `life[winner]` non-decreasing across the matched window (prior frame → every
+/// subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
+/// is correctly unreachable (a non-faller never crosses a loss SBA).
+pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
+    let mut prev: Option<i32> = None;
+    for frame in frames {
+        let Some(life) = frame
+            .players
+            .iter()
+            .find(|p| p.id == winner)
+            .map(|p| p.life)
+        else {
+            continue;
+        };
+        if prev.is_some_and(|p| life < p) {
+            return false;
+        }
+        prev = Some(life);
+    }
+    true
+}
+
+/// CR 704.3 (one SBA batch) + CR 800.4a + CR 104.2a: the R5-B2 simultaneity floor,
+/// seam half. With ≥2 fallers, every faller's `player.life` must be pairwise-equal at
+/// EVERY ring frame (incl. the live state); combined with the predicate's equal
+/// per-cycle deltas, all fallers stay pairwise-equal at every extrapolated frame and
+/// therefore cross lethal in the SAME resolution's CR 704.3 SBA batch. The single
+/// CR 104.2a elimination is then terminal ("happens immediately and overrides all
+/// effects"), so CR 800.4a's machinery-removal side effects occur only after the game
+/// is already decided — zero post-death continuation to model. Staggered-life games
+/// become fail-safe FALSE NEGATIVES. Only meaningful for `fallers.len() >= 2`.
+pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[PlayerId]) -> bool {
+    frames.iter().all(|frame| {
+        let lives: Vec<i32> = fallers
+            .iter()
+            .filter_map(|&fp| frame.players.iter().find(|p| p.id == fp).map(|p| p.life))
+            .collect();
+        lives.windows(2).all(|w| w[0] == w[1])
+    })
 }
 
 /// Derive the [`WinKind`] from the measured per-cycle delta.
@@ -857,9 +960,11 @@ mod tests {
         );
     }
 
-    /// U6 SOUNDNESS: a single faller but THREE living players ⇒ None (2-player
-    /// scope only; multiplayer deferred). Revert: dropping `living.len()==2` yields
-    /// a winner.
+    /// U6 SOUNDNESS: a single faller with THREE living players is NOT an all-opponent
+    /// drain — a bystander (P2, life delta 0) survives, so `nonfallers = {P0, P2}`
+    /// (len 2 ≠ 1) ⇒ None. The MP-general predicate correctly refuses to name a winner
+    /// while a non-draining opponent is alive. Revert: an "any-faller-wins" rewrite
+    /// that ignores bystanders flips this to `Some(P0)`.
     #[test]
     fn live_winner_three_player_is_none() {
         let mut end = GameState::new_two_player(7);
@@ -1012,6 +1117,234 @@ mod tests {
             live_mandatory_loop_winner(&start, &end, &delta),
             None,
             "a net-zero repeat is a draw, not a win — no life faller"
+        );
+    }
+
+    // ===================================================================
+    // N2 — MP winner predicate over a growing-cascade covering pair.
+    // ===================================================================
+
+    /// A mandatory, no-ordering-input `TriggeredAbility` stack entry (fixed GainLife,
+    /// no target/condition) — the churn-kind whose growth `cover_modulo_growth`
+    /// certifies. Same source/controller ⇒ one normalized kind.
+    fn mtrig(entry_id: u64) -> crate::types::game_state::StackEntry {
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let src = ObjectId(500);
+        StackEntry {
+            id: ObjectId(entry_id),
+            source_id: src,
+            controller: pid(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: src,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    src,
+                    pid(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        }
+    }
+
+    fn n_player(n: u8) -> GameState {
+        let mut s = GameState::new_two_player(7);
+        while (s.players.len() as u8) < n {
+            let mut p = s.players[1].clone();
+            p.id = pid(s.players.len() as u8);
+            s.players.push(p);
+        }
+        s
+    }
+
+    /// N2 POSITIVE: a 3-player all-opponent drain over a GROWING (covering) stack
+    /// names the controller. The growing depth means the exact-depth equality never
+    /// matches — only `cover_modulo_growth` can confirm, so the cover path IS
+    /// exercised. REVERT-FAIL: restoring `living.len() != 2` ⇒ None (blocker B-WINNER).
+    #[test]
+    fn n2_three_player_all_opponent_drain_growing_stack() {
+        let mut start = n_player(3);
+        start.stack.push_back(mtrig(10));
+        start.stack.push_back(mtrig(11));
+        let mut end = start.clone();
+        end.stack.push_back(mtrig(12)); // [G,G] -> [G,G,G]: covering growth
+        assert!(
+            !loop_states_equal_modulo_resources(&start, &end),
+            "fixture: growing depth ⇒ exact-depth equality must NOT match (cover path required)"
+        );
+        assert!(
+            loop_states_cover_modulo_growth(&start, &end),
+            "fixture: the covering pair holds"
+        );
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(2), -1);
+        delta.life.insert(pid(0), 2);
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            Some(pid(0)),
+            "3p all-opponent drain over a covering pair names the controller"
+        );
+
+        // Non-vacuity of the GROWTH arm: with a NON-covering grown stack (the extra
+        // entry is a Spell, not a mandatory trigger) the board gate fails ⇒ None.
+        let mut end_bad = start.clone();
+        end_bad.stack.push_back(spell_entry(99));
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end_bad, &delta),
+            None,
+            "a grown stack that is NOT a covering pair (spell) must not name a winner"
+        );
+
+        // Control: the SAME delta at CONSTANT depth confirms via equality — proving
+        // the positive above depends on the cover path, not the equality path.
+        let flat = start.clone();
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &flat, &delta),
+            Some(pid(0)),
+            "constant-depth confirms via the equality path"
+        );
+    }
+
+    fn spell_entry(entry_id: u64) -> crate::types::game_state::StackEntry {
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        StackEntry {
+            id: ObjectId(entry_id),
+            source_id: ObjectId(500),
+            controller: pid(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        }
+    }
+
+    /// N2 HOSTILE: a 4-player table with a STATIC bystander (P3, no life delta) ⇒
+    /// non-fallers {P0, P3} (len 2) ⇒ None.
+    #[test]
+    fn n2_four_player_static_bystander_is_none() {
+        let end = n_player(4);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(2), -1);
+        delta.life.insert(pid(0), 2);
+        // P3 carries no delta ⇒ static ⇒ a second non-faller.
+        assert_eq!(live_mandatory_loop_winner(&start, &end, &delta), None);
+    }
+
+    /// N2 HOSTILE: 3p where the controller ALSO loses ⇒ non-fallers {} ⇒ None (the
+    /// CR 104.4a draw road; the strict draw path owns it).
+    #[test]
+    fn n2_controller_also_falls_is_none() {
+        let end = n_player(3);
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(0), -1);
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(2), -1);
+        assert_eq!(live_mandatory_loop_winner(&start, &end, &delta), None);
+    }
+
+    /// N2 HOSTILE (CR 101.2): 3p all-opponent drain but a faller CAN'T LOSE ⇒ None.
+    #[test]
+    fn n2_faller_cant_lose_is_none() {
+        let mut end = n_player(3);
+        add_cant_static(
+            &mut end,
+            1,
+            911,
+            crate::types::statics::StaticMode::CantLoseTheGame,
+        );
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(2), -1);
+        delta.life.insert(pid(0), 2);
+        assert_eq!(live_mandatory_loop_winner(&start, &end, &delta), None);
+    }
+
+    /// N2 HOSTILE (R5-B2, predicate half): 3p all-opponent drain with UNEQUAL faller
+    /// deltas over a valid covering pair ⇒ None (the fallers cross lethal in DIFFERENT
+    /// resolutions, so the first CR 800.4a elimination is not terminal). REVERT-FAIL:
+    /// dropping the `fallers.len() >= 2 ⇒ equal per-cycle delta` conjunct ⇒ Some(P0).
+    #[test]
+    fn n2_unequal_faller_deltas_is_none() {
+        let mut start = n_player(3);
+        start.stack.push_back(mtrig(10));
+        start.stack.push_back(mtrig(11));
+        let mut end = start.clone();
+        end.stack.push_back(mtrig(12));
+        assert!(
+            loop_states_cover_modulo_growth(&start, &end),
+            "fixture: the covering pair holds (isolates the simultaneity conjunct)"
+        );
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -1);
+        delta.life.insert(pid(2), -2); // unequal ⇒ staggered crossing
+        delta.life.insert(pid(0), 3);
+        assert_eq!(live_mandatory_loop_winner(&start, &end, &delta), None);
+    }
+
+    // ===================================================================
+    // N5 — m9 monotonicity + R5-B2 per-frame simultaneity (pure fn tests).
+    // ===================================================================
+
+    /// Build a state whose players 0..lives.len() carry the given life totals.
+    fn frame(lives: &[i32]) -> GameState {
+        let mut s = n_player(lives.len() as u8);
+        for (i, &l) in lives.iter().enumerate() {
+            s.players[i].life = l;
+        }
+        s
+    }
+
+    /// N5: `winner_life_never_dips` — monotone non-decreasing ⇒ true; a
+    /// dip-and-recover whose NET delta is ≥ 0 (a net-delta check cannot see it) ⇒
+    /// false. REVERT-FAIL: gutting the fn (or dropping its seam call) admits the dip.
+    #[test]
+    fn n5_winner_life_never_dips() {
+        let mono = [frame(&[5]), frame(&[5]), frame(&[7])];
+        let mono_refs: Vec<&GameState> = mono.iter().collect();
+        assert!(winner_life_never_dips(&mono_refs, pid(0)));
+
+        let dip = [frame(&[5]), frame(&[2]), frame(&[5])];
+        let dip_refs: Vec<&GameState> = dip.iter().collect();
+        assert!(
+            !winner_life_never_dips(&dip_refs, pid(0)),
+            "a 5→2→5 intra-window dip (net ≥ 0) must be rejected"
+        );
+    }
+
+    /// N5: `fallers_lives_pairwise_equal` — two fallers equal at every frame ⇒ true;
+    /// diverging lives ⇒ false (the staggered-crossing CR 800.4a machinery-removal
+    /// shape). REVERT-FAIL: gutting the fn (or dropping its seam call) admits it.
+    #[test]
+    fn n5_fallers_lives_pairwise_equal() {
+        let equal = [frame(&[20, 10, 10]), frame(&[20, 9, 9]), frame(&[20, 8, 8])];
+        let equal_refs: Vec<&GameState> = equal.iter().collect();
+        assert!(fallers_lives_pairwise_equal(&equal_refs, &[pid(1), pid(2)]));
+
+        let diverge = [
+            frame(&[20, 10, 20]),
+            frame(&[20, 9, 19]),
+            frame(&[20, 8, 18]),
+        ];
+        let diverge_refs: Vec<&GameState> = diverge.iter().collect();
+        assert!(
+            !fallers_lives_pairwise_equal(&diverge_refs, &[pid(1), pid(2)]),
+            "P1@10 / P2@20 staggered lives must be rejected"
         );
     }
 }

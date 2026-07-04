@@ -6,11 +6,11 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
-    Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-    DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
-    FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    Comparator, ContinuousModification, ControllerRef, CountScope, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -199,6 +199,38 @@ fn assert_owned_by_opponent(filter: &TargetFilter) {
 }
 
 #[test]
+fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TargetFilter};
+
+    let filter = parse_post_spell_modifier(
+        "that doesn't share a creature type with a creature you control or a creature card in your graveyard",
+    )
+    .expect("expected SharesQuality post-spell modifier");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    let shares_quality = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::SharesQuality {
+                quality,
+                relation,
+                reference,
+            } => Some((quality, relation, reference.as_deref())),
+            _ => None,
+        })
+        .expect("expected SharesQuality property");
+    assert_eq!(*shares_quality.0, SharedQuality::CreatureType);
+    assert_eq!(*shares_quality.1, SharedQualityRelation::DoesNotShare);
+    let reference = shares_quality.2.expect("expected disjunctive reference");
+    let TargetFilter::Or { filters } = reference else {
+        panic!("expected Or reference filter, got {reference:?}");
+    };
+    assert_eq!(filters.len(), 2);
+}
+
+#[test]
 fn parse_post_spell_modifier_cast_origin_from_nonhand() {
     // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
     // cast-capable zones except the hand.
@@ -377,6 +409,106 @@ fn static_condition_to_trigger_condition_source_in_battlefield() {
             zone: Zone::Battlefield,
         }),
     );
+}
+
+#[test]
+fn intervening_if_source_attacked_this_turn_populates_condition() {
+    // CR 508.1 + CR 603.4: a source-scoped "if ~ attacked this turn"
+    // intervening-if must gate the trigger on the ability's own source creature
+    // having declared as an attacker this turn — not resolve unconditionally.
+    // Composed from the existing, already-evaluated `FilterProp::AttackedThisTurn`
+    // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is added.
+    // Distinct from the player-scoped `YouAttackedThisTurn`.
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+        ),
+    });
+
+    // Riders of the Mark — phase trigger. Without the gate it would bounce
+    // itself to hand every end step even when it never attacked.
+    let riders = parse_trigger_line(
+        "At the beginning of your end step, if Riders of the Mark attacked this turn, \
+         return it to its owner's hand.",
+        "Riders of the Mark",
+    );
+    assert_eq!(riders.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(riders.execute.is_some());
+
+    // Taigam, Ojutai Master — the same source-scoped gate on a spell-cast
+    // trigger (would otherwise grant rebound unconditionally).
+    let taigam = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell from your hand, if Taigam, \
+         Ojutai Master attacked this turn, that spell gains rebound.",
+        "Taigam, Ojutai Master",
+    );
+    assert_eq!(taigam.condition, expected);
+    assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
+    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
+    // attacked-only intervening-if. Gates on the source creature having attacked
+    // OR blocked this turn, composed from the existing, already-evaluated
+    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
+    // `TriggerCondition` variant.
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+        ),
+    });
+
+    // Inferno Hellion — without the gate it would shuffle itself into its
+    // owner's library every end step, even on a turn it neither attacked nor
+    // blocked.
+    let hellion = parse_trigger_line(
+        "At the beginning of each end step, if Inferno Hellion attacked or blocked this turn, \
+         its owner shuffles it into their library.",
+        "Inferno Hellion",
+    );
+    assert_eq!(hellion.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(hellion.execute.is_some());
+}
+
+#[test]
+fn intervening_if_source_has_counters_on_it_populates_condition() {
+    // CR 603.4 + CR 122: source-scoped "if ~ has counters on it" gates the
+    // trigger on the source permanent currently having at least one counter of
+    // any type, mapping to the existing, already-evaluated
+    // `TriggerCondition::HasCounters` — no new variant. Distinct from the
+    // past-tense event-subject "if it had counters on it" (`HadCounters`).
+    let expected = Some(TriggerCondition::HasCounters {
+        counters: CounterMatch::Any,
+        minimum: 1,
+        maximum: None,
+    });
+
+    // The Ozolith — without the gate it would offer the counter-move every
+    // combat even when it holds no counters.
+    let ozolith = parse_trigger_line(
+        "At the beginning of combat on your turn, if The Ozolith has counters on it, \
+         you may move all counters from The Ozolith onto target creature.",
+        "The Ozolith",
+    );
+    assert_eq!(ozolith.condition, expected);
+    // The intervening-if clause is stripped, so the effect still parses.
+    assert!(ozolith.execute.is_some());
+
+    // Denry Klin, Editor in Chief — the same source-scoped gate on an ETB
+    // trigger. The card's Oracle text uses the comma-based short self-name
+    // "Denry Klin" (not the full "Denry Klin, Editor in Chief"); passing the
+    // full card name exercises the real short-name → `~` normalization path.
+    let denry = parse_trigger_line(
+        "Whenever a nontoken creature you control enters, if Denry Klin has counters on it, \
+         proliferate.",
+        "Denry Klin, Editor in Chief",
+    );
+    assert_eq!(denry.condition, expected);
+    assert!(denry.execute.is_some());
 }
 
 #[test]
@@ -2788,6 +2920,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -2805,6 +2938,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )));
     trigger.execute = Some(Box::new(head));
@@ -7226,7 +7360,7 @@ fn trigger_intervening_if_source_was_dealt_damage_this_turn() {
 /// CR 120.10 + CR 603.4: Maarika, Brutal Gladiator's "Whenever ~ deals
 /// damage to a creature, if that creature was dealt excess damage this turn"
 /// must hoist the excess-damage clause as a `TriggerCondition::QuantityComparison`
-/// with `excess_only: true`, not silently drop it (condition: null).
+/// with `channel: Excess`, not silently drop it (condition: null).
 #[test]
 fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
     let def = parse_trigger_line(
@@ -7239,7 +7373,7 @@ fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::DamageDealtThisTurn {
-                        excess_only: true,
+                        channel: DamageChannel::Excess,
                         ..
                     },
                 },
@@ -7253,9 +7387,9 @@ fn trigger_intervening_if_that_creature_was_dealt_excess_damage_this_turn() {
 }
 
 /// CR 120.10 + CR 603.4: Rith, Liberated Primeval's phase trigger with an
-/// opponent-scoped excess-damage intervening-if must set `excess_only: true`
+/// opponent-scoped excess-damage intervening-if must set `channel: Excess`
 /// and produce a non-trivial target filter. `parse_type_phrase` emits
-/// `TargetFilter::Or` for compound types, so we check excess_only and
+/// `TargetFilter::Or` for compound types, so we check the channel and
 /// that the condition is a QuantityComparison with DamageDealtThisTurn.
 #[test]
 fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_turn() {
@@ -7269,7 +7403,7 @@ fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_t
                 qty:
                     QuantityRef::DamageDealtThisTurn {
                         ref target,
-                        excess_only,
+                        channel,
                         ..
                     },
             },
@@ -7282,7 +7416,11 @@ fn trigger_intervening_if_opponent_creature_or_planeswalker_excess_damage_this_t
             def.condition
         );
     };
-    assert!(excess_only, "excess_only must be true for Rith's trigger");
+    assert_eq!(
+        channel,
+        DamageChannel::Excess,
+        "channel must be Excess for Rith's trigger"
+    );
     assert!(
         !matches!(target.as_ref(), TargetFilter::Any),
         "target filter must be non-Any, got: {target:?}"
@@ -8130,6 +8268,47 @@ fn trigger_spell_or_ability_opponent_controls_counters_a_spell() {
         def.valid_source,
         Some(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+#[test]
+fn trigger_a_spell_youve_cast_is_countered() {
+    // CR 701.6a + CR 108.4: Multani's Presence -- the passive dual of the
+    // countering-side arm. The trigger fires when a spell YOU control leaves
+    // the stack via a counter, so it gates the *countered* spell through
+    // `valid_card` (the `SpellCountered` event's `object_id`), not the
+    // countering source through `valid_source`.
+    let def = parse_trigger_line(
+        "Whenever a spell you've cast is countered, draw a card.",
+        "Multani's Presence",
+    );
+    assert_eq!(def.mode, TriggerMode::Countered);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    // The passive form must NOT populate `valid_source` (that gates the
+    // countering source, the active-side semantics).
+    assert_eq!(def.valid_source, None);
+}
+
+#[test]
+fn trigger_a_spell_you_control_is_countered() {
+    // CR 108.4: the plain "you control" possessive is synonymous with
+    // "you've cast" for a spell (a spell's controller is its caster), so it
+    // routes to the same `ControllerRef::You` `valid_card` filter.
+    let def = parse_trigger_line(
+        "Whenever a spell you control is countered, draw a card.",
+        "Hypothetical Own-Spell Countered Watcher",
+    );
+    assert_eq!(def.mode, TriggerMode::Countered);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
         ))
     );
 }
@@ -12827,6 +13006,11 @@ fn trigger_one_or_more_creature_cards_leave_graveyard() {
     assert_eq!(def.origin, Some(Zone::Graveyard));
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
+    // CR 113.6 / CR 113.6b: Insidious Roots is a battlefield permanent whose
+    // "leave your graveyard" trigger references other cards, not itself, so it
+    // functions only from the battlefield (make_base() default). CR 603.10a's
+    // graveyard/exile look-back applies only to self-referential leaves triggers.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12844,6 +13028,9 @@ fn trigger_one_or_more_cards_leave_graveyard() {
         matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
         "expected card filter for unqualified cards, got {filter:?}"
     );
+    // CR 113.6 / CR 113.6b: Chalk Outline's trigger references other cards leaving
+    // its owner's graveyard, not itself — battlefield-only (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12857,6 +13044,9 @@ fn trigger_one_or_more_cards_leave_graveyard_during_your_turn() {
     assert!(def.batched);
     assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    // CR 113.6 / CR 113.6b: Soul Enervation is a battlefield permanent; its
+    // non-self "leave your graveyard" trigger stays battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12871,6 +13061,10 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_or_graveyard() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Graveyard]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: Laelia is a battlefield permanent whose "cards are put
+    // into exile from library/graveyard" trigger has no self-referential subject —
+    // it functions only from the battlefield (make_base() default).
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12884,6 +13078,8 @@ fn trigger_one_or_more_cards_put_into_exile_from_library_only() {
     assert_eq!(def.destination, Some(Zone::Exile));
     assert_eq!(def.origin_zones, vec![Zone::Library]);
     assert!(def.batched);
+    // CR 113.6 / CR 113.6b: battlefield-only for the single-source variant too.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 #[test]
@@ -12898,6 +13094,9 @@ fn trigger_one_or_more_artifact_or_creature_cards_leave_graveyard() {
     let filter = def.valid_card.as_ref().expect("valid_card");
     assert!(matches!(filter, TargetFilter::Or { .. }));
     assert_owned_by_you(filter);
+    // CR 113.6 / CR 113.6b: Attuned Hunter's disjunctive "leave your graveyard"
+    // trigger references other cards, not itself — battlefield-only.
+    assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
 }
 
 // ── Work Item 2: Discard Batch Triggers ───────────────────────
@@ -19038,6 +19237,7 @@ fn trigger_another_player_attacks_with_two_or_more_creatures_intervening_if() {
                         subject: AttackersDeclaredCountSubject::AttackTarget {
                             controller: ControllerRef::You,
                             attacked: AttackTargetFilter::Player,
+                            filter: None,
                         },
                         comparator: Comparator::EQ,
                         count: 0,
@@ -19132,6 +19332,7 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
             subject: AttackersDeclaredCountSubject::AttackTarget {
                 controller: ControllerRef::You,
                 attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                filter: None,
             },
             comparator: Comparator::GE,
             count: 2,
@@ -20923,4 +21124,178 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
         1,
         "after cleanup: only the base {{U}}, no bonus — the delayed trigger expired"
     );
+}
+
+/// CR 614.12: Summoner's Grimoire's granted ability — the leading
+/// "if that card is an enchantment card" must materialize an
+/// `enters_modified_if` gate on the absorbed ChangeZone (via `parse_type_phrase`),
+/// not be silently dropped while applying the riders unconditionally.
+#[test]
+fn grimoire_granted_trigger_gates_enters_on_moved_object_type() {
+    let def = parse_trigger_line(
+            "Whenever this creature attacks, you may put a creature card from your hand onto the battlefield. If that card is an enchantment card, it enters tapped and attacking.",
+            "Summoner's Grimoire",
+        );
+    let exec = def.execute.as_ref().expect("expected execute");
+    match &*exec.effect {
+        Effect::ChangeZone {
+            enter_tapped,
+            enters_attacking,
+            enters_modified_if,
+            ..
+        } => {
+            assert!(enter_tapped.is_tapped(), "enter_tapped must be Tapped");
+            assert!(*enters_attacking, "enters_attacking must be set");
+            match enters_modified_if {
+                Some(TargetFilter::Typed(tf)) => assert!(
+                    tf.type_filters.contains(&TypeFilter::Enchantment),
+                    "gate must materialize an Enchantment card-type filter, got {tf:?}"
+                ),
+                other => {
+                    panic!("expected enters_modified_if = Some(Typed(Enchantment)), got {other:?}")
+                }
+            }
+        }
+        other => panic!("expected ChangeZone execute, got {other:?}"),
+    }
+}
+
+/// CR 508.4 — negative: a follow-on "It enters tapped and attacking" with NO
+/// leading moved-object condition (Stangg / Shark Shredder) keeps both flags
+/// AND leaves `enters_modified_if` as `None` (unconditional).
+#[test]
+fn grimoire_unconditional_enters_leaves_gate_none() {
+    let def = parse_trigger_line(
+            "When this creature enters, put a creature card from your hand onto the battlefield. It enters tapped and attacking.",
+            "Unconditional Put",
+        );
+    let exec = def.execute.as_ref().expect("expected execute");
+    match &*exec.effect {
+        Effect::ChangeZone {
+            enter_tapped,
+            enters_attacking,
+            enters_modified_if,
+            ..
+        } => {
+            assert!(enter_tapped.is_tapped());
+            assert!(*enters_attacking);
+            assert!(
+                enters_modified_if.is_none(),
+                "no leading condition -> gate must stay None, got {enters_modified_if:?}"
+            );
+        }
+        other => panic!("expected ChangeZone execute, got {other:?}"),
+    }
+}
+
+/// Issue #4356 — Trouble in Pairs disjunctive trigger must split into three
+/// independent triggers instead of misparsing the draw/cast clauses as effect text.
+#[test]
+fn trouble_in_pairs_disjunctive_trigger_splits_into_three_triggers() {
+    let text = "Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.";
+    let triggers = parse_trigger_lines(text, "Trouble in Pairs");
+    assert_eq!(
+        triggers.len(),
+        3,
+        "expected three triggers, got {triggers:?}"
+    );
+
+    assert_eq!(triggers[0].mode, TriggerMode::YouAttack);
+    assert!(matches!(
+        triggers[0].condition,
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        })
+    ));
+
+    assert_eq!(triggers[1].mode, TriggerMode::Drawn);
+    assert!(matches!(
+        triggers[1].constraint,
+        Some(TriggerConstraint::NthDrawThisTurn { n: 2, .. })
+    ));
+
+    assert_eq!(triggers[2].mode, TriggerMode::SpellCast);
+    assert!(matches!(
+        triggers[2].constraint,
+        Some(TriggerConstraint::NthSpellThisTurn { n: 2, .. })
+    ));
+
+    for trigger in &triggers {
+        assert!(
+            !matches!(
+                trigger.execute.as_ref().map(|e| e.effect.as_ref()),
+                Some(Effect::Unimplemented { .. })
+            ),
+            "trigger execute must not be Unimplemented: {trigger:?}"
+        );
+    }
+}
+
+#[test]
+fn trouble_in_pairs_opponent_attacks_you_with_two_or_more_creatures() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks you with two or more creatures, you draw a card.",
+        "Trouble in Pairs",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(matches!(
+        def.condition,
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        })
+    ));
+}
+
+#[test]
+fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks you with two or more Dinosaurs, you draw a card.",
+        "Trouble in Pairs",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    match &def.valid_card {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+            "expected Dinosaur subtype in valid_card, got {:?}",
+            tf.type_filters,
+        ),
+        other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
+    }
+    match &def.condition {
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject:
+                AttackersDeclaredCountSubject::AttackTarget {
+                    controller: ControllerRef::You,
+                    attacked: AttackTargetFilter::Player,
+                    filter: Some(TargetFilter::Typed(tf)),
+                },
+            comparator: Comparator::GE,
+            count: 2,
+        }) => assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+            "expected Dinosaur subtype in attack-target count filter, got {:?}",
+            tf.type_filters,
+        ),
+        other => panic!(
+            "expected AttackersDeclaredCount {{ AttackTarget {{ You, Player, Some(Dinosaur) }}, GE, 2 }}, got {other:?}"
+        ),
+    }
 }

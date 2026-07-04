@@ -54,12 +54,20 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
         let attackers_before = combat.attackers.len();
         combat.attackers.retain(|a| a.object_id != oid);
         attacker_removed = combat.attackers.len() != attackers_before;
-        // Remove as blocker from all attacker assignments
+        // Drop attacker-keyed forward assignments (oid was blocking nobody as a key,
+        // but was an attacker with blockers assigned to it).
+        combat.blocker_assignments.remove(&oid);
+        // Remove as blocker from all remaining attacker assignments
         for blockers in combat.blocker_assignments.values_mut() {
             blockers.retain(|b| *b != oid);
         }
-        // Remove reverse blocker lookup
+        // Remove reverse lookup when oid was a blocker
         combat.blocker_to_attacker.remove(&oid);
+        // Prune oid from every blocker's attacker list (oid was an attacker)
+        combat.blocker_to_attacker.retain(|_, attackers| {
+            attackers.retain(|id| *id != oid);
+            !attackers.is_empty()
+        });
         // Remove any pending damage assignments for this object
         combat.damage_assignments.remove(&oid);
     }
@@ -93,17 +101,27 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        let blocker_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
 
-        state.combat = Some(CombatState {
+        let mut combat = CombatState {
             attackers: vec![AttackerInfo {
                 object_id: obj_id,
                 defending_player: PlayerId(1),
                 attack_target: AttackTarget::Player(PlayerId(1)),
-                blocked: false,
+                blocked: true,
                 band_id: None,
             }],
             ..Default::default()
-        });
+        };
+        combat.blocker_assignments.insert(obj_id, vec![blocker_id]);
+        combat.blocker_to_attacker.insert(blocker_id, vec![obj_id]);
+        state.combat = Some(combat);
 
         let ability = ResolvedAbility::new(
             Effect::RemoveFromCombat {
@@ -119,6 +137,17 @@ mod tests {
 
         let combat = state.combat.as_ref().unwrap();
         assert!(combat.attackers.is_empty(), "Attacker should be removed");
+        assert!(
+            !combat.blocker_assignments.contains_key(&obj_id),
+            "Attacker-keyed block assignment must be removed"
+        );
+        assert!(
+            combat
+                .blocker_to_attacker
+                .get(&blocker_id)
+                .is_none_or(|attackers| !attackers.contains(&obj_id)),
+            "Departing attacker must be pruned from every blocker's reverse lookup"
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {

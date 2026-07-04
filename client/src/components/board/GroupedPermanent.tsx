@@ -59,6 +59,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "StationTarget":
     case "SaddleMount":
     case "HarmonizeTapChoice":
+    case "KeepWithinTotalPowerChoice":
       return waitingFor.data.player;
     default:
       return null;
@@ -555,7 +556,10 @@ function BoardChoiceGroupControls({
 
   const canConfirm = canConfirmBoardChoice(choice, selectedForChoice, objects);
   const requiredPower =
-    choice.selection.type === "totalPowerAtLeast" ? choice.selection.power : null;
+    choice.selection.type === "totalPowerAtLeast" ||
+    choice.selection.type === "totalPowerAtMost"
+      ? choice.selection.power
+      : null;
   const power =
     requiredPower != null
       ? boardChoiceSelectedPower(choice, selectedForChoice, objects)

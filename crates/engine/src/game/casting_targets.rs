@@ -16,8 +16,8 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
     build_chained_resolved, build_target_slots_labelled, choose_target_for_ability,
-    flatten_targets_in_chain, random_select_targets_for_ability, validate_modal_indices,
-    validate_selected_targets_for_ability, TargetSelectionAdvance,
+    distribution_targets, flatten_targets_in_chain, random_select_targets_for_ability,
+    validate_modal_indices, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost_for_activation};
 use super::casting_costs::{
@@ -257,7 +257,10 @@ pub(crate) fn handle_select_targets(
     // For X-spells, distribution is deferred to after mana payment (engine.rs).
     if let Some(ref unit) = pending.distribute {
         if let Some(total) = extract_distribution_total(state, &ability, &ability.effect) {
-            let assigned_targets = flatten_targets_in_chain(&ability);
+            // CR 601.2c + CR 601.2d: Divide only among the distributing effect's
+            // own targets; sibling-effect targets became targets already and are
+            // not part of the division.
+            let assigned_targets = distribution_targets(&ability);
             // Store ability + targets on pending_cast for post-distribution resumption.
             let mut pending_dist = PendingCast::new(
                 pending.object_id,

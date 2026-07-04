@@ -37,6 +37,36 @@ export function computeGapPx(cardWidthPx: number, edgeOverlapPx: number): number
   return VISIBLE_GAP_FRACTION * cardWidthPx + edgeOverlapPx;
 }
 
+/**
+ * Pure computation of the post-reorder hand order for a drag-and-drop within the
+ * hand, or `null` when the reorder must be suppressed or is a no-op.
+ *
+ * The caller derives a `ReorderHand` order by mapping a *displayed* slot index
+ * onto `hand` (the engine's `player.hand` order). That mapping is only 1:1 when
+ * the displayed order equals `hand`, so the caller passes `suppressed = true`
+ * whenever the display diverges from `hand`: a cast is in flight (the pending
+ * card is filtered out of the DOM, leaving N-1 slots) or the hand is sorted /
+ * filtered (the display permutes or hides entries). Dispatching a reorder in
+ * those states would scramble the real hand — this returns `null` instead.
+ * Returns `null` too for a no-op move (unknown slot, card not in `hand`, or the
+ * card already at `targetSlot`). Generic over the id type so it is exercisable
+ * with plain numbers in tests and `ObjectId`s in production.
+ */
+export function computeReorderedHand<Id>(
+  hand: readonly Id[],
+  objectId: Id,
+  targetSlot: number | null,
+  suppressed: boolean,
+): Id[] | null {
+  if (suppressed || targetSlot == null) return null;
+  const order = hand.slice();
+  const fromIdx = order.indexOf(objectId);
+  if (fromIdx === -1 || fromIdx === targetSlot) return null;
+  const [moved] = order.splice(fromIdx, 1);
+  order.splice(targetSlot, 0, moved);
+  return order;
+}
+
 export function computeHandInsertionSlot(
   cards: HandSlotRect[],
   clientX: number,

@@ -77,7 +77,8 @@
     "priorityTooltip": "Priorität abgeben. Wenn der Stapel leer ist, rückt dies durch das aktuelle Prioritätsfenster vor. Tastenkürzel: Leertaste.",
     "pass": "Abgeben",
     "passToEndTooltip": "Bis zum Endschritt automatisch abgeben, sofern keine Wahl, kein Stopp oder die volle Kontrolle unterbricht. Tastenkürzel: Eingabe.",
-    "autoPassing": "Automatisch bis zum Endschritt abgeben..."
+    "autoPassing": "Automatisch bis zum Endschritt abgeben...",
+    "resolvingStack": "Stapel wird aufgelöst..."
   },
   "board": {
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
@@ -152,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Reihe einklappen",
+      "auto": "Auto",
+      "on": "Immer an",
+      "off": "Immer aus"
     }
   },
   "permanent": {
@@ -173,6 +180,10 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wählen",
+    "fanConfirm": "Bestätigen ({{count}})",
+    "viewAttachments_one": "Angelegte Karte ansehen",
+    "viewAttachments_other": "{{count}} angelegte Karten ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -184,7 +195,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Behalt."
     }
   },
   "player": {
@@ -215,7 +227,26 @@
     "you": "Du",
     "ally": "Verbündeter",
     "restoreDialog": "Dialog wiederherstellen",
-    "restoreDialogTitle": "Angriffsziel-Dialog wiederherstellen"
+    "restoreDialogTitle": "Angriffsziel-Dialog wiederherstellen",
+    "distribute": "Verteilen",
+    "attackersColumn": "Angreifer",
+    "unassigned": "Nicht zugewiesen",
+    "assignedBadge": "Zugewiesen",
+    "allAssigned": "Alle Angreifer zugewiesen",
+    "unassignedRemaining_one": "{{count}} nicht zugewiesen",
+    "unassignedRemaining_other": "{{count}} nicht zugewiesen",
+    "evenSplitAll": "Alle gleichmäßig aufteilen",
+    "resetAssignments": "Zurücksetzen",
+    "allHere": "Alle hierher",
+    "spread": "Aufteilen",
+    "spreadEvenly": "Gleichmäßig aufteilen",
+    "assignOne": "Einen an {{label}} zuweisen",
+    "removeOne": "Einen von {{label}} entfernen",
+    "assignAllHere": "Alle an {{label}} senden",
+    "assignRemaining_one": "Noch {{count}} zuweisen",
+    "assignRemaining_other": "Noch {{count}} zuweisen",
+    "confirmDistribute_one": "{{count}} Angreifer erklären",
+    "confirmDistribute_other": "{{count}} Angreifer erklären"
   },
   "fullControl": {
     "on": "Volle Kontrolle An",
@@ -451,7 +482,9 @@
     "viewFullHand_other": "Volle Hand ansehen ({{count}} Karten)",
     "handLabel": "Hand {{count}}",
     "handTitle": "Hand ({{count}})",
-    "cardBack": "Kartenrückseite"
+    "cardBack": "Kartenrückseite",
+    "organizeLabel": "Hand ordnen",
+    "reorderPausedHint": "Das Umsortieren per Ziehen ist pausiert, solange die Hand sortiert oder gefiltert ist."
   },
   "opponentHud": {
     "ally": "Verbündeter",
@@ -1051,10 +1084,19 @@
       "subtitleManaValueUpTo_other": "Wähle bis zu {{count}} Karten innerhalb des Manawert-Limits"
     },
     "searchPartition": {
-      "title": "Karten für das Schlachtfeld wählen",
-      "subtitle_one": "Wähle {{count}} Karte, um sie{{tapped}} auf das Schlachtfeld zu legen; der Rest geht auf deine Hand",
-      "subtitle_other": "Wähle {{count}} Karten, um sie{{tapped}} auf das Schlachtfeld zu legen; der Rest geht auf deine Hand",
-      "tapped": " getappt"
+      "title": "Karten wählen",
+      "subtitle_one": "Wähle {{count}} Karte, um sie{{tapped}} {{primary}} zu legen; der Rest geht {{rest}}",
+      "subtitle_other": "Wähle {{count}} Karten, um sie{{tapped}} {{primary}} zu legen; der Rest geht {{rest}}",
+      "tapped": " getappt",
+      "zones": {
+        "Library": "in deine Bibliothek",
+        "Hand": "auf deine Hand",
+        "Battlefield": "auf das Schlachtfeld",
+        "Graveyard": "in deinen Friedhof",
+        "Stack": "auf den Stapel",
+        "Exile": "ins Exil",
+        "Command": "in die Kommandozone"
+      }
     },
     "outsideGame": {
       "title": "Aus dem Sideboard wählen",
@@ -1260,6 +1302,12 @@
       "optCmc": "Manawert",
       "optType": "Typ",
       "optColor": "Farbe",
+      "filterLabel": "Anzeigen",
+      "filterNone": "Alle",
+      "filterPlayable": "Spielbar",
+      "filterCreatures": "Kreaturen",
+      "filterLands": "Länder",
+      "filterNonland": "Nichtländer",
       "counterDiscard": "{{selected}} von {{cap}} abwerfen",
       "counterKeep": "{{selected}} von {{cap}} behalten",
       "keepInstead": "Stattdessen behalten",
@@ -1490,16 +1538,20 @@
     "cascadeEyebrow": "Kaskade",
     "discoverEyebrow": "Entdecken",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Aus dem Friedhof wirken",
     "title": "{{name}} wirken?",
     "subtitleCascade": "Kaskade hat {{name}} ins Exil geschickt (Manawert unter {{sourceMv}}). Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und mische alle {{total}} ins Exil geschickten Karten unter deine Bibliothek.",
     "subtitleDiscover": "Entdecken hat {{name}} ins Exil geschickt. Wirke es, ohne seine Manakosten zu bezahlen, oder nimm es auf deine Hand und mische die anderen {{missCount}} ins Exil geschickten Karten unter deine Bibliothek.",
     "subtitleRipple": "Ripple hat {{name}} aufgedeckt. Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und lege alle {{total}} aufgedeckten Karten in zufälliger Reihenfolge unter deine Bibliothek.",
+    "subtitleGraveyardPaid": "Wirke {{name}} aus einem Friedhof, indem du seine Manakosten bezahlst — Mana jeder Art darf ausgegeben werden. Oder lehne ab und lass es im Friedhof.",
     "castNamed": "{{name}} wirken",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
+    "castPaidSuffix": "(bezahle seine Manakosten — Mana jeder Art darf ausgegeben werden)",
     "putIntoHand": "Auf die Hand nehmen",
     "decline": "Ablehnen",
     "discoverDeclineSuffix": "(den Rest unter die Bibliothek legen)",
-    "cascadeDeclineSuffix": "(alle ins Exil geschickten Karten unter die Bibliothek mischen)"
+    "cascadeDeclineSuffix": "(alle ins Exil geschickten Karten unter die Bibliothek mischen)",
+    "graveyardPaidDeclineSuffix": "(im Friedhof lassen)"
   },
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
@@ -1849,7 +1901,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Behalten"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1859,14 +1912,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: Stärke {{selected}} / {{max}} oder weniger"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Bestätigen ({{selected}}/{{max}} Stärke)"
   },
   "planechase": {
     "active": "Active plane",
@@ -1886,8 +1941,8 @@
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",
-    "waitingFor": "Waiting for {{player}}",
-    "waitingForReason": "Waiting for {{player}} — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
       "declareAttackers": "declaring attackers",
       "declareBlockers": "declaring blockers",
