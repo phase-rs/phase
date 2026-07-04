@@ -799,6 +799,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Unpaired
+        // CR 608.2c: Reads the resolution-chain tracked-set side-table
+        // (`tracked_object_sets` / `chain_tracked_set_id`), not the candidate's
+        // own fingerprint — POISON for memoization.
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::Other { .. } => false,
     }
 }

@@ -13,13 +13,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
+    EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -908,6 +908,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let inner_tf = TypedFilter::default().properties(vec![(**prop).clone()]);
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
+            // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
+            FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
@@ -1840,6 +1842,9 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
                     .join(", ")
             );
         }
+        // CR 608.2d + CR 122.1: "choose a counter on it" — the option list is
+        // enumerated at resolution, so the coverage label stays generic.
+        ChoiceType::CounterKind { .. } => return "counter kind".to_string(),
     }
     .into()
 }
@@ -2036,6 +2041,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::EachDealsDamageEqualToPower { sources, recipient } => {
             d.push(("sources".into(), fmt_target(sources)));
             d.push(("recipient".into(), fmt_target(recipient)));
+        }
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => {
+            d.push(("sources".into(), fmt_target(sources)));
+            d.push(("amount".into(), fmt_quantity(amount)));
+            d.push((
+                "recipient".into(),
+                match recipient {
+                    EachDamageRecipient::Shared(filter) => fmt_target(filter),
+                    EachDamageRecipient::EachController => "its controller".into(),
+                },
+            ));
         }
         Effect::SearchOutsideGame {
             filter,
@@ -2806,6 +2826,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 crate::types::ability::effect_variant_name(replacement_effect).to_string(),
             ));
         }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
@@ -2836,6 +2862,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+        }
+        Effect::ChooseCounterKind { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PutChosenCounter { target, count } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -3161,6 +3194,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters

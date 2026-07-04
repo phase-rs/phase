@@ -1699,6 +1699,7 @@
       "numberRange": "Wybierz liczbę",
       "labeled": "Dokonaj wyboru",
       "keyword": "Wybierz zdolność",
+      "counterKind": "Wybierz żeton",
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",

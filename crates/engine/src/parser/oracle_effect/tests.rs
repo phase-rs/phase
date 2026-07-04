@@ -33269,6 +33269,42 @@ fn exile_from_top_until_second_person_nonland_filter() {
         .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
 }
 
+/// CR 205.4a: A bare supertype adjective in the stop condition ("until you
+/// exile a legendary card") must scope the `NextMatches` filter to that
+/// supertype, not collapse to `Any`. The Day of the Doctor chapters I-III dig to
+/// the first LEGENDARY card, so the filter must carry `HasSupertype { Legendary }`
+/// — otherwise the loop stops on the first card of any type. This "exile from the
+/// top until a match" shape is only structurally similar to Discover (CR 701.57a),
+/// not the Discover keyword action itself; the supertype scoping is governed
+/// solely by CR 205.4a. Building-block coverage: exercises the supertype-word
+/// branch of `try_parse_next_matches_until` (legendary/basic/snow), not one card.
+#[test]
+fn exile_from_top_until_supertype_legendary_filter() {
+    let e =
+        parse_effect("exile cards from the top of your library until you exile a legendary card");
+    let Effect::ExileFromTopUntil { player: _, until } = e else {
+        panic!("expected ExileFromTopUntil, got {:?}", e);
+    };
+    let UntilCondition::NextMatches { filter } = until else {
+        panic!("expected NextMatches arm, got {:?}", until);
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!(
+            "expected Typed filter, got a non-supertype filter (regression: dropped 'legendary')"
+        );
+    };
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Legendary
+            }
+        )),
+        "expected HasSupertype(Legendary), got {:?}",
+        typed.properties
+    );
+}
+
 /// CR 701.57a + CR 702.85a: Etali, Primal Conqueror's trigger body uses
 /// the third-person possessive form ("their library" / "they exile") that
 /// `strip_each_player_subject` produces after stripping "each player ".
