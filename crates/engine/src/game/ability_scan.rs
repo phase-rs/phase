@@ -1311,6 +1311,7 @@ fn scan_effect(x: &Effect) -> Axes {
             phase: _,
             after: _,
             followed_by: _,
+            attacker_restriction: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));

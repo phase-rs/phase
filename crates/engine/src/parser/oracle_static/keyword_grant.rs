@@ -1083,6 +1083,43 @@ fn parse_all_land_types_modification(text: &str) -> Option<ContinuousModificatio
     })
 }
 
+/// One characteristic listed in an "its `<X>` is/are the last chosen `<X>`"
+/// clause. Parser-local — maps to the chosen-attribute read modification(s) for
+/// that characteristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastChosenCharacteristic {
+    Name,
+    CreatureType,
+}
+
+/// CR 612.8 + CR 205.1a / CR 613.1d: Parse the SUBJECT list of an "its
+/// `<characteristics>` is/are the last chosen `<characteristics>`" clause
+/// (Psychic Paper: "its name and creature type are the last chosen name and
+/// creature type"). The mandatory `"its "` prefix distinguishes this clause from
+/// the `"it can't be blocked"` restriction anaphor. The subject characteristic
+/// list drives the emitted modifications; the trailing object list ("the last
+/// chosen name and creature type") is the read source and is left unconsumed.
+/// One `alt()` per axis (separator, characteristic) rather than enumerating the
+/// cross-product, per the combinator-composition mandate.
+fn parse_last_chosen_characteristic_list(
+    input: &str,
+) -> OracleResult<'_, Vec<LastChosenCharacteristic>> {
+    preceded(
+        tag("its "),
+        terminated(
+            separated_list1(
+                alt((tag(", and "), tag(" and "), tag(", "))),
+                alt((
+                    value(LastChosenCharacteristic::CreatureType, tag("creature type")),
+                    value(LastChosenCharacteristic::Name, tag("name")),
+                )),
+            ),
+            (alt((tag(" is "), tag(" are "))), tag("the last chosen ")),
+        ),
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -1249,6 +1286,39 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         || nom_primitives::scan_contains(unquoted_lower.as_str(), "are every creature type")
     {
         modifications.push(ContinuousModification::AddAllCreatureTypes);
+    }
+
+    // CR 612.8 (name, Layer 3) + CR 205.1a / CR 613.1d (creature type, Layer 4):
+    // "its <characteristics> is/are the last chosen <characteristics>" — set each
+    // listed characteristic to the granting source's persisted ChosenAttribute
+    // (Psychic Paper). `split_keyword_list` shreds this clause across its commas
+    // and "and"s, so it is recognized HERE on the intact predicate, ahead of the
+    // keyword-list path. It is a distinct clause type (not a restriction, so no
+    // overlap with `parse_restriction_modes`). Built for the class of "its <X> is
+    // the last chosen <X>" equipment-choice readbacks, not the single card.
+    if let Some(characteristics) = nom_primitives::scan_at_word_boundaries(
+        unquoted_lower.as_str(),
+        parse_last_chosen_characteristic_list,
+    ) {
+        for characteristic in characteristics {
+            match characteristic {
+                LastChosenCharacteristic::Name => {
+                    modifications.push(ContinuousModification::SetChosenName);
+                }
+                LastChosenCharacteristic::CreatureType => {
+                    // CR 205.1a + CR 613.1d: setting a creature's creature type
+                    // REPLACES its existing creature subtypes (Layer 4), so remove
+                    // all current creature subtypes before adding the chosen one.
+                    // Emission order is the intra-layer timestamp order (CR 613.7a).
+                    modifications.push(ContinuousModification::RemoveAllSubtypes {
+                        set: SubtypeSet::Creature,
+                    });
+                    modifications.push(ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::CreatureType,
+                    });
+                }
+            }
+        }
     }
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
@@ -1473,6 +1543,21 @@ pub(crate) fn push_grant_clause_modifications(
     let part_trimmed = part.trim().trim_end_matches('.');
     let (part_without_duration, _) = strip_trailing_duration(part_trimmed);
     let part_trimmed = part_without_duration.trim().trim_end_matches('.');
+    let part_lower = part_trimmed.to_lowercase();
+
+    // CR 509.1b: A compound equipped/enchanted-creature grant lists restriction
+    // conjuncts with an anaphoric subject ("…, it can't be blocked, …" — Psychic
+    // Paper). Strip a leading subject-anaphor so the bare predicate reaches the
+    // single restriction authority (`parse_restriction_modes`) already called at
+    // this fn's tail — no second `CantBeBlocked` detector. `tag("it ")` is
+    // word-boundary-safe (it never matches "its …"). Keywords / "can't be the
+    // target" grants never begin with these anaphors, so the strip leaves
+    // `map_keyword` / `classify_cant_be_targeted` unaffected. Mirrors the
+    // anaphor-strip idiom in oracle_static/shared.rs.
+    let part_trimmed = nom_tag_lower(part_trimmed, &part_lower, "it ")
+        .or_else(|| nom_tag_lower(part_trimmed, &part_lower, "this creature "))
+        .or_else(|| nom_tag_lower(part_trimmed, &part_lower, "they "))
+        .unwrap_or(part_trimmed);
     let part_lower = part_trimmed.to_lowercase();
 
     // CR 702: Check for dynamic "keyword X" with "where X is [qty]"

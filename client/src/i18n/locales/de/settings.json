@@ -61,6 +61,11 @@
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "multiplayerBoardLayout": "Mehrspieler-Boardlayout",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Fokussierter Gegner",
+      "split": "Geteilter Tisch"
+    },
     "cardPreviewDelay": "Hover-Verzögerung",
     "cardPreviewDelayInstant": "Sofort",
     "cardPreviewDelayValue": "{{ms}} ms",

@@ -49,7 +49,7 @@ mod tests {
     use super::*;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::zones::create_object;
-    use crate::types::ability::Effect;
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::Phase;
@@ -131,6 +131,44 @@ mod tests {
                 }
             )),
             "should emit EffectResolved(EndTheTurn)"
+        );
+    }
+
+    /// CR 724.1d + CR 511.3: if a restricted extra combat is active when the
+    /// turn ends (e.g., Time Stop fired during Last Night Together's extra
+    /// combat), the combat attacker restriction must be cleared. Previously,
+    /// `end_turn_to_cleanup` skipped the EndCombat step where the normal clear
+    /// happens, leaving stale restriction state that could affect the next turn's
+    /// AI attacker queries and legal-action checks.
+    #[test]
+    fn end_the_turn_clears_combat_attacker_restriction() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::DeclareAttackers;
+
+        // Simulate a restricted extra combat being active (Last Night Together /
+        // Bumi): only creatures matching `TargetFilter::Any` may attack.
+        state.current_combat_attacker_restriction = Some(TargetFilter::Any);
+        state.current_combat_attacker_restriction_source = Some(ObjectId(77));
+
+        let ability = ResolvedAbility::new(Effect::EndTheTurn, vec![], ObjectId(999), PlayerId(0));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 724.1d: the turn ended during combat — the restriction must expire.
+        assert!(
+            state.current_combat_attacker_restriction.is_none(),
+            "combat attacker restriction must be cleared when the turn ends during combat"
+        );
+        assert!(
+            state.current_combat_attacker_restriction_source.is_none(),
+            "combat attacker restriction source must be cleared when the turn ends during combat"
+        );
+        // Sanity: we still reached cleanup.
+        assert_eq!(
+            state.phase,
+            Phase::Cleanup,
+            "should skip to the cleanup step"
         );
     }
 }
