@@ -7647,6 +7647,7 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 damage_source: None,
+                excess: _,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
@@ -7706,6 +7707,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }
             }
         }
@@ -7863,6 +7865,7 @@ pub(super) fn parse_imperative_family_ast(
                 vec![]
             },
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -7872,6 +7875,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::Upkeep,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     // CR 500.8 + CR 513.1: "there is an additional end step after this step"
@@ -7884,6 +7888,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::End,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
 
@@ -10506,7 +10511,18 @@ pub(super) fn parse_zone_counter_ast(
                 _remainder,
                 multi_target,
             )) => {
-                if is_all && multi_target.is_none() {
+                // CR 608.2c: A `ParentTarget` placement subject ("each of them")
+                // is an anaphor to a bounded set of chosen objects, not a
+                // battlefield-wide type scan. The `PutCounterAll` resolver
+                // matches its filter against every battlefield object and cannot
+                // resolve a bare `ParentTarget` (it has no target slot to bind),
+                // so route the anaphor to `PutCounter`, whose
+                // `resolve_defined_or_targets` binds `ability.targets` (the
+                // chosen creatures). Typed mass placements ("on each creature you
+                // control") and tracked-set demonstratives still take the
+                // `PutCounterAll` path.
+                if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
+                {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),

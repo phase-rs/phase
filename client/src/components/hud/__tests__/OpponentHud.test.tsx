@@ -210,6 +210,18 @@ describe("OpponentHud", () => {
     expect(usePreferencesStore.getState().opponentHudDensity).toBe("comfortable");
   });
 
+  it("forces compact opponent tabs in split overview without changing the saved density", () => {
+    usePreferencesStore.setState({ opponentHudDensity: "comfortable" });
+
+    render(<OpponentHud splitOverview />);
+
+    expect(screen.queryByRole("button", { name: /compact opponent hud/i })).toBeNull();
+    expect(screen.queryByText(/hand/i)).toBeNull();
+    expect(screen.queryByText(/creatures/i)).toBeNull();
+    expect(screen.queryByText(/lands/i)).toBeNull();
+    expect(usePreferencesStore.getState().opponentHudDensity).toBe("comfortable");
+  });
+
   it("keeps Follow enabled when browsing opponents on my turn", async () => {
     usePreferencesStore.setState({ followActiveOpponent: true });
     useGameStore.setState({

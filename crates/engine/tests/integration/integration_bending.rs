@@ -235,6 +235,7 @@ fn test_mana_payment_finalization() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![],
         spell_id,

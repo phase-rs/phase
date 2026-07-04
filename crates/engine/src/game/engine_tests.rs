@@ -95,6 +95,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             damage_source: None,
+            excess: None,
         },
         vec![],
         source_id,
@@ -334,6 +335,7 @@ fn make_damage_ability(amount: i32, cost: Option<AbilityCost>) -> AbilityDefinit
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     );
     if let Some(c) = cost {

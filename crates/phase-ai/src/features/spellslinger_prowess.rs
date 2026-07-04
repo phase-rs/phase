@@ -421,6 +421,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -440,6 +442,7 @@ mod tests {
                 ..TypedFilter::default()
             }),
             damage_source: None,
+            excess: None,
         }
     }
 

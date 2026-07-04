@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
@@ -106,6 +106,38 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   }
 
   const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
+  const headerHeight = isCompactHeight
+    ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
+    : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";
+  const headerInlinePadding = "clamp(3px, calc(var(--art-crop-w) * 0.045), 6px)";
+  const headerStyle = {
+    height: headerHeight,
+    paddingInline: headerInlinePadding,
+  } as CSSProperties;
+  const headerTextStyle = {
+    fontSize: isCompactHeight
+      ? "clamp(6.5px, calc(var(--art-crop-h) * 0.105), 8px)"
+      : "clamp(6.5px, calc(var(--art-crop-h) * 0.105), 11.5px)",
+  } as CSSProperties;
+  const counterStyle = {
+    width: "clamp(13px, calc(var(--art-crop-w) * 0.24), 20px)",
+    height: "clamp(13px, calc(var(--art-crop-w) * 0.24), 20px)",
+    fontSize: "clamp(6.5px, calc(var(--art-crop-h) * 0.085), 9px)",
+  } as CSSProperties;
+  const ptOuterStyle = {
+    padding: "clamp(1px, calc(var(--art-crop-h) * 0.018), 2px)",
+  } as CSSProperties;
+  const ptInnerStyle = {
+    minWidth: "clamp(1.55rem, calc(var(--art-crop-w) * 0.42), 2.75rem)",
+    paddingInline: "clamp(4px, calc(var(--art-crop-w) * 0.075), 8px)",
+    paddingBlock: "clamp(0px, calc(var(--art-crop-h) * 0.012), 1px)",
+  } as CSSProperties;
+  const ptNumStyle = {
+    fontSize: "clamp(9px, calc(var(--art-crop-h) * 0.145), 14px)",
+  } as CSSProperties;
+  const ptSlashStyle = {
+    fontSize: "clamp(8px, calc(var(--art-crop-h) * 0.13), 13px)",
+  } as CSSProperties;
 
   return (
     <div className="relative select-none drop-shadow-[0_4px_6px_rgba(0,0,0,0.6)]" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
@@ -119,11 +151,20 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           style={{ background: frameGradient }}
         >
           {/* Header Light Reflection Overlay */}
-          <div className="absolute inset-x-0 top-0 h-[20px] bg-gradient-to-b from-white/40 to-transparent pointer-events-none z-10" />
+          <div
+            className="absolute inset-x-0 top-0 bg-gradient-to-b from-white/40 to-transparent pointer-events-none z-10"
+            style={{ height: headerHeight }}
+          />
 
           {/* 3. HEADER AREA: Uses isToken to make the background slightly translucent for tokens */}
-          <div className={`${isCompactHeight ? "h-[12px] px-1" : "h-[20px] px-1.5"} w-full flex items-center shrink-0 z-10 border-b border-black/40 shadow-[0_1px_2px_rgba(0,0,0,0.4)] ${isToken ? 'bg-black/10' : ''}`}>
-            <span className={`${isCompactHeight ? "text-[8px]" : "text-[11.5px]"} font-extrabold tracking-tight leading-none truncate mt-[1px] ${lightText ? 'text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]' : isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}>
+          <div
+            className={`w-full flex items-center shrink-0 z-10 border-b border-black/40 shadow-[0_1px_2px_rgba(0,0,0,0.4)] ${isToken ? 'bg-black/10' : ''}`}
+            style={headerStyle}
+          >
+            <span
+              className={`font-extrabold tracking-tight leading-none truncate mt-[1px] ${lightText ? 'text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]' : isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}
+              style={headerTextStyle}
+            >
               {cardName}
             </span>
           </div>
@@ -151,7 +192,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                     <div
                       key={type}
                       title={formatCounterTooltip(type, count)}
-                      className={`rounded-full w-5 h-5 flex items-center justify-center text-[9px] font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                      style={counterStyle}
                     >
                       {count}
                     </div>
@@ -199,15 +241,30 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
       {/* 6. P/T BOX */}
       {ptDisplay && (
         <div className="absolute -bottom-[3px] -right-[3px] z-20">
-          <div className="rounded-[6px] bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">
-            <div className="bg-[#f0f2f5] rounded-[6px] px-2 py-[1px] min-w-[2.75rem] flex justify-center items-baseline shadow-[inset_0_2px_4px_rgba(0,0,0,0.4),inset_0_1px_2px_rgba(0,0,0,0.6),0_1px_0_rgba(255,255,255,0.4)]">
-              <span className={`font-serif font-black leading-none ${ptNumClass} ${PT_COLORS[ptDisplay.powerColor] || "text-[#111]"}`}>
+          <div
+            className="rounded-[6px] bg-gradient-to-b from-[#e2e4e6] to-[#888c91] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80"
+            style={ptOuterStyle}
+          >
+            <div
+              className="bg-[#f0f2f5] rounded-[6px] flex justify-center items-baseline shadow-[inset_0_2px_4px_rgba(0,0,0,0.4),inset_0_1px_2px_rgba(0,0,0,0.6),0_1px_0_rgba(255,255,255,0.4)]"
+              style={ptInnerStyle}
+            >
+              <span
+                className={`font-serif font-black leading-none ${ptNumClass} ${PT_COLORS[ptDisplay.powerColor] || "text-[#111]"}`}
+                style={ptNumStyle}
+              >
                 {ptDisplay.power}
               </span>
-              <span className={`font-serif font-bold text-[#666] leading-none mx-[1px] ${ptSlashClass}`}>
+              <span
+                className={`font-serif font-bold text-[#666] leading-none mx-[1px] ${ptSlashClass}`}
+                style={ptSlashStyle}
+              >
                 /
               </span>
-              <span className={`font-serif font-black leading-none ${ptNumClass} ${PT_COLORS[ptDisplay.toughnessColor] || "text-[#111]"}`}>
+              <span
+                className={`font-serif font-black leading-none ${ptNumClass} ${PT_COLORS[ptDisplay.toughnessColor] || "text-[#111]"}`}
+                style={ptNumStyle}
+              >
                 {ptDisplay.toughness}
               </span>
             </div>

@@ -48,6 +48,7 @@ fn shelob_creates_food_copy_token_via_real_damage_pipeline() {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(victim)],
         spider,

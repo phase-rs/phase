@@ -1247,6 +1247,18 @@ pub enum ManaCost {
     /// The card's own mana value (CR 202.3), as generic mana only — used for
     /// "encore {X}, where X is its mana value" (Sliver Gravemother class).
     SelfManaValue,
+    /// The card's own mana cost reduced by `reduction` generic mana — used for
+    /// granted alt-cost keywords whose cost is "its mana cost reduced by {N}"
+    /// (Dream Devourer foretell = MV−2, Aminatou miracle = MV−4).
+    ///
+    /// INVARIANT: this is a pre-resolution placeholder like `SelfManaCost` /
+    /// `SelfManaValue`; it MUST be concretized by `resolve_keyword_mana_cost`
+    /// (game/keywords.rs) into a concrete `Cost` before any arithmetic path
+    /// (`plus` / `scaled` / `concretize_x`) — it never reaches them unresolved.
+    /// CR 601.2f: reduction floors at {0} and only the generic component is reduced.
+    SelfManaCostReduced {
+        reduction: u32,
+    },
 }
 
 impl ManaCost {
@@ -1263,7 +1275,22 @@ impl ManaCost {
         match self {
             ManaCost::NoCost => true,
             ManaCost::Cost { shards, generic } => shards.is_empty() && *generic == 0,
-            ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
+        }
+    }
+
+    /// CR 601.2f: reduce ONLY the generic component, saturating at 0; colored/
+    /// hybrid/X pips (shards) untouched. An alternative cost's mana component
+    /// can't be reduced below {0}.
+    pub fn reduced_by_generic(&self, reduction: u32) -> ManaCost {
+        match self {
+            ManaCost::Cost { shards, generic } => ManaCost::Cost {
+                shards: shards.clone(),
+                generic: generic.saturating_sub(reduction),
+            },
+            other => other.clone(),
         }
     }
 
@@ -1280,7 +1307,10 @@ impl ManaCost {
     /// CR 202.3f: For hybrid symbols, use the largest component.
     pub fn mana_value(&self) -> u32 {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
             ManaCost::Cost { shards, generic } => {
                 let shard_total: u32 = shards.iter().map(|s| s.mana_value_contribution()).sum();
                 shard_total + generic
@@ -1297,7 +1327,10 @@ impl ManaCost {
     /// Gutsy Explorer).
     pub fn has_x(&self) -> bool {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
             ManaCost::Cost { shards, .. } => shards.iter().any(|s| matches!(s, ManaCostShard::X)),
         }
     }
@@ -1326,7 +1359,10 @@ impl ManaCost {
                     .count();
                 i32::try_from(count).unwrap_or(i32::MAX)
             }
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
         }
     }
 
