@@ -21319,3 +21319,53 @@ fn set_tap_state_lift_skips_reflexive_and_targeted_taps() {
         other => panic!("Howl of the Hunt must lower a SetTapState untap, got {other:?}"),
     }
 }
+
+/// CR 608.2d + CR 603.2 (issue #4963 review): Bow to My Command's
+/// "they may tap any number of untapped creatures they control ..." threads the
+/// triggering player out as the optional actor (`player_scope: TriggeringPlayer`)
+/// so the optional prompt AND the "creatures they control" choice resolve to the
+/// triggering opponent named by "they", not the scheme's controller. Unlike
+/// Charismatic Conqueror's "that permanent" self-tap, this tap keeps its OWN
+/// target set — it must NOT lift to `TriggeringSource`.
+#[test]
+fn they_may_tap_targeted_threads_triggering_player_scope() {
+    fn find_tap_ability(a: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(a.effect.as_ref(), Effect::SetTapState { .. }) {
+            return Some(a);
+        }
+        a.sub_ability.as_deref().and_then(find_tap_ability)
+    }
+    fn chain_has_triggering_player_scope(a: &AbilityDefinition) -> bool {
+        a.player_scope == Some(PlayerFilter::TriggeringPlayer)
+            || a.sub_ability
+                .as_deref()
+                .is_some_and(chain_has_triggering_player_scope)
+    }
+
+    let bow = parse_trigger_line(
+        "At the beginning of each opponent's end step, they may tap any number of untapped creatures they control with total power 8 or greater.",
+        "Bow to My Command",
+    );
+    let execute = bow
+        .execute
+        .as_deref()
+        .expect("Bow to My Command trigger must have an execute body");
+    let tap = find_tap_ability(execute).expect("Bow to My Command must lower a SetTapState tap");
+    match tap.effect.as_ref() {
+        Effect::SetTapState { target, state, .. } => {
+            assert_eq!(*state, TapStateChange::Tap);
+            assert_ne!(
+                *target,
+                TargetFilter::TriggeringSource,
+                "Bow's tap names its own targets; it must NOT lift to TriggeringSource, \
+                 got {target:?}"
+            );
+        }
+        other => panic!("expected SetTapState, got {other:?}"),
+    }
+    assert!(
+        chain_has_triggering_player_scope(execute),
+        "the 'they may tap <targets>' optional actor must thread as \
+         player_scope: TriggeringPlayer, got execute={execute:?}"
+    );
+}

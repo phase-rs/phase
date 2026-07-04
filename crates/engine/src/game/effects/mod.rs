@@ -4677,9 +4677,16 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             return player;
         }
     }
-    // CR 608.2d: "they may tap that permanent" on zone-change observer
-    // triggers (Charismatic Conqueror) — the entering object's controller
-    // decides whether to tap it, not the ability's controller.
+    // CR 608.2d + CR 603.10a: "they may tap that permanent" on zone-change
+    // observer triggers (Charismatic Conqueror) — the entering object's
+    // controller decides whether to tap it, not the ability's controller.
+    // Resolve the actor from the EVENT-TIME controller recorded on the trigger's
+    // `ZoneChangeRecord` (`TriggeringPlayer` → `record.controller`), NOT the
+    // object's live controller: if the entering permanent changes controllers
+    // between the ETB event and this trigger resolving, "they" is still the
+    // player who controlled it when it entered. `TriggeringSourceController`
+    // (live/LKI controller) is only the fallback for non-zone-change events that
+    // reach this shape without a recorded triggering player.
     if let Effect::SetTapState {
         target: TargetFilter::TriggeringSource,
         ..
@@ -4688,8 +4695,15 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
         if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
             state,
             ability,
-            &TargetFilter::TriggeringSourceController,
-        ) {
+            &TargetFilter::TriggeringPlayer,
+        )
+        .or_else(|| {
+            crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::TriggeringSourceController,
+            )
+        }) {
             return player;
         }
     }

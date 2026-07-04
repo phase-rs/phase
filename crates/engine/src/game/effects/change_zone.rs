@@ -5608,6 +5608,16 @@ mod tests {
     /// Returns the state paused at the `OptionalEffectChoice`, plus the
     /// conqueror and the entering permanent ids.
     fn fire_charismatic_conqueror_optional_tap() -> (GameState, ObjectId, ObjectId) {
+        fire_charismatic_conqueror_optional_tap_with(|_, _| {})
+    }
+
+    /// Like `fire_charismatic_conqueror_optional_tap`, but runs `before_resolve`
+    /// with the entering permanent id AFTER the trigger has been placed on the
+    /// stack (post `process_triggers`) and BEFORE it resolves — the seam a
+    /// control-change-before-resolution regression needs.
+    fn fire_charismatic_conqueror_optional_tap_with(
+        before_resolve: impl FnOnce(&mut GameState, ObjectId),
+    ) -> (GameState, ObjectId, ObjectId) {
         use crate::game::triggers::process_triggers;
         use crate::parser::oracle_trigger::parse_trigger_line;
 
@@ -5669,6 +5679,8 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         process_triggers(&mut state, &events);
 
+        before_resolve(&mut state, opp_creature);
+
         let mut resolve_events = Vec::new();
         crate::game::stack::resolve_top(&mut state, &mut resolve_events);
 
@@ -5687,6 +5699,32 @@ mod tests {
                     *player,
                     PlayerId(1),
                     "the entering permanent's controller (opponent) must decide the optional tap"
+                );
+            }
+            other => panic!("expected an OptionalEffectChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 603.10a (issue #4963 review): if the entering permanent CHANGES
+    /// controllers after it entered but before the trigger resolves, "they" is
+    /// still the player who controlled it at the zone-change event — read from
+    /// the `ZoneChangeRecord` — not whoever controls it live at resolution. Here
+    /// the entering creature is handed to `PlayerId(0)` (Charismatic Conqueror's
+    /// controller) after the trigger is on the stack; the optional tap must still
+    /// be offered to `PlayerId(1)`, the event-time controller.
+    #[test]
+    fn charismatic_conqueror_optional_tap_uses_event_time_controller() {
+        let (state, _conqueror, _opp) =
+            fire_charismatic_conqueror_optional_tap_with(|state, opp| {
+                state.objects.get_mut(&opp).unwrap().controller = PlayerId(0);
+            });
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the event-time controller (recorded on the ZoneChangeRecord) must decide \
+                     the optional tap, even after the permanent changed controllers"
                 );
             }
             other => panic!("expected an OptionalEffectChoice prompt, got {other:?}"),

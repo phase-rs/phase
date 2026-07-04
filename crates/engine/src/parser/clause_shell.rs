@@ -287,16 +287,23 @@ pub(crate) fn peel_optional_slots(
     if let Some((scope, player_scope, rest)) = try_peel_opponent_may_prefix(text) {
         return (true, scope, player_scope, rest);
     }
-    // CR 608.2d: "they may tap …" third-person optional tap on a triggered
-    // ability whose actor is the trigger's subject player, not the ability's
-    // controller (Charismatic Conqueror: the entering permanent's controller may
-    // tap it; Bow to My Command: your opponents may tap their own creatures).
-    // Peel ONLY the "they may " optional marker and leave the "tap …" verb for
-    // the effect parser — consuming the verb would strand a bare noun phrase.
-    // Scoped to a following "tap" so unrelated "they may play/cast/…" grants
-    // (Gonti and siblings) keep their specialized routes. The prompt player is
-    // resolved at runtime by `optional_prompt_player` for
-    // `SetTapState { TriggeringSource }` effects.
+    // CR 608.2d + CR 603.2: "they may tap …" third-person optional tap on a
+    // triggered ability whose actor is the trigger's subject player, not the
+    // ability's controller (Charismatic Conqueror: the entering permanent's
+    // controller may tap it; Bow to My Command: the triggering opponent may tap
+    // their own creatures). Peel ONLY the "they may " optional marker and leave
+    // the "tap …" verb for the effect parser — consuming the verb would strand a
+    // bare noun phrase. Scoped to a following "tap" so unrelated "they may
+    // play/cast/…" grants (Gonti and siblings) keep their specialized routes.
+    //
+    // Thread "they" out as `PlayerFilter::TriggeringPlayer` so the optional
+    // prompt (and any "creatures they control" target choice) resolves to the
+    // triggering player — NOT the ability's controller. Without this, a Bow to
+    // My Command-style tap of "creatures they control" would fall back to the
+    // scheme's controller. For the "that permanent" anaphor class (Charismatic
+    // Conqueror) the tap independently lifts to `SetTapState { TriggeringSource }`
+    // and `optional_prompt_player` resolves the same triggering player from the
+    // zone-change record, so the two paths agree.
     let lower = text.to_lowercase();
     if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
         value(
@@ -305,7 +312,22 @@ pub(crate) fn peel_optional_slots(
         )
         .parse(i)
     }) {
-        return (true, None, None, rest.to_string());
+        // CR 603.2: "tap that permanent" / "tap it" taps the trigger's OWN source
+        // (Charismatic Conqueror, Dragon Turtle). The parser lifts that anaphor to
+        // `SetTapState { TriggeringSource }` and `optional_prompt_player` already
+        // resolves its actor from the zone-change record, so it must NOT also carry
+        // a controller-rebinding `player_scope` — that would leak the triggering
+        // player onto the following "if they don't, you …" tail (the token would be
+        // created under the wrong player). Only a tap that names its OWN targets
+        // ("any number of untapped creatures they control" — Bow to My Command)
+        // threads the triggering player so its prompt and "creatures they control"
+        // choice resolve to "they", not the ability's (scheme's) controller.
+        let rest_lower = rest.to_lowercase();
+        let taps_trigger_source_anaphor = ["tap that ", "tap it", "tap those ", "tap them"]
+            .iter()
+            .any(|prefix| rest_lower.starts_with(prefix));
+        let player_scope = (!taps_trigger_source_anaphor).then_some(PlayerFilter::TriggeringPlayer);
+        return (true, None, player_scope, rest.to_string());
     }
     if let Some(rest) = peel_you_may_prefix(text, YouMayBlocklist::ChunkLoop) {
         return (true, None, None, rest);
@@ -886,6 +908,42 @@ mod tests {
             peel_optional_slots("you may cast the exiled card without paying its mana cost");
         assert!(is_optional);
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
+    }
+
+    /// CR 608.2d + CR 603.2 (issue #4963 review): "they may tap <own targets>"
+    /// (Bow to My Command) threads the triggering player out as the optional
+    /// actor so the prompt and the "creatures they control" choice resolve to
+    /// "they", not the ability's (scheme's) controller. The "tap" verb is kept.
+    #[test]
+    fn peel_optional_slots_they_may_tap_targets_threads_triggering_player() {
+        let (is_optional, opponent_scope, player_scope, rest) = peel_optional_slots(
+            "they may tap any number of untapped creatures they control with total power 8 or greater",
+        );
+        assert!(is_optional);
+        assert!(opponent_scope.is_none());
+        assert_eq!(player_scope, Some(PlayerFilter::TriggeringPlayer));
+        assert_eq!(
+            rest,
+            "tap any number of untapped creatures they control with total power 8 or greater"
+        );
+    }
+
+    /// CR 603.2 (issue #4963 review): the "they may tap that permanent" / "tap
+    /// it" anaphor taps the trigger's OWN source (Charismatic Conqueror). It
+    /// lifts to `SetTapState { TriggeringSource }` and its prompt resolves from
+    /// the zone-change record, so it must NOT thread a controller-rebinding
+    /// `player_scope` (that would leak onto the "if they don't, you …" tail).
+    #[test]
+    fn peel_optional_slots_they_may_tap_that_permanent_keeps_no_player_scope() {
+        let (is_optional, opponent_scope, player_scope, rest) =
+            peel_optional_slots("they may tap that permanent");
+        assert!(is_optional);
+        assert!(opponent_scope.is_none());
+        assert!(
+            player_scope.is_none(),
+            "the 'that permanent' self-tap anaphor must not carry a player scope, got {player_scope:?}"
+        );
+        assert_eq!(rest, "tap that permanent");
     }
 
     #[test]
