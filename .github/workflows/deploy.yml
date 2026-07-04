@@ -368,6 +368,9 @@ jobs:
           # cloud sync stays disabled and the app falls back to file backup.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # First-party telemetry ingest (lobby Worker → Analytics Engine, see
+          # docs/telemetry-proposal.md). Unset would compile telemetry to a no-op.
+          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
         run: |
           cd client
           pnpm install --frozen-lockfile

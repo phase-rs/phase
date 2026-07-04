@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4786
-- **Total card appearances across root causes:** 4820 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4785
+- **Total card appearances across root causes:** 4819 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -30,7 +30,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 16 | Keyword payload / multiplicity / mis-tokenization | 84 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
-| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 71 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
+| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 67 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
@@ -40,7 +40,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 17 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
-| 30 | Token/named-card name corrupted by normalization or overrun | 13 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
+| 30 | Token/named-card name corrupted by normalization or overrun | 12 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 6 | manual triage |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
@@ -4621,7 +4621,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (71 cards)
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (67 cards)
 
 **Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
 
@@ -4636,7 +4636,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Courtly Provocateur
 - Creeping Tar Pit
 - Custodi Soulcaller
-- Davriel's Withering
 - Drop Tower
 - Edifice of Authority
 - Effluence Devourer
@@ -4649,7 +4648,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Grow Old Together
 - Hardened Bonds
 - Homarid Warrior
-- Hypnotic Pattern
 - Incessant Provocation
 - Indris, the Hydrostatic Surge
 - Inspiring Easel
@@ -4680,7 +4678,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ravenous Pursuit
 - Reckless Ringleader
 - Sap Vitality
-- Scion of Shiv
 - Scrutiny of the Guildpact
 - Shadow of the Enemy
 - Shattered Seraph
@@ -4698,7 +4695,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Undersimplify
 - Unsavory Kitchen
 - Valiant Farewell
-- Wizened Githzerai
 - Wyll of the Fey Pact
 
 </details>
@@ -5152,7 +5148,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (13 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (12 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5160,7 +5156,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Deathpact Angel
 - Dragonstorm Forecaster
 - Hecatomb
 - High Marshal Arguel

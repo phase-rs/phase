@@ -228,5 +228,10 @@
     "settings": "Impostazioni",
     "languageSettings": "Lingua ({{lang}}) — apri impostazioni",
     "languageTitle": "Lingua: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Qualcosa è andato storto",
+    "body": "L'app ha riscontrato un errore imprevisto e non può continuare in questa schermata. Ricaricare di solito risolve il problema.",
+    "reload": "Ricarica"
   }
 }

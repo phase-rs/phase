@@ -53,6 +53,9 @@ export default defineConfig({
       process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
     ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __IS_RELEASE_BUILD__: JSON.stringify(false),
+    // Empty ⇒ telemetry is build-disabled in tests (no network egress).
+    __TELEMETRY_URL__: JSON.stringify(""),
   },
   test: {
     environment: "happy-dom",
