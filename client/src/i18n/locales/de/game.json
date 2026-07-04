@@ -1699,6 +1699,7 @@
       "numberRange": "Wähle eine Zahl",
       "labeled": "Triff eine Wahl",
       "keyword": "Wähle eine Fähigkeit",
+      "counterKind": "Wähle eine Marke",
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",

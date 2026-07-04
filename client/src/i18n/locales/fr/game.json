@@ -1699,6 +1699,7 @@
       "numberRange": "Choisir un nombre",
       "labeled": "Faire un choix",
       "keyword": "Choisir une capacité",
+      "counterKind": "Choisir un marqueur",
       "fallback": "Faire un choix"
     },
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",

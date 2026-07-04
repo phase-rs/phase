@@ -498,6 +498,16 @@ pub(super) fn handle_replacement_choice(
                         "handle_replacement_choice: BeginPhase is a mandatory-skip replacement and should never surface as a choice"
                     );
                 }
+                // CR 701.31 + CR 901.9c: Planeswalk is a mandatory full-replacement
+                // (Fixed Point in Time). A single mandatory candidate is applied
+                // inline by `pipeline_loop` and never surfaces a CR 616.1 choice, so
+                // this arm is unreachable in practice.
+                ProposedEvent::Planeswalk { .. } => {
+                    debug_assert!(
+                        false,
+                        "handle_replacement_choice: Planeswalk is a mandatory full-replacement and should never surface as a choice"
+                    );
+                }
                 // CR 701.8a + CR 614: Destroy accepted after replacement choice —
                 // delegate to the shared helper so the inner ZoneChange (battlefield
                 // → graveyard) re-enters the replacement pipeline. Leaves-the-

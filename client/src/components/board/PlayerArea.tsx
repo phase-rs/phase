@@ -314,7 +314,13 @@ export function PlayerArea({
       labelKey: "zone.commandZone",
       editClass: "ring-2 ring-amber-400/70 bg-amber-400/10",
       badgeClass: "bg-amber-400",
-      content: <CommandDock playerId={playerId} isMirrored={isMirrored} />,
+      content: (
+        <CommandDock
+          playerId={playerId}
+          isMirrored={isMirrored}
+          splitOverview={splitOverview}
+        />
+      ),
     },
   };
 
