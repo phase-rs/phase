@@ -39,7 +39,7 @@ pub use draft_wire_guard::{
     guard_reconnect_draft,
 };
 pub use emote_guard::guard_emote;
-pub use filter::filter_state_for_player;
+pub use filter::{filter_events_for_player, filter_state_for_player};
 pub use game_reconnect_guard::guard_game_reconnect;
 pub use game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,

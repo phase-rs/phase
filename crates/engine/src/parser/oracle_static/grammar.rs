@@ -6,8 +6,8 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerFilter;
-use nom::character::complete::{digit1, one_of};
-use nom::combinator::{all_consuming, opt, recognize};
+use nom::character::complete::{alphanumeric1, digit1, one_of};
+use nom::combinator::{all_consuming, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
@@ -964,20 +964,57 @@ pub(crate) fn parse_variable_pt_pattern(
 }
 
 pub(crate) fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
+    // CR 613.4c: Layer 7c additive P/T grant — "gets/has +N/+M". The copula
+    // ("has"/"have") is accepted alongside "gets"/"get" so equip/anthem lines
+    // that phrase the grant as "Equipped creature has +2/+2 and has …"
+    // (Tinfoil Helm) resolve to the same additive modification as "gets +2/+2".
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
             tag::<_, _, OracleError<'_>>("get "),
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
         ))
         .parse(input)?;
+        // sign-required: "protection"/"flying"/etc. after "has " fail here.
         let (rest, pt) = nom_primitives::parse_pt_modifier.parse(rest)?;
+        // CR 122.1a + CR 613.4c: a "+N/+M counter" is a counter placement, NOT a
+        // static P/T grant — exclude it so counter-placement lines (e.g. Melira,
+        // Sylvok Outcast "can't have -1/-1 counters put on them") do not misfire
+        // into an anthem. This counter-suffix guard is the load-bearing exclusion:
+        // `scan_at_word_boundaries` retries at every word, so a front "can't have"
+        // lookahead would be positionally ineffective; the suffix guard here is
+        // what actually rejects the counter-placement class.
+        peek(not(preceded(
+            space0,
+            alt((tag("counters"), tag("counter"))),
+        )))
+        .parse(rest)?;
         Ok((rest, pt))
     })
 }
 
-pub(crate) fn parse_legendary_supertype_grant(lower: &str) -> Option<()> {
+/// CR 205.4a + CR 205.4b: recognize a "... is <supertype>" grant riding on an
+/// attached-subject predicate body and return the granted supertype. Supertypes
+/// are additive (CR 205.4b) and are never card types. Generalizes the former
+/// legendary-only recognizer to every CR 205.4a supertype via
+/// [`nom_target::parse_supertype_word`] (Legendary/Basic/Snow), so Glittering
+/// Frost ("Enchanted land is snow.") and In Bolas's Clutches ("Enchanted
+/// permanent is legendary.") both flow through this ONE seam:
+/// `parse_continuous_modifications` pushes `AddSupertype { supertype }` for the
+/// returned supertype.
+///
+/// Scans at word boundaries so the grant is still found when it is one conjunct
+/// of a compound aura predicate ("... is legendary, gets +1/+1, and has
+/// flying"). `parse_supertype_word` consumes no trailing boundary by contract,
+/// so the `peek(not(alphanumeric1))` guard rejects a longer word that merely
+/// starts with a supertype (e.g. "snow" in "snowman").
+pub(crate) fn parse_supertype_grant(lower: &str) -> Option<Supertype> {
     nom_primitives::scan_at_word_boundaries(lower, |input| {
-        value((), tag::<_, _, OracleError<'_>>("is legendary")).parse(input)
+        let (rest, _) = tag::<_, _, OracleError<'_>>("is ").parse(input)?;
+        let (rest, supertype) = nom_target::parse_supertype_word(rest)?;
+        peek(not(alphanumeric1::<_, OracleError<'_>>)).parse(rest)?;
+        Ok((rest, supertype))
     })
 }
 

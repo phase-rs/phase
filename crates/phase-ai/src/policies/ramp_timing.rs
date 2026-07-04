@@ -374,6 +374,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = RampTimingPolicy.verdict(&ctx);
@@ -427,6 +428,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = RampTimingPolicy.verdict(&ctx);
@@ -464,6 +466,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = RampTimingPolicy.verdict(&ctx);
@@ -507,6 +510,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = RampTimingPolicy.verdict(&ctx);

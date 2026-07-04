@@ -92,16 +92,21 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
-/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow")
-/// without consuming any trailing boundary. Shared building block for both the
-/// adjective-prefix form (`parse_supertype_prefix`, word + space) and trailing
-/// relative-clause forms ("that aren't legendary", where the word is at
-/// end-of-string). Callers that need a boundary apply their own check.
+/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow",
+/// "world", "ongoing") without consuming any trailing boundary. Shared building
+/// block for both the adjective-prefix form (`parse_supertype_prefix`, word +
+/// space) and trailing relative-clause forms ("that aren't legendary", where
+/// the word is at end-of-string). Callers that need a boundary apply their own
+/// check. Covers the full CR 205.4a set the engine `Supertype` enum models
+/// (Host is set-supplemental / not CR 205.4a and is excluded here). None of the
+/// five words is a prefix of another, so `alt` ordering is boundary-safe.
 pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
     alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
+        value(Supertype::World, tag("world")),
+        value(Supertype::Ongoing, tag("ongoing")),
     ))
     .parse(input)
 }
@@ -852,6 +857,30 @@ mod tests {
             }
             _ => panic!("expected Typed filter"),
         }
+    }
+
+    /// CR 205.4a: the shared supertype-word recognizer is the building block for
+    /// every CR 205.4a supertype the engine `Supertype` enum models. World and
+    /// Ongoing were previously missing, so the "general" supertype-grant path
+    /// silently dropped them; this pins that the recognizer now maps all five
+    /// (Host is set-supplemental and intentionally excluded). None of the five
+    /// words is a prefix of another, so the `alt` order is boundary-safe.
+    #[test]
+    fn test_parse_supertype_word_covers_world_and_ongoing() {
+        assert_eq!(parse_supertype_word("world").unwrap().1, Supertype::World);
+        assert_eq!(
+            parse_supertype_word("ongoing").unwrap().1,
+            Supertype::Ongoing
+        );
+        // pre-existing arms remain recognized (no regression).
+        assert_eq!(
+            parse_supertype_word("legendary").unwrap().1,
+            Supertype::Legendary
+        );
+        assert_eq!(parse_supertype_word("basic").unwrap().1, Supertype::Basic);
+        assert_eq!(parse_supertype_word("snow").unwrap().1, Supertype::Snow);
+        // Host is NOT a CR 205.4a word here, so the recognizer must reject it.
+        assert!(parse_supertype_word("host").is_err());
     }
 
     #[test]
