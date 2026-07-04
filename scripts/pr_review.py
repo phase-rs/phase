@@ -1756,6 +1756,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "reviewed_request_changes",
         "blocked",
     }
+    local_hold = local_event_type == "held" or local_outcome in HOLD_STATES
+    local_block = local_block_event or local_block_outcome
 
     if pr.get("state") == "MERGED":
         action = "merged_prune"
@@ -1783,13 +1785,16 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif (local_event_type == "held" or local_outcome in HOLD_STATES) and author_followup_after_local_event:
+    elif local_hold and author_followup_after_local_event:
         action = "review"
         reason = "author_followup_after_local_hold"
-    elif local_event_type == "held" or local_outcome in HOLD_STATES:
+    elif local_hold and (packet.get("ci") or {}).get("state") != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
-    elif local_block_event or local_block_outcome:
+    elif local_block and author_followup_after_local_event:
+        action = "review"
+        reason = "author_followup_after_local_block"
+    elif local_block:
         action = "blocked"
         reason = "local_block_current_head"
     elif (packet.get("proof") or {}).get("proof_gap"):
@@ -1921,6 +1926,16 @@ def make_packet(
         )
     }
     proof = proof_profile(pr, contributor_summary, gittensor)
+    if (
+        files
+        and classification.get("surface") == "unknown"
+        and all(path.startswith("docs/") for path in files)
+    ):
+        # Docs-only maintenance has no runtime or parser boundary to prove. Keep
+        # the risk flags visible for reviewer context, but do not turn contributor
+        # scrutiny into a queue-safety proof blocker.
+        proof["proof_required"] = False
+        proof["proof_gap"] = False
     packet = {
         "schema_version": 1,
         "completeness": "complete" if mode == "full" else "triage",
