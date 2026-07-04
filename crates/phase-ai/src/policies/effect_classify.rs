@@ -233,6 +233,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterKind { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
         | Effect::ChooseFromZone { .. }
@@ -316,6 +317,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ProliferateTarget { .. }
         | Effect::PumpAll { .. }
         | Effect::PutAtLibraryPosition { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::PutOnTopOrBottom { .. }
         | Effect::PutSticker { .. }
         | Effect::ReassembleContraption { .. }
