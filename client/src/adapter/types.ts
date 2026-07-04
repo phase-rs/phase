@@ -1364,6 +1364,12 @@ export type WaitingFor =
       actor:
         | { type: "SubjectActs" }
         | { type: "Delegated"; data: PlayerId };
+      // CR 701.38b: For object-pool votes (Council's Judgment, Prime
+      // Minister's Cabinet Room) the candidate battlefield objects, parallel
+      // to `options`/`option_labels`. Empty (`[]`) for named votes. When
+      // non-empty, the modal dispatches `SubmitVoteCandidate { candidate_index }`
+      // (index into this array) instead of `ChooseOption`.
+      candidate_objects: ObjectId[];
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
@@ -1632,6 +1638,9 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  // CR 701.38b: Cast a vote for one object candidate in an object-pool vote.
+  // `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`.
+  | { type: "SubmitVoteCandidate"; data: { candidate_index: number } }
   | { type: "SubmitSpellbookDraft"; data: { card: string } }
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }

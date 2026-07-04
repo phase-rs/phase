@@ -215,6 +215,37 @@ pub fn effective_web_slinging_cost(
         })
 }
 
+/// CR 702.62a: Effective Suspend `[cost]` for an object, honoring off-zone reads
+/// (a card in hand exposes its printed Suspend via `base_keywords`). Mirrors
+/// `effective_sneak_cost`.
+pub fn effective_suspend_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    match effective_keyword_for_object(state, object_id, KeywordKind::Suspend)? {
+        Keyword::Suspend { cost, .. } => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
+/// CR 118.9 + CR 702.62a: Single authority for
+/// `AbilityCost::KeywordCostOfCastSpell`. Maps a keyword kind whose alternative
+/// cost is a single `ManaCost` to that cost on `object_id`. Returns `None` for
+/// kinds whose cost is not a single `ManaCost` (Flashback non-mana, Escape
+/// compound) — the parser never emits those, so a `None` here is a defensive
+/// refusal that surfaces a misparse rather than silently miscosting.
+pub fn effective_keyword_mana_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: KeywordKind,
+) -> Option<ManaCost> {
+    match keyword {
+        KeywordKind::Suspend => effective_suspend_cost(state, object_id),
+        KeywordKind::Sneak => effective_sneak_cost(state, object_id),
+        KeywordKind::Mayhem => effective_mayhem_cost(state, object_id),
+        KeywordKind::Harmonize => effective_harmonize_cost(state, object_id),
+        KeywordKind::Disturb => effective_disturb_cost(state, object_id),
+        _ => None,
+    }
+}
+
 fn effective_keyword_for_object(
     state: &GameState,
     object_id: ObjectId,
@@ -2337,6 +2368,50 @@ mod tests {
                     } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
                 ))),
             "Ninjutsu should be grouped under the hand object for frontend playability"
+        );
+    }
+
+    /// CR 702.62a + CR 118.9: `effective_suspend_cost` reads the colored printed
+    /// Suspend `[cost]` off-zone (a card in hand), and the single
+    /// `effective_keyword_mana_cost` dispatch authority agrees for Suspend while
+    /// refusing a compound-cost kind (Flashback) with `None`.
+    #[test]
+    fn effective_keyword_mana_cost_reads_suspend_and_refuses_flashback() {
+        let mut state = GameState::new_two_player(1);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Suspended Spell".to_string(),
+            Zone::Hand,
+        );
+        let suspend_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        };
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords.push(Keyword::Suspend {
+                count: 4,
+                cost: suspend_cost.clone(),
+            });
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        assert_eq!(
+            effective_suspend_cost(&state, id),
+            Some(suspend_cost.clone()),
+            "suspend cost must preserve its colored {{1}}{{U}} pips off-zone",
+        );
+        assert_eq!(
+            effective_keyword_mana_cost(&state, id, KeywordKind::Suspend),
+            Some(suspend_cost),
+            "the dispatch authority must agree with effective_suspend_cost",
+        );
+        assert_eq!(
+            effective_keyword_mana_cost(&state, id, KeywordKind::Flashback),
+            None,
+            "Flashback (compound-cost kind) must be refused by the single authority",
         );
     }
 }

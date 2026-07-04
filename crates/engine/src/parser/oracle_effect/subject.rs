@@ -1173,11 +1173,13 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
+                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
+                    by: None,
+                })
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None },
+                }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
             },
