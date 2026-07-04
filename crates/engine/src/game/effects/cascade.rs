@@ -90,7 +90,10 @@ pub fn resolve(
 
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
             let is_land = obj.card_types.core_types.contains(&CoreType::Land);
-            let mv = obj.mana_cost.mana_value();
+            // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a split
+            // card's mana value is its combined halves (front-only would misjudge
+            // the < source_mv hit test). No-ops for single-face cards.
+            let mv = obj.effective_mana_value();
             !is_land && mv < source_mv
         });
 

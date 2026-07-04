@@ -1734,7 +1734,14 @@ pub(super) fn cast_permission_constraint_allows_cast(
             comparator,
             value: QuantityExpr::Fixed { value },
         }) if resulting_mv.is_none() => {
-            comparator.evaluate(obj.mana_cost.mana_value() as i32, *value)
+            // CR 202.3d + CR 709.4b: The object being tested is off the stack (in
+            // exile/graveyard for the impulse-draw exile-cast path), so a split
+            // card's mana value is the COMBINED value of both halves.
+            // `effective_mana_value()` gates on `zone != Zone::Stack`, so it
+            // combines here and falls back to the chosen-half value for any
+            // on-stack caller — correct in both cases. A single-face object's
+            // `effective_mana_value()` is identical to `mana_cost.mana_value()`.
+            comparator.evaluate(obj.effective_mana_value() as i32, *value)
         }
         Some(CastPermissionConstraint::ManaValue { comparator, value }) => {
             let Some(resulting_mv) = resulting_mv else {

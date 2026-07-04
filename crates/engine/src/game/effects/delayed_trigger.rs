@@ -615,7 +615,10 @@ fn snapshot_quantity_ref(
             let value = state
                 .objects
                 .get(&target_object_id)
-                .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32)
+                // CR 202.3d + CR 709.4b: the target object may be in a non-stack
+                // zone (a targeted card in a graveyard), where a split card's mana
+                // value is its combined halves; CR 202.3e: chosen X on the stack.
+                .map(|obj| obj.effective_mana_value() as i32)
                 .or_else(|| {
                     state
                         .lki_cache

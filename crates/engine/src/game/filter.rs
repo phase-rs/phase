@@ -3443,11 +3443,16 @@ fn matches_filter_prop(
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
         // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
         FilterProp::Cmc { comparator, value } => {
-            let cmc = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32;
+            // CR 202.3d + CR 709.4b: a split card off the stack matches on its
+            // combined mana value; on the stack it matches the chosen half (X
+            // included per CR 202.3e). `effective_mana_value` no-ops single-face.
+            let cmc = obj.effective_mana_value() as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
         FilterProp::ManaValueParity { parity } => {
-            let mana_value = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid);
+            // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
+            // card's parity is that of both halves), chosen half on the stack.
+            let mana_value = obj.effective_mana_value();
             mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
@@ -3771,7 +3776,9 @@ fn matches_filter_prop(
                     .is_some_and(|set| set.contains(&object_id))
             })
         }
-        FilterProp::HasColor { color } => obj.color.contains(color),
+        // CR 202.2 + CR 709.4b: A split card off the stack has the combined
+        // colors of both halves; `effective_colors` no-ops for single-face cards.
+        FilterProp::HasColor { color } => obj.effective_colors().contains(color),
         // CR 208 + CR 208.4b: Power/toughness metric comparison against a
         // dynamic threshold. `scope = Base` reads `base_power`/`base_toughness`
         // (the value after layer 7b, ignoring counters/modifiers per
@@ -3803,12 +3810,14 @@ fn matches_filter_prop(
                 .unwrap_or(0);
             obj.power.unwrap_or(0) > source_power
         }
+        // CR 709.4b: A split card off the stack counts its combined colors.
         FilterProp::ColorCount { comparator, count } => {
-            comparator.evaluate(obj.color.len() as i32, i32::from(*count))
+            comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
         }
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
-        // CR 205.4b: Object does NOT have this color.
-        FilterProp::NotColor { color } => !obj.color.contains(color),
+        // CR 202.2 + CR 709.4b: Object does NOT have this color (combined colors
+        // off the stack for a split card).
+        FilterProp::NotColor { color } => !obj.effective_colors().contains(color),
         // CR 205.4a: Object does NOT have this supertype.
         FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
         // CR 205.3e + CR 205.3m + CR 702.73a: A chosen creature type matches
@@ -3851,7 +3860,8 @@ fn matches_filter_prop(
                 crate::types::ability::ChosenAttribute::Color(c) => Some(c),
                 _ => None,
             })
-            .is_some_and(|chosen| obj.color.contains(chosen)),
+            // CR 709.4b: combined colors off the stack for a split card.
+            .is_some_and(|chosen| obj.effective_colors().contains(chosen)),
         // CR 205 + CR 205.2a: Match objects whose core type includes the
         // source's chosen card type. Used for "spells of the chosen type"
         // (Archon of Valor's Reach) and "all cards of the chosen type revealed
@@ -4686,16 +4696,21 @@ fn object_shared_quality_values(
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
+    // CR 202.3d + CR 709.4b: A split card off the stack shares its combined mana
+    // value and combined colors; both no-op for single-face cards. Bound to a
+    // local because `SharedQualitySource.colors` borrows a slice.
+    let effective_colors = obj.effective_colors();
     shared_quality_values(
         SharedQualitySource {
             name: &obj.name,
             power: obj.power,
             toughness: obj.toughness,
-            // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
-            mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+            // CR 202.3d + CR 202.3e: combined MV off the stack, chosen half (with
+            // announced X) on the stack.
+            mana_value: obj.effective_mana_value(),
             core_types: &obj.card_types.core_types,
             subtypes: &obj.card_types.subtypes,
-            colors: &obj.color,
+            colors: &effective_colors,
             keywords: &obj.keywords,
         },
         quality,

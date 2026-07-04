@@ -2267,9 +2267,12 @@ fn finish_exile_selection_for_cost(
                 && pending.cost == crate::types::mana::ManaCost::NoCost
                 && pending.base_cost.as_ref().is_some_and(cost_has_x)
             {
+                // CR 202.3d + CR 709.4b: the pitched card is exiled from hand
+                // (off the stack), so a split card defines X from its combined
+                // mana value.
                 pending
                     .ability
-                    .set_chosen_x_recursive(obj.mana_cost.mana_value());
+                    .set_chosen_x_recursive(obj.effective_mana_value());
             }
             pending
                 .ability
@@ -3661,7 +3664,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 )
             })
         {
-            Some(obj.mana_cost.mana_value())
+            // CR 202.3d + CR 709.4b: the card is in exile (off the stack), so a
+            // split card's energy cost is its combined mana value.
+            Some(obj.effective_mana_value())
         } else {
             None
         }
@@ -5321,7 +5326,10 @@ pub(super) fn apply_emerge_cost_reduction(
     let Some(sacrificed_obj) = state.objects.get(&sacrifice_id) else {
         return;
     };
-    let reduction = sacrificed_obj.mana_cost.mana_value();
+    // CR 202.3d + CR 709.4b: the sacrificed permanent is off the stack, so a
+    // split permanent's Emerge reduction is its combined mana value (no-op for
+    // single-face creatures and battlefield Rooms, which gate out).
+    let reduction = sacrificed_obj.effective_mana_value();
 
     let ManaCost::Cost { generic, .. } = spell_cost else {
         return;
