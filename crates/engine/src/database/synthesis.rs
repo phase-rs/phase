@@ -466,7 +466,7 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
 
     let produced = if colors.len() == 1 {
         ManaProduction::Fixed {
-            colors: vec![colors[0]],
+            colors,
             contribution: ManaContribution::Base,
         }
     } else {
