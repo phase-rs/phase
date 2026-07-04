@@ -761,6 +761,13 @@ pub(crate) fn apply_damage_after_replacement(
                     false,
                     events,
                 ) {
+                    // The redirect leg gains the combined lifelink (its own dealt +
+                    // the bonus) itself — but ONLY when it actually reaches its
+                    // lifelink path by dealing damage. A fully prevented, gated, or
+                    // phased redirect returns `Applied(0)` from the prevention/early
+                    // paths BEFORE that gain, so fall through to have the creature leg
+                    // gain lifelink for the lethal `primary_amount` it did deal.
+                    Ok(DamageResult::Applied(0)) => redirected = false,
                     Ok(DamageResult::Applied(_)) => {}
                     Ok(DamageResult::NeedsChoice) => return DamageResult::NeedsChoice,
                     // A redirect gate failure must not corrupt the primary result;

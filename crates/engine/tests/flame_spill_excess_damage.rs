@@ -350,12 +350,13 @@ fn t14_lifelink_redirect_damage_replacement_choice_resolves_full_total() {
                 .expect("targeting the creature must succeed"),
             WaitingFor::ReplacementChoice { .. } => {
                 saw_choice = true;
-                // Decline the prevention shield (index 1 of an Optional with no
-                // decline branch), so the redirected damage resolves through.
+                // ACCEPT the prevention shield (index 0 = accept for an Optional
+                // replacement), so it prevents 1 of the 2 redirected damage and the
+                // redirect resolves through with the reduced amount.
                 runner
-                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .act(GameAction::ChooseReplacement { index: 0 })
                     .map(|_| ())
-                    .expect("declining the prevention shield must resolve the choice");
+                    .expect("accepting the prevention shield must resolve the choice");
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
@@ -388,6 +389,44 @@ fn t14_lifelink_redirect_damage_replacement_choice_resolves_full_total() {
         3,
         "P0 gains the combined lifelink for the damage actually dealt (2 lethal + 1 redirect), not dropped"
     );
+}
+
+/// T15 — CR 120.4a + CR 615 + CR 702.15b: when the redirected excess is FULLY
+/// prevented, the source still gains lifelink for the lethal creature damage it
+/// actually dealt. P1 controls a mandatory "prevent the next 2 damage to you"
+/// shield, so the redirected 2 is fully prevented (dealt 0). Because the redirect
+/// leg never reaches its own lifelink path, the creature leg gains lifelink for the
+/// lethal 2 it did deal. Before the fix, the creature leg's lifelink was skipped and
+/// the fully-prevented redirect leg never gained, so P0 gained nothing.
+#[test]
+fn t15_fully_prevented_redirect_still_gains_creature_lifelink() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Victim", 2, 2).id();
+    {
+        // Mandatory (no Optional mode) — fully prevents the redirected damage with
+        // no choice, so `apply_damage_to_target` returns `Applied(0)`.
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(2))
+            .description("Prevent the next 2 damage to you.".to_string());
+        shield.valid_player = Some(ReplacementPlayerScope::You);
+        scenario
+            .add_creature(P1, "Shieldbearer", 0, 3)
+            .with_replacement_definition(shield);
+    }
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Flame Spill", false, FLAME_SPILL);
+        b.with_mana_cost(ManaCost::generic(0))
+            .with_keyword(Keyword::Lifelink);
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+    // The redirected excess (2) is fully prevented, so P1 loses nothing.
+    outcome.assert_life_delta(P1, 0);
+    // The source still dealt lethal 2 to the creature, so lifelink still gains 2.
+    outcome.assert_life_delta(P0, 2);
+    outcome.assert_zone(&[creature], Zone::Graveyard);
 }
 
 /// Collect every effect in an ability's `sub_ability` chain.
