@@ -11042,13 +11042,17 @@ fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
         .expect("Fixed Point in Time encounter trigger must parse");
 
     assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("Fixed Point in Time trigger must execute");
     assert_eq!(
-        trigger.execute.duration,
+        execute.duration,
         Some(Duration::UntilNextTurnOf {
             player: PlayerScope::Controller
         })
     );
-    match trigger.execute.effect.as_ref() {
+    match execute.effect.as_ref() {
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             assert!(matches!(replacement_effect.as_ref(), Effect::ChaosEnsues));
         }

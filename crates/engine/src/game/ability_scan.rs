@@ -1456,6 +1456,10 @@ fn scan_effect(x: &Effect) -> Axes {
             destination: _,
             tapped: _,
         } => Axes::NONE,
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            scan_effect(replacement_effect)
+        }
+        Effect::ChaosEnsues => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
             name: _,
@@ -3496,6 +3500,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::ChaosEnsues
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }

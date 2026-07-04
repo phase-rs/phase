@@ -4446,6 +4446,9 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         ProposedEvent::ProduceMana { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ProduceMana);
         }
+        ProposedEvent::Planeswalk { .. } => {
+            push_replacement_event_key(&mut keys, ReplacementEvent::Planeswalk);
+        }
         ProposedEvent::Sacrifice { .. } | ProposedEvent::EmptyManaPool { .. } => {}
     }
     keys
