@@ -77,7 +77,8 @@
     "priorityTooltip": "Przekaż priorytet. Jeśli stos jest pusty, spowoduje to przejście przez bieżące okno priorytetu. Skrót: Spacja.",
     "pass": "Przekaż",
     "passToEndTooltip": "Automatycznie przekazuj priorytet aż do kroku końcowego, chyba że przerwie to wybór, zatrzymanie lub Pełna kontrola. Skrót: Enter.",
-    "autoPassing": "Automatyczne przekazywanie do kroku końcowego..."
+    "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
+    "resolvingStack": "Rozpatrywanie stosu..."
   },
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
@@ -179,6 +180,10 @@
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wybierz",
+    "fanConfirm": "Potwierdź ({{count}})",
+    "viewAttachments_one": "Pokaż dołączoną kartę",
+    "viewAttachments_other": "Pokaż dołączone karty ({{count}})",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {

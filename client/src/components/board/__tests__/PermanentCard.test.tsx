@@ -269,6 +269,39 @@ describe("PermanentCard attachments", () => {
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
   });
 
+  it("opens the attachment fan for the host via the hover badge", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, inspectedObjectId: null });
+    });
+
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    // On a pointer device the view-attachments badge is hover-revealed, so it
+    // is absent until the host is hovered. (The nested attachment cards never
+    // render a badge here — only the host owns attachments.)
+    expect(container.querySelector("button")).toBeNull();
+
+    // Hovering reveals the badge AND raises the card preview (inspectedObjectId).
+    fireEvent.mouseEnter(host);
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+    const button = container.querySelector("button") as HTMLButtonElement;
+    expect(button).not.toBeNull();
+
+    // pointerdown must be stopped so the host motion.div never captures the
+    // pointer (useLongPress.setPointerCapture) and retargets the click to the
+    // host — which would fire card selection instead of opening the fan.
+    fireEvent.pointerDown(button);
+    fireEvent.click(button);
+
+    // Routes to the fan-host state (uiStore), clears the covering card preview
+    // so the z-[100] preview never veils the fan, and never selects the host
+    // (the click stayed on the badge).
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+    expect(useUiStore.getState().selectedObjectId).toBeNull();
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+  });
+
   it("auto-expands collapsed attachments when one is a valid target", () => {
     // Regression: Moira Brown's "put a quest counter on target nonland
     // permanent you control" offers the host's attached Equipment/Auras as
@@ -479,6 +512,26 @@ describe("PermanentCard attachments", () => {
     fireEvent.click(permanent);
 
     expect(staleBlockerHandler).not.toHaveBeenCalled();
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 1 } },
+    });
+  });
+
+  it("directly targets the host (not the fan) when host and attachment are both legal targets", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null });
+    });
+    // Both the host (1) and its attached Equipment (2) are legal targets. A
+    // click on the host targets the host DIRECTLY — the fan is never forced.
+    // (The attachment stays independently reachable via its peek, and the fan
+    // is available on demand from the "⧉" badge — covered by the badge test.)
+    const { container } = renderPermanent(new Set([1, 2]));
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.click(host);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "ChooseTarget",
       data: { target: { Object: 1 } },

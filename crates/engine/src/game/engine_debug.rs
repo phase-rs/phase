@@ -98,6 +98,8 @@ pub fn apply_debug_action(
             {
                 super::sacrifice::SacrificeOutcome::Complete => {
                     super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
+                    let delayed = super::triggers::check_delayed_triggers(state, events);
+                    events.extend(delayed);
                     super::sba::check_state_based_actions(state, events); // CR 704
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {

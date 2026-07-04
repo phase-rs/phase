@@ -22,8 +22,14 @@ pub fn resolve(
             target,
         } => (
             // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
-            // reads the caster-chosen X from the resolving ability.
-            resolve_quantity_with_targets(state, count, ability) as usize,
+            // reads the caster-chosen X from the resolving ability, and clamp a
+            // negative result to zero before the `as usize` cast. Mill shares the
+            // Draw/Mill/Discard dynamic-count parser, so a subtractive count
+            // ("mill cards equal to A minus B" with B > A) resolves negative;
+            // without the clamp `-1 as usize` wraps huge and the downstream
+            // library-size `min` mills the entire library instead of nothing.
+            // Mirrors the guard in `draw.rs` / `discard.rs`.
+            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             *destination,
             // CR 701.17a + CR 115.1: Mirror Draw/Scry/Surveil — context-ref
             // target filters (Controller, PostReplacementSourceController,
@@ -804,6 +810,93 @@ mod tests {
         assert_eq!(
             state.players[0].life, life_before,
             "life must be unchanged — no Angel was milled this way"
+        );
+    }
+
+    /// CR 107.1b: a mill count that resolves negative must clamp to 0, not wrap
+    /// through the `as usize` cast and mill the whole library. Mill shares the
+    /// Draw/Mill/Discard dynamic-count parser, so "mill cards equal to A minus B"
+    /// (with B > A) resolves negative. Revert-probe: without the `.max(0)` the
+    /// downstream library-size `min` mills the target's entire library instead of
+    /// nothing.
+    #[test]
+    fn mill_negative_count_clamps_to_zero() {
+        use crate::types::ability::{AggregateFunction, PlayerScope};
+
+        let mut state = GameState::new_two_player(7);
+        // Controller (P0): 1 card in hand, 2 in library. Opponent (P1): 3 in hand.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand".into(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "LibA".into(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "LibB".into(),
+            Zone::Library,
+        );
+        for i in 0..3u64 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                "Theirs".into(),
+                Zone::Hand,
+            );
+        }
+
+        // count = HandSize{You} − HandSize{Opponent} = 1 − 3 = −2.
+        let count = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    }),
+                },
+            ],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Mill {
+                count,
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].library.len(),
+            2,
+            "CR 107.1b: a negative mill count must mill 0, not the whole library"
+        );
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "no card may be milled"
         );
     }
 }

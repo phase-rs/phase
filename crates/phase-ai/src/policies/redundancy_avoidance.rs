@@ -1131,6 +1131,7 @@ mod tests {
             config,
             context: ai_ctx,
             cast_facts,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 

@@ -846,7 +846,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 from.map_or("any".into(), |zone| format!("{zone:?}")),
                 to.map_or("any".into(), |zone| format!("{zone:?}"))
             )),
-            FilterProp::AttackedThisTurn => parts.push("attacked this turn".into()),
+            FilterProp::AttackedThisTurn { defender } => match defender {
+                None => parts.push("attacked this turn".into()),
+                Some(ControllerRef::You) => parts.push("attacked you this turn".into()),
+                Some(ControllerRef::Opponent) => {
+                    parts.push("attacked your opponents this turn".into())
+                }
+                Some(_) => parts.push("attacked scoped player this turn".into()),
+            },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
@@ -874,6 +881,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
+            FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));
@@ -1424,6 +1432,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
         }
@@ -1577,6 +1586,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 CountScope::All => "each player has",
             };
             format!("# of {kind} counters {scope_s}")
+        }
+        QuantityRef::TargetControllerCounter { kind } => {
+            format!("# of {kind} counters its controller has")
         }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
@@ -1786,7 +1798,7 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
 
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
-        ChoiceType::CreatureType => "creature type",
+        ChoiceType::CreatureType { .. } => "creature type",
         ChoiceType::Color { excluded } => {
             if excluded.is_empty() {
                 "color"
@@ -6544,6 +6556,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
         QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
@@ -6585,6 +6598,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::TargetControllerCounter { .. } => ("TargetControllerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
         QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
@@ -7945,6 +7959,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            // CR 508.1c: Pramikon/Mystic Barrier/Teyo directional restriction.
+            StaticMode::AttackOnlyNeighbor => {
+                effective_lower.contains("attack only the nearest opponent")
+            }
             // CR 701.60a + CR 701.60d: Airtight Alibi's "can't become suspected".
             StaticMode::CantBecomeSuspected => effective_lower.contains("can't become suspected"),
             StaticMode::CantCrew => {
@@ -11586,6 +11604,7 @@ mod tests {
                 AbilityCondition::TargetMatchesFilter {
                     filter: TargetFilter::Any,
                     use_lki: false,
+                    subject_slot: None,
                 },
                 "TargetMatchesFilter",
             ),

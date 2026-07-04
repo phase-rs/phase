@@ -42,7 +42,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 28 | Trigger/activation timing or ordinal restriction dropped | 20 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 29 | Disjunctive mana ability split into two Fixed abilities | 18 | oracle parser mana-ability handling — emit AnyOneColor{color_options} for 'Add A or B' |
 | 30 | Token/named-card name corrupted by normalization or overrun | 18 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
-| 31 | Other / uncategorized misparse | 7 | manual triage |
+| 31 | Other / uncategorized misparse | 3 | manual triage |
 | 32 | Static pay/action-to-ignore-effect clause dropped | 1 | add-static-ability / add-interactive-effect — model "ignore this effect until end of turn" exceptions |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
@@ -5219,7 +5219,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (4 cards)
+### 31. Other / uncategorized misparse  (3 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5227,7 +5227,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Flaccify
 - Merfolk Falconer
 - Rush of Dread
 - The Goose Mother

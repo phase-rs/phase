@@ -1,3 +1,4 @@
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
     ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
@@ -14,6 +15,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
@@ -1056,27 +1058,17 @@ pub struct ManaActivationGates {
 }
 
 impl ManaActivationGates {
-    /// One `game_functioning_statics` sweep computing both presence flags.
+    /// Reads both presence flags from the O(1) `StaticModePresence` index (Unit 1)
+    /// instead of sweeping `game_functioning_statics`. A post-flush-precise superset:
+    /// a spurious `true` falls through to the exact per-source scan.
     pub fn compute(state: &GameState) -> Self {
-        let mut gates = ManaActivationGates {
-            has_cant_be_activated: false,
-            has_cant_activate_during: false,
-        };
-        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
-            match def.mode {
-                crate::types::statics::StaticMode::CantBeActivated { .. } => {
-                    gates.has_cant_be_activated = true
-                }
-                crate::types::statics::StaticMode::CantActivateDuring { .. } => {
-                    gates.has_cant_activate_during = true
-                }
-                _ => {}
-            }
-            if gates.has_cant_be_activated && gates.has_cant_activate_during {
-                break;
-            }
+        ManaActivationGates {
+            has_cant_be_activated: static_kind_present(state, StaticModeKind::CantBeActivated),
+            has_cant_activate_during: static_kind_present(
+                state,
+                StaticModeKind::CantActivateDuring,
+            ),
         }
-        gates
     }
 }
 
