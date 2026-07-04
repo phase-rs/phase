@@ -173,6 +173,25 @@ pub fn effective_mayhem_cost(state: &GameState, object_id: ObjectId) -> Option<M
     }
 }
 
+/// CR 702.143a + CR 113.6b: Effective Foretell cost for a card in hand, honoring
+/// off-zone characteristic grants (Dream Devourer's "Each nonland card in your
+/// hand without foretell has foretell. Its foretell cost is equal to its mana
+/// cost reduced by {2}.") in addition to a printed Foretell keyword. Resolves the
+/// placeholder cost (`SelfManaCost` / `SelfManaCostReduced`) against the card's
+/// own printed mana cost via `resolve_keyword_mana_cost`, mirroring
+/// `effective_mayhem_cost`.
+pub fn effective_foretell_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    // CR 702.143a + CR 113.6b: single authority (mirrors effective_mayhem/harmonize/
+    // sneak). effective_keyword_for_object routes battlefield->obj.keywords, else->the
+    // off-zone layer (base_keywords + off-zone Add/Remove), so an off-zone
+    // RemoveKeyword(Foretell)/RemoveAllAbilities correctly strips a PRINTED foretell.
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Foretell)?;
+    match keyword {
+        Keyword::Foretell(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 /// CR 702.180a: Effective Harmonize alt-cost for a card in the graveyard,
 /// honoring off-zone keyword grants (e.g. Songcrafter Mage's "target instant or
 /// sorcery card in your graveyard gains harmonize until end of turn. Its
@@ -215,6 +234,37 @@ pub fn effective_web_slinging_cost(
         })
 }
 
+/// CR 702.62a: Effective Suspend `[cost]` for an object, honoring off-zone reads
+/// (a card in hand exposes its printed Suspend via `base_keywords`). Mirrors
+/// `effective_sneak_cost`.
+pub fn effective_suspend_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    match effective_keyword_for_object(state, object_id, KeywordKind::Suspend)? {
+        Keyword::Suspend { cost, .. } => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
+/// CR 118.9 + CR 702.62a: Single authority for
+/// `AbilityCost::KeywordCostOfCastSpell`. Maps a keyword kind whose alternative
+/// cost is a single `ManaCost` to that cost on `object_id`. Returns `None` for
+/// kinds whose cost is not a single `ManaCost` (Flashback non-mana, Escape
+/// compound) — the parser never emits those, so a `None` here is a defensive
+/// refusal that surfaces a misparse rather than silently miscosting.
+pub fn effective_keyword_mana_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: KeywordKind,
+) -> Option<ManaCost> {
+    match keyword {
+        KeywordKind::Suspend => effective_suspend_cost(state, object_id),
+        KeywordKind::Sneak => effective_sneak_cost(state, object_id),
+        KeywordKind::Mayhem => effective_mayhem_cost(state, object_id),
+        KeywordKind::Harmonize => effective_harmonize_cost(state, object_id),
+        KeywordKind::Disturb => effective_disturb_cost(state, object_id),
+        _ => None,
+    }
+}
+
 fn effective_keyword_for_object(
     state: &GameState,
     object_id: ObjectId,
@@ -232,7 +282,19 @@ fn effective_keyword_for_object(
     crate::game::off_zone_characteristics::effective_off_zone_keyword(state, object_id, kind)
 }
 
-fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &ManaCost) -> ManaCost {
+/// CR 601.2f + CR 118.9c: Single authority for concretizing a granted keyword's
+/// placeholder mana cost against the recipient object's own printed mana cost.
+/// `SelfManaCost` → the card's mana cost; `SelfManaValue` → that mana value as
+/// generic; `SelfManaCostReduced { reduction }` → the card's mana cost with the
+/// generic component reduced (floors at {0}, colored pips untouched). Every seam
+/// that stamps a granted keyword's payable cost (foretell exile, miracle offer,
+/// miracle cast substitution, activated-ability synthesis) routes through here so
+/// no unresolved placeholder reaches the mana payment path.
+pub(crate) fn resolve_keyword_mana_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> ManaCost {
     match cost {
         ManaCost::SelfManaCost => state
             .objects
@@ -245,6 +307,13 @@ fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &Mana
             .objects
             .get(&object_id)
             .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
+            .unwrap_or(ManaCost::NoCost),
+        // CR 601.2f: "its mana cost reduced by {N}" (Dream Devourer foretell,
+        // Aminatou miracle) — reduce only the generic component, floor at {0}.
+        ManaCost::SelfManaCostReduced { reduction } => state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.mana_cost.reduced_by_generic(*reduction))
             .unwrap_or(ManaCost::NoCost),
         _ => cost.clone(),
     }
@@ -476,6 +545,8 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
     match quality {
+        // CR 105.2c: An object with no colors is colorless.
+        "colorless" => source.color.is_empty(),
         "monocolored" => source.color.len() == 1,
         "multicolored" => source.color.len() > 1,
         _ => false,
@@ -2337,6 +2408,95 @@ mod tests {
                     } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
                 ))),
             "Ninjutsu should be grouped under the hand object for frontend playability"
+        );
+    }
+
+    #[test]
+    fn source_matches_quality_colorless_tracks_zero_color_sources() {
+        let mut colorless = make_obj();
+        let mut white = make_obj();
+        white.color.push(ManaColor::White);
+
+        assert!(
+            source_matches_quality(&colorless, "colorless"),
+            "objects with no colors must satisfy the colorless quality"
+        );
+        assert!(
+            !source_matches_quality(&white, "colorless"),
+            "colored objects must not satisfy the colorless quality"
+        );
+
+        colorless.color.push(ManaColor::Blue);
+        assert!(
+            !source_matches_quality(&colorless, "colorless"),
+            "once an object gains a color, the colorless quality must stop matching"
+        );
+    }
+
+    #[test]
+    fn protection_from_colorless_prevents_only_colorless_sources() {
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Quality(
+                "colorless".to_string(),
+            )));
+
+        let colorless_source = make_obj();
+        let mut green_source = make_obj();
+        green_source.color.push(ManaColor::Green);
+
+        assert!(
+            protection_prevents_from(&protected, &colorless_source),
+            "protection from colorless must stop a source with no colors"
+        );
+        assert!(
+            !protection_prevents_from(&protected, &green_source),
+            "protection from colorless must not stop a colored source"
+        );
+    }
+
+    /// CR 702.62a + CR 118.9: `effective_suspend_cost` reads the colored printed
+    /// Suspend `[cost]` off-zone (a card in hand), and the single
+    /// `effective_keyword_mana_cost` dispatch authority agrees for Suspend while
+    /// refusing a compound-cost kind (Flashback) with `None`.
+    #[test]
+    fn effective_keyword_mana_cost_reads_suspend_and_refuses_flashback() {
+        let mut state = GameState::new_two_player(1);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Suspended Spell".to_string(),
+            Zone::Hand,
+        );
+        let suspend_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        };
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords.push(Keyword::Suspend {
+                count: 4,
+                cost: suspend_cost.clone(),
+            });
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        assert_eq!(
+            effective_suspend_cost(&state, id),
+            Some(suspend_cost.clone()),
+            "suspend cost must preserve its colored {{1}}{{U}} pips off-zone",
+        );
+        assert_eq!(
+            effective_keyword_mana_cost(&state, id, KeywordKind::Suspend),
+            Some(suspend_cost),
+            "the dispatch authority must agree with effective_suspend_cost",
+        );
+        assert_eq!(
+            effective_keyword_mana_cost(&state, id, KeywordKind::Flashback),
+            None,
+            "Flashback (compound-cost kind) must be refused by the single authority",
         );
     }
 }

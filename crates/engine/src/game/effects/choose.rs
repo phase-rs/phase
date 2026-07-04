@@ -269,6 +269,14 @@ pub(crate) fn bind_named_choice(
                     obj.chosen_attributes
                         .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
                 }
+                // CR 608.2d + CR 122.1: A per-iteration counter-kind choice (The
+                // Caves of Androzani) represents the CURRENT answer only —
+                // replace the prior `Counter` so `PutChosenCounter` reads this
+                // iteration's kind, not an accumulation across permanents.
+                if matches!(choice_type, ChoiceType::CounterKind { .. }) {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Counter(_)));
+                }
                 // CR 607.2d "the last chosen direction": a re-choice (Mystic
                 // Barrier's upkeep re-selection) REPLACES the prior direction.
                 // Clear only `ChosenAttribute::Direction`, mirroring the Keyword
@@ -290,7 +298,7 @@ pub(crate) fn bind_named_choice(
                 if matches!(
                     choice_type,
                     ChoiceType::CardName
-                        | ChoiceType::CreatureType
+                        | ChoiceType::CreatureType { .. }
                         | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
@@ -396,8 +404,14 @@ fn compute_options(
 ) -> Vec<String> {
     match choice_type {
         // CR 205.3m: Creature types are shared between creature and kindred cards.
-        ChoiceType::CreatureType => {
-            if state.all_creature_types.is_empty() {
+        // A non-empty `options` restricts the offered set to an explicit
+        // Oracle-listed candidate list (A Killer Among Us' "secretly choose
+        // Human, Merfolk, or Goblin"), preserving source order; empty ⇒ all
+        // creature types (Morophon / Changeling).
+        ChoiceType::CreatureType { options } => {
+            if !options.is_empty() {
+                options.clone()
+            } else if state.all_creature_types.is_empty() {
                 to_strings(FALLBACK_CREATURE_TYPES)
             } else {
                 let mut types = state.all_creature_types.clone();
@@ -478,6 +492,12 @@ fn compute_options(
             } else {
                 options.iter().map(|kw| kw.to_string()).collect()
             }
+        }
+        // CR 608.2d + CR 122.1: the concrete counter-kind option list is baked
+        // into the `ChoiceType` at resolution by `choose_counter_kind::resolve`
+        // (enumerated from the target object's counters), so render it directly.
+        ChoiceType::CounterKind { options } => {
+            options.iter().map(|k| k.as_str().into_owned()).collect()
         }
     }
 }
@@ -587,7 +607,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
 
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -599,7 +619,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
-                assert_eq!(*choice_type, ChoiceType::CreatureType);
+                assert_eq!(*choice_type, ChoiceType::creature_type());
                 assert!(options.contains(&"Elf".to_string()));
                 assert!(options.contains(&"Goblin".to_string()));
             }
@@ -728,7 +748,7 @@ mod tests {
     fn choose_creature_type_with_empty_all_types_uses_fallback() {
         let mut state = GameState::new_two_player(42);
         // all_creature_types is empty by default
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 

@@ -7512,6 +7512,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                     condition: Box::new(AbilityCondition::TargetMatchesFilter {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
+                        subject_slot: None,
                     }),
                 })
                 .description(
@@ -19060,7 +19061,9 @@ mod backup_synthesis_tests {
         // Verify the condition is Not(TargetMatchesFilter(SelfRef))
         match &sub_ability.condition {
             Some(AbilityCondition::Not { condition }) => match condition.as_ref() {
-                AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                AbilityCondition::TargetMatchesFilter {
+                    filter, use_lki, ..
+                } => {
                     assert!(matches!(filter, TargetFilter::SelfRef));
                     assert!(!use_lki);
                 }
@@ -25152,6 +25155,7 @@ mod absorb_synthesis_tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target)],
             source,

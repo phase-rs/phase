@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{char, multispace1};
+use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
@@ -164,6 +164,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If X is N or less/greater, ~ enters tapped" (cast-X-comparison gate) ---
+    // CR 107.3 + CR 614.1d: Slumbering Trudge-class. Must precede the unconditional
+    // "enters tapped" guard below so the X comparison is not dropped.
+    if let Some(def) = parse_enters_tapped_if_x_comparison(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     if let Some(def) = parse_clone_replacement(&norm_lower, &text, card_name) {
@@ -203,6 +210,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
         && !nom_primitives::scan_contains(&norm_lower, "unless")
         && !nom_primitives::scan_contains(&norm_lower, "if you control")
+        && !nom_primitives::scan_contains(&norm_lower, "if x")
         && !has_enters_tapped_with_counter(&norm_lower)
     {
         return Some(
@@ -2678,6 +2686,67 @@ fn parse_enters_tapped_if_controls(
     )
 }
 
+/// Combinator for "if x is <N> or less/fewer/greater/more[,] [it|~|this creature]
+/// enters tapped" — anchored at the sentence start (per-sentence dispatch,
+/// mirroring `parse_if_controls_count_condition`). Requiring the enters-tapped
+/// tail here (rather than a separate `scan_contains` guard) keeps the whole shape
+/// inside one typed nom chain so the error type is inferred cleanly.
+fn parse_x_comparison_enters_tapped(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    let (input, _) = tag("if x is ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number.parse(input)?;
+    let (input, comparator) = alt((
+        value(Comparator::GE, alt((tag(" or greater"), tag(" or more")))),
+        value(Comparator::LE, alt((tag(" or less"), tag(" or fewer")))),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(char(',')).parse(input)?;
+    let (input, _) = opt(multispace1).parse(input)?;
+    let (input, _) = opt(alt((tag("it "), tag("~ "), tag("this creature ")))).parse(input)?;
+    let (input, _) =
+        alt((tag("enters tapped"), tag("enters the battlefield tapped"))).parse(input)?;
+    Ok((input, (n, comparator)))
+}
+
+/// CR 107.3 + CR 614.1d: "If X is N or less/greater, [it] enters tapped" — a
+/// cast-X-comparison ETB tap gate (Slumbering Trudge: "If X is 2 or less, it
+/// enters tapped"). The tap replacement applies only when the cast value of X
+/// satisfies the comparison; `CostXPaid` defaults to 0 for non-cast entries
+/// (CR 107.3), so `X <= 2` is true and the permanent enters tapped, matching the
+/// printed ruling. Reuses `ReplacementCondition::OnlyIfQuantity` — no new variant.
+/// Sibling of `parse_enters_tapped_if_controls`; dispatched before the
+/// unconditional enters-tapped guard so the condition is not dropped.
+fn parse_enters_tapped_if_x_comparison(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, (n, comparator)) = parse_x_comparison_enters_tapped(norm_lower).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string())
+            // CR 107.3: gate the tap on the cast value of X.
+            .condition(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: n as i32 },
+                active_player_req: None,
+            }),
+    )
+}
+
 /// Extract "if you control N or more [type phrase]" condition (CR 614.1d).
 ///
 /// The "if you control" prefix is the positive form: the replacement APPLIES
@@ -4638,6 +4707,22 @@ fn parse_damage_modification_replacement(
     if let Some(cs) = combat_scope {
         def = def.combat_scope(cs);
     }
+    // CR 614.1a: A "while [condition]" gate in the antecedent (Delirium threshold
+    // on The Rollercrusher Ride — "... would deal noncombat damage to a permanent
+    // or player while there are four or more card types among cards in your
+    // graveyard, ...") suppresses the doubler when the condition is false. Reuses
+    // the `parse_while_antecedent` building block and the
+    // `ReplacementCondition::OnlyIfQuantity` typed surface. The anchor is
+    // "would deal " (a substring of both "would deal damage" and "would deal
+    // noncombat damage"); a no-`while` clause yields `Absent` → ungated, so
+    // unconditional damage doublers (Trance Kuja) are unaffected.
+    match parse_while_antecedent(norm_lower, "would deal ") {
+        WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+        // Guard present but unparseable: fail closed rather than emit an
+        // unconditional damage doubler.
+        WhileAntecedent::Unparsed => return None,
+        WhileAntecedent::Absent => {}
+    }
     Some(def)
 }
 
@@ -4890,6 +4975,49 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     }
 
     Some(Effect::CreateDrawReplacement {
+        replacement_effect: Box::new(payload),
+    })
+}
+
+/// CR 614.1a + CR 611.2 + CR 901.9c: Parse "[if] a player would planeswalk as a
+/// result of rolling the planar die, [effect] instead" (Fixed Point in Time)
+/// into `Effect::CreatePlaneswalkReplacement`. The substitute rides in
+/// `replacement_effect`; the resolver installs a floating, duration-bound
+/// (`until your next turn`) shield.
+///
+/// The subject is parsed as a distinct combinator step so it can grow into an
+/// `alt` of player scopes later. Today the only card in the class is any-player
+/// ("a player") — the resolver installs an `AnyPlayer` shield — so a non-"a
+/// player" subject fails the parse and stays an honest gap rather than a
+/// mis-scoped shield. The substitute is parsed by `parse_effect`; an
+/// Unimplemented payload is rejected so this never emits a silent misparse.
+pub(crate) fn parse_planar_die_planeswalk_replacement(norm_lower: &str) -> Option<Effect> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(norm_lower)
+        .ok()?;
+    // CR 611.2 / CR 901.9c: "a player" (any-player scope). A distinct combinator
+    // step from the predicate so the subject axis stays composable.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a player").parse(rest).ok()?;
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>(" would planeswalk as a result of rolling the planar die, ")
+            .parse(rest)
+            .ok()?;
+
+    // CR 614.6: isolate the substitute payload — everything up to (excluding)
+    // the trailing "instead". Split via the shared nom combinator, never byte
+    // math.
+    let (_, (payload_text, after_instead)) = nom_primitives::split_once_on(rest, "instead").ok()?;
+    let payload_text = payload_text.trim();
+    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
+    // Honest-gap guard: never emit a silent misparse for an unrecognized
+    // substitute (e.g. voting / villainous-choice phenomena stay Unimplemented).
+    if matches!(payload, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    // CR 614.1a: the clause must end cleanly after "instead" (optional period).
+    crate::parser::oracle_effect::parse_optional_period_and_end(after_instead)?;
+
+    Some(Effect::CreatePlaneswalkReplacement {
         replacement_effect: Box::new(payload),
     })
 }
@@ -6184,11 +6312,17 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
     else {
         return WhileAntecedent::Absent;
     };
-    let Ok((_, condition_text)) = nom::sequence::preceded(
+    // The " while " gate need not be flush against the verb anchor: for damage
+    // replacements the recipient clause ("noncombat damage to a permanent or
+    // player") sits between the anchor and the gate, so scan forward to the gate
+    // marker. The life-gain caller's flush case is the empty-prefix match.
+    let Ok((_, (_, _, condition_text))) = (
+        take_until::<_, _, OracleError<'_>>(" while "),
         tag::<_, _, OracleError<'_>>(" while "),
         take_until::<_, _, OracleError<'_>>(","),
     )
-    .parse(after_verb) else {
+        .parse(after_verb)
+    else {
         return WhileAntecedent::Absent;
     };
     // A guard clause IS present from here on; every failure path below must fail
@@ -7021,14 +7155,8 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if nom_primitives::scan_contains(lower, "permanent you control") {
-        def = def.valid_card(TargetFilter::Typed(
-            TypedFilter::permanent().controller(ControllerRef::You),
-        ));
-    } else if nom_primitives::scan_contains(lower, "creature you control") {
-        def = def.valid_card(TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::You),
-        ));
+    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+        def = def.valid_card(valid_card);
     }
     if nom_primitives::scan_contains(lower, "an opponent would put")
         || nom_primitives::scan_contains(lower, "opponent would put")
@@ -7047,6 +7175,57 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     }
 
     Some(def)
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
+    let (_, (), after_anchor) =
+        nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
+    let (filter, rest) = parse_type_phrase(after_anchor);
+    if !is_counter_replacement_object_scope(&filter)
+        || parse_counter_replacement_scope_tail(rest).is_err()
+    {
+        return None;
+    }
+    Some(filter)
+}
+
+fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Not { filter } => is_counter_replacement_object_scope(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(is_counter_replacement_object_scope)
+        }
+        _ => false,
+    }
+}
+
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("counters would be put on "),
+            tag("counter would be put on "),
+            tag("an effect would put one or more counters on "),
+            tag("an effect would put a counter on "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_counter_replacement_scope_tail(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        multispace0,
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(", that many"),
+                tag(", twice that many"),
+                tag(", it puts"),
+            )),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse "Players can't get counters."
@@ -9137,6 +9316,7 @@ mod tests {
                 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
         );
         def.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -9173,6 +9353,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         rewrite_parent_target_controller_to_post_replacement_source(&mut def);
@@ -10873,7 +11054,7 @@ mod tests {
         assert!(matches!(
             *execute.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CreatureType,
+                choice_type: ChoiceType::CreatureType { .. },
                 persist: true,
                 ..
             }
@@ -14051,6 +14232,84 @@ mod tests {
         ));
     }
 
+    fn controlled_or_branch_types(valid_card: Option<TargetFilter>) -> Vec<Vec<TypeFilter>> {
+        let Some(TargetFilter::Or { filters }) = valid_card else {
+            panic!("expected controlled Or target filter");
+        };
+        filters
+            .into_iter()
+            .map(|filter| match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    ..
+                }) => type_filters,
+                other => panic!("expected controlled typed branch, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_artifact_or_creature_scope() {
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.",
+            "Ozolith-style test card",
+        )
+        .unwrap();
+
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![vec![TypeFilter::Artifact], vec![TypeFilter::Creature]]
+        );
+    }
+
+    #[test]
+    fn counter_doubling_replacement_comma_type_list_scope() {
+        let def = parse_replacement_line(
+            "If one or more counters would be put on a creature, Spacecraft, or Planet you control, twice that many of each of those kinds of counters are put on it instead.",
+            "Loading Zone",
+        )
+        .unwrap();
+
+        assert_eq!(def.counter_match, None);
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![
+                vec![TypeFilter::Creature],
+                vec![TypeFilter::Subtype("Spacecraft".to_string())],
+                vec![TypeFilter::Subtype("Planet".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_mauhur_scope() {
+        // CR 614.1a + CR 122.1a: Mauhur only changes +1/+1 counters put on
+        // Armies, Goblins, and Orcs you control.
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on an Army, Goblin, or Orc you control, that many plus one +1/+1 counters are put on it instead.",
+            "Mauhur, Uruk-hai Captain",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Plus1Plus1))
+        );
+        assert_eq!(
+            controlled_or_branch_types(def.valid_card),
+            vec![
+                vec![TypeFilter::Subtype("Army".to_string())],
+                vec![TypeFilter::Subtype("Goblin".to_string())],
+                vec![TypeFilter::Subtype("Orc".to_string())],
+            ]
+        );
+    }
+
     #[test]
     fn counter_minus_one_replacement_vizier_of_remedies() {
         // CR 614.1a + CR 122.1a: Vizier of Remedies — "-1/-1 counters"
@@ -15546,6 +15805,7 @@ mod tests {
         .expect("halving season");
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(def.valid_card, None);
     }
 
     #[test]
@@ -16247,6 +16507,66 @@ mod snapshot_tests {
             )
             .is_none(),
             "Words of Waste (each-opponent payload) must remain an honest gap"
+        );
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_parses_chaos_ensues() {
+        // Fixed Point in Time: the effect body after the trigger/duration is
+        // stripped. Building-block: the clause parses to a
+        // CreatePlaneswalkReplacement carrying the chaos-ensues substitute.
+        let effect = parse_planar_die_planeswalk_replacement(
+            "if a player would planeswalk as a result of rolling the planar die, chaos ensues instead",
+        )
+        .expect("Fixed Point in Time replacement clause must parse");
+        match effect {
+            Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+                assert!(
+                    matches!(*replacement_effect, Effect::ChaosEnsues),
+                    "substitute must be ChaosEnsues, got {replacement_effect:?}"
+                );
+            }
+            other => panic!("expected CreatePlaneswalkReplacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_routes_through_parse_effect() {
+        // End-to-end through the clause dispatch: the effect body routes to
+        // CreatePlaneswalkReplacement (never a leading-"if" strip to Unimplemented).
+        let effect = crate::parser::oracle_effect::parse_effect(
+            "if a player would planeswalk as a result of rolling the planar die, chaos ensues instead",
+        );
+        assert!(
+            matches!(effect, Effect::CreatePlaneswalkReplacement { .. }),
+            "the clause dispatch must route the planeswalk-replacement form, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn chaos_ensues_parses_as_effect_leaf() {
+        // Building-block: the substitute step depends on `parse_effect("chaos
+        // ensues") == Effect::ChaosEnsues`.
+        assert!(
+            matches!(
+                crate::parser::oracle_effect::parse_effect("chaos ensues"),
+                Effect::ChaosEnsues
+            ),
+            "\"chaos ensues\" must parse to Effect::ChaosEnsues"
+        );
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_rejects_unknown_substitute() {
+        // Honest-gap guard: an unrecognized substitute must NOT emit a
+        // CreatePlaneswalkReplacement wrapping Unimplemented (never a silent
+        // misparse) — it returns None so the clause stays an honest gap.
+        assert!(
+            parse_planar_die_planeswalk_replacement(
+                "if a player would planeswalk as a result of rolling the planar die, glorp the florb instead"
+            )
+            .is_none(),
+            "an unrecognized substitute must remain an honest gap"
         );
     }
 

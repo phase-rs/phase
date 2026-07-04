@@ -629,7 +629,19 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
-            if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
+            if let Some(mut def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip)
+            {
+                // CR 611.3a: the split stripped the "as long as <condition>" gate
+                // from the canonical rewrite, so the recursed effect parser (e.g.
+                // DoubleTriggers, which carries no condition of its own) never sees
+                // it. Re-attach the split condition whenever the recursed def
+                // didn't derive one itself — this restores the gate for the whole
+                // class of split inverted-as-long-as statics, not just Cloud.
+                if def.condition.is_none() {
+                    if let Some(condition) = parse_static_condition(&split.condition_text) {
+                        def.condition = Some(condition);
+                    }
+                }
                 return Some(def.description(text.to_string()));
             }
             // CR 601.3b + CR 702.8a: Inverted flash-grant conditional:
@@ -1220,6 +1232,16 @@ pub(crate) fn parse_static_line_inner(
     // `parse_land_type_change` — color-rejected "All lands are Plains."-shaped
     // lines fall through to that branch correctly.
     if let Some(def) = parse_all_subject_are_color(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
+    // — supertype sibling of the color path (Leyline of Singularity "All nonland
+    // permanents are legendary", Melting "All lands are no longer snow"). The
+    // supertype predicate (legendary/basic/snow) is disjoint from color and
+    // land-type words, so this is order-safe here; it precedes `parse_land_type_change`
+    // so "All lands are basic" (supertype) is not probed as a land-type line.
+    if let Some(def) = parse_subject_is_supertype(&tp, &text) {
         return Some(def);
     }
 
@@ -2865,13 +2887,35 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "must be blocked if able" (CR 509.1b) ---
+    // --- "must be blocked [by <quality>] if able" (CR 509.1c) ---
     if nom_primitives::scan_contains(tp.lower, "must be blocked") {
-        return Some(
-            StaticDefinition::new(StaticMode::MustBeBlocked)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+        // CR 509.1c: classify the OPTIONAL "by <quality>" conjunct so a present
+        // quality is never silently weakened to the bare "any blocker" (None)
+        // requirement. Mirrors the attached-grant paths (grammar.rs / shared.rs)
+        // which distinguish the same three cases via the shared conjunct helper:
+        //   * Recognized quality   → typed `MustBeBlocked { by: Some(filter) }`.
+        //   * Unrecognized quality → leave the line Unimplemented (`return None`);
+        //     emitting `by: None` here would force a block by ANY creature and
+        //     drop the quality restriction. Falling through surfaces the gap to
+        //     coverage instead of weakening the requirement.
+        //   * No quality (bare "must be blocked if able") → `by: None`.
+        match extract_must_be_blocked_by_conjunct(tp.lower) {
+            Some(MustBeBlockedByConjunct::Recognized(filter)) => {
+                return Some(
+                    StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
+            Some(MustBeBlockedByConjunct::Unrecognized(_)) => return None,
+            None => {
+                return Some(
+                    StaticDefinition::new(StaticMode::MustBeBlocked { by: None })
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // --- "can't gain life" (CR 119.7) ---

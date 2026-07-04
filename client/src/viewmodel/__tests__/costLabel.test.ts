@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import { buildGameObject } from "../../test/factories/gameObjectFactory.ts";
 import {
   abilityChoiceLabel,
   abilityLabel,
@@ -10,42 +11,14 @@ import {
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObject({
     id: 1,
     card_id: 100,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Test Card",
-    power: null,
-    toughness: null,
-    loyalty: null,
     card_types: { supertypes: [], core_types: [], subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
-    timestamp: 1,
-    entered_battlefield_turn: null,
     back_face: null,
     ...overrides,
-  };
+  });
 }
 
 describe("abilityChoiceLabel per-variant formatting", () => {
@@ -122,7 +95,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
       description:
         "Return a Forest you control to its owner's hand: Untap target creature.",
       effect: { type: "Untap" },
-    } as unknown as GameObject["abilities"][number];
+    } satisfies GameObject["abilities"][number];
     expect(abilityLabel(ability)).toBe(
       "Return a Forest you control to its owner's hand",
     );
@@ -140,7 +113,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
             type: "Mana",
             produced: { type: "Fixed", colors: ["Green"] },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -173,7 +146,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
               color_options: ["White", "Blue", "Black", "Red", "Green"],
             },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -199,7 +172,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
               color_options: ["White", "Blue", "Black", "Red", "Green"],
             },
           },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {
@@ -218,7 +191,7 @@ describe("abilityChoiceLabel per-variant formatting", () => {
           cost: { type: "Tap" },
           description: "{T}: Draw a card.",
           effect: { type: "Draw" },
-        } as unknown as GameObject["abilities"][number],
+        } satisfies GameObject["abilities"][number],
       ],
     });
     const action: GameAction = {

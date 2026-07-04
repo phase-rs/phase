@@ -45,12 +45,13 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_mass_type_union, parse_target, parse_target_with_ctx, parse_target_with_syntax,
-    parse_type_phrase, resolve_pronoun_target, TargetSyntax,
+    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_type_phrase, resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, split_around, starts_with_possessive, TextPair,
+    parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
+    starts_with_possessive, TextPair,
 };
 
 /// CR 702.26: Phasing direction used by the "phase in"/"phase out" dispatch.
@@ -1328,7 +1329,7 @@ pub(super) fn parse_targeted_action_ast(
         // bare count of 1. `parse_count_expr` discards the word's identity, so
         // without this the parsed target never regains `FilterProp::Another`
         // and the source could sacrifice itself (Morkrut Necropod, #4513).
-        let (count, after_count, count_word) =
+        let (mut count, after_count, count_word) =
             super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
                 crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 rest,
@@ -1342,7 +1343,12 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(target_text));
+        let target_text = strip_sacrifice_choice_marker(target_text);
+        // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+        if let Some(rounding) = parse_rounding_suffix_only(&target_text) {
+            rewrite_quantity_expr_rounding(&mut count, rounding);
+        }
+        let target_text = strip_sacrifice_count_suffix(&target_text);
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -1839,7 +1845,7 @@ pub(super) fn parse_targeted_action_ast(
         // Preserve the optional-target spec through the AST; it is stamped onto
         // the clause in `lower_imperative_family_ast`.
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+        let (target, _rem) = parse_fight_target(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight {
@@ -3148,6 +3154,56 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
     .parse(input)
 }
 
+/// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
+/// discards the rest" (Monomania). The chosen player keeps exactly one card of
+/// their choice and discards every other card in hand -- equivalently, discards
+/// `hand size - 1` cards, chooser-directed. Routes to the existing
+/// `Effect::Discard` (via `TargetedImperativeAst::Discard`) using the canonical
+/// `ClampMin { Offset { HandSize, -1 }, 0 }` "N - 1, floored at 0" count
+/// (CR 107.1b keeps the amount non-negative when the hand holds one or zero
+/// cards); no new effect is introduced. Whole-clause anchored with `eof` so a
+/// bare "choose a card ..." prefix cannot hijack unrelated choose clauses. The
+/// leading verb has already been de-inflected to "choose" by the subject-
+/// stripping layer, but `opt("s")` also accepts a raw "chooses" for
+/// context-free callers. The possessive selects the `HandSize` scope;
+/// `Effect::Discard.target` is left as `Controller` for `inject_subject_target`
+/// to rewrite to the discarding player, exactly as the sibling "discard their
+/// hand" path does.
+fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<TargetedImperativeAst> {
+    let (hand_owner, _) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("choose").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" a card in ").parse(input)?;
+        let (input, hand_owner) = alt((
+            value(PlayerScope::Controller, tag("your hand")),
+            value(PlayerScope::Target, tag("their hand")),
+            value(PlayerScope::Target, tag("his or her hand")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" and discard").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" the rest").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, hand_owner))
+    })?;
+    Some(TargetedImperativeAst::Discard {
+        count: QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { player: hand_owner },
+                }),
+                offset: -1,
+            }),
+            minimum: 0,
+        },
+        random: false,
+        up_to: false,
+        unless_filter: None,
+        filter: None,
+    })
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -3202,6 +3258,16 @@ pub(super) fn parse_choose_ast(
         // ChooseFromZone seam (which pauses for player choice) instead of the
         // non-interactive TargetOnly path.
         if let Some(ast) = try_parse_choose_owned_by_voter(rest, rest_lower, ctx) {
+            return Some(ast);
+        }
+
+        // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
+        // pick one of the distinct counter kinds on the anaphoric object
+        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
+        // target form ("a counter on target permanent", Ichormoon Gauntlet)
+        // is not yet supported (its consumer "put one more or remove one" is
+        // also absent) and is left as an honest Unimplemented gap.
+        if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
             return Some(ast);
         }
 
@@ -3274,6 +3340,32 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     let source_filter =
         crate::parser::oracle_replacement::parse_choose_damage_source_candidate(rest)?;
     Some(ChooseImperativeAst::DamageSource { source_filter })
+}
+
+/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
+/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
+/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
+/// counter on ")` then the anaphor phrase, consuming the entire residual.
+///
+/// The declared-target form ("a counter on target permanent", Ichormoon
+/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
+/// that kind on that permanent or remove one of those counters from it") is not
+/// yet implemented, so parsing only the head would create a partial and
+/// rules-incorrect parse. Left as an honest Unimplemented gap.
+fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let anaphor = |i| -> OracleResult<'_, ()> {
+        let (i, _) = tag("a counter on ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    if anaphor(rest_lower.trim()).is_ok() {
+        return Some(ChooseImperativeAst::CounterKind {
+            target: TargetFilter::ParentTarget,
+        });
+    }
+    None
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -4274,7 +4366,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
-                    | ChoiceType::CreatureType
+                    | ChoiceType::CreatureType { .. }
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
@@ -4354,6 +4446,9 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
+        // CR 608.2d + CR 122.1: "choose a counter on it" → interactive
+        // counter-kind selection on the anaphoric object.
+        ChooseImperativeAst::CounterKind { target } => Effect::ChooseCounterKind { target },
     }
 }
 
@@ -7575,6 +7670,7 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 damage_source: None,
+                excess: _,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
@@ -7634,6 +7730,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }
             }
         }
@@ -7740,6 +7837,23 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 311.7 / CR 901.9b: "chaos ensues" as a standalone resolving instruction
+    // — the active plane's "whenever chaos ensues" ability triggers. Whole-phrase
+    // imperative with no target; anchored nom production mirroring the "end the
+    // turn" / "end the combat phase" parses so unrelated clauses cannot
+    // accidentally match it. Makes `parse_effect("chaos ensues") ==
+    // Effect::ChaosEnsues`, which the planar-die planeswalk-replacement parser
+    // (Fixed Point in Time) consumes as its substitute.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("chaos ensues"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —
@@ -7791,6 +7905,7 @@ pub(super) fn parse_imperative_family_ast(
                 vec![]
             },
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -7800,6 +7915,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::Upkeep,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     // CR 500.8 + CR 513.1: "there is an additional end step after this step"
@@ -7812,6 +7928,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::End,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
 
@@ -8239,8 +8356,12 @@ pub(super) fn parse_imperative_family_ast(
             }),
 
         // Choose (CR 700.2)
-        "choose" | "secretly" => parse_choose_ast(text, lower, ctx)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast))),
+        "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
+            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            .or_else(|| {
+                parse_choose_ast(text, lower, ctx)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast)))
+            }),
 
         // ── Exact-match keyword actions ──
         "explore" if lower == "explore" || lower == "explore again" => {
@@ -10126,16 +10247,17 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
-        ImperativeFamilyAst::MustBeBlocked => {
-            Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
-                duration: Some(Duration::UntilEndOfTurn),
-                target: None,
-            }
-        }
+        ImperativeFamilyAst::MustBeBlocked => Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: None }).modifications(vec![
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustBeBlocked { by: None },
+                    },
+                ]),
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
@@ -10374,6 +10496,22 @@ pub(super) fn parse_zone_counter_ast(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
+        // CR 122.1 + CR 122.6: "put [a[n]] [additional] counter of that kind on
+        // <anaphor>" — add one counter of the kind chosen by a preceding
+        // `ChooseCounterKind` (The Caves of Androzani). Detected before the
+        // generic counter-type paths so "counter of that kind" is never mis-read
+        // as a literal counter name. `parse_target`/`try_parse_put_counter`
+        // cannot express "of that kind" (no CounterType), so this is a distinct
+        // seam.
+        if let Some(after_put) =
+            nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
+        {
+            if let Some(Effect::PutChosenCounter { target, count }) =
+                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            {
+                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+            }
+        }
         // Try move-counters first ("put its counters on ...")
         if let Some((
             Effect::MoveCounters {
@@ -10429,7 +10567,18 @@ pub(super) fn parse_zone_counter_ast(
                 _remainder,
                 multi_target,
             )) => {
-                if is_all && multi_target.is_none() {
+                // CR 608.2c: A `ParentTarget` placement subject ("each of them")
+                // is an anaphor to a bounded set of chosen objects, not a
+                // battlefield-wide type scan. The `PutCounterAll` resolver
+                // matches its filter against every battlefield object and cannot
+                // resolve a bare `ParentTarget` (it has no target slot to bind),
+                // so route the anaphor to `PutCounter`, whose
+                // `resolve_defined_or_targets` binds `ability.targets` (the
+                // chosen creatures). Typed mass placements ("on each creature you
+                // control") and tracked-set demonstratives still take the
+                // `PutCounterAll` path.
+                if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
+                {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),
@@ -10604,6 +10753,10 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
+        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
+            Effect::PutChosenCounter { target, count }
+        }
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here
@@ -13249,6 +13402,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_sacrifice_half_creatures_choice_rounding_up_suffix_is_applied() {
+        let text = "sacrifice half the creatures they control of their choice, rounded up";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx);
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count, .. }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::DivideRounded {
+                        rounding: crate::types::ability::RoundingMode::Up,
+                        ..
+                    }
+                ));
+                assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                }) = target
+                else {
+                    panic!("expected ScopedPlayer-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![crate::types::ability::TypeFilter::Creature]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
     /// CR 608.2c — Yuriko, the Tiger's Shadow / Dark Confidant class. The bare
     /// anaphoric prefix "that card" in `"loses life equal to that card's mana
     /// value"` is an instruction-order referent: it points at the object
@@ -14112,6 +14298,97 @@ mod tests {
                 );
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
+        }
+    }
+
+    /// CR 701.9a + CR 107.1b: Monomania -- "chooses a card in their hand and
+    /// discards the rest" routes through the "choose" verb to the existing
+    /// `Effect::Discard` with a `hand size - 1` (floored at 0) count. The
+    /// possessive drives the `HandSize` scope; "their" -> `Target`.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_their() {
+        let text = "choose a card in their hand and discards the rest";
+        match parse_choose_discard_rest_of_hand(text, text) {
+            Some(TargetedImperativeAst::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            }) => {
+                assert!(!random && !up_to);
+                assert!(unless_filter.is_none() && filter.is_none());
+                match count {
+                    QuantityExpr::ClampMin { inner, minimum } => {
+                        assert_eq!(minimum, 0);
+                        match *inner {
+                            QuantityExpr::Offset { inner, offset } => {
+                                assert_eq!(offset, -1);
+                                assert!(
+                                    matches!(
+                                        *inner,
+                                        QuantityExpr::Ref {
+                                            qty: QuantityRef::HandSize {
+                                                player: PlayerScope::Target
+                                            }
+                                        }
+                                    ),
+                                    "expected HandSize(Target), got {inner:?}"
+                                );
+                            }
+                            other => panic!("expected Offset(-1), got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected ClampMin, got {other:?}"),
+                }
+            }
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
+
+    /// The de-inflected leading "choose" verb and the "your hand" possessive
+    /// (Controller scope) are both accepted.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_your() {
+        let text = "choose a card in your hand and discard the rest";
+        match parse_choose_discard_rest_of_hand(text, text) {
+            Some(TargetedImperativeAst::Discard { count, .. }) => match count {
+                QuantityExpr::ClampMin { inner, .. } => match *inner {
+                    QuantityExpr::Offset { inner, .. } => assert!(matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
+                        }
+                    )),
+                    other => panic!("expected Offset, got {other:?}"),
+                },
+                other => panic!("expected ClampMin, got {other:?}"),
+            },
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
+
+    /// Whole-clause anchoring guard: near-miss clauses that share the "choose"
+    /// / "the rest" tokens must NOT be captured by the Monomania recognizer.
+    /// A bare "choose a card in their hand" (no disposal), a "discard it"
+    /// back-reference, a plain targeting clause, a "two cards" cardinality
+    /// mismatch, and the Balance-family "a number of ... they control ...
+    /// discards the rest" equalization clause all return `None`.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_rejects_near_misses() {
+        for s in [
+            "choose a card in their hand",
+            "choose a card in their hand and discard it",
+            "choose a creature",
+            "choose two cards in their hand and discard the rest",
+            "choose a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then discards the rest",
+        ] {
+            assert!(
+                parse_choose_discard_rest_of_hand(s, s).is_none(),
+                "near-miss must not match: {s:?}"
+            );
         }
     }
 

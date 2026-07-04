@@ -199,6 +199,38 @@ fn assert_owned_by_opponent(filter: &TargetFilter) {
 }
 
 #[test]
+fn parse_post_spell_modifier_creature_type_does_not_share_reference() {
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation, TargetFilter};
+
+    let filter = parse_post_spell_modifier(
+        "that doesn't share a creature type with a creature you control or a creature card in your graveyard",
+    )
+    .expect("expected SharesQuality post-spell modifier");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    let shares_quality = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::SharesQuality {
+                quality,
+                relation,
+                reference,
+            } => Some((quality, relation, reference.as_deref())),
+            _ => None,
+        })
+        .expect("expected SharesQuality property");
+    assert_eq!(*shares_quality.0, SharedQuality::CreatureType);
+    assert_eq!(*shares_quality.1, SharedQualityRelation::DoesNotShare);
+    let reference = shares_quality.2.expect("expected disjunctive reference");
+    let TargetFilter::Or { filters } = reference else {
+        panic!("expected Or reference filter, got {reference:?}");
+    };
+    assert_eq!(filters.len(), 2);
+}
+
+#[test]
 fn parse_post_spell_modifier_cast_origin_from_nonhand() {
     // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
     // cast-capable zones except the hand.
@@ -6630,6 +6662,41 @@ fn trigger_you_cast_aura_spell() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+/// CR 601.2 + CR 702.33d: "Whenever you cast a kicked spell" is a
+/// SpellCast trigger whose `valid_card` gates on the cast-time kicked
+/// snapshot, not an unrestricted any-spell trigger.
+#[test]
+fn trigger_you_cast_kicked_spell_filters_valid_card() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever you cast a kicked spell, scry 2.",
+        "Merfolk Falconer",
+        &[],
+        &["Creature".to_string()],
+        &["Merfolk".to_string(), "Wizard".to_string()],
+    );
+
+    let def = parsed
+        .triggers
+        .first()
+        .expect("Merfolk Falconer should have a SpellCast trigger");
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert!(matches!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter { ref properties, .. }))
+            if properties.contains(&FilterProp::WasKicked)
+    ));
+
+    let execute = def.execute.as_deref().expect("trigger should execute");
+    match execute.effect.as_ref() {
+        Effect::Scry { count, target } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            assert_eq!(*target, TargetFilter::Controller);
+        }
+        other => panic!("expected Scry 2, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_a_player_casts_spell_they_dont_own() {
     let def = parse_trigger_line(
@@ -10900,6 +10967,99 @@ fn trigger_encounter_maps_to_planeswalked_to() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// DEFERRED GAP (documented, not fixed): Caught in a Parallel Universe is a
+/// Planechase phenomenon whose encounter effect is a per-player, left-neighbor,
+/// many-to-many choose-and-copy — "each player chooses a creature controlled by
+/// the player to their left. Each player creates a token that's a copy of the
+/// creature they chose, except it has menace."
+///
+/// Modeling this correctly needs infrastructure the engine does not yet have:
+///   * a left-neighbor `ControllerRef` — CR 103.1 fixes turn order (starting
+///     player, proceeding clockwise) and thus "the player to their left", but no
+///     filter controller ref resolves it (`ControllerRef` has no
+///     `PlayerToTheLeft`/left-neighbor variant);
+///   * a per-player PARALLEL selection where every player is simultaneously a
+///     chooser binding their own creature — `Effect::ChooseObjectsIntoTrackedSet`
+///     has a single `chooser` and one tracked set (CR 608.2c), not one binding
+///     per player; and
+///   * a per-player token copy keyed to each chooser's own binding —
+///     `CopyTokenOf { target: ParentTarget }` inherits ONE parent target, not a
+///     per-player selection (CR 707.2).
+///
+/// This is a single Planechase phenomenon, not a card class, so the per-player
+/// left-neighbor choose head is deliberately left as a strict-failure
+/// `Unimplemented { name: "choose" }` gap rather than mis-modeled with the
+/// single-chooser machinery. This test LOCKS that documented state so the card
+/// is not silently counted as fixed and a future change can't quietly alter the
+/// shape. When per-player parallel-selection infrastructure lands, replace this
+/// with a positive end-to-end test.
+#[test]
+fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap() {
+    let def = parse_trigger_line(
+        "When you encounter Caught in a Parallel Universe, each player chooses a \
+         creature controlled by the player to their left. Each player creates a \
+         token that's a copy of the creature they chose, except it has menace. \
+         (Then planeswalk away from this phenomenon.)",
+        "Caught in a Parallel Universe",
+    );
+    // CR 312.5: the encounter maps to the face-up (planeswalked-to) endpoint.
+    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("the encounter trigger must carry an execute body");
+    // The per-player left-neighbor selection head is unsupported: it must remain
+    // a documented `Unimplemented { name: "choose" }` strict-failure, NOT be
+    // mis-converted into a single-chooser `ChooseObjectsIntoTrackedSet`.
+    match &*execute.effect {
+        Effect::Unimplemented { name, .. } => assert_eq!(
+            name, "choose",
+            "the deferred per-player choose head must stay an Unimplemented choose gap"
+        ),
+        other => panic!(
+            "Caught in a Parallel Universe's per-player left-neighbor choose is a \
+             deferred gap and must remain Unimplemented, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
+    // CR 312.5 + CR 614.1a + CR 901.9c: the full production parser must carry
+    // the encounter trigger, duration shell, and planar-die replacement payload
+    // together for Fixed Point in Time.
+    let parsed = parse_oracle_text(
+        "When you encounter Fixed Point in Time, until your next turn, if a player would planeswalk as a result of rolling the planar die, chaos ensues instead.",
+        "Fixed Point in Time",
+        &[],
+        &["Phenomenon".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::PlaneswalkedTo)
+        .expect("Fixed Point in Time encounter trigger must parse");
+
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("Fixed Point in Time trigger must execute");
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    match execute.effect.as_ref() {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            assert!(matches!(replacement_effect.as_ref(), Effect::ChaosEnsues));
+        }
+        other => panic!("expected CreatePlaneswalkReplacement, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
     // CR 312.5 / CR 701.31d: every arrival/encounter phrasing in the class
@@ -13215,6 +13375,78 @@ fn trigger_source_deals_exactly_n_damage_to_player() {
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
 }
 
+#[test]
+fn ghyrson_damage_trigger_parses_mixed_permanent_or_player_recipient() {
+    let parsed = parse_oracle_text(
+        "Ward {2}\nWhenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player.",
+        "Ghyrson Starn, Kelermorph",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+        "Ghyrson must parse without unimplemented abilities: {:?}",
+        parsed.abilities
+    );
+    let trigger = parsed.triggers.first().expect("Ghyrson trigger parses");
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.damage_amount, Some((Comparator::EQ, 1)));
+    assert_eq!(trigger.valid_target, None);
+    match trigger.valid_source.as_ref() {
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) => assert!(
+            properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Another)),
+            "source filter must require another controlled source: {properties:?}"
+        ),
+        other => panic!("expected another source you control filter, got {other:?}"),
+    }
+    let execute = trigger.execute.as_ref().expect("trigger has an effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::EventTarget,
+                damage_source: None,
+                ..
+            }
+        ),
+        "Ghyrson effect must damage the event target, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn damage_trigger_mixed_permanent_or_player_requires_exact_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a permanent or player this turn, draw a card.",
+        "Test",
+    );
+    assert_ne!(
+        def.mode,
+        TriggerMode::DamageDone,
+        "mixed permanent/player recipient must not accept trailing qualifier text"
+    );
+}
+
+#[test]
+fn damage_trigger_creature_or_player_is_not_promoted_to_mixed_recipient() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a creature or player, draw a card.",
+        "Test",
+    );
+    assert_ne!(def.mode, TriggerMode::DamageDone);
+}
+
 // Same general parser must also accept the no-threshold + noncombat-kind
 // form (Virtue of Courage style) — proves the threshold axis is optional
 // and composes orthogonally with the damage-kind axis.
@@ -13466,6 +13698,7 @@ fn trigger_etb_from_graveyard_flayer() {
             amount,
             target,
             damage_source,
+            excess: _,
         } => {
             assert_eq!(*target, TargetFilter::Any);
             assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
@@ -13501,6 +13734,7 @@ fn pyrogoyf_etb_damage_uses_entering_lhurgoyf_as_damage_source() {
             amount,
             target,
             damage_source,
+            excess: _,
         } => {
             assert_eq!(*target, TargetFilter::Any);
             assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
@@ -20897,6 +21131,48 @@ fn trigger_veilstone_amulet_cant_be_targets() {
         matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
         "expected GenericEffect (hexproof grant), got {:?}",
         execute.effect
+    );
+}
+
+/// CR 508.1c + CR 611.2c: Bumi, Unleashed — a triggered additional combat
+/// phase whose "Only land creatures can attack during that combat phase"
+/// rider must fold onto the `AdditionalPhase` (Typed restriction,
+/// re-evaluated continuously) rather than surfacing as an Unimplemented gap.
+#[test]
+fn triggered_additional_combat_folds_land_creature_attacker_restriction() {
+    let def = parse_trigger_line(
+        "Whenever Bumi deals combat damage to a player, untap all lands you control. \
+         After this phase, there is an additional combat phase. Only land creatures \
+         can attack during that combat phase.",
+        "Bumi, Unleashed",
+    );
+
+    let mut node = def.execute.as_deref();
+    let mut saw_restriction = false;
+    while let Some(ability) = node {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "no Unimplemented node may remain after the fold"
+        );
+        if let Effect::AdditionalPhase {
+            phase: Phase::BeginCombat,
+            attacker_restriction: Some(TargetFilter::Typed(tf)),
+            ..
+        } = ability.effect.as_ref()
+        {
+            // "land creatures" -> a typed land+creature filter (Bumi class).
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land)
+                    && tf.type_filters.contains(&TypeFilter::Creature),
+                "restriction must be the land-creature typed filter, got {tf:?}"
+            );
+            saw_restriction = true;
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    assert!(
+        saw_restriction,
+        "the additional combat phase must carry a Typed land-creature restriction"
     );
 }
 

@@ -476,6 +476,7 @@ mod tests {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let unimpl = AbilityDefinition::new(

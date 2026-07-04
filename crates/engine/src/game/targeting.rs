@@ -727,18 +727,7 @@ pub fn resolved_targets(
     // `resolving_stack_entry`; the live stack lookup covers target resolution
     // before the entry is popped.
     if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
-        let root = state
-            .resolving_stack_entry
-            .as_ref()
-            .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
-            .or_else(|| {
-                state.stack.iter().find(|entry| {
-                    entry.id == ability.source_id || entry.source_id == ability.source_id
-                })
-            })
-            .and_then(|entry| entry.ability())
-            .unwrap_or(ability);
-        return super::ability_utils::flatten_targets_in_chain(root);
+        return parent_chain_targets_from_root(state, ability);
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -753,6 +742,46 @@ pub fn resolved_targets(
         return vec![target];
     }
     ability.targets.clone()
+}
+
+/// CR 608.2c: The full flattened target chain from the resolving root stack
+/// entry, so a `ParentTargetSlot { index }` anaphor can index a specific earlier
+/// declared slot even after the current node's local `targets` were replaced by
+/// chain propagation (`resolve_chain_body`'s most-recent-parent clone). This is
+/// the single authority for the root-entry lookup — previously inlined in
+/// `resolved_targets` — reused by the counter resolver so the stack walk is not
+/// duplicated. During normal resolution the root stack entry has already been
+/// popped and is exposed through `resolving_stack_entry`; the live `stack`
+/// lookup covers target resolution before the entry is popped.
+pub(crate) fn parent_chain_targets_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let root = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+        .or_else(|| {
+            state
+                .stack
+                .iter()
+                .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+        })
+        .and_then(|entry| entry.ability())
+        .unwrap_or(ability);
+    super::ability_utils::flatten_targets_in_chain(root)
+}
+
+/// CR 608.2c: Resolve a single earlier target slot by its declared `index` from
+/// the flattened chain root. `None` when the index is out of range.
+pub(crate) fn resolve_parent_slot_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    index: usize,
+) -> Option<TargetRef> {
+    parent_chain_targets_from_root(state, ability)
+        .into_iter()
+        .nth(index)
 }
 
 fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
