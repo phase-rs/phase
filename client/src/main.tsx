@@ -10,6 +10,7 @@ import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import { registerTauriUpdater } from "./pwa/tauriUpdater";
 import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
 import { installTauriExternalLinkHandler } from "./services/externalLinks";
+import { installTelemetry } from "./services/telemetryEvents";
 
 // StrictMode is scoped inside App.tsx instead of wrapping the root. P2P game
 // sessions own PeerJS resources whose cleanup is intentionally destructive, so
@@ -20,3 +21,4 @@ registerServiceWorker();
 registerTauriUpdater();
 installChunkReloadHandler();
 installTauriExternalLinkHandler();
+installTelemetry();

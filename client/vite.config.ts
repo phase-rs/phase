@@ -10,6 +10,8 @@ import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import type { Plugin } from "vite";
 
+const OFFICIAL_MULTIPLAYER_SERVER_URL = "wss://lobby.phase-rs.dev/ws";
+
 // wasm-bindgen emits `import * as importN from "env"` for WASM host-environment
 // imports (LLVM intrinsics). These are provided at instantiation time by the JS
 // glue code and are never loaded as ES modules. Resolve them to an empty shim
@@ -81,6 +83,9 @@ function dataFileDefines(mode: string): Record<string, string> {
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
+      envVar("DEFAULT_MULTIPLAYER_SERVER_URL") || OFFICIAL_MULTIPLAYER_SERVER_URL,
+    ),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
@@ -93,6 +98,10 @@ function dataFileDefines(mode: string): Record<string, string> {
     // keeps self-hosted builds working with no Supabase account.
     __SUPABASE_URL__: JSON.stringify(envVar("SUPABASE_URL")),
     __SUPABASE_ANON_KEY__: JSON.stringify(envVar("SUPABASE_ANON_KEY")),
+    // First-party telemetry ingest endpoint (lobby-worker `POST /telemetry`).
+    // Empty when unset (local dev, self-hosted builds) → the telemetry module
+    // compiles to a permanent no-op and nothing is ever sent anywhere.
+    __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded

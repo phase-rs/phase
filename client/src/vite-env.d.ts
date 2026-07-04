@@ -3,6 +3,7 @@
 
 declare const __APP_VERSION__: string;
 declare const __BUILD_HASH__: string;
+declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 declare const __CARD_DATA_URL__: string;
 declare const __CARD_DATA_LOCALE_URL_TEMPLATE__: string;
 declare const __CARD_NAMES_URL__: string;
@@ -23,6 +24,7 @@ declare const __PREVIEW_SITE_URL__: string;
 declare const __IS_RELEASE_BUILD__: boolean;
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_ANON_KEY__: string;
+declare const __TELEMETRY_URL__: string;
 
 // Fontsource packages ship only side-effect CSS (no type declarations); Vite
 // resolves the import at build time, but tsc needs an ambient module.

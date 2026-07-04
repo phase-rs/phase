@@ -373,6 +373,17 @@ pub enum ChoiceType {
         options: Vec<Keyword>,
         count: usize,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it" — pick one of the distinct
+    /// counter kinds currently present on a specific object (The Caves of
+    /// Androzani II/III). The concrete `options` list is enumerated at
+    /// resolution from the target object's counters (mirroring the runtime-baked
+    /// `Keyword { options }` template idiom), so the same interactive
+    /// `WaitingFor::NamedChoice` seam renders it. The chosen kind persists as
+    /// `ChosenAttribute::Counter` on the source for a downstream
+    /// `Effect::PutChosenCounter` ("put an additional counter of that kind").
+    CounterKind {
+        options: Vec<CounterType>,
+    },
 }
 
 impl ChoiceType {
@@ -527,6 +538,14 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
+            // CR 608.2d + CR 122.1: Runtime-only counter-kind choice (never
+            // appears in card data; baked with concrete kinds at resolution).
+            Self::CounterKind { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 15, "CounterKind", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
         }
     }
 }
@@ -575,6 +594,9 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default = "default_keyword_choice_count")]
                 count: usize,
             },
+            CounterKind {
+                options: Vec<CounterType>,
+            },
         }
 
         fn default_keyword_choice_count() -> usize {
@@ -621,6 +643,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
                 ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
+                ChoiceTypeData::CounterKind { options } => Ok(Self::CounterKind { options }),
             },
         }
     }
@@ -942,6 +965,12 @@ pub enum ChosenAttribute {
     /// changes zones (CR 400.7), which is exactly the lifetime Koh's grant needs.
     /// Replace-on-rechoose: `RememberCard` removes any prior `Card` before pushing.
     Card(ObjectId),
+    /// CR 608.2d + CR 122.1: The counter kind chosen from a `ChoiceType::CounterKind`
+    /// option list (The Caves of Androzani "choose a counter on it"). Read by
+    /// `Effect::PutChosenCounter` ("put an additional counter of that kind on
+    /// that permanent") to add one counter of the chosen kind. Replace-on-rechoose
+    /// (the per-iteration bind clears the prior `Counter` — see `bind_named_choice`).
+    Counter(CounterType),
     /// CR 607.2d: The chosen seat direction (left/right) for a directional
     /// "choose left or right" ability linked to a "the [last] chosen direction"
     /// static (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
@@ -996,6 +1025,12 @@ impl ChosenAttribute {
             Self::Card(_) => ChoiceType::Labeled {
                 options: Vec::new(),
             },
+            // CR 608.2d + CR 122.1: A category template — the concrete counter-kind
+            // option list is enumerated at each resolution from the target object's
+            // counters (mirrors the `Keyword` template idiom).
+            Self::Counter(_) => ChoiceType::CounterKind {
+                options: Vec::new(),
+            },
             // CR 607.2d: The directional choice is a two-option labeled prompt.
             // The {Left,Right} hijack in `choose.rs` recognises exactly this
             // option set to persist a typed `Direction` rather than a `Label`.
@@ -1023,6 +1058,9 @@ impl ChosenAttribute {
             // companion `ChosenLabelIs` conditions (static + trigger) can read
             // it for the lifetime of the permanent.
             ChoiceValue::Label(label) => Some(Self::Label(label)),
+            // CR 608.2d + CR 122.1: Persist the chosen counter kind so a later
+            // `Effect::PutChosenCounter` can read it.
+            ChoiceValue::Counter(counter_type) => Some(Self::Counter(counter_type)),
             ChoiceValue::LandType(_) => None,
         }
     }
@@ -1048,6 +1086,10 @@ pub enum ChoiceValue {
     /// `chosen_attributes` as `ChosenAttribute::Keyword` for later
     /// `RemoveChosenKeyword` resolution.
     Keyword(Keyword),
+    /// CR 608.2d + CR 122.1: typed counter-kind choice from a
+    /// `ChoiceType::CounterKind` option list (The Caves of Androzani). Persisted
+    /// as `ChosenAttribute::Counter` for later `PutChosenCounter` resolution.
+    Counter(CounterType),
 }
 
 impl ChoiceValue {
@@ -1093,6 +1135,17 @@ impl ChoiceValue {
                     .find(|k| k.to_string().to_lowercase() == needle)
                     .cloned()
                     .map(Self::Keyword)
+            }
+            // CR 608.2d + CR 122.1: match the player's response against the typed
+            // counter-kind option list by display string (case-insensitive, so
+            // the frontend can render canonical capitalization).
+            ChoiceType::CounterKind { options } => {
+                let needle = value.to_lowercase();
+                options
+                    .iter()
+                    .find(|k| k.as_str().to_lowercase() == needle)
+                    .cloned()
+                    .map(Self::Counter)
             }
         }
     }
@@ -3258,6 +3311,19 @@ pub enum FilterProp {
     Not {
         prop: Box<FilterProp>,
     },
+    /// CR 608.2c: The object is a member of the active resolution-chain tracked
+    /// set ("... chosen this way" / "the rest"). Composes with `FilterProp::Not`
+    /// for "all other <type>" after a choose-into-tracked-set head (Day of the
+    /// Doctor IV: "Choose up to three Doctors. You may exile all other
+    /// creatures."). The sentinel `TrackedSetId(0)` is resolved to the active
+    /// chain set at match time (see `matches_filter_prop` in `game/filter.rs`),
+    /// so no compile-time id binding is required. This is a *property* form of
+    /// the whole-filter `TargetFilter::TrackedSet` selector — usable as a
+    /// negatable constraint inside a `Typed` filter's `properties` vector,
+    /// which the whole-filter selector cannot express.
+    InTrackedSet {
+        id: super::identifiers::TrackedSetId,
+    },
     /// CR 700.9: A permanent is modified if it has one or more counters on it
     /// (CR 122), if it is equipped (CR 301.5), or if it is enchanted by an Aura
     /// that is controlled by that permanent's controller (CR 303.4).
@@ -3961,6 +4027,10 @@ pub enum TargetFilter {
     /// Gladiator) checks only the creature this trigger's damage went to.
     /// Resolved via `extract_target_object_from_event` against
     /// `state.current_trigger_event`; matches no object outside a trigger.
+    /// DealDamage has a narrow CR 115.10a / CR 120.3 exception for "that
+    /// permanent or player": its resolver reads the raw `DamageDealt.target`,
+    /// which may be `TargetRef::Player`. Generic filter, targeting, and
+    /// quantity paths remain object-only.
     EventTarget,
     /// CR 603.7c + CR 109.4 + CR 110.2: Resolves to the *controller* of the
     /// triggering event's source object — the player-level counterpart of
@@ -8023,6 +8093,31 @@ pub enum DamageSource {
     EachTarget,
 }
 
+/// CR 120.1: Who each independently-sourced damage instance in an
+/// [`Effect::EachSourceDealsDamage`] batch is dealt to. Each member of the source
+/// class is the source of its own damage (CR 120.1: the object dealing damage is
+/// its source); this enum selects that damage's recipient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EachDamageRecipient {
+    /// CR 115.1 / CR 608.2c: one shared recipient for every source — resolved
+    /// from ability context exactly like `DealDamage`'s `target` (an announced
+    /// `Any`/typed target, or a context anaphor: `ParentTarget`,
+    /// `TriggeringSource`, `ParentTargetController`). Surfaced by
+    /// `Effect::target_filter()` so the same target-slot / event-context
+    /// hydration the `DealDamage` recipient relies on populates `ability.targets`.
+    Shared(TargetFilter),
+    /// CR 109.4 + CR 120.3a: each source deals to the player who controls it
+    /// ("each creature deals 1 damage to its controller"). A per-source recipient
+    /// computed at resolution — surfaces no player-selectable target slot.
+    EachController,
+    // DEFERRED (§9, set-audit backlog): AttachedPermanent — each Aura source deals
+    // to the permanent it's attached to (CR 303.4). Needs a new attachment
+    // `FilterProp` (`AttachedToObjectOfType`) for the source filter; until then
+    // the parser fails the "...to the creature it's attached to" recipient closed
+    // to `Effect::Unimplemented` rather than mis-dealing.
+}
+
 /// CR 120.4a: Where excess damage (damage in excess of what would be lethal /
 /// past loyalty / past defense) is redirected when an effect that deals damage
 /// carries an excess-redirect rider ("Excess damage is dealt to that creature's
@@ -8459,6 +8554,36 @@ pub enum Effect {
         sources: TargetFilter,
         /// CR 115.1: The single targeted recipient that each source damages.
         recipient: TargetFilter,
+    },
+    /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated
+    /// at resolution time, CR 608.2) deals `amount` damage as its OWN source
+    /// (CR 120.1) to `recipient`. The filter-evaluated-source counterpart of
+    /// [`Effect::EachDealsDamageEqualToPower`] (whose sources are announced
+    /// targets with a `multi_target` count and whose amount is each source's own
+    /// power). Split as a sibling — not unified — because the source-selection
+    /// axis (resolution-time filter evaluation, CR 608.2, vs CR 115.1 targeting)
+    /// drives entirely different target-slot / legal-action wiring. `amount` is a
+    /// `QuantityExpr` so a future variable-amount filter-source card extends
+    /// `amount` rather than adding a third sibling.
+    ///
+    /// Covers "each <object class> [you control] deals N damage to <recipient>":
+    /// tribal pingers (Sarkhan the Masterless, Princess Snowfall), villainous-
+    /// choice / modal pingers (Missy, Rakdos Charm), and Pestilence-adjacent "each
+    /// creature deals" (Aura Barbs clause 1). `recipient` is an
+    /// [`EachDamageRecipient`] so "its controller" (per-source) and a shared
+    /// announced/context target are both expressed without a boolean.
+    EachSourceDealsDamage {
+        /// CR 608.2: The source class, evaluated against the battlefield at
+        /// resolution. Each matching object is an independent damage source
+        /// (CR 120.1). Always a non-player object-class filter — player-shaped
+        /// subjects route to `DamageEachPlayer`.
+        sources: TargetFilter,
+        /// CR 120.1: Damage dealt by every source. Uniform across the batch
+        /// (resolved once, CR 608.2).
+        amount: QuantityExpr,
+        /// CR 120.3: The recipient resolution strategy (shared target vs
+        /// per-source controller).
+        recipient: EachDamageRecipient,
     },
     /// CR 121.1: Draw a card.
     /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
@@ -9410,6 +9535,30 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it" — the controller picks one
+    /// of the distinct counter kinds currently on `target`. Zero kinds → no-op
+    /// (CR 608.2d "can't choose an impossible option"); one kind → auto-select
+    /// (no prompt); two or more → an interactive `WaitingFor::NamedChoice`
+    /// (`ChoiceType::CounterKind`). The chosen kind persists as
+    /// `ChosenAttribute::Counter` on the source for a following
+    /// `Effect::PutChosenCounter`. Building block for The Caves of Androzani
+    /// II/III (member-driven `repeat_for` over each non-Saga permanent).
+    ChooseCounterKind {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 122.1 + CR 122.6: "put an additional counter of that kind on that
+    /// permanent" — read the source's `ChosenAttribute::Counter` and add `count`
+    /// counters of that kind to `target`. No-op when no counter kind was chosen
+    /// (the preceding `ChooseCounterKind` was skipped because the object had no
+    /// counters). Mirrors the `ChosenAttribute::Keyword` → `RemoveChosenKeyword`
+    /// consume precedent.
+    PutChosenCounter {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// CR 122.1: Place counters on all objects matching a filter (no targeting).
     PutCounterAll {
         counter_type: CounterType,
@@ -10213,6 +10362,16 @@ pub enum Effect {
     CreateDrawReplacement {
         replacement_effect: Box<Effect>,
     },
+    /// CR 614.1a + CR 611.2 + CR 901.9c: Install a floating "if a player would
+    /// planeswalk as a result of rolling the planar die, [replacement_effect]
+    /// instead" replacement (Fixed Point in Time). Mirrors CreateDrawReplacement
+    /// for the planar-die planeswalk event class — the substitute rides in
+    /// `runtime_execute`; expiry comes from the ability's Duration
+    /// (`UntilNextTurnOf { Controller }`). RUNTIME:
+    /// create_planeswalk_replacement::resolve.
+    CreatePlaneswalkReplacement {
+        replacement_effect: Box<Effect>,
+    },
     /// CR 104.3e: An effect may state that a player loses the game.
     ///
     /// `target` names the player who loses the game when the effect resolves:
@@ -10323,6 +10482,10 @@ pub enum Effect {
     /// triggers and is put on the stack; on resolution its controller (the
     /// roller, CR 901.8) planeswalks (CR 701.31).
     Planeswalk,
+    /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's "whenever chaos
+    /// ensues" triggered ability triggers. Payload-less resolving keyword action
+    /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
+    ChaosEnsues,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -11923,6 +12086,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSpellOwner
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
+                | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
                 // continuations bind to objects created earlier in the same
@@ -12169,6 +12333,12 @@ impl Effect {
             | Effect::GainActivatedAbilitiesOfTarget { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
+            // CR 608.2d + CR 122.1: `ChooseCounterKind`/`PutChosenCounter`
+            // surface their `target` (typically `ParentTarget`) so the
+            // member-driven `repeat_for` loop rebinds it to the i-th permanent
+            // per iteration (The Caves of Androzani), mirroring `PutCounter`.
+            | Effect::ChooseCounterKind { target, .. }
+            | Effect::PutChosenCounter { target, .. }
             | Effect::MultiplyCounter { target, .. }
             | Effect::DoublePT { target, .. }
             | Effect::MoveCounters { target, .. }
@@ -12229,6 +12399,16 @@ impl Effect {
             // haunted creature is a real target chosen as the haunt trigger goes
             // on the stack, so it must be surfaced for the target-slot path.
             | Effect::ExileHaunting { target } => Some(target),
+
+            // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
+            // `DealDamage::target` — surface it so the same target-slot collection
+            // and event-context hydration build / bind the recipient. The
+            // `EachController` and deferred per-source recipients carry no slot and
+            // fall through to the `None` group below.
+            Effect::EachSourceDealsDamage {
+                recipient: EachDamageRecipient::Shared(filter),
+                ..
+            } => Some(filter),
 
             Effect::CombineHost { host, .. }
             | Effect::ChooseAugmentAndCombineWithHost { host, .. } => Some(host.as_ref()),
@@ -12469,6 +12649,14 @@ impl Effect {
             // "up to two" sources slot is driven by the ability's `multi_target`
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
+            // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
+            // resolver — no player-selectable target slot. Exhaustive match
+            // ensures any future `EachDamageRecipient` variant must be
+            // explicitly decided here rather than silently falling through.
+            | Effect::EachSourceDealsDamage {
+                recipient: EachDamageRecipient::EachController,
+                ..
+            }
             // CR 701.12a: player targets (player_a/player_b) are surfaced as
             // dual target slots by ability_utils, not by `target_filter()`.
             | Effect::ExchangeLifeTotals { .. }
@@ -12491,6 +12679,7 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::ChaosEnsues
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
             | Effect::AssembleContraptions { .. }
@@ -12542,7 +12731,10 @@ impl Effect {
             | Effect::CreateDamageReplacement { .. }
             // CR 614.11: CreateDrawReplacement is non-targeted — "you would
             // draw" scopes via the shield's source-player default, no slot.
-            | Effect::CreateDrawReplacement { .. } => None,
+            | Effect::CreateDrawReplacement { .. }
+            // CR 614.1a: CreatePlaneswalkReplacement is non-targeted — "a player
+            // would planeswalk" scopes via the shield's player scope, no slot.
+            | Effect::CreatePlaneswalkReplacement { .. } => None,
             // CR 115.1: RevealUntil with a non-context player filter ("target
             // opponent reveals...") requires a stack-time player target slot.
             Effect::RevealUntil { player, .. } => {
@@ -12586,6 +12778,8 @@ impl Effect {
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
+            // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
+            | Effect::PutChosenCounter { count, .. }
             | Effect::Discard { count, .. }
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
@@ -12616,6 +12810,8 @@ impl Effect {
             // --- Effects whose magnitude is an `amount: QuantityExpr` ---
             Effect::ChangeSpeed { amount, .. }
             | Effect::DealDamage { amount, .. }
+            // CR 120.1: uniform per-source damage amount.
+            | Effect::EachSourceDealsDamage { amount, .. }
             | Effect::GainLife { amount, .. }
             | Effect::LoseLife { amount, .. }
             | Effect::DamageAll { amount, .. }
@@ -12633,6 +12829,8 @@ impl Effect {
             // --- Effects with no QuantityExpr count/amount ---
             Effect::ApplyPerpetual { .. }
             | Effect::StartYourEngines { .. }
+            // CR 608.2d: the counter-kind CHOICE carries no magnitude.
+            | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -12738,6 +12936,7 @@ impl Effect {
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
             | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
@@ -12788,6 +12987,7 @@ impl Effect {
             | Effect::Specialize
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::ChaosEnsues
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -12816,6 +13016,8 @@ impl Effect {
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
+            // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
+            | Effect::PutChosenCounter { count, .. }
             | Effect::Discard { count, .. }
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
@@ -12846,6 +13048,8 @@ impl Effect {
             // --- Effects whose magnitude is an `amount: QuantityExpr` ---
             Effect::ChangeSpeed { amount, .. }
             | Effect::DealDamage { amount, .. }
+            // CR 120.1: uniform per-source damage amount.
+            | Effect::EachSourceDealsDamage { amount, .. }
             | Effect::GainLife { amount, .. }
             | Effect::LoseLife { amount, .. }
             | Effect::DamageAll { amount, .. }
@@ -12863,6 +13067,8 @@ impl Effect {
             // --- Effects with no QuantityExpr count/amount ---
             Effect::ApplyPerpetual { .. }
             | Effect::StartYourEngines { .. }
+            // CR 608.2d: the counter-kind CHOICE carries no magnitude.
+            | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -12968,6 +13174,7 @@ impl Effect {
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
             | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
             | Effect::Heist { .. }
@@ -13018,6 +13225,7 @@ impl Effect {
             | Effect::Specialize
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::ChaosEnsues
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13037,6 +13245,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::DealDamage { .. } => "DealDamage",
         Effect::ApplyPostReplacementDamage { .. } => "ApplyPostReplacementDamage",
         Effect::EachDealsDamageEqualToPower { .. } => "EachDealsDamageEqualToPower",
+        Effect::EachSourceDealsDamage { .. } => "EachSourceDealsDamage",
         Effect::Draw { .. } => "Draw",
         Effect::Pump { .. } => "Pump",
         Effect::PairWith { .. } => "PairWith",
@@ -13110,6 +13319,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainActivatedAbilitiesOfTarget { .. } => "GainActivatedAbilitiesOfTarget",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
+        Effect::ChooseCounterKind { .. } => "ChooseCounterKind",
+        Effect::PutChosenCounter { .. } => "PutChosenCounter",
         Effect::PutCounterAll { .. } => "PutCounterAll",
         Effect::MultiplyCounter { .. } => "MultiplyCounter",
         Effect::DoublePT { .. } => "DoublePT",
@@ -13160,6 +13371,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::CreateDrawReplacement { .. } => "CreateDrawReplacement",
+        Effect::CreatePlaneswalkReplacement { .. } => "CreatePlaneswalkReplacement",
         Effect::LoseTheGame { .. } => "LoseTheGame",
         Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
@@ -13171,6 +13383,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::VentureInto { .. } => "VentureInto",
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
+        Effect::ChaosEnsues => "ChaosEnsues",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::AssembleContraptions { .. } => "AssembleContraptions",
@@ -13269,6 +13482,7 @@ pub enum EffectKind {
     DealDamage,
     ApplyPostReplacementDamage,
     EachDealsDamageEqualToPower,
+    EachSourceDealsDamage,
     Draw,
     Pump,
     PairWith,
@@ -13387,6 +13601,7 @@ pub enum EffectKind {
     PreventDamage,
     CreateDamageReplacement,
     CreateDrawReplacement,
+    CreatePlaneswalkReplacement,
     Regenerate,
     RemoveAllDamage,
     LoseTheGame,
@@ -13400,6 +13615,7 @@ pub enum EffectKind {
     VentureInto,
     TakeTheInitiative,
     Planeswalk,
+    ChaosEnsues,
     OpenAttractions,
     RollToVisitAttractions,
     AssembleContraptions,
@@ -13415,6 +13631,8 @@ pub enum EffectKind {
     ChooseFromZone,
     RememberCard,
     ChooseObjectsIntoTrackedSet,
+    ChooseCounterKind,
+    PutChosenCounter,
     ChooseAndSacrificeRest,
     Exploit,
     GainEnergy,
@@ -13500,6 +13718,7 @@ impl From<&Effect> for EffectKind {
             Effect::DealDamage { .. } => EffectKind::DealDamage,
             Effect::ApplyPostReplacementDamage { .. } => EffectKind::ApplyPostReplacementDamage,
             Effect::EachDealsDamageEqualToPower { .. } => EffectKind::EachDealsDamageEqualToPower,
+            Effect::EachSourceDealsDamage { .. } => EffectKind::EachSourceDealsDamage,
             Effect::Draw { .. } => EffectKind::Draw,
             Effect::Pump { .. } => EffectKind::Pump,
             Effect::PairWith { .. } => EffectKind::PairWith,
@@ -13631,6 +13850,7 @@ impl From<&Effect> for EffectKind {
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
             Effect::CreateDrawReplacement { .. } => EffectKind::CreateDrawReplacement,
+            Effect::CreatePlaneswalkReplacement { .. } => EffectKind::CreatePlaneswalkReplacement,
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
             Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
@@ -13642,6 +13862,7 @@ impl From<&Effect> for EffectKind {
             Effect::VentureInto { .. } => EffectKind::VentureInto,
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
+            Effect::ChaosEnsues => EffectKind::ChaosEnsues,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::AssembleContraptions { .. } => EffectKind::AssembleContraptions,
@@ -13666,6 +13887,8 @@ impl From<&Effect> for EffectKind {
             // emits `ChooseFromZone` resolution events; it shares the kind.
             Effect::ForEachCategoryExile { .. } => EffectKind::ChooseFromZone,
             Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
+            Effect::ChooseCounterKind { .. } => EffectKind::ChooseCounterKind,
+            Effect::PutChosenCounter { .. } => EffectKind::PutChosenCounter,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,

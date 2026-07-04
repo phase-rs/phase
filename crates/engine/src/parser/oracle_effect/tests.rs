@@ -3009,6 +3009,75 @@ fn effect_lightning_bolt() {
 }
 
 #[test]
+fn non_trigger_damage_to_that_permanent_or_player_does_not_use_event_target() {
+    let e = parse_effect("Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player");
+    if let Effect::DealDamage { target, .. } = &e {
+        assert_ne!(
+            *target,
+            TargetFilter::EventTarget,
+            "generic parse_effect must not bind trigger event targets"
+        );
+    }
+    assert!(
+        e.target_filter()
+            .filter(|filter| **filter == TargetFilter::EventTarget)
+            .is_none(),
+        "generic parse_effect must not expose EventTarget"
+    );
+}
+
+#[test]
+fn trigger_context_damage_to_that_permanent_or_player_uses_event_target_without_slot() {
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        ..Default::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match def.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target,
+            damage_source: None,
+            ..
+        } => {
+            assert_eq!(*target, TargetFilter::EventTarget);
+            assert!(
+                target.is_context_ref(),
+                "EventTarget must be suppressed as a target slot"
+            );
+            assert!(
+                def.effect
+                    .target_filter()
+                    .filter(|filter| !filter.is_context_ref())
+                    .is_none(),
+                "EventTarget must not produce a chosen target slot"
+            );
+        }
+        other => panic!("expected DealDamage to EventTarget, got {other:?}"),
+    }
+}
+
+#[test]
+fn each_target_damage_does_not_accept_permanent_or_player_event_target() {
+    let def = parse_effect_chain(
+        "They each deal damage equal to their power to that permanent or player.",
+        AbilityKind::Spell,
+    );
+    if let Effect::DealDamage {
+        damage_source: Some(DamageSource::EachTarget),
+        target,
+        ..
+    } = def.effect.as_ref()
+    {
+        assert_ne!(*target, TargetFilter::EventTarget);
+    }
+}
+
+#[test]
 fn effect_deal_x_plus_two_damage_uses_offset_amount() {
     // Flame Discharge / Light Up the Night: "deals X plus N damage" composes the
     // spell's announced X with a fixed bonus. The DealDamage amount must be
@@ -6181,6 +6250,35 @@ fn molten_influence_unless_have_deal_damage() {
 }
 
 #[test]
+fn skullscorch_unless_that_player_have_deal_damage() {
+    let def = parse_effect_chain(
+        "Target player discards two cards at random unless that player has Skullscorch deal 4 damage to them.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Discard { .. }),
+        "primary should discard, got {:?}",
+        def.effect
+    );
+    let unless_pay = def
+        .unless_pay
+        .as_ref()
+        .expect("Skullscorch must attach unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+    match &unless_pay.cost {
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Player,
+                ..
+            } => {}
+            other => panic!("expected DealDamage 4 to payer, got {other:?}"),
+        },
+        other => panic!("expected EffectCost, got {other:?}"),
+    }
+}
+
+#[test]
 fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller() {
     use crate::types::mana::ManaCost;
 
@@ -8216,6 +8314,134 @@ fn effect_for_each_chosen_type_copy_token_uses_source_filter() {
                 .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
         }
         other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_for_each_graveyard_countered_card_copy_token_uses_source_filter() {
+    let def = parse_effect_chain(
+        "For each creature card in your graveyard with a quest counter on it, create a token that's a copy of it.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        def.repeat_for.is_none(),
+        "copy-source set should not be lowered to repeat_for"
+    );
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Typed(tf)),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with typed source_filter, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(tf.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::InZone {
+            zone: Zone::Graveyard
+        }
+    )));
+    assert!(tf.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::OfType(CounterType::Generic(name)),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        } if name == "quest"
+    )));
+}
+
+#[test]
+fn effect_for_each_controlled_creature_copy_token_preserves_except_clause() {
+    let def = parse_effect_chain(
+        "For each creature you control, create a token that's a copy of it, except it isn't legendary.",
+        AbilityKind::Spell,
+    );
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Typed(tf)),
+        additional_modifications,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with source_filter and exception, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(additional_modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::RemoveSupertype {
+            supertype: Supertype::Legendary
+        }
+    )));
+}
+
+#[test]
+fn effect_for_each_copy_token_preserves_contextual_this_ability_except_clause() {
+    let mut ctx = ParseContext {
+        current_trigger_index: Some(2),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause(
+        "For each creature you control, create a token that's a copy of it, except it has this ability.",
+        &mut ctx,
+    );
+    let Effect::CopyTokenOf {
+        additional_modifications,
+        ..
+    } = clause.effect
+    else {
+        panic!("expected CopyTokenOf, got {:?}", clause.effect);
+    };
+    assert!(additional_modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::RetainPrintedTriggerFromSource {
+            source_trigger_index: 2
+        }
+    )));
+}
+
+#[test]
+fn effect_for_each_comma_or_filter_copy_token_uses_later_structural_comma() {
+    let def = parse_effect_chain(
+        "For each artifact, creature, or enchantment you control, create a token that's a copy of it.",
+        AbilityKind::Spell,
+    );
+    assert!(def.repeat_for.is_none());
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Or { filters }),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with Or source_filter, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(filters.len(), 3);
+    for filter in filters {
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed Or branch, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::Artifact | TypeFilter::Creature | TypeFilter::Enchantment
+            )),
+            "branch should be artifact, creature, or enchantment: {tf:?}"
+        );
     }
 }
 
@@ -20171,6 +20397,93 @@ fn strip_optional_target_prefix_up_to_x_target() {
 }
 
 #[test]
+fn detain_up_to_two_target_creatures_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target creatures your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_up_to_two_target_nonland_permanents_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target nonland permanents your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+    assert!(filter
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_single_target_permanent_remains_mandatory() {
+    let def = parse_effect_chain("Detain target permanent.", AbilityKind::Spell);
+
+    assert_eq!(def.multi_target, None);
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+}
+
+#[test]
+fn chained_return_up_to_one_target_creature_card_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Each opponent sacrifices a creature of their choice and you return up to one target creature card from your graveyard to your hand.",
+        AbilityKind::Spell,
+    );
+
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("expected return sub-ability");
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+    let Effect::Bounce { target, .. } = sub.effect.as_ref() else {
+        panic!("expected Bounce sub-effect, got {:?}", sub.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed return target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Graveyard
+    }));
+}
+
+#[test]
 fn cast_variant_paid_instead_sneak() {
     let (cond, text) = strip_additional_cost_conditional(
         "if her sneak cost was paid this turn, instead return that card to the battlefield",
@@ -29394,6 +29707,32 @@ fn perpetual_parser_maps_modify_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: -1,
+                toughness_delta: -2,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
+    ));
+
+    let e = parse_effect("target creature you control perpetually gets +1/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 1,
+                toughness_delta: 0,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::You)
+    ));
 }
 
 #[test]
@@ -33267,6 +33606,42 @@ fn exile_from_top_until_second_person_nonland_filter() {
         .type_filters
         .iter()
         .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+}
+
+/// CR 205.4a: A bare supertype adjective in the stop condition ("until you
+/// exile a legendary card") must scope the `NextMatches` filter to that
+/// supertype, not collapse to `Any`. The Day of the Doctor chapters I-III dig to
+/// the first LEGENDARY card, so the filter must carry `HasSupertype { Legendary }`
+/// — otherwise the loop stops on the first card of any type. This "exile from the
+/// top until a match" shape is only structurally similar to Discover (CR 701.57a),
+/// not the Discover keyword action itself; the supertype scoping is governed
+/// solely by CR 205.4a. Building-block coverage: exercises the supertype-word
+/// branch of `try_parse_next_matches_until` (legendary/basic/snow), not one card.
+#[test]
+fn exile_from_top_until_supertype_legendary_filter() {
+    let e =
+        parse_effect("exile cards from the top of your library until you exile a legendary card");
+    let Effect::ExileFromTopUntil { player: _, until } = e else {
+        panic!("expected ExileFromTopUntil, got {:?}", e);
+    };
+    let UntilCondition::NextMatches { filter } = until else {
+        panic!("expected NextMatches arm, got {:?}", until);
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!(
+            "expected Typed filter, got a non-supertype filter (regression: dropped 'legendary')"
+        );
+    };
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Legendary
+            }
+        )),
+        "expected HasSupertype(Legendary), got {:?}",
+        typed.properties
+    );
 }
 
 /// CR 701.57a + CR 702.85a: Etali, Primal Conqueror's trigger body uses
