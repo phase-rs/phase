@@ -730,7 +730,7 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
                 )),
             ),
             value(
-                vec![StaticMode::MustBeBlocked],
+                vec![StaticMode::MustBeBlocked { by: None }],
                 alt((
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),

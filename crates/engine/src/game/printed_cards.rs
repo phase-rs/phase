@@ -3,7 +3,7 @@ use crate::database::CardDatabase;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
     CounterSourceRider, Effect, PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -850,6 +850,8 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
+        // CR 118.9: a borrowed keyword cost carries no nested effect/cost carrier.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }
@@ -900,10 +902,23 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         Effect::TurnFaceDown { .. } => {}
         // Nested-ability carriers — descend.
         Effect::Vote {
-            per_choice_effect, ..
+            per_choice_effect,
+            subject,
+            ..
         } => {
             for sub in per_choice_effect {
                 walk_ability_def(sub, out);
+            }
+            // CR 701.38b: object-pool votes (Council's Judgment, Prime
+            // Minister's Cabinet Room) leave `per_choice_effect` empty and
+            // carry the sole nested AbilityDefinition in `outcome_template`.
+            // Walk it so any conjure name a future object-vote outcome names is
+            // surfaced (the current exile-only class carries none).
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                walk_ability_def(outcome_template, out);
             }
         }
         Effect::SeparateIntoPiles {
@@ -2827,6 +2842,8 @@ mod tests {
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
             tally_mode: crate::types::ability::VoteTally::PerVote,
+            subject: crate::types::ability::VoteSubject::Named,
+            visibility: crate::types::ability::VoteVisibility::Open,
         };
         walk_effect(&vote, &mut names);
 
