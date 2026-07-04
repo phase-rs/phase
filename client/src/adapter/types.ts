@@ -1224,6 +1224,7 @@ export type WaitingFor =
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
@@ -1363,6 +1364,12 @@ export type WaitingFor =
       actor:
         | { type: "SubjectActs" }
         | { type: "Delegated"; data: PlayerId };
+      // CR 701.38b: For object-pool votes (Council's Judgment, Prime
+      // Minister's Cabinet Room) the candidate battlefield objects, parallel
+      // to `options`/`option_labels`. Empty (`[]`) for named votes. When
+      // non-empty, the modal dispatches `SubmitVoteCandidate { candidate_index }`
+      // (index into this array) instead of `ChooseOption`.
+      candidate_objects: ObjectId[];
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
@@ -1631,6 +1638,9 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  // CR 701.38b: Cast a vote for one object candidate in an object-pool vote.
+  // `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`.
+  | { type: "SubmitVoteCandidate"; data: { candidate_index: number } }
   | { type: "SubmitSpellbookDraft"; data: { card: string } }
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }

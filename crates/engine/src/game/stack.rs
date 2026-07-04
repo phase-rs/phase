@@ -2131,6 +2131,8 @@ fn zone_change_record_from_spec(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        // A freshly created token is never suspected (CR 701.60b).
+        is_suspected: false,
     }
 }
 
@@ -3320,6 +3322,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(first_target)],
             spell_id,
@@ -3330,6 +3333,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(second_target)],
             spell_id,
@@ -4056,6 +4060,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target_id)],
             spell_id,

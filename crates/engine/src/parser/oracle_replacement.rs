@@ -165,6 +165,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If X is N or less/greater, ~ enters tapped" (cast-X-comparison gate) ---
+    // CR 107.3 + CR 614.1d: Slumbering Trudge-class. Must precede the unconditional
+    // "enters tapped" guard below so the X comparison is not dropped.
+    if let Some(def) = parse_enters_tapped_if_x_comparison(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     if let Some(def) = parse_clone_replacement(&norm_lower, &text, card_name) {
@@ -204,6 +211,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
         && !nom_primitives::scan_contains(&norm_lower, "unless")
         && !nom_primitives::scan_contains(&norm_lower, "if you control")
+        && !nom_primitives::scan_contains(&norm_lower, "if x")
         && !has_enters_tapped_with_counter(&norm_lower)
     {
         return Some(
@@ -2753,6 +2761,67 @@ fn parse_enters_tapped_if_controls(
     )
 }
 
+/// Combinator for "if x is <N> or less/fewer/greater/more[,] [it|~|this creature]
+/// enters tapped" — anchored at the sentence start (per-sentence dispatch,
+/// mirroring `parse_if_controls_count_condition`). Requiring the enters-tapped
+/// tail here (rather than a separate `scan_contains` guard) keeps the whole shape
+/// inside one typed nom chain so the error type is inferred cleanly.
+fn parse_x_comparison_enters_tapped(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    let (input, _) = tag("if x is ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number.parse(input)?;
+    let (input, comparator) = alt((
+        value(Comparator::GE, alt((tag(" or greater"), tag(" or more")))),
+        value(Comparator::LE, alt((tag(" or less"), tag(" or fewer")))),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(char(',')).parse(input)?;
+    let (input, _) = opt(multispace1).parse(input)?;
+    let (input, _) = opt(alt((tag("it "), tag("~ "), tag("this creature ")))).parse(input)?;
+    let (input, _) =
+        alt((tag("enters tapped"), tag("enters the battlefield tapped"))).parse(input)?;
+    Ok((input, (n, comparator)))
+}
+
+/// CR 107.3 + CR 614.1d: "If X is N or less/greater, [it] enters tapped" — a
+/// cast-X-comparison ETB tap gate (Slumbering Trudge: "If X is 2 or less, it
+/// enters tapped"). The tap replacement applies only when the cast value of X
+/// satisfies the comparison; `CostXPaid` defaults to 0 for non-cast entries
+/// (CR 107.3), so `X <= 2` is true and the permanent enters tapped, matching the
+/// printed ruling. Reuses `ReplacementCondition::OnlyIfQuantity` — no new variant.
+/// Sibling of `parse_enters_tapped_if_controls`; dispatched before the
+/// unconditional enters-tapped guard so the condition is not dropped.
+fn parse_enters_tapped_if_x_comparison(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, (n, comparator)) = parse_x_comparison_enters_tapped(norm_lower).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string())
+            // CR 107.3: gate the tap on the cast value of X.
+            .condition(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: n as i32 },
+                active_player_req: None,
+            }),
+    )
+}
+
 /// Extract "if you control N or more [type phrase]" condition (CR 614.1d).
 ///
 /// The "if you control" prefix is the positive form: the replacement APPLIES
@@ -4713,6 +4782,22 @@ fn parse_damage_modification_replacement(
     if let Some(cs) = combat_scope {
         def = def.combat_scope(cs);
     }
+    // CR 614.1a: A "while [condition]" gate in the antecedent (Delirium threshold
+    // on The Rollercrusher Ride — "... would deal noncombat damage to a permanent
+    // or player while there are four or more card types among cards in your
+    // graveyard, ...") suppresses the doubler when the condition is false. Reuses
+    // the `parse_while_antecedent` building block and the
+    // `ReplacementCondition::OnlyIfQuantity` typed surface. The anchor is
+    // "would deal " (a substring of both "would deal damage" and "would deal
+    // noncombat damage"); a no-`while` clause yields `Absent` → ungated, so
+    // unconditional damage doublers (Trance Kuja) are unaffected.
+    match parse_while_antecedent(norm_lower, "would deal ") {
+        WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+        // Guard present but unparseable: fail closed rather than emit an
+        // unconditional damage doubler.
+        WhileAntecedent::Unparsed => return None,
+        WhileAntecedent::Absent => {}
+    }
     Some(def)
 }
 
@@ -6259,11 +6344,17 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
     else {
         return WhileAntecedent::Absent;
     };
-    let Ok((_, condition_text)) = nom::sequence::preceded(
+    // The " while " gate need not be flush against the verb anchor: for damage
+    // replacements the recipient clause ("noncombat damage to a permanent or
+    // player") sits between the anchor and the gate, so scan forward to the gate
+    // marker. The life-gain caller's flush case is the empty-prefix match.
+    let Ok((_, (_, _, condition_text))) = (
+        take_until::<_, _, OracleError<'_>>(" while "),
         tag::<_, _, OracleError<'_>>(" while "),
         take_until::<_, _, OracleError<'_>>(","),
     )
-    .parse(after_verb) else {
+        .parse(after_verb)
+    else {
         return WhileAntecedent::Absent;
     };
     // A guard clause IS present from here on; every failure path below must fail
@@ -9257,6 +9348,7 @@ mod tests {
                 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
         );
         def.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -9293,6 +9385,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         rewrite_parent_target_controller_to_post_replacement_source(&mut def);
@@ -11099,7 +11192,7 @@ mod tests {
         assert!(matches!(
             *execute.effect,
             Effect::Choose {
-                choice_type: ChoiceType::CreatureType,
+                choice_type: ChoiceType::CreatureType { .. },
                 persist: true,
                 ..
             }

@@ -19,8 +19,8 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec,
-    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
+    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -3127,6 +3127,20 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        ContinuationAst::ExcessDamageToController => {
+            // CR 120.4a + CR 608.2c: walk backward to the nearest DealDamage and
+            // attach the excess-redirect rider. The clause may not be adjacent to
+            // the DealDamage effect, mirroring the CantRegenerate walk above.
+            if let Some(def) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+            {
+                if let Effect::DealDamage { excess, .. } = &mut *def.effect {
+                    *excess = Some(ExcessRecipient::TargetController);
+                }
+            }
+        }
         ContinuationAst::PutRest {
             destination,
             reorder_all,
@@ -4031,6 +4045,9 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
+        // CR 120.4a: recognition was gated on a preceding DealDamage, so the
+        // rider is always absorbed into that effect (never a standalone effect).
+        ContinuationAst::ExcessDamageToController => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
@@ -5244,6 +5261,32 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     !matches!(filter, TargetFilter::Any | TargetFilter::None)
 }
 
+/// CR 122.1 + CR 614.1c + CR 608.2c: returns true when `sentence` is a
+/// moved-object put-onto-battlefield-this-way conditional whose counter payoff
+/// is represented by `Effect::ChangeZone.conditional_enter_with_counters`
+/// ("If you put an artifact onto the battlefield this way, put two +1/+1 counters
+/// on it" — Oviya, Automech Artisan). Shared with the `Condition_If` swallow
+/// detector so the represented clause can be located and stripped text-scoped,
+/// reusing the same `parse_you_put_onto_battlefield_this_way_clause` combinator
+/// that produced the gate — not a verbatim Oracle-string match. Mirrors
+/// `is_moved_object_enters_modifier_clause`: it keys on the put-this-way condition
+/// AND a "counter" payoff tail so it drops only the represented clause.
+pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Ok((body, _)) =
+        crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
+            after_if,
+        )
+    else {
+        return false;
+    };
+    nom_primitives::scan_contains(body, "counter")
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -5741,6 +5784,21 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
         {
             Some(ContinuationAst::CantRegenerate)
+        }
+        // CR 120.4a: "Excess damage is dealt to that creature's controller
+        // instead." — trailing rider on a `DealDamage` (Flame Spill, Gandalf's
+        // Sanction, Ravenous Tyrannosaurus). The two negative guards defer the
+        // conditional / trample-gated form (Ram Through: "If the creature you
+        // control has trample, excess ...") to `Effect::Unimplemented` — that
+        // form requires a controlled-source trample check we do not model here.
+        Effect::DealDamage { .. }
+            if nom_primitives::scan_contains(&lower, "excess damage")
+                && nom_primitives::scan_contains(&lower, "that creature's controller")
+                && nom_primitives::scan_contains(&lower, "instead")
+                && !nom_primitives::scan_contains(&lower, "has trample")
+                && !nom_primitives::scan_contains(&lower, "if ") =>
+        {
+            Some(ContinuationAst::ExcessDamageToController)
         }
         Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)

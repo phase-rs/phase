@@ -460,23 +460,40 @@ fn entered_perturbs_quantity(
 
 /// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
 ///
-/// This intentionally supports only `Not(ParentTarget)` inside composite filters.
-/// Positive `ParentTarget` inside `And` / `Or` remains unresolved here.
+/// This intentionally supports only `Not(ParentTarget)` and
+/// `Not(ParentTargetSlot { index })` inside composite filters. Positive
+/// `ParentTarget` / `ParentTargetSlot` inside `And` / `Or` remains unresolved here.
 pub fn normalize_contextual_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
     match filter {
         TargetFilter::Not { filter: inner }
-            if matches!(inner.as_ref(), TargetFilter::ParentTarget) =>
+            if matches!(
+                inner.as_ref(),
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            ) =>
         {
-            let object_ids: Vec<ObjectId> = parent_targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
+            // CR 608.2c: exclude the concrete parent object(s). `ParentTarget`
+            // excludes every parent object; `ParentTargetSlot { index }` excludes
+            // only the object at that one declared slot.
+            let object_ids: Vec<ObjectId> = match inner.as_ref() {
+                TargetFilter::ParentTargetSlot { index } => parent_targets
+                    .get(*index)
+                    .and_then(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .into_iter()
+                    .collect(),
+                _ => parent_targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect(),
+            };
             match object_ids.as_slice() {
                 [] => TargetFilter::Any,
                 [id] => TargetFilter::Not {
@@ -1349,6 +1366,9 @@ pub fn matches_target_filter_on_lki_snapshot(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        // CR 701.60b: Carry suspected status from the LKI snapshot so
+        // `FilterProp::Suspected` reads the cost-paid look-back value.
+        is_suspected: lki.is_suspected,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -2182,6 +2202,48 @@ fn subtype_matches_with_changeling(
 
 fn subtype_matches_host_supertype(subtype: &str, supertypes: &[Supertype]) -> bool {
     subtype.eq_ignore_ascii_case("host") && supertypes.contains(&Supertype::Host)
+}
+
+/// CR 701.4a + CR 205.3m + CR 601.2h: the creature types for which the player can
+/// actually pay "choose a creature type and behold N of that type" — types T such
+/// that >= `count` beholdable creatures (hand + controlled battlefield permanents)
+/// are of type T (Changeling counts as every type, CR 702.73a). Single authority
+/// feeding BOTH the Optional-cost payability probe (set non-empty) AND the
+/// `CostTypeChoice` option list (the set itself), so the offered options and the
+/// payability gate can never disagree.
+pub(crate) fn feasible_behold_creature_types(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    behold_filter: &crate::types::ability::TargetFilter,
+    count: u32,
+) -> Vec<String> {
+    // Enumerate against the BASE creature filter — the same filter with the
+    // per-type `IsChosenCreatureType` discriminator removed. With that leg
+    // present and no type chosen yet, `eligible_behold_choices` returns empty.
+    let base = behold_filter.without_prop(&crate::types::ability::FilterProp::IsChosenCreatureType);
+    let candidates = super::casting_costs::eligible_behold_choices(state, player, source, &base);
+    state
+        .all_creature_types
+        .iter()
+        .filter(|t| {
+            candidates
+                .iter()
+                .filter(|&&id| {
+                    state.objects.get(&id).is_some_and(|o| {
+                        subtype_matches_with_changeling(
+                            t,
+                            &o.card_types.subtypes,
+                            &o.keywords,
+                            &state.all_creature_types,
+                        )
+                    })
+                })
+                .count()
+                >= count as usize
+        })
+        .cloned()
+        .collect()
 }
 
 /// Check if an object matches a TypeFilter variant.
@@ -4350,6 +4412,11 @@ fn zone_change_record_matches_property(
         // These could be snapshotted (e.g. suspected status, damage-dealt-this-turn)
         // or require state joins that aren't plumbed to this evaluator. Expand as
         // trigger-filter coverage grows.
+        // CR 701.60b + CR 608.2c: Suspected status as of the zone change. Now
+        // snapshotted onto the record (Agency Coroner: "the sacrificed creature
+        // was suspected" reads the cost-paid LKI, taken before the sacrifice
+        // zone-change reset the flag).
+        FilterProp::Suspected => record.is_suspected,
         FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
@@ -4357,7 +4424,6 @@ fn zone_change_record_matches_property(
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
-        | FilterProp::Suspected
         | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
@@ -5397,6 +5463,7 @@ mod tests {
                 chosen_attributes: vec![],
                 counters: Default::default(),
                 tapped: false,
+                is_suspected: false,
             },
         );
 
@@ -7680,6 +7747,42 @@ mod tests {
         );
     }
 
+    /// T7 (s25 site 3) — CR 608.2c: `Not(ParentTargetSlot { index })` excludes
+    /// only the parent object at that one declared slot; the other parent object
+    /// remains affected. Pre-fix (no `ParentTargetSlot` arm) the `Not` fell to
+    /// the recursion arm and stayed unresolved as `Not(ParentTargetSlot{..})`
+    /// (excluding nobody concretely) — this asserts the concrete single-slot
+    /// exclusion, so reverting the arm flips both slot assertions.
+    #[test]
+    fn normalize_contextual_filter_not_parent_target_slot_excludes_only_that_slot() {
+        let parents = [
+            TargetRef::Object(ObjectId(7)),
+            TargetRef::Object(ObjectId(8)),
+        ];
+        assert_eq!(
+            normalize_contextual_filter(
+                &TargetFilter::Not {
+                    filter: Box::new(TargetFilter::ParentTargetSlot { index: 0 }),
+                },
+                &parents,
+            ),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(7) }),
+            },
+        );
+        assert_eq!(
+            normalize_contextual_filter(
+                &TargetFilter::Not {
+                    filter: Box::new(TargetFilter::ParentTargetSlot { index: 1 }),
+                },
+                &parents,
+            ),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(8) }),
+            },
+        );
+    }
+
     #[test]
     fn has_chosen_name_matches_object_with_chosen_card_name() {
         let mut state = setup();
@@ -9017,6 +9120,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: Default::default(),
             tapped: false,
+            is_suspected: false,
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -9060,6 +9164,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: Default::default(),
             tapped: false,
+            is_suspected: false,
         };
         let filter =
             TargetFilter::Typed(
@@ -9205,6 +9310,7 @@ mod tests {
             chosen_attributes: vec![],
             counters: Default::default(),
             tapped,
+            is_suspected: false,
         };
 
         // Left the battlefield TAPPED.
@@ -9967,6 +10073,7 @@ mod tests {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            is_suspected: false,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -10058,6 +10165,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
             tapped: false,
+            is_suspected: false,
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -10076,6 +10184,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
             tapped: false,
+            is_suspected: false,
         };
 
         let filter =
@@ -10219,6 +10328,7 @@ mod tests {
                 counters: Default::default(),
                 chosen_attributes: vec![],
                 tapped: false,
+                is_suspected: false,
             },
         );
 
@@ -10287,6 +10397,7 @@ mod tests {
                 counters: Default::default(),
                 chosen_attributes: vec![],
                 tapped: false,
+                is_suspected: false,
             },
         );
 

@@ -3040,6 +3040,7 @@ mod tests {
                 amount,
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         )
     }

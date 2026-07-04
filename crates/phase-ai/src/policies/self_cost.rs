@@ -314,6 +314,7 @@ fn damage_kills_creature(
         amount: QuantityExpr::Fixed { value },
         target: TargetFilter::Any,
         damage_source: None,
+        excess: None,
     };
     state.battlefield.iter().any(|&id| {
         let Some(obj) = state.objects.get(&id) else {

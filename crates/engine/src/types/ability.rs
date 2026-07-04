@@ -297,7 +297,15 @@ pub enum OpponentMayScope {
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
-    CreatureType,
+    /// CR 205.3m: A choice among creature types. `options`, when non-empty,
+    /// narrows the offered set below the full creature-type list to an explicit
+    /// Oracle-listed candidate set (e.g. A Killer Among Us' "secretly choose
+    /// Human, Merfolk, or Goblin") — mirrors the `Color { excluded }` /
+    /// `CardType { excluded }` restriction axis. Empty ⇒ all creature types
+    /// (Morophon / Changeling), which keeps existing card-data JSON byte-stable.
+    CreatureType {
+        options: Vec<String>,
+    },
     Color {
         /// Colors that cannot be chosen by this prompt.
         ///
@@ -368,6 +376,19 @@ pub enum ChoiceType {
 }
 
 impl ChoiceType {
+    /// Unrestricted creature-type choice (all creature types offered).
+    pub fn creature_type() -> Self {
+        Self::CreatureType {
+            options: Vec::new(),
+        }
+    }
+
+    /// Creature-type choice restricted to an explicit Oracle-listed candidate
+    /// set (CR 205.3m), e.g. "secretly choose Human, Merfolk, or Goblin".
+    pub fn creature_type_from(options: Vec<String>) -> Self {
+        Self::CreatureType { options }
+    }
+
     pub fn color() -> Self {
         Self::Color {
             excluded: Vec::new(),
@@ -417,8 +438,19 @@ impl Serialize for ChoiceType {
         S: Serializer,
     {
         match self {
-            Self::CreatureType => {
-                serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+            // Serialize the unrestricted form as the legacy unit variant
+            // "CreatureType" so existing Morophon/Changeling card-data JSON
+            // stays byte-stable; only emit the struct form when a candidate
+            // restriction is present.
+            Self::CreatureType { options } => {
+                if options.is_empty() {
+                    serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 0, "CreatureType", 1)?;
+                    variant.serialize_field("options", options)?;
+                    variant.end()
+                }
             }
             Self::Color { excluded } => {
                 if excluded.is_empty() {
@@ -513,6 +545,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         #[derive(Deserialize)]
         enum ChoiceTypeData {
+            CreatureType {
+                #[serde(default)]
+                options: Vec<String>,
+            },
             Color {
                 #[serde(default)]
                 excluded: Vec<ManaColor>,
@@ -547,7 +583,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         match ChoiceTypeRepr::deserialize(deserializer)? {
             ChoiceTypeRepr::Unit(value) => match value.as_str() {
-                "CreatureType" => Ok(Self::CreatureType),
+                "CreatureType" => Ok(Self::creature_type()),
                 "Color" => Ok(Self::color()),
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
@@ -578,6 +614,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 )),
             },
             ChoiceTypeRepr::Data(data) => match data {
+                ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
@@ -920,7 +957,7 @@ impl ChosenAttribute {
     pub fn choice_type(&self) -> ChoiceType {
         match self {
             Self::Color(_) => ChoiceType::color(),
-            Self::CreatureType(_) => ChoiceType::CreatureType,
+            Self::CreatureType(_) => ChoiceType::creature_type(),
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
@@ -1020,7 +1057,7 @@ impl ChoiceValue {
                 let color = value.parse::<ManaColor>().ok()?;
                 (!excluded.contains(&color)).then_some(Self::Color(color))
             }
-            ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
+            ChoiceType::CreatureType { .. } => Some(Self::CreatureType(value.to_string())),
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
             }
@@ -2387,6 +2424,14 @@ pub enum ResolutionCastCost {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mana_spend_permission: Option<ManaSpendPermission>,
     },
+    /// CR 118.9 + CR 702.62a: Cast paying a specific alternative mana cost
+    /// borrowed from a keyword (e.g., The Face of Boe's suspend cost). The
+    /// mana cost is explicit (not `SelfManaCost`) and payment is `Auto` so the
+    /// pool is drained automatically during resolution (the triggering player's
+    /// pool already holds the keyword cost before the trigger resolves). `None`
+    /// from `effective_keyword_mana_cost` aborts before this is constructed
+    /// (see `cast_from_zone::complete_hand_pick_cast_from_zone`).
+    AlternativeMana { cost: crate::types::mana::ManaCost },
 }
 
 /// CR 608.2g: Disposition of a during-resolution card that is not cast.
@@ -4674,6 +4719,16 @@ pub enum QuantityRef {
     },
     /// CR 710.2: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
+    /// (air/earth/water/fire) the controller has performed this turn — these are
+    /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
+    /// rules that `game::bending::record_bending` records. Reads
+    /// `Player::bending_types_this_turn.len()` (a `HashSet<BendingType>` with
+    /// exactly four possible members). Backs Avatar Aang's "if you've done all
+    /// four this turn" (`>= 4` means every distinct bend type). Controller-scoped,
+    /// mirroring the bare `CrimesCommittedThisTurn` / `DescendedThisTurn` per-turn
+    /// accumulator siblings.
+    BendTypesThisTurn,
     /// CR 119.4: Amount of life gained this turn, scoped by `player` per the
     /// workspace "Parameterize, don't proliferate" principle (Round Π-4 — mirrors
     /// `LifeLostThisTurn`'s Π-3 lift). `Controller` reads
@@ -4948,7 +5003,7 @@ pub enum QuantityRef {
     /// multiple ballots, so a single player can contribute more than one to
     /// the tally). Used by vote-tally effects ("for each X vote, do Y") whose
     /// per-choice count is bound to this ref during vote-block parsing.
-    VoteCount { choice_index: u8 },
+    VoteCount { choice_index: u32 },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -5220,9 +5275,10 @@ pub enum PlayerFilter {
     /// who chose that option.
     VotedFor {
         /// Index into the parent `Effect::Vote.choices` list (and parallel
-        /// `WaitingFor::VoteChoice.options`). The voter ledger encodes choices
-        /// as `u8` — vote sessions never exceed 255 choices in practice.
-        choice_index: u8,
+        /// `WaitingFor::VoteChoice.options`), or into `candidate_objects` for
+        /// object-pool votes. Widened to `u32` so boards with >255 object
+        /// candidates (token-heavy games) are addressable without aliasing.
+        choice_index: u32,
     },
     /// CR 109.4 + CR 608.2c: The controller of the first object target of
     /// the resolving ability ("reduce that opponent's speed" anaphoring the
@@ -7037,6 +7093,14 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
         action: BeholdCostAction,
+        /// CR 601.2b + CR 701.4a: when `Some`, the player first chooses a value
+        /// of this kind (creature type for Celestial Reunion) as part of paying
+        /// the behold cost. The choice is recorded as a `ChosenAttribute` on the
+        /// spell object; the behold `filter`'s `IsChosenCreatureType` leg then
+        /// scopes "of that type". `None` = the existing fixed-quality behold
+        /// (Monstrous Emergence, Close Encounter).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_choice: Option<ChoiceType>,
     },
     Composite {
         costs: Vec<AbilityCost>,
@@ -7091,6 +7155,24 @@ pub enum AbilityCost {
         counter: CounterType,
         target: TargetFilter,
         base: Box<AbilityCost>,
+    },
+    /// CR 118.9 + CR 702.62a: Cast a spell paying a mana cost borrowed from a
+    /// keyword on the spell being cast — its `[cost]` (Suspend N—[cost], Sneak,
+    /// Mayhem, Harmonize, Disturb) — in lieu of its mana cost. The Face of Boe:
+    /// "pay its suspend cost rather than its mana cost." Color-preserving and
+    /// per-card: the concrete `ManaCost` is read at cast time via
+    /// `game::keywords::effective_keyword_mana_cost(state, id, keyword)`, which a
+    /// static `Mana { cost }` cannot express. `keyword` is restricted by the
+    /// parser to kinds whose alternative cost is a single `ManaCost`; the reader
+    /// returns `None` for compound-cost kinds (Flashback non-mana, Escape).
+    ///
+    /// Two consumers, selected structurally by the cast clause (CR 608.2g vs
+    /// CR 611.2): a during-resolution caster (The Face of Boe) resolves this into
+    /// the overriding `ExileWithAltCost { cost }` (cast_from_zone.rs / casting.rs);
+    /// a lingering `ExileWithAltAbilityCost` grant resolves it in
+    /// `pay_additional_cost` (casting_costs.rs).
+    KeywordCostOfCastSpell {
+        keyword: crate::types::keywords::KeywordKind,
     },
     Unimplemented {
         description: String,
@@ -7179,6 +7261,7 @@ impl AbilityCost {
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::EffectCost { .. }
             | AbilityCost::PerCounter { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
     }
@@ -7301,6 +7384,9 @@ impl AbilityCost {
             // CR 702.24a: The multiplier doesn't change *what kind* of cost
             // this is, only *how much* — delegate classification to the base.
             AbilityCost::PerCounter { base, .. } => base.categories(),
+            // CR 118.9 + CR 702.62a: the borrowed keyword cost resolves to a
+            // concrete `ManaCost` at cast time, so it is a mana payment.
+            AbilityCost::KeywordCostOfCastSpell { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Unimplemented { .. } => Vec::new(),
         }
     }
@@ -7361,6 +7447,8 @@ impl AbilityCost {
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::EffectCost { .. }
+            // CR 118.9: borrowed mana cost — pays mana, never destroys the source.
+            | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
     }
@@ -7935,6 +8023,17 @@ pub enum DamageSource {
     EachTarget,
 }
 
+/// CR 120.4a: Where excess damage (damage in excess of what would be lethal /
+/// past loyalty / past defense) is redirected when an effect that deals damage
+/// carries an excess-redirect rider ("Excess damage is dealt to that creature's
+/// controller instead").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ExcessRecipient {
+    /// CR 120.4a: excess is dealt to the damaged permanent's controller.
+    TargetController,
+}
+
 /// CR 120.3: Source characteristics captured before applying an already-replaced
 /// damage event. Used only by internal continuations that resume Phase C damage
 /// application after a nested replacement choice.
@@ -7948,6 +8047,15 @@ pub struct DamageContextSnapshot {
     pub has_wither: bool,
     pub has_infect: bool,
     pub combat_damage_poison: u32,
+    /// CR 120.4a: carry the excess-redirect rider across a replacement-pause
+    /// resume so remaining post-replacement damage still redirects correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excess_recipient: Option<ExcessRecipient>,
+    /// CR 702.15b: lifelink already-dealt bonus deferred from an earlier leg of a
+    /// CR 120.4a-modified event, carried across a redirect leg's replacement pause
+    /// so the combined lifelink total is still gained on resume.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lifelink_bonus: u32,
 }
 
 /// A single conjured card entry: card source + quantity.
@@ -8307,6 +8415,10 @@ pub enum Effect {
         /// CR 120.3: Override damage source. None = ability source (default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source: Option<DamageSource>,
+        /// CR 120.4a: Trailing excess-redirect rider ("Excess damage is dealt to
+        /// that creature's controller instead"). None = no redirect (default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excess: Option<ExcessRecipient>,
     },
     /// CR 120.3 + CR 120.4b: Internal continuation for applying a damage event
     /// that has already passed through replacement/prevention selection. This
@@ -8957,13 +9069,27 @@ pub enum Effect {
         /// card-defined ("If <B> gets more votes or the vote is tied, …").
         /// `VoteTally::PerVote` (Council's-dilemma classics — Tivit, Capital
         /// Punishment) resolves `per_choice_effect[i]` once per vote tallied
-        /// for `choices[i]`. `VoteTally::Threshold { tie_breaker_index }`
-        /// (Will-of-the-council — Plea for Power, Split Decision, Coercive
-        /// Portal, Trial of a Time Lord IV) resolves exactly ONE
-        /// `per_choice_effect` — the choice with the most votes, with ties
-        /// broken in favor of `tie_breaker_index` ("...or the vote is tied").
+        /// for `choices[i]`. `VoteTally::TopVotes { tie }` (Will-of-the-council
+        /// — Plea for Power, Split Decision, Council Guardian, Council's
+        /// Judgment) resolves the winning choice(s): `TieResolution::Breaker`
+        /// resolves exactly ONE outcome (the most votes, ties broken in favor
+        /// of the index), `TieResolution::AllTied` resolves every choice tied
+        /// for the most votes.
         #[serde(default)]
         tally_mode: VoteTally,
+        /// CR 701.38b: What the listed choices are. `VoteSubject::Named` (the
+        /// default) votes among the static `choices` words. `VoteSubject::Objects`
+        /// votes among battlefield objects enumerated at resolution — `choices`
+        /// / `per_choice_effect` are empty and the winner(s) drive
+        /// `outcome_template` (Council's Judgment, Prime Minister's Cabinet
+        /// Room).
+        #[serde(default)]
+        subject: VoteSubject,
+        /// Card-defined: whether votes are public as cast (`VoteVisibility::Open`,
+        /// the default) or each player votes secretly with a simultaneous reveal
+        /// (`VoteVisibility::Secret` — Truth or Consequences).
+        #[serde(default)]
+        visibility: VoteVisibility,
     },
     /// CR 700.3 + CR 608: Separate objects into two piles, have another player
     /// choose one of them, and apply a sub-effect to the chosen pile. The
@@ -10831,6 +10957,17 @@ pub enum Effect {
         followed_by: Vec<Phase>,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 508.1c + CR 611.2c: Optional attacker restriction for the combat
+        /// phase(s) this effect schedules. `Some(filter)` ("only X can attack
+        /// during that combat phase" — Last Night Together, Bumi) means only
+        /// creatures matching `filter` may be declared as attackers during that
+        /// phase, evaluated continuously at declaration (CR 611.2c, a
+        /// rules-modifying continuous effect). `None` = ordinary additional
+        /// combat. The parser may emit `ParentTarget` ("the chosen creatures");
+        /// the resolver concretizes it to a fixed tracked set (CR 608.2h — the
+        /// affected set is information determined once, at resolution).
+        #[serde(default)]
+        attacker_restriction: Option<TargetFilter>,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
@@ -11584,6 +11721,28 @@ pub enum VoterScope {
     ControllerLabels,
 }
 
+/// Card-defined: how a completed top-tally vote selects winners among the
+/// choices tied for the maximum tally. The CR defines only the vote *procedure*
+/// (CR 701.38a: starting player + turn order); the "most votes or tied" winner
+/// selection below is card-defined text, NOT a CR rule. This enum is the single
+/// structural axis that distinguished the former `Threshold` from the "most
+/// votes or tied" family (winner cardinality under a tie).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TieResolution {
+    /// Card-defined "...or the vote is tied": exactly ONE winner. The unique
+    /// holder of the max tally wins; on a tie (or empty ballot set) the choice
+    /// at this index wins (the historical `Threshold` behavior). Plea for
+    /// Power, Split Decision, Coercive Portal, Magister of Worth, Tyrant's
+    /// Choice, Trial of a Time Lord IV.
+    Breaker(u8),
+    /// Card-defined "...or tied for most votes": EVERY choice tied for the max
+    /// tally wins and resolves once (inclusive tie; no tie-breaker). Council
+    /// Guardian, Council's Judgment, Prime Minister's Cabinet Room, Custodi
+    /// Squire.
+    AllTied,
+}
+
 /// CR 701.38a: How a completed `Effect::Vote` tally maps onto its
 /// `per_choice_effect` slots. CR 701.38 defines only the vote procedure; the
 /// strict-majority / tie-break outcome semantics below are card-defined, not a
@@ -11595,28 +11754,78 @@ pub enum VoterScope {
 /// choice. This is the historical `Effect::Vote` behavior and the serde
 /// default, so pre-existing serialized votes deserialize unchanged.
 ///
-/// `Threshold` is the Will-of-the-council family (Plea for Power, Split
-/// Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, Trial of a
-/// Time Lord IV): the players vote between two named outcomes and exactly ONE
-/// `per_choice_effect` resolves — the choice with strictly more votes. Ties
-/// resolve to `tie_breaker_index`, matching the Oracle phrasing "If <B> gets
-/// more votes **or the vote is tied**, <effect-B>".
+/// `TopVotes { tie }` is the Will-of-the-council / "most votes or tied" family.
+/// The vote *procedure* is CR 701.38a; the winner-selection is card text.
+/// `tie` parameterizes winner cardinality under a tie:
+/// * `TieResolution::Breaker(idx)` — exactly ONE winner (Plea for Power, Split
+///   Decision, Coercive Portal, Magister of Worth, Tyrant's Choice, Trial of a
+///   Time Lord IV): the unique max wins, else `idx` ("...or the vote is tied").
+///   This is the historical `Threshold { tie_breaker_index }` behavior.
+/// * `TieResolution::AllTied` — every choice tied for the max wins and resolves
+///   once (Council Guardian, Council's Judgment, Prime Minister's Cabinet Room,
+///   Custodi Squire): "...or tied for most votes".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum VoteTally {
     /// CR 701.38a: Every per-choice effect resolves, fanning out per the
     /// tally for that choice. The historical default.
     #[default]
     PerVote,
-    /// CR 701.38a: The single winning choice's effect resolves once. The
-    /// strict-majority rule and tie behavior are card-defined (not a CR
-    /// subrule): on a tie, `tie_breaker_index` (the choice whose Oracle clause
-    /// reads "...or the vote is tied") wins. `u8` indexes `choices`; vote
-    /// cardinality is bounded by Magic card design.
-    Threshold { tie_breaker_index: u8 },
+    /// Card-defined top-tally selection (the vote procedure is CR 701.38a; the
+    /// winner-selection is card text). `tie` parameterizes winner cardinality.
+    TopVotes { tie: TieResolution },
+}
+
+/// CR 701.38b: What an `Effect::Vote`'s listed choices are. Orthogonal to
+/// [`VoteTally`] (how the tally resolves) and [`VoteVisibility`] (whether the
+/// votes are public).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum VoteSubject {
+    /// CR 701.38b: vote among the static `choices` words (existing behavior).
+    #[default]
+    Named,
+    /// CR 701.38b: vote among objects matching `candidate_filter`, enumerated
+    /// at resolution. `outcome_template` resolves once per winning object with
+    /// that object injected as its single target (see
+    /// `vote::resolve_top_votes_tally`). For object votes `choices` /
+    /// `per_choice_effect` are empty at parse time.
+    Objects {
+        candidate_filter: TargetFilter,
+        outcome_template: Box<AbilityDefinition>,
+    },
+}
+
+/// Card-defined: whether an `Effect::Vote`'s ballots are public as cast or
+/// collected secretly with a simultaneous reveal. Orthogonal to [`VoteTally`]
+/// and [`VoteSubject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum VoteVisibility {
+    /// CR 701.38a procedure: votes are public as cast (existing behavior).
+    #[default]
+    Open,
+    /// Card-defined: each player votes secretly; tallies are withheld until all
+    /// have voted, then revealed simultaneously (Truth or Consequences).
+    Secret,
 }
 
 impl TargetFilter {
+    /// Clone this filter with any `Typed` property equal to `prop` removed.
+    /// Used to strip a per-item discriminator leg (e.g. `IsChosenCreatureType`)
+    /// so the residual base filter can be enumerated across candidate values.
+    /// Non-`Typed` shapes are returned unchanged.
+    pub fn without_prop(&self, prop: &FilterProp) -> TargetFilter {
+        match self {
+            TargetFilter::Typed(filter) => {
+                let mut filter = filter.clone();
+                filter.properties.retain(|p| p != prop);
+                TargetFilter::Typed(filter)
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn normalized(self) -> Self {
         match self {
             TargetFilter::Typed(filter) => TargetFilter::Typed(filter.normalized()),
@@ -14875,6 +15084,16 @@ pub enum AbilityCondition {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
+        /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
+        /// declared chain slot `n` (resolved from the flattened root chain via
+        /// `resolve_parent_slot_from_root`) rather than this node's local
+        /// most-recent target. `None` (default) preserves the legacy
+        /// first-object / `TriggeringSource` behavior. Set by the two-target
+        /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
+        /// first-declared fighter (Malamet: "if the creature you control entered
+        /// this turn") reads slot 0 under most-recent-only chain propagation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_slot: Option<usize>,
     },
     /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
     /// at least one *object* target. Guards reflexive-target riders ("If that
@@ -17524,6 +17743,15 @@ pub enum ContinuousModification {
     /// is derived from the subtype in `mana_sources.rs` (CR 305.6), so no explicit
     /// mana grant is needed here.
     SetChosenBasicLandType,
+    /// CR 612.8 + CR 613.1c: A continuous effect that sets the object's name to
+    /// the granting source's chosen card name (Layer 3, text-changing). Reads the
+    /// source's `ChosenAttribute::CardName` at layer-evaluation time; per CR 612.8
+    /// the object loses any names it had and has only the chosen name. The
+    /// chosen-read sibling of the literal `SetName` (which is a Layer-1 copy
+    /// override, CR 707.9b), mirroring how `AddChosenColor` is the chosen-read
+    /// sibling of `SetColor`. Used by "its name is the last chosen name" (Psychic
+    /// Paper). Unit variant: the read source is implicitly `ChosenAttribute::CardName`.
+    SetChosenName,
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,
@@ -18517,6 +18745,7 @@ mod tests {
             amount: fixed(5),
             target: default_target_filter_any(),
             damage_source: None,
+            excess: None,
         };
         assert_eq!(damage.count_expr(), Some(&fixed(5)));
 
@@ -18996,6 +19225,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -19022,6 +19252,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(1),
@@ -19272,6 +19503,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Mana {
