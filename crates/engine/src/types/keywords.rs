@@ -1631,7 +1631,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
-        parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1700,7 +1700,7 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     //   "creature card in a graveyard"  (Animate Dead, Dance of the Dead)
     //   "instant card in a graveyard"   (Spellweaver Volute)
     //   "card in your hand"             (Don't Worry About It — no type leg)
-    let (rest, type_filter) = opt(parse_enchant_type_leg).parse(input).ok()?;
+    let (rest, type_leg) = opt(parse_enchant_qualified_type_leg).parse(input).ok()?;
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
@@ -1720,13 +1720,16 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // word AND a zone word AND a controller, so it cannot be a meaningful
     // enchant clause. (An attachment qualifier cannot stand alone: its leading
     // space requires a preceding type leg, so it never reaches this guard.)
-    if type_filter.is_none() && zone.is_none() && controller.is_none() {
+    if type_leg.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
     let mut props = Vec::new();
+    if let Some(leg) = &type_leg {
+        props.extend(leg.properties.iter().cloned());
+    }
     if let Some(z) = zone {
         props.push(FilterProp::InZone { zone: z });
     }
@@ -1734,7 +1737,10 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
         props.push(prop);
     }
     props.extend(without_keyword);
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    let type_filter = type_leg
+        .map(|leg| leg.type_filter)
+        .unwrap_or(TypeFilter::Card);
+    let mut filter = TypedFilter::new(type_filter);
     if !props.is_empty() {
         filter = filter.properties(props);
     }
@@ -3766,6 +3772,50 @@ mod tests {
                 TypedFilter::creature().controller(ControllerRef::You)
             ))
         );
+    }
+
+    /// CR 205.4a + CR 702.5a: Supertype-qualified Aura targets ("snow land",
+    /// "basic land", "legendary creature") must lower to the same typed filter
+    /// shape as ordinary target phrases: head type plus `HasSupertype`.
+    #[test]
+    fn parse_enchant_supertype_qualified_targets() {
+        use crate::types::card_type::Supertype;
+
+        let cases = [
+            (
+                "Enchant:snow land you control",
+                TypeFilter::Land,
+                Supertype::Snow,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:basic land you control",
+                TypeFilter::Land,
+                Supertype::Basic,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:legendary creature",
+                TypeFilter::Creature,
+                Supertype::Legendary,
+                None,
+            ),
+        ];
+
+        for (text, type_filter, supertype, controller) in cases {
+            let enchant = Keyword::from_str(text).unwrap();
+            let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+                panic!("expected Typed enchant target for {text}, got {enchant:?}");
+            };
+            assert_eq!(tf.type_filters, vec![type_filter], "{text}");
+            assert_eq!(tf.controller, controller, "{text}");
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::HasSupertype { value: supertype }),
+                "expected HasSupertype({supertype:?}) for {text}; got {:?}",
+                tf.properties
+            );
+        }
     }
 
     /// CR 702.5d + CR 303.4: "Enchant player" maps to `TargetFilter::Player`,
