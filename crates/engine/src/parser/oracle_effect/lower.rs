@@ -72,6 +72,30 @@ fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style "that permanent or player"
+/// is a non-target damage recipient bound to the raw `DamageDealt.target`.
+/// Keep this local to single-source DealDamage lowering so generic event-context
+/// refs and EachTarget/EachSource damage stay object-only.
+fn parse_damage_event_target_recipient<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    if !ctx.in_trigger {
+        return None;
+    }
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        value(
+            TargetFilter::EventTarget,
+            alt((
+                tag::<_, _, OracleError<'_>>("that permanent or player"),
+                tag("that permanent or a player"),
+            )),
+        )
+        .parse(i)
+    })
+}
+
 /// CR 608.2c: True when an ability's primary effect acts on the ability's own
 /// source permanent (`TargetFilter::SelfRef`). Self-targeting "If <self status>,
 /// A on it. Otherwise, B it." abilities (Repeat Offender) lower the "if" body's
@@ -6568,6 +6592,18 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         "",
                     ));
                 } else if let Some((target, ecr_rem)) =
+                    parse_damage_event_target_recipient(target_phrase, ctx)
+                {
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        ecr_rem,
+                    ));
+                } else if let Some((target, ecr_rem)) =
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
@@ -6807,6 +6843,22 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 excess: None,
             },
             "",
+        ));
+    }
+
+    // CR 115.10a + CR 120.1 + CR 120.3: Check Ghyrson-style mixed event
+    // recipients before generic event-context references. This is DealDamage
+    // local because `EventTarget` may be a player only for the raw damage
+    // recipient carried by DamageDealt.
+    if let Some((target, ecr_rem)) = parse_damage_event_target_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            ecr_rem,
         ));
     }
 

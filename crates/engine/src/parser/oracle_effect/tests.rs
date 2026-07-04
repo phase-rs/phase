@@ -3009,6 +3009,75 @@ fn effect_lightning_bolt() {
 }
 
 #[test]
+fn non_trigger_damage_to_that_permanent_or_player_does_not_use_event_target() {
+    let e = parse_effect("Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player");
+    if let Effect::DealDamage { target, .. } = &e {
+        assert_ne!(
+            *target,
+            TargetFilter::EventTarget,
+            "generic parse_effect must not bind trigger event targets"
+        );
+    }
+    assert!(
+        e.target_filter()
+            .filter(|filter| **filter == TargetFilter::EventTarget)
+            .is_none(),
+        "generic parse_effect must not expose EventTarget"
+    );
+}
+
+#[test]
+fn trigger_context_damage_to_that_permanent_or_player_uses_event_target_without_slot() {
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        ..Default::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match def.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target,
+            damage_source: None,
+            ..
+        } => {
+            assert_eq!(*target, TargetFilter::EventTarget);
+            assert!(
+                target.is_context_ref(),
+                "EventTarget must be suppressed as a target slot"
+            );
+            assert!(
+                def.effect
+                    .target_filter()
+                    .filter(|filter| !filter.is_context_ref())
+                    .is_none(),
+                "EventTarget must not produce a chosen target slot"
+            );
+        }
+        other => panic!("expected DealDamage to EventTarget, got {other:?}"),
+    }
+}
+
+#[test]
+fn each_target_damage_does_not_accept_permanent_or_player_event_target() {
+    let def = parse_effect_chain(
+        "They each deal damage equal to their power to that permanent or player.",
+        AbilityKind::Spell,
+    );
+    if let Effect::DealDamage {
+        damage_source: Some(DamageSource::EachTarget),
+        target,
+        ..
+    } = def.effect.as_ref()
+    {
+        assert_ne!(*target, TargetFilter::EventTarget);
+    }
+}
+
+#[test]
 fn effect_deal_x_plus_two_damage_uses_offset_amount() {
     // Flame Discharge / Light Up the Night: "deals X plus N damage" composes the
     // spell's announced X with a fixed bonus. The DealDamage amount must be
