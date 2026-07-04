@@ -12838,6 +12838,16 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
             ));
         }
     }
+    if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
+        .parse(qualifier)
+        .is_ok()
+    {
+        // CR 702.33d: A spell whose controller declared any kicker payment has
+        // been kicked; use the existing cast snapshot filter for kicked spells.
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::WasKicked]),
+        ));
+    }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)

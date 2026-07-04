@@ -18526,6 +18526,34 @@ fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
 }
 
 #[test]
+fn static_ignore_this_effect_special_action_fails_closed() {
+    let supported_head = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated.",
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| def.mode == StaticMode::CantAttackOrBlock),
+        "head restriction should still parse, got {supported_head:?}"
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::CantBeActivated { .. })),
+        "head activation lock should still parse, got {supported_head:?}"
+    );
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated. \
+         Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn.",
+    );
+    assert!(
+        defs.is_empty(),
+        "unimplemented ignore-this-effect special action must fail closed, got {defs:?}"
+    );
+}
+
+#[test]
 fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
     let def = parse_static_line("Enchanted creatures you control get +2/+2.").unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);

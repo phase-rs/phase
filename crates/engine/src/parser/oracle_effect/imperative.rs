@@ -50,7 +50,8 @@ use super::super::oracle_target::{
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, split_around, starts_with_possessive, TextPair,
+    parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
+    starts_with_possessive, TextPair,
 };
 
 /// CR 702.26: Phasing direction used by the "phase in"/"phase out" dispatch.
@@ -1328,7 +1329,7 @@ pub(super) fn parse_targeted_action_ast(
         // bare count of 1. `parse_count_expr` discards the word's identity, so
         // without this the parsed target never regains `FilterProp::Another`
         // and the source could sacrifice itself (Morkrut Necropod, #4513).
-        let (count, after_count, count_word) =
+        let (mut count, after_count, count_word) =
             super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
                 crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 rest,
@@ -1342,7 +1343,12 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(target_text));
+        let target_text = strip_sacrifice_choice_marker(target_text);
+        // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+        if let Some(rounding) = parse_rounding_suffix_only(&target_text) {
+            rewrite_quantity_expr_rounding(&mut count, rounding);
+        }
+        let target_text = strip_sacrifice_count_suffix(&target_text);
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -13297,6 +13303,39 @@ mod tests {
                             crate::types::ability::TypeFilter::Subtype("God".to_string())
                         )),
                     ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_half_creatures_choice_rounding_up_suffix_is_applied() {
+        let text = "sacrifice half the creatures they control of their choice, rounded up";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx);
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count, .. }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::DivideRounded {
+                        rounding: crate::types::ability::RoundingMode::Up,
+                        ..
+                    }
+                ));
+                assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                }) = target
+                else {
+                    panic!("expected ScopedPlayer-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![crate::types::ability::TypeFilter::Creature]
                 );
             }
             other => panic!("Expected Sacrifice, got {other:?}"),
