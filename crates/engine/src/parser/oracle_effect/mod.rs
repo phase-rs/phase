@@ -7085,6 +7085,37 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
 
     let lower = tp.lower;
 
+    // Explicit target form: "Target creature perpetually gets -2/-0."
+    // `parse_target` owns the target/filter grammar; this arm only recognizes the
+    // perpetual P/T tail and rejects compound grants so mixed forms stay honest.
+    if peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(lower)
+        .is_ok()
+    {
+        let (target, after_target) = parse_target(lower);
+        if !matches!(target, TargetFilter::Any) {
+            let (rest, _) = space1::<_, OracleError<'_>>(after_target).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(rest)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            let (rest, (power_delta, toughness_delta)) =
+                nom_primitives::parse_pt_modifier(rest).ok()?;
+            return tail_done(rest).then_some(Effect::ApplyPerpetual {
+                target,
+                modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            });
+        }
+    }
+
     // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")

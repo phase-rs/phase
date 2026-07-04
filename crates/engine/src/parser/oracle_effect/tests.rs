@@ -29707,6 +29707,32 @@ fn perpetual_parser_maps_modify_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: -1,
+                toughness_delta: -2,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
+    ));
+
+    let e = parse_effect("target creature you control perpetually gets +1/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 1,
+                toughness_delta: 0,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::You)
+    ));
 }
 
 #[test]
