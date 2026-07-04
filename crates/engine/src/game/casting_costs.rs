@@ -6144,6 +6144,10 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // protection all see the merged characteristics while the spell resolves.
     if casting_variant == CastingVariant::Fuse {
         if let Some(obj) = state.objects.get_mut(&object_id) {
+            // CR 202.3d + CR 709.4d: mark this stack object as a fused split spell
+            // so its mana value combines both halves (via `effective_mana_value`),
+            // matching the combined card types/colors unioned below.
+            obj.fused_split_spell = true;
             let right_half_characteristics = obj
                 .back_face
                 .as_ref()

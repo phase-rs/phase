@@ -612,6 +612,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_x_paid: Option<u32>,
 
+    /// CR 702.102b + CR 709.4d: `true` when this stack object is a *fused* split
+    /// spell (both halves cast via Fuse), so its characteristics are the combined
+    /// characteristics of both halves *while on the stack* — unlike a non-fused
+    /// split spell, whose on-stack characteristics are those of the chosen half
+    /// alone (CR 202.3d). Set at fuse finalize; only meaningful on the stack (off
+    /// the stack a split card combines regardless, per CR 709.4). Read by
+    /// [`GameObject::effective_mana_value`]/[`effective_colors`] so mana-value and
+    /// color reads of a fused spell see both halves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fused_split_spell: bool,
+
     /// CR 702.33d + CR 702.33f: Kicker payments declared while casting the
     /// spell that produced this permanent, in payment order. Mirrors
     /// `SpellContext.kickers_paid`; copied at cast resolution from the
@@ -1181,11 +1192,13 @@ impl GameObject {
         self.is_commander || self.is_signature_spell()
     }
 
-    /// CR 202.3d + CR 709.4/709.4b: Off the stack, a split card's mana value and
-    /// colors are the COMBINED value of both halves; on the stack it's the chosen
-    /// half. When this returns `Some(bf)`, `bf` is the *other* half's back-face
-    /// data (its `mana_cost`/`color` describe the half NOT stored in `self`), and
-    /// the caller should combine it with `self`.
+    /// CR 202.3d + CR 709.4/709.4b/709.4d: A split card's mana value and colors
+    /// are the COMBINED value of both halves off the stack, AND for a *fused*
+    /// split spell on the stack (CR 702.102b — both halves were cast). A *non-fused*
+    /// split spell on the stack uses only the chosen half. When this returns
+    /// `Some(bf)`, `bf` is the *other* half's back-face data (its `mana_cost`/
+    /// `color` describe the half NOT stored in `self`), and the caller should
+    /// combine it with `self`.
     ///
     /// CR 709.5 / CR 709.5c: A Room permanent ON THE BATTLEFIELD is characterized
     /// by its unlocked-half static abilities (the "left/right half unlocked"
@@ -1195,13 +1208,22 @@ impl GameObject {
     /// CR 709.4. `room_unlocks` is populated on any Room card regardless of zone
     /// (see `apply_card_face_to_object`), so the gate keys on the actual zone —
     /// a Room card in hand/graveyard/exile has `zone != Battlefield` and combines.
-    fn offstack_split_other_half(&self) -> Option<&BackFaceData> {
+    fn split_half_to_combine(&self) -> Option<&BackFaceData> {
         let bf = self.back_face.as_ref()?;
+        if bf.layout_kind != Some(LayoutKind::Split) {
+            return None;
+        }
+        // CR 709.5c: a Room on the battlefield is characterized by its unlocked
+        // halves, not a naive combine.
         let is_battlefield_room = self.zone == Zone::Battlefield && self.room_unlocks.is_some();
-        (bf.layout_kind == Some(LayoutKind::Split)
-            && self.zone != Zone::Stack
-            && !is_battlefield_room)
-            .then_some(bf)
+        if is_battlefield_room {
+            return None;
+        }
+        // CR 202.3d + CR 709.4d: combine off the stack, or on the stack when this
+        // is a fused split spell. A non-fused split spell on the stack keeps the
+        // chosen half only.
+        let combine = self.zone != Zone::Stack || self.fused_split_spell;
+        combine.then_some(bf)
     }
 
     /// CR 202.3d + CR 709.4b: This object's mana value accounting for the split
@@ -1211,9 +1233,11 @@ impl GameObject {
     /// mana-value read for a split-capable object must route through here rather
     /// than reading `self.mana_cost.mana_value()` directly.
     pub fn effective_mana_value(&self) -> u32 {
-        match self.offstack_split_other_half() {
+        match self.split_half_to_combine() {
             // CR 202.3e: X = 0 off the stack, so `mana_value()` (X treated as 0)
-            // on each half is the correct combined off-stack mana value.
+            // on each half is the correct combined off-stack mana value. A fused
+            // split spell on the stack also reaches this arm; no printed Fuse card
+            // has {X} in either half, so summing X-as-0 mana values is exact there.
             Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
             None => self
                 .mana_cost
@@ -1227,7 +1251,7 @@ impl GameObject {
     /// colors. The union is de-duplicated in canonical WUBRG order
     /// (`ManaColor::ALL`) so the result is deterministic and order-stable.
     pub fn effective_colors(&self) -> Vec<ManaColor> {
-        match self.offstack_split_other_half() {
+        match self.split_half_to_combine() {
             Some(bf) => ManaColor::ALL
                 .into_iter()
                 .filter(|c| self.color.contains(c) || bf.color.contains(c))
@@ -1423,6 +1447,7 @@ impl GameObject {
             entered_via_ability_source: None,
             cast_timing_permission: None,
             cost_x_paid: None,
+            fused_split_spell: false,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),

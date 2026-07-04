@@ -181,21 +181,24 @@ fn exile_cast_permission_uses_combined_split_mana_value() {
     );
 }
 
-/// CR 202.3d + CR 702.102b + CR 709.4d: Fuse regression guard. A FUSED split
-/// spell on the stack combines the characteristics of BOTH halves. Fuse's
-/// deliberate on-stack merge (`casting_costs.rs`) is unchanged by the off-stack
-/// `effective_*` helpers, which gate out `zone == Stack`, so this guards that
-/// the off-stack mana-value fix did NOT disturb Fuse's on-stack combine.
+/// CR 202.3d + CR 702.102b + CR 709.4d: A FUSED split spell on the stack combines
+/// the characteristics of BOTH halves — colors AND mana value. Per CR 202.3d, "the
+/// mana value of ... a fused split spell on the stack is determined from the
+/// combined mana costs of its halves", so the on-stack `zone == Stack` chosen-half
+/// gate must NOT apply to a fused spell (the `fused_split_spell` marker overrides
+/// it).
 ///
-/// Assault // Battery has no Fuse ability, so it cannot be fused (deviation from
-/// the plan, which assumed it could — casting a plain spell//spell split routes
-/// through `ModalFaceChoice`, not the Fuse `CastingVariantChoice`). Breaking //
-/// Entering is the Fuse fixture card: Breaking {U}{B} (Blue, Black) + Entering
-/// {4}{B}{R} (Black, Red) fuse to colors {Blue, Black, Red}. Colors/types only —
-/// on-stack fused combined MV is a separate concern (`effective_mana_value`
-/// gates out on the stack) and out of scope.
+/// Assault // Battery has no Fuse ability, so it cannot be fused (casting a plain
+/// spell//spell split routes through `ModalFaceChoice`, not the Fuse
+/// `CastingVariantChoice`). Breaking // Entering is the Fuse fixture card: Breaking
+/// {U}{B} (Blue, Black, MV 2) + Entering {4}{B}{R} (Black, Red, MV 6) fuse to
+/// colors {Blue, Black, Red} and combined MV 8.
+///
+/// Revert-failing discriminator: without the `fused_split_spell` marker feeding
+/// `effective_mana_value`, the on-stack fused spell reports only the front half's
+/// MV (2) and the combined-MV assertion fails.
 #[test]
-fn fused_split_spell_on_stack_reports_both_halves_colors() {
+fn fused_split_spell_on_stack_reports_both_halves_colors_and_mana_value() {
     let Some(db) = load_db() else {
         return;
     };
@@ -251,4 +254,18 @@ fn fused_split_spell_on_stack_reports_both_halves_colors() {
             spell.color
         );
     }
+    // CR 202.3d + CR 709.4d: a fused split spell's on-stack mana value is the
+    // COMBINED value of both halves ({U}{B} = 2 + {4}{B}{R} = 6 → 8), NOT the
+    // chosen/front half alone (2). This asserts the fused_split_spell marker
+    // overrides the on-stack chosen-half gate in effective_mana_value.
+    assert!(
+        spell.fused_split_spell,
+        "the fused stack object must be marked fused_split_spell"
+    );
+    assert_eq!(
+        spell.effective_mana_value(),
+        8,
+        "fused Breaking // Entering on the stack reports the COMBINED MV 8, not the \
+         front half's MV 2"
+    );
 }
