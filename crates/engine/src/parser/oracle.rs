@@ -5270,6 +5270,31 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
     None
 }
 
+/// CR 602.5b + CR 102.1 + CR 109.5: "Activate only during an opponent's turn"
+/// gates activation to turns where the activator is not the active player.
+fn parse_activate_only_during_opponents_turn_suffix(lower: &str) -> Option<usize> {
+    let (rest, prefix) = take_until::<_, _, OracleError<'_>>("activate only during ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("activate only during ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("an opponent's turn"),
+        tag("an opponents turn"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    rest.trim().is_empty().then_some(prefix.len())
+}
+
+fn opponents_turn_activation_condition() -> ParsedCondition {
+    ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::IsYourTurn),
+    }
+}
+
 pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
     let mut remaining = text.trim().trim_end_matches('.').trim().to_string();
     let mut constraints = ActivatedConstraintAst::default();
@@ -5416,6 +5441,21 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 .restrictions
                 .push(ActivationRestriction::AsInstant);
             if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(end) = parse_activate_only_during_opponents_turn_suffix(&lower) {
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::RequiresCondition {
+                    condition: Some(opponents_turn_activation_condition()),
+                });
+            if remaining.is_empty() {
                 break;
             }
             continue;

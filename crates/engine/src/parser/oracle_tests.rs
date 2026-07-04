@@ -96,6 +96,30 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
     );
 }
 
+#[test]
+fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+    let r = parse(
+        "{T}: Add {C}{C}. Activate only during an opponent's turn.",
+        "Lavinia, Foil to Conspiracy",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.iter().any(|restriction| matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition })
+            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+        )),
+        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        restrictions
+    );
+}
+
 /// The static half of M.O.D.O.K. ("Designed Only for Killing — Creatures your
 /// opponents control get -1/-1") already parses on its own ability-word label;
 /// this guards that the activated-ability fix above doesn't regress it.
