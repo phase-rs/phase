@@ -758,6 +758,18 @@ fn pay_ability_cost_inner(
                 "Cost not implemented: {description}"
             )));
         }
+        // CR 118.9 + CR 702.62a: a borrowed keyword cost is an alternative cost on
+        // the *cast spell*, paid through the casting pipeline's
+        // `ExileWithAltCost` / `ExileWithAltAbilityCost` permissions
+        // (casting.rs / casting_costs.rs), never as an activation cost paid here.
+        // Reaching this arm means a misrouted cost — fail loudly rather than
+        // silently no-op.
+        AbilityCost::KeywordCostOfCastSpell { .. } => {
+            return Ok(payment_failed(
+                "Keyword-cost-of-cast-spell is paid by the casting pipeline, not as an \
+                 activation cost",
+            ));
+        }
         // CR 107.14: A player can pay {E} only if they have enough energy.
         // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
         // state at payment time.
@@ -1185,6 +1197,9 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, never as
+        // a resolution-time activation cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1324,6 +1339,9 @@ fn can_pay_resolution(
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, not a
+        // direct resolution-time cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1453,6 +1471,9 @@ mod tests {
                     cost: ManaCost::generic(1),
                 }),
             },
+            AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
+            },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
             },
@@ -1558,6 +1579,9 @@ mod tests {
                 counter: CounterType::Age,
                 target: TargetFilter::SelfRef,
                 base: Box::new(AbilityCost::Tap),
+            },
+            AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
             },
             AbilityCost::Unimplemented {
                 description: String::new(),

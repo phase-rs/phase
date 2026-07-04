@@ -10186,16 +10186,17 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
-        ImperativeFamilyAst::MustBeBlocked => {
-            Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
-                duration: Some(Duration::UntilEndOfTurn),
-                target: None,
-            }
-        }
+        ImperativeFamilyAst::MustBeBlocked => Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: None }).modifications(vec![
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustBeBlocked { by: None },
+                    },
+                ]),
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject

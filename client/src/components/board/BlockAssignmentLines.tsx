@@ -8,8 +8,9 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
-import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
+import { filterVisibleBlockerPairs } from "./blockAssignmentVisibility.ts";
 
 const BLOCK_COLOR = "rgba(56,189,248,0.95)";
 const BLOCK_COLOR_HEAD = "rgba(56,189,248,0.9)";
@@ -21,46 +22,43 @@ export function BlockAssignmentLines() {
   const combat = useGameStore((s) => s.gameState?.combat ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const localPlayerId = usePlayerId();
 
   const gameState = useGameStore((s) => s.gameState);
   const isMultiplayer = gameState != null && !isOneOnOne(gameState);
-  const opponents = useMemo(() => getOpponentIds(gameState, localPlayerId), [gameState, localPlayerId]);
-  const effectiveFocusedOpponent = resolveFocusedOpponent(focusedOpponent, opponents);
+  const visiblePlayerIds = useMemo(
+    () => new Set(getVisibleBoardPlayerIds(
+      gameState,
+      localPlayerId,
+      focusedOpponent,
+      multiplayerBoardLayout,
+    )),
+    [focusedOpponent, gameState, localPlayerId, multiplayerBoardLayout],
+  );
 
   const pairs = useMergedPairs(blockerAssignments, combat?.blocker_to_attacker ?? null);
+  const visibleBlockerPairs = useMemo(
+    () => filterVisibleBlockerPairs(pairs, objects ?? null, visiblePlayerIds),
+    [objects, pairs, visiblePlayerIds],
+  );
 
-  const positions = useRafPositions(pairs);
+  const positions = useRafPositions(visibleBlockerPairs);
 
   const isVisible =
     combatMode === "blockers" ||
     (combat !== null && Object.keys(combat.blocker_to_attacker).length > 0);
-
-  // In multiplayer, hide creature→creature blocker lines when viewing a different opponent
-  const relevantBlockerController = useMemo(() => {
-    if (!isMultiplayer || !objects || pairs.size === 0) return null;
-    const firstBlockerId = pairs.keys().next().value;
-    if (firstBlockerId == null) return null;
-    return objects[firstBlockerId]?.controller ?? null;
-  }, [isMultiplayer, objects, pairs]);
-
-  const hiddenByFocus =
-    isMultiplayer &&
-    effectiveFocusedOpponent !== null &&
-    relevantBlockerController !== null &&
-    relevantBlockerController !== localPlayerId &&
-    relevantBlockerController !== effectiveFocusedOpponent;
 
   // Compute HUD→attacker indicator arrows for off-screen blocking opponents
   const hudIndicators = useHudBlockIndicators(
     combat?.blocker_assignments ?? null,
     objects ?? null,
     localPlayerId,
-    effectiveFocusedOpponent,
+    visiblePlayerIds,
     isMultiplayer,
   );
 
-  const showCreatureArrows = isVisible && !hiddenByFocus && positions.size > 0;
+  const showCreatureArrows = isVisible && positions.size > 0;
   const showHudIndicators = hudIndicators.length > 0;
 
   if (!showCreatureArrows && !showHudIndicators) return null;
@@ -155,7 +153,7 @@ function useHudBlockIndicators(
   blockerAssignments: Record<string, ObjectId[]> | null,
   objects: Record<string, { controller: PlayerId }> | null,
   localPlayerId: PlayerId,
-  focusedOpponent: PlayerId | null,
+  visiblePlayerIds: ReadonlySet<PlayerId>,
   isMultiplayer: boolean,
 ): HudIndicator[] {
   const [indicators, setIndicators] = useState<HudIndicator[]>([]);
@@ -170,11 +168,11 @@ function useHudBlockIndicators(
       const blockerController = objects[String(blockerIds[0])]?.controller;
       if (blockerController == null) continue;
       if (blockerController === localPlayerId) continue;
-      if (blockerController === focusedOpponent) continue;
+      if (visiblePlayerIds.has(blockerController)) continue;
       result.push({ attackerId: Number(attackerId), blockingPlayerId: blockerController });
     }
     return result;
-  }, [isMultiplayer, blockerAssignments, objects, localPlayerId, focusedOpponent]);
+  }, [isMultiplayer, blockerAssignments, objects, localPlayerId, visiblePlayerIds]);
 
   const prevCountRef = useRef(0);
 

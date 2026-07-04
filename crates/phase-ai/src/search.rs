@@ -1127,8 +1127,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             player,
             actor,
             controller,
+            candidate_objects,
             ..
         } => {
+            // CR 701.38b: object-pool votes (Council's Judgment, Prime
+            // Minister's Cabinet Room) submit a ballot by candidate index, not
+            // by option word — the engine's `handle_resolution_choice` rejects
+            // `ChooseOption` whenever `candidate_objects` is non-empty. The
+            // deadlock-safety fallback must mirror that shape, so vote for the
+            // first candidate object rather than emitting an action the engine
+            // would reject.
+            if !candidate_objects.is_empty() {
+                return Some(GameAction::SubmitVoteCandidate { candidate_index: 0 });
+            }
             // The friend-or-foe heuristic only fires when the controller is
             // labeling other players (the delegated shape) — matching
             // `VoteActor::Delegated(actor)` where `actor == controller` is
@@ -4454,6 +4465,9 @@ mod tests {
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::Delegated(controller),
             tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         }
     }
 
@@ -4594,6 +4608,9 @@ mod tests {
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::SubjectActs,
             tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(

@@ -15,7 +15,7 @@ import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } fr
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
-import { useResolvedGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
@@ -139,8 +139,12 @@ import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from ".
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import {
   getCastableZoneViewerTarget,
+  getOpponentIds,
+  getSeatCount,
   getWaitingForObjectChoiceIds,
+  isSplitBoardActive,
   resolveFocusedOpponent,
+  shouldRenderFocusedOpponentTopRow,
   type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
@@ -777,12 +781,11 @@ function GamePageContent({
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
-  const gridTemplateRows = useResolvedGridRows();
+  const focusedGridTemplateRows = useResolvedGridRows();
+  const splitGridTemplateRows = useResolvedSplitGridRows();
+  const gameState = useGameStore((s) => s.gameState);
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
-  const players = useGameStore((s) => s.gameState?.players);
-  const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
   const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
@@ -835,17 +838,29 @@ function GamePageContent({
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
   const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
-    const orderedPlayers = seatOrder ?? players?.map((player) => player.id) ?? [];
-    const eliminated = new Set(eliminatedPlayers ?? []);
-    return orderedPlayers.filter((id) => id !== perspectivePlayerId && !eliminated.has(id));
-  }, [eliminatedPlayers, perspectivePlayerId, players, seatOrder]);
+    return getOpponentIds(gameState, perspectivePlayerId);
+  }, [gameState, perspectivePlayerId]);
   const activeOpponentId =
     resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
+  const seatCount = getSeatCount(gameState);
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, seatCount);
+  const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
+    multiplayerBoardLayout,
+    seatCount,
+  );
+  const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
+  const handleKickPlayer = useCallback((pid: number) => {
+    const adapter = useGameStore.getState().adapter as
+      | { kickPlayer?: (pid: number) => Promise<void> }
+      | null;
+    void adapter?.kickPlayer?.(pid);
+  }, []);
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element
@@ -856,19 +871,11 @@ function GamePageContent({
     () => (
       <OpponentHud
         opponentName={isOnlineMode ? opponentDisplayName : undefined}
-        onKickPlayer={
-          isP2PHost
-            ? (pid) => {
-                const adapter = useGameStore.getState().adapter as
-                  | { kickPlayer?: (pid: number) => Promise<void> }
-                  | null;
-                void adapter?.kickPlayer?.(pid);
-              }
-            : undefined
-        }
+        splitOverview={splitBoardActive}
+        onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
       />
     ),
-    [isOnlineMode, opponentDisplayName, isP2PHost],
+    [handleKickPlayer, isOnlineMode, opponentDisplayName, isP2PHost, splitBoardActive],
   );
   const playerHud = useMemo(() => <PlayerHud />, []);
 
@@ -1099,6 +1106,12 @@ function GamePageContent({
   const topOverlayOffsetPx = reconnectState.status === "idle" ? 0 : 56;
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
+    "--game-split-safe-top": "0px",
+    "--game-top-controls-height": isMobile ? "3.75rem" : "4.25rem",
+    "--game-top-controls-width": isMobile ? "11rem" : "13.25rem",
+    "--game-targeting-prompt-top": splitBoardActive
+      ? isMobile ? "4.25rem" : "4.75rem"
+      : "0.25rem",
   } as CSSProperties;
   const playerZoneRailStyle: ZoneRailStyle = isMobile
     ? { "--card-w": "28px", "--card-h": "39px" }
@@ -1106,6 +1119,12 @@ function GamePageContent({
   const pileSize = isMobile
     ? { width: "38px", height: "53px" }
     : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
+  const handleViewZone = useCallback(
+    (zone: "graveyard" | "exile" | "library", zonePlayerId: number) => {
+      setViewingZone({ zone, playerId: zonePlayerId });
+    },
+    [],
+  );
   const showFlowHelpNudge =
     !dismissedFlowHelpNudge &&
     !helpSheetOpen &&
@@ -1221,45 +1240,53 @@ function GamePageContent({
       >
         {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
         <div
-          className="relative z-20 min-w-0 flex w-full overflow-visible"
+          className={`relative z-20 min-w-0 flex w-full ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
           data-flex-zone="opp-row"
         >
-          <div className="min-w-0 flex-1">
-            <OpponentHand showCards={showAiHand} />
-          </div>
-          <DraggableWidget
-            target={{ kind: "widget", key: "opponentPiles" }}
-            flexZone="opponentPiles"
-            className="flex shrink-0 items-start gap-1.5 px-1 py-1"
-            style={playerZoneRailStyle}
-          >
-            {activeOpponentId != null ? (
-              <>
-                <ExilePile
-                  playerId={activeOpponentId}
-                  size={pileSize}
-                  onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
-                />
-                <LibraryPile
-                  playerId={activeOpponentId}
-                  size={pileSize}
-                  onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
-                />
-                <GraveyardPile
-                  playerId={activeOpponentId}
-                  size={pileSize}
-                  onClick={() =>
-                    setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-                  }
-                />
-              </>
-            ) : null}
-          </DraggableWidget>
+          {renderFocusedOpponentTopRow && (
+            <>
+              <div className="min-w-0 flex-1">
+                <OpponentHand showCards={showAiHand} />
+              </div>
+              <DraggableWidget
+                target={{ kind: "widget", key: "opponentPiles" }}
+                flexZone="opponentPiles"
+                className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+                style={playerZoneRailStyle}
+              >
+                {activeOpponentId != null ? (
+                  <>
+                    <ExilePile
+                      playerId={activeOpponentId}
+                      size={pileSize}
+                      onClick={() => handleViewZone("exile", activeOpponentId)}
+                    />
+                    <LibraryPile
+                      playerId={activeOpponentId}
+                      size={pileSize}
+                      onView={() => handleViewZone("library", activeOpponentId)}
+                    />
+                    <GraveyardPile
+                      playerId={activeOpponentId}
+                      size={pileSize}
+                      onClick={() => handleViewZone("graveyard", activeOpponentId)}
+                    />
+                  </>
+                ) : null}
+              </DraggableWidget>
+            </>
+          )}
         </div>
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
-          <GameBoard oppHud={oppHud} playerHud={playerHud} />
+          <GameBoard
+            oppHud={oppHud}
+            playerHud={playerHud}
+            showOpponentCards={showAiHand}
+            onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
+            onViewZone={handleViewZone}
+          />
         </div>
 
         {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
@@ -1298,17 +1325,17 @@ function GamePageContent({
               <ExilePile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onClick={() => setViewingZone({ zone: "exile", playerId: perspectivePlayerId })}
+                onClick={() => handleViewZone("exile", perspectivePlayerId)}
               />
               <GraveyardPile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
+                onClick={() => handleViewZone("graveyard", perspectivePlayerId)}
               />
               <LibraryPile
                 playerId={perspectivePlayerId}
                 size={pileSize}
-                onView={() => setViewingZone({ zone: "library", playerId: perspectivePlayerId })}
+                onView={() => handleViewZone("library", perspectivePlayerId)}
               />
             </div>
           </DraggableWidget>
