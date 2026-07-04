@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState, ModalChoice, WaitingFor } from "../../../adapter/types.ts";
+import type { ModalChoice, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameState, buildPendingCast } from "../../../test/factories/gameStateFactory.ts";
 import { ModeChoiceModal } from "../ModeChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -18,12 +19,11 @@ function singleChoiceModal(): ModalChoice {
 }
 
 function setWaitingFor(waitingFor: WaitingFor) {
-  const gameState = {
-    active_player: 0,
+  const gameState = buildGameState({
     objects: {},
     priority_player: 0,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 
   useGameStore.setState({
     gameState,
@@ -87,10 +87,7 @@ describe("ModeChoiceModal", () => {
       data: {
         player: 0,
         modal: singleChoiceModal(),
-        pending_cast: { object_id: 50 } as unknown as Extract<
-          WaitingFor,
-          { type: "ModeChoice" }
-        >["data"]["pending_cast"],
+        pending_cast: buildPendingCast({ object_id: 50 }),
       },
     });
 

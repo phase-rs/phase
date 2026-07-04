@@ -228,5 +228,10 @@
     "settings": "Ajustes",
     "languageSettings": "Idioma ({{lang}}) — abrir ajustes",
     "languageTitle": "Idioma: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Algo salió mal",
+    "body": "La aplicación encontró un error inesperado y no puede continuar en esta pantalla. Recargar suele solucionarlo.",
+    "reload": "Recargar"
   }
 }

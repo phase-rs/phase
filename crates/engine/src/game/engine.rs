@@ -4000,7 +4000,7 @@ fn apply_action(
         (
             WaitingFor::CastOffer {
                 player,
-                kind: CastOfferKind::Miracle { object_id, .. },
+                kind: CastOfferKind::Miracle { object_id, cost },
             },
             GameAction::CastSpellAsMiracle {
                 object_id: action_obj,
@@ -4015,12 +4015,17 @@ fn apply_action(
             }
             let p = *player;
             let obj = action_obj;
+            // CR 702.94a + CR 608.2g: forward the cost latched at offer-enqueue as
+            // the sole cost authority — live keywords are not re-read (the granting
+            // source may have left the battlefield, CR 608.2b).
+            let latched_cost = Some(cost.clone());
             super::casting::handle_cast_spell_as_miracle_with_payment_mode(
                 state,
                 p,
                 obj,
                 card_id,
                 payment_mode,
+                latched_cost,
                 &mut events,
             )?
         }

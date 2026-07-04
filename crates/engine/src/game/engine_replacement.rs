@@ -111,6 +111,19 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
+    // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
+    // the Damage resume arm can restore them onto the ctx it rebuilds from the
+    // source (which cannot re-derive either).
+    let parked_excess_recipient = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.excess_recipient);
+    let parked_lifelink_bonus = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.lifelink_bonus)
+        .unwrap_or(0);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -216,14 +229,21 @@ pub(super) fn handle_replacement_choice(
                     is_combat,
                     ..
                 } => {
-                    let ctx = DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                        let controller = state
-                            .objects
-                            .get(&source_id)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(state.active_player);
-                        DamageContext::fallback(source_id, controller)
-                    });
+                    let mut ctx =
+                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                            let controller = state
+                                .objects
+                                .get(&source_id)
+                                .map(|obj| obj.controller)
+                                .unwrap_or(state.active_player);
+                            DamageContext::fallback(source_id, controller)
+                        });
+                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                    // the deferred lifelink bonus dropped by the source-derived ctx
+                    // rebuild, so the resumed hit still redirects and a resumed redirect
+                    // leg still gains the combined lifelink total.
+                    ctx.excess_recipient = parked_excess_recipient;
+                    ctx.lifelink_bonus = parked_lifelink_bonus;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -478,6 +498,16 @@ pub(super) fn handle_replacement_choice(
                         "handle_replacement_choice: BeginPhase is a mandatory-skip replacement and should never surface as a choice"
                     );
                 }
+                // CR 701.31 + CR 901.9c: Planeswalk is a mandatory full-replacement
+                // (Fixed Point in Time). A single mandatory candidate is applied
+                // inline by `pipeline_loop` and never surfaces a CR 616.1 choice, so
+                // this arm is unreachable in practice.
+                ProposedEvent::Planeswalk { .. } => {
+                    debug_assert!(
+                        false,
+                        "handle_replacement_choice: Planeswalk is a mandatory full-replacement and should never surface as a choice"
+                    );
+                }
                 // CR 701.8a + CR 614: Destroy accepted after replacement choice —
                 // delegate to the shared helper so the inner ZoneChange (battlefield
                 // → graveyard) re-enters the replacement pipeline. Leaves-the-
@@ -729,6 +759,19 @@ pub(super) fn handle_replacement_choice(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
+                }
+                // CR 120.4a: a SECOND material replacement ordering choice on the
+                // same damage event re-parked a fresh record with
+                // `excess_recipient: None`. Reapply the rider captured before
+                // `continue_replacement` consumed the prior record so the eventual
+                // delivery still redirects the excess to the creature's controller.
+                if pending.excess_recipient.is_none() {
+                    pending.excess_recipient = parked_excess_recipient;
+                }
+                // CR 702.15b: likewise carry the deferred lifelink bonus onto the
+                // re-parked record so a second ordering choice cannot drop it.
+                if pending.lifelink_bonus == 0 {
+                    pending.lifelink_bonus = parked_lifelink_bonus;
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
@@ -2218,6 +2261,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });

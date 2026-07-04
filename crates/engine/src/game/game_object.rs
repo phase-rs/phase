@@ -1742,9 +1742,29 @@ impl GameObject {
     }
 
     /// Look up a stored creature type choice.
+    ///
+    /// CR 613.7: Reads the LAST `ChosenAttribute::CreatureType`, so that a
+    /// re-choice (which appends to `chosen_attributes`, since the vector is only
+    /// cleared on leave-battlefield) supersedes the prior choice — the most
+    /// recent persisted choice wins. ETB-once cards have a single entry, so the
+    /// last entry equals the first and behavior is unchanged. Kept consistent
+    /// with `chosen_card_name` so a same-clause read of "the last chosen name and
+    /// creature type" (Psychic Paper) reports both halves from the same choice.
     pub fn chosen_creature_type(&self) -> Option<&str> {
-        self.chosen_attributes.iter().find_map(|a| match a {
+        self.chosen_attributes.iter().rev().find_map(|a| match a {
             ChosenAttribute::CreatureType(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// CR 612.8 + CR 613.7: The most recently chosen card name (Psychic Paper's
+    /// "the last chosen name"). Reads the LAST `ChosenAttribute::CardName` so a
+    /// re-attach that chooses again (which appends, since `chosen_attributes` only
+    /// clears on leave-battlefield) supersedes the prior choice. Read by
+    /// `ContinuousModification::SetChosenName` at Layer 3 evaluation.
+    pub fn chosen_card_name(&self) -> Option<&str> {
+        self.chosen_attributes.iter().rev().find_map(|a| match a {
+            ChosenAttribute::CardName(s) => Some(s.as_str()),
             _ => None,
         })
     }
@@ -2021,6 +2041,44 @@ mod tests {
         obj.chosen_attributes
             .push(ChosenAttribute::Color(ManaColor::Red));
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn chosen_card_name_returns_last_choice() {
+        // CR 613.7: re-attach appends a second CardName; the most recent wins.
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.chosen_card_name().is_none());
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+        assert_eq!(obj.chosen_card_name(), Some("Llanowar Elves"));
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+        assert_eq!(obj.chosen_card_name(), Some("Grizzly Bears"));
+    }
+
+    #[test]
+    fn chosen_creature_type_returns_last_choice() {
+        // CR 613.7: re-attach appends a second CreatureType; the most recent wins.
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.chosen_creature_type().is_none());
+        obj.chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+        assert_eq!(obj.chosen_creature_type(), Some("Elf"));
+        obj.chosen_attributes
+            .push(ChosenAttribute::CreatureType("Bear".to_string()));
+        assert_eq!(obj.chosen_creature_type(), Some("Bear"));
     }
 
     #[test]

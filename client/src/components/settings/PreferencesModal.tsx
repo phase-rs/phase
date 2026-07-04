@@ -985,6 +985,8 @@ function CloudSyncSection() {
 
 function DataSection() {
   const { t } = useTranslation("settings");
+  const telemetryEnabled = usePreferencesStore((s) => s.telemetryEnabled);
+  const setTelemetryEnabled = usePreferencesStore((s) => s.setTelemetryEnabled);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1086,6 +1088,18 @@ function DataSection() {
       />
       {status && <p className="text-xs text-emerald-400">{status}</p>}
       {error && <p className="text-xs text-rose-400">{error}</p>}
+      <label className="mt-1 flex min-h-11 items-start gap-2">
+        <input
+          type="checkbox"
+          checked={telemetryEnabled}
+          onChange={(e) => setTelemetryEnabled(e.target.checked)}
+          className="mt-1 accent-cyan-500"
+        />
+        <span className="text-sm text-slate-200">
+          {t("data.telemetry")}
+          <span className="mt-0.5 block text-xs text-slate-400">{t("data.telemetryDescription")}</span>
+        </span>
+      </label>
     </SettingsSection>
   );
 }

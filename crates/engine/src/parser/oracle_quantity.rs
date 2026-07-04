@@ -3067,8 +3067,16 @@ fn for_each_anaphor_context(ctx: &ParseContext, they_controller: &ControllerRef)
 /// only needing the count. This preserves object identity for patterns such as
 /// "for each token you control that entered this turn, create a token that's a
 /// copy of it".
+#[allow(dead_code)]
 pub(crate) fn parse_for_each_object_filter_clause(clause: &str) -> Option<TargetFilter> {
-    match parse_for_each_clause(clause)? {
+    parse_for_each_object_filter_clause_with_context(clause, &ParseContext::default())
+}
+
+pub(crate) fn parse_for_each_object_filter_clause_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    match parse_for_each_clause_with_context(clause, ctx)? {
         QuantityRef::ObjectCount { filter } => Some(filter),
         QuantityRef::EnteredThisTurn { filter } => {
             Some(add_filter_property(filter, FilterProp::EnteredThisTurn))

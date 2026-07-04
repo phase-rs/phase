@@ -3261,6 +3261,16 @@ pub(super) fn parse_choose_ast(
             return Some(ast);
         }
 
+        // CR 608.2d + CR 122.1: "choose a counter on it / that permanent" —
+        // pick one of the distinct counter kinds on the anaphoric object
+        // (The Caves of Androzani II/III). Anaphoric form only; the declared-
+        // target form ("a counter on target permanent", Ichormoon Gauntlet)
+        // is not yet supported (its consumer "put one more or remove one" is
+        // also absent) and is left as an honest Unimplemented gap.
+        if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
+            return Some(ast);
+        }
+
         if super::is_choose_as_targeting(rest_lower) {
             // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
             // two independent target slots on the same activated/triggered
@@ -3330,6 +3340,32 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     let source_filter =
         crate::parser::oracle_replacement::parse_choose_damage_source_candidate(rest)?;
     Some(ChooseImperativeAst::DamageSource { source_filter })
+}
+
+/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
+/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
+/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
+/// counter on ")` then the anaphor phrase, consuming the entire residual.
+///
+/// The declared-target form ("a counter on target permanent", Ichormoon
+/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
+/// that kind on that permanent or remove one of those counters from it") is not
+/// yet implemented, so parsing only the head would create a partial and
+/// rules-incorrect parse. Left as an honest Unimplemented gap.
+fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let anaphor = |i| -> OracleResult<'_, ()> {
+        let (i, _) = tag("a counter on ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    if anaphor(rest_lower.trim()).is_ok() {
+        return Some(ChooseImperativeAst::CounterKind {
+            target: TargetFilter::ParentTarget,
+        });
+    }
+    None
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -4410,6 +4446,9 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
+        // CR 608.2d + CR 122.1: "choose a counter on it" → interactive
+        // counter-kind selection on the anaphoric object.
+        ChooseImperativeAst::CounterKind { target } => Effect::ChooseCounterKind { target },
     }
 }
 
@@ -7631,6 +7670,7 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 damage_source: None,
+                excess: _,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
@@ -7690,6 +7730,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }
             }
         }
@@ -7796,6 +7837,23 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 311.7 / CR 901.9b: "chaos ensues" as a standalone resolving instruction
+    // — the active plane's "whenever chaos ensues" ability triggers. Whole-phrase
+    // imperative with no target; anchored nom production mirroring the "end the
+    // turn" / "end the combat phase" parses so unrelated clauses cannot
+    // accidentally match it. Makes `parse_effect("chaos ensues") ==
+    // Effect::ChaosEnsues`, which the planar-die planeswalk-replacement parser
+    // (Fixed Point in Time) consumes as its substitute.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("chaos ensues"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —
@@ -7847,6 +7905,7 @@ pub(super) fn parse_imperative_family_ast(
                 vec![]
             },
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -7856,6 +7915,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::Upkeep,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     // CR 500.8 + CR 513.1: "there is an additional end step after this step"
@@ -7868,6 +7928,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::End,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
 
@@ -10435,6 +10496,22 @@ pub(super) fn parse_zone_counter_ast(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
+        // CR 122.1 + CR 122.6: "put [a[n]] [additional] counter of that kind on
+        // <anaphor>" — add one counter of the kind chosen by a preceding
+        // `ChooseCounterKind` (The Caves of Androzani). Detected before the
+        // generic counter-type paths so "counter of that kind" is never mis-read
+        // as a literal counter name. `parse_target`/`try_parse_put_counter`
+        // cannot express "of that kind" (no CounterType), so this is a distinct
+        // seam.
+        if let Some(after_put) =
+            nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
+        {
+            if let Some(Effect::PutChosenCounter { target, count }) =
+                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            {
+                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+            }
+        }
         // Try move-counters first ("put its counters on ...")
         if let Some((
             Effect::MoveCounters {
@@ -10490,7 +10567,18 @@ pub(super) fn parse_zone_counter_ast(
                 _remainder,
                 multi_target,
             )) => {
-                if is_all && multi_target.is_none() {
+                // CR 608.2c: A `ParentTarget` placement subject ("each of them")
+                // is an anaphor to a bounded set of chosen objects, not a
+                // battlefield-wide type scan. The `PutCounterAll` resolver
+                // matches its filter against every battlefield object and cannot
+                // resolve a bare `ParentTarget` (it has no target slot to bind),
+                // so route the anaphor to `PutCounter`, whose
+                // `resolve_defined_or_targets` binds `ability.targets` (the
+                // chosen creatures). Typed mass placements ("on each creature you
+                // control") and tracked-set demonstratives still take the
+                // `PutCounterAll` path.
+                if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
+                {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),
@@ -10665,6 +10753,10 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
+        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
+            Effect::PutChosenCounter { target, count }
+        }
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here

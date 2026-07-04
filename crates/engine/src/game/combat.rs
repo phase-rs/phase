@@ -545,6 +545,16 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         if has_summoning_sickness(obj) {
             return Err(format!("{:?} has summoning sickness", id));
         }
+
+        // CR 508.1c + CR 611.2c: additional-combat attacker restriction
+        // (Last Night Together: "Only the chosen creatures can attack during
+        // that combat phase"; Bumi: "Only land creatures..."). No-op outside a
+        // restricted combat phase.
+        if !passes_combat_attacker_restriction(state, id) {
+            return Err(format!(
+                "{id:?} can't attack during this combat phase (CR 508.1c)"
+            ));
+        }
     }
 
     // CR 506.5 + CR 508.1c: CombatAlone(Attack, NeedsCompanion) — creature must
@@ -587,6 +597,47 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     Ok(())
+}
+
+/// CR 508.1c + CR 611.2c: A creature may be declared as an attacker during a
+/// restricted additional combat phase (Last Night Together / Bumi) only if it
+/// matches the active filter. The restriction is a rules-modifying continuous
+/// effect (re-evaluated per declaration), so it correctly covers creatures that
+/// entered after the scheduling spell resolved (`Typed` subjects) while a
+/// fixed `TrackedSet`/`SpecificObject` membership stays constant. `None` (no
+/// restriction) permits every creature. This is the single shared authority the
+/// candidate-set query, the declaration gate, and the AI fallback all route
+/// through.
+pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -> bool {
+    match &state.current_combat_attacker_restriction {
+        None => true,
+        // CR 500.10a + CR 508.1c: the restricted extra combat phase is only ever
+        // added to the active player's turn (the scheduling spell's controller),
+        // so a controller-relative restriction subject ("creatures you control")
+        // resolves `ControllerRef::You` against the active player. A bare
+        // `FilterContext::neutral()` carries no `source_controller` and would make
+        // such a restriction match nothing, wrongly excluding the active player's
+        // creatures.
+        // CR 611.2c: use the actual scheduling spell's ObjectId (stored on
+        // `ExtraPhase.attacker_restriction_source` and propagated to
+        // `current_combat_attacker_restriction_source`) so source-relative
+        // restriction predicates resolve against the correct object rather than
+        // the dummy `ObjectId(0)` sentinel. The current concrete-set / Typed
+        // subjects (Last Night Together's chosen set, Bumi's "land creatures")
+        // are unaffected by the source; this correctly future-proofs
+        // controller-scoped and source-colour subjects.
+        Some(filter) => matches_target_filter(
+            state,
+            obj_id,
+            filter,
+            &FilterContext::from_source_with_controller(
+                state
+                    .current_combat_attacker_restriction_source
+                    .unwrap_or(ObjectId(0)),
+                state.active_player,
+            ),
+        ),
+    }
 }
 
 /// CR 508.1c: The global "no more than N creatures can attack each combat" cap
@@ -3107,6 +3158,9 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
                 && !has_summoning_sickness(obj)
+                // CR 508.1c + CR 611.2c: additional-combat attacker restriction
+                // (Last Night Together / Bumi). No-op outside a restricted combat.
+                && passes_combat_attacker_restriction(state, *id)
             {
                 Some(*id)
             } else {
@@ -4030,6 +4084,54 @@ mod tests {
             scans, 0,
             "no static-ability whole-board scan on a vanilla board"
         );
+    }
+
+    /// CR 508.1c + CR 611.2c: a restricted additional combat phase (Bumi,
+    /// Unleashed: "Only land creatures can attack during that combat phase")
+    /// admits only creatures matching the active filter. Because the restriction
+    /// is rules-modifying (re-evaluated per declaration), it covers creatures
+    /// independent of when they entered. Exercises the full enforcement path:
+    /// candidate query, declaration gate, and the clear-on-end semantics.
+    #[test]
+    fn restricted_combat_filters_candidates_and_declarations() {
+        use crate::parser::oracle_ir::context::ParseContext;
+        use crate::parser::oracle_target::parse_target_with_ctx;
+
+        let mut state = setup();
+        let land_creature = create_creature(&mut state, PlayerId(0), "Dryad Arbor", 1, 1);
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let plain_creature = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // No restriction: both creatures are valid attackers.
+        assert!(get_valid_attacker_ids(&state).contains(&land_creature));
+        assert!(get_valid_attacker_ids(&state).contains(&plain_creature));
+
+        // Bumi-style restriction: only land creatures may attack.
+        let (filter, _) = parse_target_with_ctx("land creatures", &mut ParseContext::default());
+        state.current_combat_attacker_restriction = Some(filter);
+
+        let valid = get_valid_attacker_ids(&state);
+        assert!(valid.contains(&land_creature), "land creature may attack");
+        assert!(
+            !valid.contains(&plain_creature),
+            "non-land creature excluded by the restriction"
+        );
+        assert!(validate_attackers(&state, &[land_creature]).is_ok());
+        assert!(
+            validate_attackers(&state, &[plain_creature]).is_err(),
+            "declaring a non-land attacker is illegal under the restriction"
+        );
+
+        // CR 511.3: clearing the restriction re-admits the non-land creature.
+        state.current_combat_attacker_restriction = None;
+        assert!(get_valid_attacker_ids(&state).contains(&plain_creature));
+        assert!(validate_attackers(&state, &[plain_creature]).is_ok());
     }
 
     /// CR 604.1: `has_potential_attackers` gates the same three per-permanent

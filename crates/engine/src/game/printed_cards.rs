@@ -790,6 +790,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -871,6 +872,12 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // (Words of Worship/Wilding). Walk it so any conjure name it carries is
         // surfaced (GainLife/Token carry none today, but it is a nested carrier).
         Effect::CreateDrawReplacement { replacement_effect } => {
+            walk_effect(replacement_effect, out)
+        }
+        // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
+        // Point in Time: chaos ensues). Walk it so any conjure name it carries is
+        // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             walk_effect(replacement_effect, out)
         }
         // Heist exiles a card from an opponent's library at random; it does not
@@ -1005,6 +1012,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // CR 120.1: leaf effect — the source/recipient filters carry no nested
         // ability or effect to walk.
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -1119,6 +1127,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -1191,6 +1200,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // ContinuousModifications, never conjured card names.
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize
+        // CR 608.2d + CR 122.1: counter-kind choice / consume carry no conjure names.
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -1652,7 +1664,10 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
 
 pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
     match mana_cost {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => vec![],
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => vec![],
         ManaCost::Cost { shards, .. } => {
             let mut colors = Vec::new();
             for shard in shards {

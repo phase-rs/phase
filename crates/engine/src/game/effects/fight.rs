@@ -303,6 +303,7 @@ fn build_fight_damage_node(
             },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target_id)],
         source_id,

@@ -182,6 +182,12 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
 
+            // CR 704.5k: If two or more permanents have the world supertype, all but the one
+            // that has held it the shortest time (highest timestamp) go to their owners'
+            // graveyards; on a tie for newest, all of them do. Global (not per-player) and
+            // choiceless — modeled on check_role_uniqueness.
+            check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
+
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
 
@@ -1236,6 +1242,171 @@ fn check_role_uniqueness(
     }
 }
 
+/// CR 704.5k + CR 613.7a/d: the timestamp at which `obj` began having the world
+/// supertype — the basis for "shortest time held" in the world rule.
+///
+/// - **Printed world** (world present in `base_card_types.supertypes`): held
+///   since the permanent entered its current zone, so the entry timestamp is
+///   the authority (CR 613.7d). A permanent that both prints world AND is
+///   re-granted world keeps its entry timestamp — the printed check comes first.
+/// - **Granted world** (world only present via a continuous
+///   `AddSupertype { World }` effect): the recipient began having world at the
+///   *later* of its own entry timestamp and the moment the grant began applying
+///   — world is present only while both the recipient is on the battlefield and
+///   the grant applies, so the later of the two is when both first held. The
+///   grant's start is the granting effect's timestamp, which for a printed
+///   static ability is the granting source's own entry timestamp (CR 613.7a: a
+///   static-ability effect's timestamp is the later of the source object's
+///   timestamp or the ability-creating effect's). We take the earliest
+///   currently-active matching grant (so an older grant governs when several
+///   apply) and `max` it with the recipient's entry timestamp.
+///
+/// Grant matching mirrors `apply_continuous_effect_filtered` (layers.rs) exactly:
+/// a grant governs `obj` only if `obj` matches the effect's `affected_filter`
+/// AND the effect's per-recipient `condition` evaluates true — so a
+/// condition-false grant cannot yield a spuriously early acquisition. Grants are
+/// already source-condition-gated at collection time by
+/// `collect_shared_active_continuous_effects`, so only recipient-context
+/// conditions survive here (dropped to `None` otherwise). If no grant matches
+/// (defensive: the layered supertype came from something this scan can't see),
+/// fall back to the entry timestamp.
+fn world_acquisition_timestamp(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> u64 {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::card_type::Supertype;
+
+    // CR 613.7d: a printed-world permanent has held the supertype since entry.
+    // Discriminate on the BASE characteristics (CR 205.4b: supertypes are
+    // independent of card type and are only lost via effects) — the layered
+    // `card_types` view can't distinguish printed from granted world.
+    if obj.base_card_types.supertypes.contains(&Supertype::World) {
+        return obj.timestamp;
+    }
+
+    // CR 613.7a: granted world — earliest active matching grant, `max`'d with
+    // the recipient's own entry timestamp ("whichever is later").
+    let earliest_grant = layers::collect_shared_active_continuous_effects(state)
+        .into_iter()
+        .filter(|effect| {
+            matches!(
+                effect.modification,
+                ContinuousModification::AddSupertype {
+                    supertype: Supertype::World
+                }
+            )
+        })
+        .filter(|effect| {
+            // Mirror apply_continuous_effect_filtered (layers.rs:4314-4332):
+            // recipient must match affected_filter AND the effect's condition.
+            let ctx = crate::game::filter::FilterContext::from_source(state, effect.source_id);
+            crate::game::filter::matches_target_filter(state, obj.id, &effect.affected_filter, &ctx)
+                && effect.condition.as_ref().is_none_or(|condition| {
+                    layers::evaluate_condition_with_recipient(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                        obj.id,
+                    )
+                })
+        })
+        .map(|effect| effect.timestamp)
+        .min();
+
+    match earliest_grant {
+        Some(grant_ts) => obj.timestamp.max(grant_ts),
+        None => obj.timestamp,
+    }
+}
+
+/// CR 704.5k: The "world rule". If two or more permanents have the world
+/// supertype, all except the one that has had the world supertype for the
+/// shortest amount of time are put into their owners' graveyards. On a tie for
+/// the shortest amount of time, all of them are.
+///
+/// Unlike the legend rule (CR 704.5j, per-player) this is **global** — there is
+/// no controller qualifier, so all world permanents across the battlefield form
+/// a single group. It is also choiceless (no player selection), so it is
+/// modeled on `check_role_uniqueness` rather than `check_legend_rule`.
+///
+/// CR 613.7a + CR 613.7d: "time held the world supertype" is NOT simply the
+/// permanent's battlefield-entry timestamp. A printed-world permanent has held
+/// the supertype since it entered (CR 613.7d), but a permanent can also GAIN
+/// world post-entry via a continuous type-changing effect
+/// (`ContinuousModification::AddSupertype { World }`). For a granted world the
+/// acquisition time is the timestamp of the granting continuous effect (CR
+/// 613.7a), and per CR 613.7a it is the *later* of the recipient's entry
+/// timestamp and the grant's timestamp. `world_acquisition_timestamp` computes
+/// this per permanent; the permanent that has held the supertype for the
+/// *shortest* time is the one with the *highest* acquisition timestamp.
+///
+/// CR 702.26b: only phased-in permanents are considered — `battlefield_snapshot`
+/// is `battlefield_phased_in_ids`.
+fn check_world_rule(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+) {
+    // CR 704.5k: one global pass — no controller grouping. Membership uses the
+    // LAYERED supertype view (`card_types`), so a permanent that gained world
+    // via a continuous effect is included; the per-permanent "time held" basis
+    // is `world_acquisition_timestamp` (printed → entry; granted → CR 613.7a).
+    let worlds: Vec<(ObjectId, u64)> = battlefield_snapshot
+        .iter()
+        .filter_map(|id| {
+            let obj = live_battlefield_object(state, id)?;
+            obj.card_types
+                .supertypes
+                .contains(&Supertype::World)
+                .then_some((*id, world_acquisition_timestamp(state, obj)))
+        })
+        .collect();
+
+    // CR 704.5k: the rule applies only with "two or more" world permanents.
+    if worlds.len() < 2 {
+        return;
+    }
+
+    // CR 613.7a: survivor = shortest time held = highest acquisition timestamp.
+    // Safe: len >= 2. `newest`/`tied` are Copy and borrow `worlds` here, so the
+    // borrow ends before the `into_iter()` consume below.
+    let newest = worlds.iter().map(|(_, ts)| *ts).max().unwrap();
+    // CR 704.5k: on a tie for newest (shortest time held), all of them die.
+    let tied = worlds.iter().filter(|(_, ts)| *ts == newest).count() > 1;
+
+    // If tied, every world permanent is doomed; otherwise the unique newest survives.
+    let mut doomed: Vec<ObjectId> = worlds
+        .into_iter()
+        .filter(|(_, ts)| tied || *ts != newest)
+        .map(|(id, _)| id)
+        .collect();
+    // Deterministic order (mirror check_role_uniqueness's stable iteration).
+    doomed.sort_by_key(|id| id.0);
+
+    let mut performed_ids = Vec::new();
+    for id in doomed {
+        if live_battlefield_object(state, &id).is_none() {
+            continue;
+        }
+        // CR 704.5k + CR 614.6: the world permanent is put into its owner's
+        // graveyard through the replacement pipeline (Moved redirects apply).
+        // CR 616.1: bail on a replacement-order pause; the fixpoint re-derives
+        // the remaining doomed permanents on the next pass.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
+        performed_ids.push(id);
+        *any_performed = true;
+    }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+}
+
 /// CR 704.5i + CR 306.9: A planeswalker with loyalty 0 is put into its owner's graveyard.
 fn check_zero_loyalty(
     state: &mut GameState,
@@ -1616,7 +1787,12 @@ fn check_counter_cancellation(
 }
 
 /// CR 704.5d: A token that's in a zone other than the battlefield ceases to exist.
-/// Tokens on the stack are excluded — spell copies resolve before the next SBA check.
+/// CR 704.5e + CR 707.10a: A copy of a card in a zone other than the stack or the
+/// battlefield also ceases to exist. Both are checked here because both are
+/// non-card objects swept by the same removal loop. The stack is excluded for both
+/// so spell copies (and copies of cards resolving as spells) finish resolving
+/// before the next SBA check; the battlefield is legal for a copy of a card
+/// (CR 707.10f) but not for a token off-battlefield.
 fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     let tokens_to_remove: Vec<(
         crate::types::identifiers::ObjectId,
@@ -1625,7 +1801,10 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     )> = state
         .objects
         .iter()
-        .filter(|(_, obj)| zones::token_is_outside_battlefield_and_stack(obj))
+        .filter(|(_, obj)| {
+            zones::token_is_outside_battlefield_and_stack(obj)
+                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+        })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
 
@@ -3389,6 +3568,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -3456,6 +3637,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -4264,6 +4447,127 @@ mod tests {
         );
     }
 
+    // --- CR 704.5e + CR 707.10a: Copy-of-a-card cease-to-exist tests ---
+
+    /// A copy of a card (is_copy = true, is_token = false) resolving to the
+    /// graveyard — as an `Effect::CastCopyOfCard` non-permanent spell copy does —
+    /// must cease to exist as a state-based action. Revert probe: without the
+    /// `copy_of_card_outside_battlefield_and_stack` filter arm, this copy persists
+    /// forever as an orphan graveyard object (the original bug).
+    #[test]
+    fn copy_of_card_in_graveyard_ceases_to_exist() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "SpellCopy".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_copy = true;
+            obj.is_token = false;
+        }
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        events.clear();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects.contains_key(&id),
+            "Copy of a card in the graveyard should cease to exist"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&id),
+            "Copy of a card should be removed from the graveyard"
+        );
+        // CR 400.7: ceasing to exist is not a zone change — no ZoneChanged event.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == id)),
+            "SBA removal must not emit a ZoneChanged event for the ceased copy"
+        );
+    }
+
+    /// The core negative: a real card (is_copy = false, is_token = false) in the
+    /// graveyard must NOT be swept. Revert probe: an over-broad filter that removed
+    /// any graveyard object would delete this and break every graveyard mechanic.
+    #[test]
+    fn real_card_in_graveyard_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "RealCard".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_copy = false;
+            obj.is_token = false;
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A real card in the graveyard must not be swept by the copy SBA"
+        );
+    }
+
+    /// Adjacent-zone hostile: a live copy of a card ON THE BATTLEFIELD must NOT be
+    /// swept — CR 707.10f makes a permanent copy legal there. Revert probe: dropping
+    /// the `Zone::Battlefield` carve-out in the predicate would delete it.
+    #[test]
+    fn copy_of_card_on_battlefield_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "BattlefieldCopy".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A copy of a card on the battlefield must survive the SBA"
+        );
+    }
+
+    /// Adjacent-zone hostile: a copy of a card ON THE STACK must NOT be swept —
+    /// it is still resolving. Mirrors `token_on_stack_survives_sba`.
+    #[test]
+    fn copy_of_card_on_stack_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "StackCopy".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A copy of a card on the stack must survive the SBA"
+        );
+    }
+
     // --- CR 104.3b: CantLoseTheGame SBA prevention tests ---
 
     /// Helper: add a permanent with CantLoseTheGame static affecting its controller.
@@ -4793,6 +5097,418 @@ mod tests {
 
         assert!(state.battlefield.contains(&role));
         assert!(state.players[0].graveyard.is_empty());
+    }
+
+    // --- CR 704.5k: World rule SBA ---
+
+    /// Helper: put a permanent with the world supertype onto the battlefield
+    /// under `owner`'s control with an explicit timestamp (time held). Modeled
+    /// on `add_legendary` — an enchantment host is fine; `world` applies to any
+    /// permanent type.
+    fn add_world(
+        state: &mut GameState,
+        card: CardId,
+        owner: PlayerId,
+        name: &str,
+        timestamp: u64,
+    ) -> ObjectId {
+        let id = create_object(state, card, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.supertypes.push(Supertype::World);
+        obj.timestamp = timestamp;
+        id
+    }
+
+    #[test]
+    fn sba_world_rule_keeps_newest_of_two() {
+        // (a) CR 704.5k: two worlds — the older (lower timestamp = held longer)
+        // goes to the graveyard; the newer survives.
+        let mut state = setup();
+        let older = add_world(&mut state, CardId(1), PlayerId(0), "The Abyss", 10);
+        let newer = add_world(&mut state, CardId(2), PlayerId(0), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&older) && state.players[0].graveyard.contains(&older),
+            "older world (held longer) goes to its owner's graveyard"
+        );
+        assert!(
+            state.battlefield.contains(&newer),
+            "newest world (shortest time held) survives"
+        );
+    }
+
+    #[test]
+    fn sba_world_rule_three_keeps_newest_only() {
+        // (b) CR 704.5k: with N>2, only the single highest timestamp survives.
+        let mut state = setup();
+        let w1 = add_world(&mut state, CardId(1), PlayerId(0), "Living Plane", 5);
+        let w2 = add_world(&mut state, CardId(2), PlayerId(0), "The Abyss", 10);
+        let w3 = add_world(&mut state, CardId(3), PlayerId(0), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&w1) && state.players[0].graveyard.contains(&w1),
+            "oldest world goes to graveyard"
+        );
+        assert!(
+            !state.battlefield.contains(&w2) && state.players[0].graveyard.contains(&w2),
+            "middle world goes to graveyard"
+        );
+        assert!(state.battlefield.contains(&w3), "newest world survives");
+    }
+
+    #[test]
+    fn sba_world_rule_tie_kills_all() {
+        // (c) CR 704.5k tie twist: two worlds with the SAME newest timestamp —
+        // neither has held it strictly the shortest, so BOTH die. This is the
+        // revert-failing guard for the tie branch: an impl that always keeps the
+        // max-timestamp survivor would leave one on the battlefield.
+        let mut state = setup();
+        let a = add_world(&mut state, CardId(1), PlayerId(0), "The Abyss", 20);
+        let b = add_world(&mut state, CardId(2), PlayerId(0), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&a) && state.players[0].graveyard.contains(&a),
+            "tied world A dies"
+        );
+        assert!(
+            !state.battlefield.contains(&b) && state.players[0].graveyard.contains(&b),
+            "tied world B dies — on a tie for newest, all are put into graveyards"
+        );
+    }
+
+    #[test]
+    fn sba_world_rule_tie_kills_all_including_older() {
+        // (c-variant) CR 704.5k: 3 worlds with timestamps 5, 20, 20 — the tie at
+        // the newest timestamp means ALL three die, including the strictly older
+        // one. Proves the tie branch dooms the whole group, not just the tied pair.
+        let mut state = setup();
+        let old = add_world(&mut state, CardId(1), PlayerId(0), "Living Plane", 5);
+        let a = add_world(&mut state, CardId(2), PlayerId(0), "The Abyss", 20);
+        let b = add_world(&mut state, CardId(3), PlayerId(0), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        for (id, label) in [(old, "older"), (a, "tied A"), (b, "tied B")] {
+            assert!(
+                !state.battlefield.contains(&id) && state.players[0].graveyard.contains(&id),
+                "{label} world dies when the newest timestamp is tied"
+            );
+        }
+    }
+
+    #[test]
+    fn sba_world_rule_single_world_unaffected() {
+        // (d) CR 704.5k: with only one world permanent, the rule ("two or more")
+        // does nothing — len < 2 early return.
+        let mut state = setup();
+        let only = add_world(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Concordant Crossroads",
+            10,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&only), "lone world is untouched");
+        assert!(state.players[0].graveyard.is_empty());
+    }
+
+    #[test]
+    fn sba_world_rule_is_global_across_controllers() {
+        // (e) CR 704.5k: the world rule is GLOBAL — no controller qualifier.
+        // Two worlds owned/controlled by different players still form one group;
+        // the older (P0's) dies and P1's newer one survives regardless of
+        // controller. A per-player impl (like the legend rule) would keep both —
+        // this is the revert-failing guard for global scope.
+        let mut state = setup();
+        let p0_older = add_world(&mut state, CardId(1), PlayerId(0), "The Abyss", 10);
+        let p1_newer = add_world(&mut state, CardId(2), PlayerId(1), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&p0_older)
+                && state.players[0].graveyard.contains(&p0_older),
+            "P0's older world dies even though it's the only world its controller has"
+        );
+        assert!(
+            state.battlefield.contains(&p1_newer),
+            "P1's newer world survives — global group, not per-player"
+        );
+    }
+
+    #[test]
+    fn sba_world_rule_is_choiceless() {
+        // (f) CR 704.5k: the world rule is choiceless — unlike the legend rule it
+        // never pauses for a player selection. A single check_state_based_actions
+        // call resolves it fully with no ChooseLegend/choice WaitingFor pause.
+        let mut state = setup();
+        let older = add_world(&mut state, CardId(1), PlayerId(0), "The Abyss", 10);
+        let newer = add_world(&mut state, CardId(2), PlayerId(0), "Nether Void", 20);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "world rule must not pause for a legend/choice selection"
+        );
+        // Resolved in one call: older dead, newer alive — no pending pause.
+        assert!(!state.battlefield.contains(&older) && state.battlefield.contains(&newer));
+    }
+
+    #[test]
+    fn sba_world_rule_zero_worlds_noop() {
+        // (g) CR 704.5k: a populated battlefield with no world permanents is a
+        // no-op for the world rule.
+        let mut state = setup();
+        let bear = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let wall = create_creature(&mut state, CardId(2), PlayerId(1), "Wall", 0, 4);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&bear));
+        assert!(state.battlefield.contains(&wall));
+        assert!(state.players[0].graveyard.is_empty());
+        assert!(state.players[1].graveyard.is_empty());
+    }
+
+    /// Helper: create a permanent that PRINTS the world supertype — world lives
+    /// in `base_card_types.supertypes` (CR 205.4b: supertypes are intrinsic),
+    /// so `world_acquisition_timestamp` returns the entry timestamp directly.
+    fn add_printed_world(
+        state: &mut GameState,
+        card: CardId,
+        owner: PlayerId,
+        name: &str,
+        timestamp: u64,
+    ) -> ObjectId {
+        let id = create_object(state, card, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.supertypes.push(Supertype::World);
+        // CR 613.7d: printed world is discriminated on the BASE characteristics.
+        obj.base_card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types.supertypes.push(Supertype::World);
+        obj.timestamp = timestamp;
+        id
+    }
+
+    /// Helper: create a non-world enchantment `recipient` (entering at
+    /// `entry_ts`) and a separate static source `grantor` (entering at
+    /// `grant_ts`) that continuously grants `AddSupertype { World }` to that
+    /// specific recipient. Returns `(recipient, grantor)`. The grant is backed by
+    /// a REAL `StaticDefinition` on both `static_definitions` and
+    /// `base_static_definitions`, so `collect_shared_active_continuous_effects`
+    /// yields it and `world_acquisition_timestamp` takes the granted branch.
+    #[allow(clippy::too_many_arguments)]
+    fn add_granted_world(
+        state: &mut GameState,
+        recipient_card: CardId,
+        grantor_card: CardId,
+        owner: PlayerId,
+        recipient_name: &str,
+        grantor_name: &str,
+        entry_ts: u64,
+        grant_ts: u64,
+    ) -> (ObjectId, ObjectId) {
+        use crate::types::ability::{ContinuousModification, StaticDefinition, TargetFilter};
+
+        let recipient = create_object(
+            state,
+            recipient_card,
+            owner,
+            recipient_name.to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.timestamp = entry_ts;
+        }
+
+        let grantor = create_object(
+            state,
+            grantor_card,
+            owner,
+            grantor_name.to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.timestamp = grant_ts;
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::AddSupertype {
+                    supertype: Supertype::World,
+                }]);
+            obj.static_definitions.push(def.clone());
+            // Both slots so the effect survives any base/derived re-derivation.
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        (recipient, grantor)
+    }
+
+    #[test]
+    fn sba_world_rule_granted_world_is_newer_than_printed_world() {
+        // CR 613.7a (discriminating HIGH guard): the world rule orders by TIME
+        // HELD the world supertype, not battlefield-entry time.
+        //   P1: printed world, enters T=20  → acq = 20 (CR 613.7d).
+        //   P2: non-world enchantment enters T=5, GAINS world via source S
+        //       entering T=30 → acq = max(5, 30) = 30 (CR 613.7a).
+        // Shortest time held = highest acquisition = P2 → P2 survives, P1 dies.
+        //
+        // REVERT-FAILING: the old impl used obj.timestamp (entry time): acq(P1)=20,
+        // acq(P2)=5, so it would kill P2 and keep P1 — the exact inversion of the
+        // two assertions below.
+        let mut state = setup();
+        let p1 = add_printed_world(&mut state, CardId(1), PlayerId(0), "Nether Void", 20);
+        let (p2, _s) = add_granted_world(
+            &mut state,
+            CardId(2),
+            CardId(3),
+            PlayerId(0),
+            "Enchanted Realm",
+            "World-Granter",
+            5,
+            30,
+        );
+
+        // Prime layers so P2's LAYERED card_types.supertypes contains World when
+        // check_world_rule reads membership.
+        layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&p2]
+                .card_types
+                .supertypes
+                .contains(&Supertype::World),
+            "precondition: P2 must have LAYERED world from the granting static"
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&p2),
+            "granted world P2 (acquired world last, T=30) survives — shortest time held"
+        );
+        assert!(
+            !state.battlefield.contains(&p1) && state.players[0].graveyard.contains(&p1),
+            "printed world P1 (held since T=20, longer) dies"
+        );
+    }
+
+    #[test]
+    fn sba_world_rule_granted_survivor_follows_source_not_recipient_entry() {
+        // NEGATIVE SIBLING (reviewer clarification #3): two GRANTED worlds whose
+        // granting SOURCES enter in the OPPOSITE order from the recipients.
+        //   A: recipient enters T=100, source enters T=10 → acq = max(100,10)=100.
+        //   B: recipient enters T=15,  source enters T=40 → acq = max(15,40)=40.
+        // Highest acquisition = A (100) → A survives, B dies. The survivor tracks
+        // recipient entry here, but the point is the LOSER (B) is decided by
+        // max(recipient, source), NOT naive recipient/source alone:
+        //   - naive recipient.timestamp would give A=100, B=15 (same survivor A,
+        //     non-discriminating), so we instead assert the acq values directly.
+        //   - naive source.timestamp would give A=10, B=40 → survivor B (WRONG),
+        //     which the max() combinator flips back to A.
+        let mut state = setup();
+        let (a, _sa) = add_granted_world(
+            &mut state,
+            CardId(1),
+            CardId(2),
+            PlayerId(0),
+            "Realm A",
+            "Granter A",
+            100,
+            10,
+        );
+        let (b, _sb) = add_granted_world(
+            &mut state,
+            CardId(3),
+            CardId(4),
+            PlayerId(0),
+            "Realm B",
+            "Granter B",
+            15,
+            40,
+        );
+
+        layers::evaluate_layers(&mut state);
+        // Direct acquisition-time assertions: prove max(recipient, source), which
+        // a naive source.timestamp impl (acq(A)=10, acq(B)=40) would invert.
+        assert_eq!(
+            world_acquisition_timestamp(&state, &state.objects[&a]),
+            100,
+            "acq(A) = max(recipient 100, source 10) = 100"
+        );
+        assert_eq!(
+            world_acquisition_timestamp(&state, &state.objects[&b]),
+            40,
+            "acq(B) = max(recipient 15, source 40) = 40"
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&a),
+            "A (acq 100, shortest time held) survives"
+        );
+        assert!(
+            !state.battlefield.contains(&b) && state.players[0].graveyard.contains(&b),
+            "B (acq 40) dies — a naive source.timestamp impl would wrongly keep B"
+        );
+    }
+
+    #[test]
+    fn sba_world_rule_ignores_phased_out_worlds() {
+        // CR 702.26b: a phased-out world is treated as though it doesn't exist —
+        // it does not count toward "two or more" and is not moved. With one
+        // phased-out world and one active world, the active one is the LONE world
+        // and survives untouched.
+        //
+        // REVERT-FAILING: if the phased-out world were counted, there would be two
+        // worlds (T=5 phased-out older, T=20 active newer) → the older phased-out
+        // one would be "doomed" and an attempt made to move it; the assertions
+        // that it stays put and the graveyard is empty would fail.
+        let mut state = setup();
+        let phased = add_world(&mut state, CardId(1), PlayerId(0), "The Abyss", 5);
+        let active = add_world(&mut state, CardId(2), PlayerId(0), "Nether Void", 20);
+        phase_out_object(&mut state, phased);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&active),
+            "the lone active world survives — the phased-out world doesn't form a pair"
+        );
+        assert!(
+            state.battlefield.contains(&phased),
+            "the phased-out world is not moved (treated as nonexistent, CR 702.26b)"
+        );
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "no world is put into the graveyard"
+        );
     }
 
     fn phase_out_object(state: &mut GameState, id: ObjectId) {

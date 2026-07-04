@@ -15,12 +15,14 @@ use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
-use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use crate::parser::oracle_quantity::{
+    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, FaceDownBody, FaceDownProfile, LibraryPosition, MultiTargetSpec,
-    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
+    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -1186,6 +1188,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 111.1 + CR 707.2: "for each <object>, create a token that's a copy
+    // of it" is one copy-token instruction. The comma separates the object-set
+    // head from the token body, not two independent clauses.
+    if is_for_each_copy_token_continuation(&current_lower, trimmed, &trimmed_lower) {
+        return None;
+    }
+
     if tag::<_, _, OracleError<'_>>("then ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -1295,6 +1304,42 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+fn is_for_each_copy_token_continuation(
+    current_lower: &str,
+    next_text: &str,
+    next_lower: &str,
+) -> bool {
+    let current = strip_sequence_connector_lower(current_lower);
+    let Ok((object_clause, _)) = tag::<_, _, OracleError<'_>>("for each ").parse(current) else {
+        return false;
+    };
+    if parse_for_each_object_filter_clause(object_clause.trim()).is_none() {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    matches!(
+        super::token::try_parse_token(next_lower, next_text, &mut ctx),
+        Some(Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource,
+            ..
+        })
+    )
+}
+
+fn strip_sequence_connector_lower(input: &str) -> &str {
+    let trimmed = input.trim();
+    alt((
+        tag::<_, _, OracleError<'_>>("then, "),
+        tag::<_, _, OracleError<'_>>("then "),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `
@@ -3127,6 +3172,20 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        ContinuationAst::ExcessDamageToController => {
+            // CR 120.4a + CR 608.2c: walk backward to the nearest DealDamage and
+            // attach the excess-redirect rider. The clause may not be adjacent to
+            // the DealDamage effect, mirroring the CantRegenerate walk above.
+            if let Some(def) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+            {
+                if let Effect::DealDamage { excess, .. } = &mut *def.effect {
+                    *excess = Some(ExcessRecipient::TargetController);
+                }
+            }
+        }
         ContinuationAst::PutRest {
             destination,
             reorder_all,
@@ -4031,6 +4090,9 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
+        // CR 120.4a: recognition was gated on a preceding DealDamage, so the
+        // rider is always absorbed into that effect (never a standalone effect).
+        ContinuationAst::ExcessDamageToController => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
@@ -4917,6 +4979,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -5028,6 +5091,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
@@ -5039,6 +5103,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -5120,6 +5185,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // for the Dig-from-among continuation search.
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize
+        // CR 608.2d + CR 122.1: counter-kind choice / consume are their own
+        // resolving effects, not Dig-lookback-transparent.
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5767,6 +5836,21 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
         {
             Some(ContinuationAst::CantRegenerate)
+        }
+        // CR 120.4a: "Excess damage is dealt to that creature's controller
+        // instead." — trailing rider on a `DealDamage` (Flame Spill, Gandalf's
+        // Sanction, Ravenous Tyrannosaurus). The two negative guards defer the
+        // conditional / trample-gated form (Ram Through: "If the creature you
+        // control has trample, excess ...") to `Effect::Unimplemented` — that
+        // form requires a controlled-source trample check we do not model here.
+        Effect::DealDamage { .. }
+            if nom_primitives::scan_contains(&lower, "excess damage")
+                && nom_primitives::scan_contains(&lower, "that creature's controller")
+                && nom_primitives::scan_contains(&lower, "instead")
+                && !nom_primitives::scan_contains(&lower, "has trample")
+                && !nom_primitives::scan_contains(&lower, "if ") =>
+        {
+            Some(ContinuationAst::ExcessDamageToController)
         }
         Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
