@@ -2480,6 +2480,24 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 601.2a: Strip an optional once-per-turn frequency prefix FIRST, before
+    // the Bolas-compound and disjunctive branches, so each branch sees the bare
+    // "you may play/cast …" lead and inherits the correct frequency. "Once each
+    // turn, …" (Assemble the Players, The Fourth Doctor) and the longer "Once
+    // during each of your turns, …" synonym both lower to OncePerTurn; absence
+    // keeps the Unlimited shape (Realmwalker, Future Sight, Crystal Skull).
+    // Strip both `text` and `lower` in lockstep so downstream helpers
+    // (alt-cost rider, condition parser, description) see aligned slices from
+    // the same character offset.
+    let (text, lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
+        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
+    {
+        let stripped_len = lower.len() - r.len();
+        (&text[stripped_len..], r, CastFrequency::OncePerTurn)
+    } else {
+        (text, lower, CastFrequency::Unlimited)
+    };
+
     // Compound Bolas's Citadel form first — "you may play lands and cast
     // spells from the top of your library". Both halves collapse to a single
     // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
@@ -2492,8 +2510,9 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
             play_mode: CardPlayMode::Play,
-            // CR 601.2a: The Bolas's Citadel compound form has no per-turn cap.
-            frequency: CastFrequency::Unlimited,
+            // CR 601.2a: inherit the once-per-turn cap stripped above (the
+            // shipping Bolas's Citadel form has no prefix → Unlimited).
+            frequency,
             alt_cost,
         })
         .affected(TargetFilter::Any)
@@ -2505,26 +2524,16 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     }
 
     // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive filtered permission —
-    // "You may play <land-filter> and cast <spell-filter> from the top of your
-    // library." (Crystal Skull, Isu Spyglass). `Play` mode covers both branches;
-    // distinct branch filters merge to `TargetFilter::Or`. Parsed after the
+    // "You may play <land-filter> and/or cast <spell-filter> from the top of
+    // your library." (Crystal Skull, Isu Spyglass, The Fourth Doctor). `Play`
+    // mode covers both branches; distinct branch filters merge to
+    // `TargetFilter::Or`. Inherits the hoisted frequency so once-per-turn
+    // disjunctive permissions keep their per-turn cap. Parsed after the
     // unfiltered Bolas compound so "play lands and cast spells" stays `Any`.
-    if let Some(def) = try_parse_disjunctive_top_of_library_cast_permission(text, lower) {
+    if let Some(def) = try_parse_disjunctive_top_of_library_cast_permission(text, lower, frequency)
+    {
         return Some(def);
     }
-
-    // CR 601.2a: Optional once-per-turn frequency prefix. "Once each turn, …"
-    // (Assemble the Players) and the longer "Once during each of your turns, …"
-    // synonym both lower to OncePerTurn; absence keeps the Unlimited shape
-    // (Realmwalker, Future Sight). After stripping the prefix, the standard
-    // "you may play/cast" verb-dispatch below is matched.
-    let (lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
-        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
-    {
-        (r, CastFrequency::OncePerTurn)
-    } else {
-        (lower, CastFrequency::Unlimited)
-    };
 
     // Standard form: "you may [play|cast] [filter] from the top of your library".
     let (rest, play_mode) = if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
@@ -2670,14 +2679,18 @@ pub(crate) fn try_parse_top_of_library_has_plot(
 /// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive filtered top-of-
 /// library play/cast permission — "You may play <land-filter> and cast
 /// <spell-filter> from the top of your library." — into a single
-/// `TopOfLibraryCastPermission { play_mode: Play, frequency: Unlimited }`
-/// whose `affected` filter is the union of the two branch filters.
+/// `TopOfLibraryCastPermission { play_mode: Play }` whose `affected` filter is
+/// the union of the two branch filters. The `frequency` is supplied by the
+/// caller (hoisted once-per-turn prefix), so the disjunctive form covers both
+/// the unlimited (Crystal Skull) and once-per-turn (The Fourth Doctor) classes.
 ///
-/// Accepts both "and cast" (Crystal Skull) and "or cast" (mirroring the
-/// graveyard disjunctive connector) before the shared library-top anchor.
+/// Accepts both "and cast" (Crystal Skull) and "or cast" (The Fourth Doctor,
+/// mirroring the graveyard disjunctive connector) before the shared library-top
+/// anchor.
 fn try_parse_disjunctive_top_of_library_cast_permission(
     text: &str,
     lower: &str,
+    frequency: CastFrequency,
 ) -> Option<StaticDefinition> {
     let rest = nom_tag_lower(lower, lower, "you may play ")?;
 
@@ -2715,7 +2728,7 @@ fn try_parse_disjunctive_top_of_library_cast_permission(
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
         play_mode: CardPlayMode::Play,
-        frequency: CastFrequency::Unlimited,
+        frequency,
         alt_cost,
     })
     .affected(affected)
