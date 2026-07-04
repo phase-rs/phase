@@ -167,6 +167,26 @@ fn bind_rider_to_fighter_a(effect: Effect, filter_a: &TargetFilter) -> Option<Ef
                 target: Some(filter_a.clone()),
             })
         }
+        // CR 122.1 + CR 608.2c: "put a +1/+1 counter on the creature you control
+        // [if <condition>]" → PutCounter targeting fighter A. The unbound "the
+        // creature you control" anaphora parsed the target as `ParentTarget`
+        // (or `Any`); rebind it to fighter A so the counter lands on the right
+        // creature — exactly as the primary Pump binds. Any gating condition
+        // ("if the gift was promised") rides on the rider def's `condition`
+        // (lifted by `parse_effect_chain`) and is preserved by the caller, so
+        // Longstalk Brawl / Hog-Monkey Rampage / Malamet Battle Glyph resolve the
+        // fight AND the gated counter — main's
+        // `s07_longstalk_brawl_counter_gated_on_gift_promised` requires the
+        // recognizer not strand that counter as an Unimplemented gap.
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::Any | TargetFilter::ParentTarget,
+        } => Some(Effect::PutCounter {
+            counter_type,
+            count,
+            target: filter_a.clone(),
+        }),
         _ => None,
     }
 }
