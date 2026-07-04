@@ -425,6 +425,17 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(target));
             acc
         }
+        Effect::ChooseCounterKind { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc
+        }
+        Effect::PutChosenCounter { target, count } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc = acc.or(scan_quantity_expr(count));
+            acc
+        }
         Effect::Sacrifice {
             target,
             count,
@@ -3292,6 +3303,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Token { .. }
         | Effect::SetTapState { .. }
         | Effect::RemoveCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }

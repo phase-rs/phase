@@ -10967,6 +10967,62 @@ fn trigger_encounter_maps_to_planeswalked_to() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// DEFERRED GAP (documented, not fixed): Caught in a Parallel Universe is a
+/// Planechase phenomenon whose encounter effect is a per-player, left-neighbor,
+/// many-to-many choose-and-copy — "each player chooses a creature controlled by
+/// the player to their left. Each player creates a token that's a copy of the
+/// creature they chose, except it has menace."
+///
+/// Modeling this correctly needs infrastructure the engine does not yet have:
+///   * a left-neighbor `ControllerRef` — CR 103.1 fixes turn order (starting
+///     player, proceeding clockwise) and thus "the player to their left", but no
+///     filter controller ref resolves it (`ControllerRef` has no
+///     `PlayerToTheLeft`/left-neighbor variant);
+///   * a per-player PARALLEL selection where every player is simultaneously a
+///     chooser binding their own creature — `Effect::ChooseObjectsIntoTrackedSet`
+///     has a single `chooser` and one tracked set (CR 608.2c), not one binding
+///     per player; and
+///   * a per-player token copy keyed to each chooser's own binding —
+///     `CopyTokenOf { target: ParentTarget }` inherits ONE parent target, not a
+///     per-player selection (CR 707.2).
+///
+/// This is a single Planechase phenomenon, not a card class, so the per-player
+/// left-neighbor choose head is deliberately left as a strict-failure
+/// `Unimplemented { name: "choose" }` gap rather than mis-modeled with the
+/// single-chooser machinery. This test LOCKS that documented state so the card
+/// is not silently counted as fixed and a future change can't quietly alter the
+/// shape. When per-player parallel-selection infrastructure lands, replace this
+/// with a positive end-to-end test.
+#[test]
+fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap() {
+    let def = parse_trigger_line(
+        "When you encounter Caught in a Parallel Universe, each player chooses a \
+         creature controlled by the player to their left. Each player creates a \
+         token that's a copy of the creature they chose, except it has menace. \
+         (Then planeswalk away from this phenomenon.)",
+        "Caught in a Parallel Universe",
+    );
+    // CR 312.5: the encounter maps to the face-up (planeswalked-to) endpoint.
+    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("the encounter trigger must carry an execute body");
+    // The per-player left-neighbor selection head is unsupported: it must remain
+    // a documented `Unimplemented { name: "choose" }` strict-failure, NOT be
+    // mis-converted into a single-chooser `ChooseObjectsIntoTrackedSet`.
+    match &*execute.effect {
+        Effect::Unimplemented { name, .. } => assert_eq!(
+            name, "choose",
+            "the deferred per-player choose head must stay an Unimplemented choose gap"
+        ),
+        other => panic!(
+            "Caught in a Parallel Universe's per-player left-neighbor choose is a \
+             deferred gap and must remain Unimplemented, got {other:?}"
+        ),
+    }
+}
+
 #[test]
 fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
     // CR 312.5 / CR 701.31d: every arrival/encounter phrasing in the class
