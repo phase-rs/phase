@@ -42,7 +42,6 @@ use crate::types::ability::{
     PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause, TypeFilter,
     TypedFilter, ZoneRef,
 };
-#[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
 use crate::types::keywords::KeywordKind;
@@ -58,6 +57,60 @@ use crate::types::zones::Zone;
 pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     let mut ctx = ParseContext::default();
     parse_quantity_ref_with_context(text, &mut ctx)
+}
+
+/// CR 122.1: Legacy quantity fallbacks receive the raw words before
+/// "counter(s) on ..." after a suffix split. Keep counter-type canonicalization
+/// local to that quantity seam: strip quantity lead-ins that are not part of the
+/// counter name, but leave atomic counter parsing strict.
+fn parse_counter_quantity_type(raw: &str) -> Option<Option<CounterType>> {
+    let mut counter_text = raw.trim();
+    let mut saw_quantity_lead_in = false;
+
+    if let Some(after_where) = nom_on_lower(counter_text, counter_text, |i| {
+        value(
+            (),
+            (
+                take_until::<_, _, OracleError<'_>>("where x is "),
+                tag("where x is "),
+            ),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest.trim())
+    {
+        counter_text = after_where;
+        saw_quantity_lead_in = true;
+    }
+
+    loop {
+        let stripped = nom_on_lower(counter_text, counter_text, |i| {
+            value(
+                (),
+                alt((
+                    tag::<_, _, OracleError<'_>>("equal to "),
+                    tag("the number of "),
+                    tag("the number of"),
+                    tag("number of "),
+                    tag("number of"),
+                )),
+            )
+            .parse(i)
+        })
+        .map(|((), rest)| rest.trim());
+
+        let Some(next) = stripped else {
+            break;
+        };
+        counter_text = next;
+        saw_quantity_lead_in = true;
+    }
+
+    if counter_text.is_empty() {
+        return saw_quantity_lead_in.then_some(None);
+    }
+
+    Some(Some(normalize_counter_type(counter_text)))
 }
 
 /// CR 119.1 + CR 102.1: "the {highest|lowest} life total among {all players|
@@ -156,15 +209,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         .or_else(|| trimmed.strip_suffix(" counter on ~"))
         .or_else(|| trimmed.strip_suffix(" counter on it"))
     {
-        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
-            .parse(rest)
-            .map_or(rest, |(r, _)| r)
-            .trim();
-        if !raw_type.is_empty() {
-            let counter_type = normalize_counter_type(raw_type);
+        if let Some(counter_type) = parse_counter_quantity_type(rest) {
             return Some(QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
-                counter_type: Some(counter_type),
+                counter_type,
             });
         }
     }
@@ -177,15 +225,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         .or_else(|| trimmed.strip_suffix(" counter on that creature"))
         .or_else(|| trimmed.strip_suffix(" counter on that permanent"))
     {
-        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
-            .parse(rest)
-            .map_or(rest, |(r, _)| r)
-            .trim();
-        if !raw_type.is_empty() {
-            let counter_type = normalize_counter_type(raw_type);
+        if let Some(counter_type) = parse_counter_quantity_type(rest) {
             return Some(QuantityRef::CountersOn {
                 scope: ObjectScope::Target,
-                counter_type: Some(counter_type),
+                counter_type,
             });
         }
     }
@@ -1328,13 +1371,7 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
 /// document "their" / "each player's own" semantics.
 fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, relation) = parse_player_population(input)?;
-    let (input, (attr, count)) = alt((
-        parse_player_counter_attr_clause,
-        parse_hand_size_attr_clause,
-        parse_cards_drawn_attr_clause,
-        parse_battlefield_entries_attr_clause,
-    ))
-    .parse(input)?;
+    let (input, (attr, count)) = parse_player_attribute_attr_clause(input)?;
     Ok((
         input,
         PlayerFilter::PlayerAttribute {
@@ -1361,12 +1398,12 @@ fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
     .parse(input)
 }
 
-/// CR 122.1f + CR 122.1: "who have N or more <kind> counters" → the candidate's
+/// CR 122.1 + CR 122.2: "who have/has N or more <kind> counters" → the candidate's
 /// named player-counter total. Delegates kind recognition to the shared
 /// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
 /// all covered.
 fn parse_player_counter_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
-    let (input, _) = tag("who have ").parse(input)?;
+    let (input, _) = alt((tag("who have "), tag("who has "))).parse(input)?;
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
     let (input, kind) = nom_quantity::parse_player_counter_kind(input)?;
@@ -1442,6 +1479,22 @@ fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (Quant
             n as i32,
         ),
     ))
+}
+
+/// CR 122.1 + CR 402.1 + CR 121.1 + CR 403.3: Shared attribute-clause tail
+/// after an "each player"/"each opponent" subject. Covers counter, hand-size,
+/// cards-drawn, and battlefield-entry predicates — the same class as
+/// `parse_player_attribute_predicate` without the leading population word.
+pub(crate) fn parse_player_attribute_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, i32)> {
+    alt((
+        parse_player_counter_attr_clause,
+        parse_hand_size_attr_clause,
+        parse_cards_drawn_attr_clause,
+        parse_battlefield_entries_attr_clause,
+    ))
+    .parse(input)
 }
 
 fn anaphoric_power_expr() -> QuantityExpr {
@@ -3345,6 +3398,30 @@ mod tests {
                 counter_type: Some(ref counter_type),
             } => assert_eq!(*counter_type, CounterType::Age),
             other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantity_ref_counter_type_strips_quantity_lead_ins() {
+        for (phrase, expected) in [
+            (
+                "equal to the number of verse counters on it",
+                Some(CounterType::Generic("verse".to_string())),
+            ),
+            (
+                "x life, where x is the number of +1/+1 counters on it",
+                Some(CounterType::Plus1Plus1),
+            ),
+            ("equal to the number of counters on it", None),
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap_or_else(|| panic!("failed: {phrase}"));
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type,
+                } => assert_eq!(counter_type, expected, "phrase: {phrase}"),
+                other => panic!("Expected CountersOn{{Source, _}} for {phrase}, got {other:?}"),
+            }
         }
     }
 
@@ -5510,6 +5587,61 @@ mod tests {
             comparator: Comparator::EQ,
             value: QuantityExpr::Fixed { value: 1 },
         }));
+    }
+
+    /// CR 508.1 + CR 608.2c: Mondassian Colony Ship's attack trigger — "for each
+    /// other creature its controller controls that shares a creature type with
+    /// it". The anaphoric "its controller controls" suffix binds the count to
+    /// the triggering (attacking) player, and the shared-quality clause
+    /// references the triggering source. Before the `parse_controller_suffix`
+    /// arm, "its controller controls" was unrecognized, the type-phrase fallback
+    /// left a non-empty remainder, and the whole for-each multiplier was
+    /// swallowed (the trigger became a flat +1/+1). Reverting the arm re-swallows
+    /// the clause and this `.expect` fails.
+    #[test]
+    fn for_each_other_creature_its_controller_controls_shares_type() {
+        use crate::types::ability::SharedQuality;
+        let ctx = ParseContext {
+            // Trigger subject = the attacking creature (a typed, non-source object).
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context(
+            "other creature its controller controls that shares a creature type with it",
+            &ctx,
+        )
+        .expect("Mondassian for-each clause should parse to an ObjectCount");
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::TriggeringPlayer),
+            "\"its controller controls\" must bind to the attacking player"
+        );
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "\"other creature\" must contribute FilterProp::Another"
+        );
+        let (quality, reference) = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::SharesQuality {
+                    quality, reference, ..
+                } => Some((quality, reference)),
+                _ => None,
+            })
+            .expect("\"shares a creature type with it\" must contribute SharesQuality");
+        assert!(matches!(quality, SharedQuality::CreatureType));
+        assert!(
+            matches!(reference.as_deref(), Some(TargetFilter::TriggeringSource)),
+            "shared-quality reference must be the triggering source, got {reference:?}"
+        );
     }
 
     #[test]

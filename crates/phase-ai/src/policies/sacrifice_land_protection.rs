@@ -215,6 +215,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         SacrificeLandProtectionPolicy.verdict(&ctx)
     }
@@ -498,6 +499,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         match ReactiveSelfProtectionPolicy.verdict(&ctx) {
             PolicyVerdict::Reject { reason } => {

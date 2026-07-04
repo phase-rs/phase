@@ -349,6 +349,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOn { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -383,6 +384,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -606,6 +608,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -634,6 +637,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -790,6 +794,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -818,6 +823,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -1576,6 +1582,27 @@ fn resolve_ref(
                 .sum();
             i32::try_from(total).unwrap_or(i32::MAX)
         }
+        // CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: the `kind` player-counter
+        // total on the controller of the first object target — "its controller
+        // is poisoned" (Corrupted Resolve). Needs the resolving `ability` to
+        // reach `ability.targets`, so it lives here rather than in the
+        // player-iteration helpers. Missing target / controller reads as 0.
+        QuantityRef::TargetControllerCounter { kind } => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .map_or(0, |pid| match kind {
+                // CR 810.10a + CR 810.10d: in Two-Headed Giant a player is
+                // "poisoned" through their team's shared poison total, so poison
+                // reads the team sum. CR 810.5: poison and life are the only
+                // shared resources — other player counters stay individual.
+                crate::types::player::PlayerCounterKind::Poison => {
+                    u32_to_i32_saturating(crate::game::players::team_poison_total(state, pid))
+                }
+                _ => state
+                    .players
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
+            }),
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
@@ -2541,6 +2568,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
+        // CR 701.65b/701.66b/701.67c/702.189b: distinct bend types the controller
+        // performed this turn — reads the tracked `HashSet<BendingType>` cardinality.
+        QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
+            usize_to_i32_saturating(p.bending_types_this_turn.len())
+        }),
         // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -3844,19 +3876,16 @@ where
         // condition still affects it. Resolved (first match wins) via:
         //   1. `cost_paid_object` — canonical activated/cast sacrifice-cost
         //      referent (Greater Good).
-        //   2. trigger-event source — the object named by this ability's
-        //      trigger condition (Hamletback Goliath, Conclave Mentor), live
-        //      object then LKI for dies/leaves-battlefield triggers.
-        //   3. `effect_context_object` — effect-driven sacrifices captured
+        //   2. `effect_context_object` — effect-driven sacrifices captured
         //      mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
         //      Bombardiers).
-        // Slots 1 and 3 are PINNED in this order by the
-        // `resolve_object_mana_value` regression guard; slot 2 is inserted
-        // strictly between them (insert-only — never reorders 1 vs 3). CR
-        // 608.2k names cost and trigger referents but does not adjudicate
-        // priority between them; the engine's pinned `cost_paid_object`-first
-        // choice stands. Exact parity with the `resolve_object_mana_value`
-        // `CostPaidObject` arm.
+        //   3. trigger-event source — the object named by this ability's
+        //      trigger condition (Hamletback Goliath, Conclave Mentor), live
+        //      object then LKI for dies/leaves-battlefield triggers.
+        // CR 608.2k pins true cost/trigger referents; CR 608.2c makes a
+        // same-resolution effect referent more specific than the trigger source
+        // once the first slot is absent. Exact parity with the
+        // `resolve_object_mana_value` `CostPaidObject` arm.
         //
         // This arm is deliberately NOT a "maybe the target" fallback: a
         // chosen-target anaphor ("that creature's power" on a targeted grant —
@@ -3869,16 +3898,16 @@ where
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
-                // read so a buffed source that left the battlefield reports its
-                // last-known P/T. Slots 1 and 3 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
-            })
-            .or_else(|| {
                 ability
                     .and_then(|a| a.effect_context_object.as_ref())
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
+            })
+            .or_else(|| {
+                // CR 608.2h: trigger-event source fallback; guarded live-then-LKI
+                // read so a buffed source that left the battlefield reports its
+                // last-known P/T. Slots 1 and 2 (snapshot-only) are unchanged.
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
             })
             .unwrap_or(0),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
@@ -4049,22 +4078,23 @@ fn resolve_object_mana_value(
         // value resolves (first match wins) via:
         //   1. `cost_paid_object` — canonical activated/cast-cost referent
         //      (Food Chain, Burnt Offering, Dark Confidant).
-        //   2. trigger-event source — the object named by this ability's
-        //      trigger condition, live object then LKI.
-        //   3. `effect_context_object` — when a `Sacrifice` *effect* (not a
+        //   2. `effect_context_object` — when a `Sacrifice` *effect* (not a
         //      cost) appears mid-resolution (Birthing Ritual: "you may
         //      sacrifice a creature. If you do, ..., where X is 1 plus the
         //      sacrificed creature's mana value"), the sacrificed permanent is
         //      captured into `effect_context_object` by the `EffectZoneChoice`
         //      handler.
-        // Slots 1 and 3 are PINNED in this order by the
-        // `resolve_object_mana_value_cost_paid_object_takes_priority_over_effect_context`
-        // regression guard; slot 2 is inserted strictly between them
-        // (insert-only). Exact parity with the `resolve_object_pt`
-        // `CostPaidObject` arm.
+        //   3. trigger-event source — the object named by this ability's
+        //      trigger condition, live object then LKI.
+        // Exact parity with the `resolve_object_pt` `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.effect_context_object.as_ref())
+                    .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            })
             .or_else(|| {
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
                     state
@@ -4078,11 +4108,6 @@ fn resolve_object_mana_value(
                                 .map(|lki| u32_to_i32_saturating(lki.mana_value))
                         })
                 })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.effect_context_object.as_ref())
-                    .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
             })
             .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its mana value") in a triggered
@@ -5049,6 +5074,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
             tapped: false,
+            is_suspected: false,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -10724,6 +10750,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
         state.current_trigger_event =
@@ -10785,6 +10812,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let power = resolve_quantity_with_targets(
@@ -10931,6 +10959,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -10946,6 +10975,96 @@ mod tests {
             resolved, 99,
             "CR 608.2k slot 1 (cost_paid_object) takes priority over slot 2 \
              (trigger-event source) per the engine's pinned ordering"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2k: if there is no true cost-paid object, a
+    /// same-resolution effect referent ("sacrifice another creature. ... that
+    /// creature's power") is more specific than the ETB trigger source.
+    #[test]
+    fn cost_paid_object_fallback_reads_effect_context_before_trigger_source() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::game_state::LKISnapshot;
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new_two_player(42);
+        let trigger_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Triggering Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&trigger_source).unwrap();
+            source.power = Some(2);
+            source.toughness = Some(2);
+            source.mana_cost = ManaCost::generic(8);
+        }
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: trigger_source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.set_effect_context_object_recursive(CostPaidObjectSnapshot {
+            object_id: ObjectId(99),
+            lki: LKISnapshot {
+                name: "Effect-Sacrificed Creature".to_string(),
+                power: Some(5),
+                toughness: Some(5),
+                base_power: Some(5),
+                base_toughness: Some(5),
+                mana_value: 4,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+            },
+        });
+        assert!(
+            ability.cost_paid_object.is_none(),
+            "precondition: no true cost-paid object"
+        );
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &ability),
+            5,
+            "effect-context power must win over trigger-source power"
+        );
+
+        let mana_value = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &mana_value, &ability),
+            4,
+            "effect-context mana value must win over trigger-source mana value"
         );
     }
 
@@ -10995,6 +11114,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         assert!(
@@ -11057,6 +11177,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11116,6 +11237,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11168,6 +11290,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11231,6 +11354,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11271,6 +11395,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -11890,6 +12015,7 @@ mod tests {
                     counters: Default::default(),
                     chosen_attributes: vec![],
                     tapped: false,
+                    is_suspected: false,
                 },
             );
             state.exile_links.push(ExileLink {

@@ -77,7 +77,8 @@
     "priorityTooltip": "Passez la priorité. Si la pile est vide, cela avance dans la fenêtre de priorité actuelle. Raccourci : Espace.",
     "pass": "Passer",
     "passToEndTooltip": "Passage automatique jusqu'à l'étape de fin sauf si un choix, un arrêt ou le Contrôle total interrompt. Raccourci : Entrée.",
-    "autoPassing": "Passage automatique jusqu'à l'étape de fin..."
+    "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
+    "resolvingStack": "Résolution de la pile..."
   },
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
@@ -152,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Réduire la rangée",
+      "auto": "Auto",
+      "on": "Toujours activé",
+      "off": "Toujours désactivé"
     }
   },
   "permanent": {
@@ -173,6 +180,10 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Choisir",
+    "fanConfirm": "Confirmer ({{count}})",
+    "viewAttachments_one": "Voir la carte attachée",
+    "viewAttachments_other": "Voir {{count}} cartes attachées",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -216,7 +227,26 @@
     "you": "Vous",
     "ally": "Allié",
     "restoreDialog": "Restaurer la boîte de dialogue",
-    "restoreDialogTitle": "Restaurer la boîte de dialogue de cible d'attaque"
+    "restoreDialogTitle": "Restaurer la boîte de dialogue de cible d'attaque",
+    "distribute": "Répartir",
+    "attackersColumn": "Attaquants",
+    "unassigned": "Non assignés",
+    "assignedBadge": "Assigné",
+    "allAssigned": "Tous les attaquants assignés",
+    "unassignedRemaining_one": "{{count}} non assigné",
+    "unassignedRemaining_other": "{{count}} non assignés",
+    "evenSplitAll": "Tout répartir également",
+    "resetAssignments": "Réinitialiser",
+    "allHere": "Tous ici",
+    "spread": "Étaler",
+    "spreadEvenly": "Étaler uniformément",
+    "assignOne": "Assigner un à {{label}}",
+    "removeOne": "Retirer un de {{label}}",
+    "assignAllHere": "Tout envoyer à {{label}}",
+    "assignRemaining_one": "Assigner {{count}} de plus",
+    "assignRemaining_other": "Assigner {{count}} de plus",
+    "confirmDistribute_one": "Déclarer {{count}} attaquant",
+    "confirmDistribute_other": "Déclarer {{count}} attaquants"
   },
   "fullControl": {
     "on": "Contrôle total activé",
@@ -452,7 +482,9 @@
     "viewFullHand_other": "Voir la main complète ({{count}} cartes)",
     "handLabel": "Main {{count}}",
     "handTitle": "Main ({{count}})",
-    "cardBack": "Dos de carte"
+    "cardBack": "Dos de carte",
+    "organizeLabel": "Organiser la main",
+    "reorderPausedHint": "La réorganisation par glisser-déposer est en pause tant que la main est triée ou filtrée."
   },
   "opponentHud": {
     "ally": "Allié",
@@ -1270,6 +1302,12 @@
       "optCmc": "Valeur de mana",
       "optType": "Type",
       "optColor": "Couleur",
+      "filterLabel": "Afficher",
+      "filterNone": "Toutes",
+      "filterPlayable": "Jouables",
+      "filterCreatures": "Créatures",
+      "filterLands": "Terrains",
+      "filterNonland": "Non-terrain",
       "counterDiscard": "Défausser {{selected}} sur {{cap}}",
       "counterKeep": "Garder {{selected}} sur {{cap}}",
       "keepInstead": "Garder plutôt",

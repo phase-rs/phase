@@ -77,7 +77,8 @@
     "priorityTooltip": "Przekaż priorytet. Jeśli stos jest pusty, spowoduje to przejście przez bieżące okno priorytetu. Skrót: Spacja.",
     "pass": "Przekaż",
     "passToEndTooltip": "Automatycznie przekazuj priorytet aż do kroku końcowego, chyba że przerwie to wybór, zatrzymanie lub Pełna kontrola. Skrót: Enter.",
-    "autoPassing": "Automatyczne przekazywanie do kroku końcowego..."
+    "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
+    "resolvingStack": "Rozpatrywanie stosu..."
   },
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
@@ -152,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Zwiń rząd",
+      "auto": "Auto",
+      "on": "Zawsze wł.",
+      "off": "Zawsze wył."
     }
   },
   "permanent": {
@@ -173,6 +180,10 @@
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wybierz",
+    "fanConfirm": "Potwierdź ({{count}})",
+    "viewAttachments_one": "Pokaż dołączoną kartę",
+    "viewAttachments_other": "Pokaż dołączone karty ({{count}})",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -216,7 +227,26 @@
     "you": "Ty",
     "ally": "Sojusznik",
     "restoreDialog": "Przywróć okno dialogowe",
-    "restoreDialogTitle": "Przywróć okno dialogowe celu ataku"
+    "restoreDialogTitle": "Przywróć okno dialogowe celu ataku",
+    "distribute": "Rozdziel",
+    "attackersColumn": "Atakujący",
+    "unassigned": "Nieprzydzieleni",
+    "assignedBadge": "Przydzielony",
+    "allAssigned": "Wszyscy atakujący przydzieleni",
+    "unassignedRemaining_one": "{{count}} nieprzydzielony",
+    "unassignedRemaining_other": "{{count}} nieprzydzielonych",
+    "evenSplitAll": "Rozłóż wszystkich równo",
+    "resetAssignments": "Zresetuj",
+    "allHere": "Wszyscy tutaj",
+    "spread": "Rozłóż",
+    "spreadEvenly": "Rozłóż równomiernie",
+    "assignOne": "Przydziel jednego do {{label}}",
+    "removeOne": "Usuń jednego z {{label}}",
+    "assignAllHere": "Wyślij wszystkich do {{label}}",
+    "assignRemaining_one": "Przydziel jeszcze {{count}}",
+    "assignRemaining_other": "Przydziel jeszcze {{count}}",
+    "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
+    "confirmDistribute_other": "Zadeklaruj {{count}} atakujących"
   },
   "fullControl": {
     "on": "Pełna kontrola włączona",
@@ -452,7 +482,9 @@
     "viewFullHand_other": "Zobacz całą rękę ({{count}} kart)",
     "handLabel": "Ręka {{count}}",
     "handTitle": "Ręka ({{count}})",
-    "cardBack": "Rewers karty"
+    "cardBack": "Rewers karty",
+    "organizeLabel": "Uporządkuj rękę",
+    "reorderPausedHint": "Zmiana kolejności przeciąganiem jest wstrzymana, gdy ręka jest posortowana lub przefiltrowana."
   },
   "opponentHud": {
     "ally": "Sojusznik",
@@ -1270,6 +1302,12 @@
       "optCmc": "Wartość many",
       "optType": "Typ",
       "optColor": "Kolor",
+      "filterLabel": "Pokaż",
+      "filterNone": "Wszystkie",
+      "filterPlayable": "Do zagrania",
+      "filterCreatures": "Stwory",
+      "filterLands": "Ziemie",
+      "filterNonland": "Niebędące ziemią",
       "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
       "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
       "keepInstead": "Zatrzymaj zamiast tego",

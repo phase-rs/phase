@@ -28,6 +28,7 @@ use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::replacements::ReplacementEvent;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -243,6 +244,15 @@ pub struct LKISnapshot {
     /// `tapped = false`.
     #[serde(default)]
     pub tapped: bool,
+    /// CR 701.60b + CR 608.2c: Suspected status as it last existed in the public
+    /// zone. Suspected is a battlefield-only status reset on any zone change
+    /// (`GameObject::is_suspected` clears when the object moves), so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner) must
+    /// read this captured value via `FilterProp::Suspected` (LKI). The snapshot
+    /// is taken at cost payment, before the sacrifice zone-change resets the flag.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
@@ -513,6 +523,14 @@ pub struct ZoneChangeRecord {
     /// within the same turn for batched trigger replay guards (issue #3866).
     #[serde(default)]
     pub turn_zone_change_index: usize,
+    /// CR 701.60b + CR 608.2c: Suspected status as of the zone change. Suspected
+    /// is a battlefield-only status reset on any zone change, so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner)
+    /// evaluated via the LKI snapshot synthesized in
+    /// `matches_target_filter_on_lki_snapshot` must read this captured value.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -615,6 +633,7 @@ impl ZoneChangeRecord {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            is_suspected: false,
         }
     }
 }
@@ -2528,6 +2547,22 @@ pub struct PendingTriggerSummary {
     pub description: String,
 }
 
+/// CR 616.1 / CR 614: Display payload for one replacement-effect option — either
+/// one candidate in a CR 616.1 ordering prompt, or one branch (accept/decline)
+/// of an optional "you may" replacement. Engine-derived so the filtered state
+/// snapshot (multiplayer) and the frontend `ReplacementModal` never re-derive
+/// the source object/description from `state.objects`, exactly as
+/// [`PendingTriggerSummary`] does for CR 603.3b trigger ordering. For the
+/// optional case both branches carry the same `source_id` (one object, two
+/// outcomes); rule-based virtual replacements (shield counter, Umbra armor,
+/// Compleated, combat skip) still point at the object they act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementCandidateSummary {
+    pub source_id: ObjectId,
+    pub source_name: String,
+    pub description: String,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -3128,7 +3163,7 @@ pub enum WaitingFor {
         player: PlayerId,
         candidate_count: usize,
         #[serde(default)]
-        candidate_descriptions: Vec<String>,
+        candidates: Vec<ReplacementCandidateSummary>,
     },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
@@ -4003,6 +4038,18 @@ pub enum WaitingFor {
         costs: Vec<AbilityCost>,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 601.2b + CR 701.4a: The player must choose a value (creature type for
+    /// Celestial Reunion) as part of paying a `Behold { type_choice: Some(_) }`
+    /// additional cost, before the behold selection. The chosen value is written
+    /// as a `ChosenAttribute` on the spell object; cost payment then resumes the
+    /// behold step. `options` is the feasible set (types with >= count beholdable
+    /// creatures), so an unpayable type is never offered.
+    CostTypeChoice {
+        player: PlayerId,
+        choice_type: crate::types::ability::ChoiceType,
+        options: Vec<String>,
+        pending_cast: Box<PendingCast>,
+    },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
     BlightChoice {
         player: PlayerId,
@@ -4710,6 +4757,7 @@ impl WaitingFor {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
+            WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
@@ -4837,6 +4885,7 @@ impl WaitingFor {
             | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
+            | WaitingFor::CostTypeChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
@@ -4943,6 +4992,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
@@ -4975,6 +5025,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
@@ -5790,6 +5841,41 @@ pub struct TriggerIndex {
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementIndexEntry {
+    pub id: ReplacementId,
+    pub ordinal: usize,
+}
+
+/// CR 614.1: Derived candidate pre-filter for replacement effects. The index is
+/// an optional acceleration over the legacy active-replacement scan: it stores
+/// only `ReplacementId`s plus their legacy scan ordinal, never replacement
+/// definitions, so consults re-read live object state and preserve CR 616 order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplacementIndex {
+    pub initialized: bool,
+    pub dirty: bool,
+    pub pipeline_active: bool,
+    pub by_event: im::HashMap<ReplacementEvent, im::Vector<ReplacementIndexEntry>>,
+}
+
+impl Default for ReplacementIndex {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            dirty: true,
+            pipeline_active: false,
+            by_event: im::HashMap::new(),
+        }
+    }
+}
+
+impl Clone for ReplacementIndex {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 /// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
 /// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
 /// `layers_dirty`-covered source categories: battlefield permanents with a
@@ -6034,6 +6120,13 @@ pub struct GameState {
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
     pub trigger_index: TriggerIndex,
+    /// CR 614.1: Derived replacement-effect candidate index. Rebuilt from the
+    /// legacy `active_replacements(state)` order before replacement pipeline
+    /// entry, invalidated after every applied replacement, and ignored whenever
+    /// dirty/uninitialized. `#[serde(skip, default)]` because it is pure derived
+    /// acceleration and must not affect equality or serialized state.
+    #[serde(skip, default)]
+    pub replacement_index: ReplacementIndex,
     /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
     /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
     /// reconstructed from `state.battlefield` + `state.command_zone` +
@@ -6043,6 +6136,24 @@ pub struct GameState {
     /// must not break AI-search dedup on semantically-identical positions.
     #[serde(skip)]
     pub static_source_index: StaticSourceIndex,
+    /// O(1) presence index over `StaticModeKind` discriminants — "does any functioning
+    /// static of kind K exist on the board?" Rebuilt wholesale from `game_functioning_statics`
+    /// as a byproduct of the layers pipeline (`layers::refresh_static_mode_presence`), so it is
+    /// exactly `.any(kind)` for every kind. Lets discriminant-only scan gates (e.g. the
+    /// hexproof scans in `static_abilities`) skip an O(battlefield) `.any()` when zero statics
+    /// of that kind exist.
+    ///
+    /// DERIVED CACHE — `#[serde(skip)]` with an `all_present` default: before the first flush
+    /// makes the index precise, every consumer must fall through to its exact per-object check,
+    /// so the conservative all-true default can only cost a redundant scan, never miss a grant.
+    /// INTENTIONALLY omitted from `impl PartialEq for GameState` — CR 104.4b loop detection
+    /// compares semantic board state; derived caches must not perturb loop-detection equality
+    /// (like `static_source_index`/`static_gate_truth`).
+    #[serde(
+        skip,
+        default = "crate::types::statics::StaticModePresence::all_present"
+    )]
+    pub static_mode_presence: crate::types::statics::StaticModePresence,
     /// CR 732.2a loop-shortcut detection ring (PR-3). A bounded FIFO of recent
     /// post-resolution NORMALIZED board snapshots, captured at the post-pipeline frame
     /// of `game::engine::pass_priority_once_with_pipeline` (after
@@ -6149,6 +6260,15 @@ pub struct GameState {
     /// `handle_order_triggers` concatenates and dispatches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_trigger_order: Option<PendingTriggerOrder>,
+
+    /// CR 603.3b: PhaseChanged occurrences whose delayed triggers were merged
+    /// into a simultaneous normal-trigger ordering batch before priority. The
+    /// generic delayed-trigger pass filters these exact occurrences so the same
+    /// delayed ability is not dispatched again. Transient engine coordination,
+    /// cleared at action/pipeline boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed_before_priority_trigger_events:
+        Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
 
     // CR 607.2a + CR 406.5: Exile tracking for "until leaves" linked abilities.
     #[serde(default)]
@@ -7542,10 +7662,10 @@ pub struct PendingReplacement {
 /// and addressed by the replacement pipeline via `ReplacementId { source:
 /// ObjectId(0), index }`.
 ///
-/// `description` is the player-facing string surfaced in `WaitingFor::
-/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
-/// the same emptying event and CR 616.1 requires the affected player to choose
-/// ordering.
+/// `description` (paired with `source`) is surfaced as a
+/// `ReplacementCandidateSummary` in `WaitingFor::ReplacementChoice::candidates`
+/// when multiple handlers apply to the same emptying event and CR 616.1
+/// requires the affected player to choose ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepEndManaScanEntry {
     pub source: ObjectId,
@@ -7910,7 +8030,9 @@ impl GameState {
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
+            replacement_index: ReplacementIndex::default(),
             static_source_index: StaticSourceIndex::default(),
+            static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -7926,6 +8048,7 @@ impl GameState {
             pending_trigger_entry: None,
             deferred_triggers: Vec::new(),
             pending_trigger_order: None,
+            consumed_before_priority_trigger_events: Vec::new(),
             exile_links: Vec::new(),
             paradigm_primed: Vec::new(),
             delayed_triggers: Vec::new(),
@@ -8458,6 +8581,9 @@ impl PartialEq for GameState {
             // static_definitions). Including it would break AI-search dedup on
             // semantically-identical positions whose caches differ only in
             // freshness.
+            // `static_mode_presence` is INTENTIONALLY excluded for the same reason
+            // (CR 104.4b) — a derived O(1) presence cache rebuilt from
+            // `game_functioning_statics`; it must not perturb loop-detection equality.
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
             && self.state_revision == other.state_revision
@@ -9116,6 +9242,61 @@ mod tests {
         assert_eq!(state, deserialized);
     }
 
+    /// Test E — deserialize-before-flush. `static_mode_presence` is `#[serde(skip)]` with an
+    /// `all_present` default, so a freshly-deserialized state (before any layers flush) has a
+    /// conservative all-present index. Gated consumers must stay CORRECT under that default by
+    /// falling through to their exact per-object scan; a full flush then makes the index
+    /// precise (a kind absent from the board reports false).
+    #[test]
+    fn static_mode_presence_defaults_all_present_after_deserialize() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{StaticMode, StaticModeKind};
+
+        let mut state = GameState::new_two_player(42);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Detection Tower".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: GameState = serde_json::from_str(&json).unwrap();
+
+        // Before any flush: the conservative all-present default (a board-absent kind still
+        // reports present).
+        assert!(restored
+            .static_mode_presence
+            .contains(StaticModeKind::IgnoreHexproof));
+        assert!(restored
+            .static_mode_presence
+            .contains(StaticModeKind::Shroud));
+        // Gated-consumer correctness under the all-present default: the Detection Tower grant
+        // is found because the consumer falls through to its exact scan, not the index.
+        assert!(crate::game::static_abilities::player_ignores_hexproof(
+            &restored,
+            PlayerId(0)
+        ));
+
+        // After a full flush the index is precise: a board-absent kind reports false.
+        let mut flushed = restored;
+        flushed.layers_dirty = LayersDirty::full();
+        crate::game::layers::flush_layers(&mut flushed);
+        assert!(!crate::game::functioning_abilities::static_kind_present(
+            &flushed,
+            StaticModeKind::Shroud
+        ));
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &flushed,
+            StaticModeKind::IgnoreHexproof
+        ));
+    }
+
     #[test]
     #[allow(clippy::vec_init_then_push)]
     fn waiting_for_variants_exist() {
@@ -9206,7 +9387,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: vec![],
+            candidates: vec![],
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

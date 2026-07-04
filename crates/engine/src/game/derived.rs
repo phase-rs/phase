@@ -262,95 +262,96 @@ pub fn derive_display_state(state: &mut GameState) {
     // `revealed_cards` across action boundaries — `apply_action` clears
     // momentary reveals at the start of each action, so re-sync here on every
     // derive pass before the state is exported to clients.
-    sync_continuous_library_top_reveals(state);
-    sync_continuous_hand_reveals(state);
+    sync_continuous_reveals(state);
 }
 
-/// CR 400.2: Repopulate `revealed_cards` for every active `RevealTopOfLibrary`
-/// static after action-boundary clears.
-fn sync_continuous_library_top_reveals(state: &mut GameState) {
-    let mut reveal_all_players = false;
-    let mut reveal_controllers = HashSet::<PlayerId>::new();
+/// CR 400.2 / CR 701.20a: Repopulate `revealed_cards` for every active
+/// continuous reveal static after action-boundary clears (`apply_action` wipes
+/// momentary reveals at the start of each action). One pass over
+/// `game_active_statics` dispatches BOTH the `RevealTopOfLibrary` ("play with
+/// the top card of your library revealed" — Future Sight, Magus of the Future)
+/// and `RevealHand` ("play with hands revealed") statics, so callers get the
+/// authoritative reveal set without scanning the statics twice.
+///
+/// Public because the AI determinizer (`phase-ai/determinize.rs`) calls it on
+/// its simulation clone to pin statically-revealed cards before resampling —
+/// the reveal rule is an engine visibility concern (CR 400.2) and stays owned
+/// here rather than being recomputed AI-side.
+pub fn sync_continuous_reveals(state: &mut GameState) {
+    let mut reveal_top_all = false;
+    let mut reveal_top_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_hand_all = false;
+    let mut reveal_hand_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_hand_opponents_of = HashSet::<PlayerId>::new();
 
     for (source, def) in game_active_statics(state) {
-        let StaticMode::RevealTopOfLibrary { all_players } = def.mode else {
-            continue;
-        };
-        if all_players {
-            reveal_all_players = true;
-        } else {
-            reveal_controllers.insert(source.controller);
+        match &def.mode {
+            StaticMode::RevealTopOfLibrary { all_players } => {
+                if *all_players {
+                    reveal_top_all = true;
+                } else {
+                    reveal_top_controllers.insert(source.controller);
+                }
+            }
+            StaticMode::RevealHand { who } => match who {
+                ProhibitionScope::AllPlayers => reveal_hand_all = true,
+                ProhibitionScope::Controller => {
+                    reveal_hand_controllers.insert(source.controller);
+                }
+                ProhibitionScope::Opponents => {
+                    reveal_hand_opponents_of.insert(source.controller);
+                }
+                ProhibitionScope::EnchantedCreatureController => {}
+            },
+            _ => {}
         }
     }
 
-    if !reveal_all_players && reveal_controllers.is_empty() {
-        return;
+    // Library-top reveals (collect owned Vec first so the immutable player read
+    // completes before the mutable `revealed_cards` write).
+    if reveal_top_all || !reveal_top_controllers.is_empty() {
+        let tops: Vec<ObjectId> = if reveal_top_all {
+            state
+                .players
+                .iter()
+                .filter_map(|player| player.library.front().copied())
+                .collect()
+        } else {
+            reveal_top_controllers
+                .into_iter()
+                .filter_map(|controller| {
+                    state
+                        .players
+                        .iter()
+                        .find(|player| player.id == controller)
+                        .and_then(|player| player.library.front().copied())
+                })
+                .collect()
+        };
+        for top in tops {
+            state.revealed_cards.insert(top);
+        }
     }
 
-    let tops: Vec<ObjectId> = if reveal_all_players {
-        state
+    // Hand reveals.
+    if reveal_hand_all
+        || !reveal_hand_controllers.is_empty()
+        || !reveal_hand_opponents_of.is_empty()
+    {
+        let hand_cards: Vec<ObjectId> = state
             .players
             .iter()
-            .filter_map(|player| player.library.front().copied())
-            .collect()
-    } else {
-        reveal_controllers
-            .into_iter()
-            .filter_map(|controller| {
-                state
-                    .players
-                    .iter()
-                    .find(|player| player.id == controller)
-                    .and_then(|player| player.library.front().copied())
+            .filter(|player| {
+                reveal_hand_all
+                    || reveal_hand_controllers.contains(&player.id)
+                    || reveal_hand_opponents_of
+                        .iter()
+                        .any(|controller| player.id != *controller)
             })
-            .collect()
-    };
-
-    for top in tops {
-        state.revealed_cards.insert(top);
+            .flat_map(|player| player.hand.iter().copied())
+            .collect();
+        state.revealed_cards.extend(hand_cards);
     }
-}
-
-/// CR 400.2 + CR 701.20a: Continuous "play with [a] hand revealed" statics
-/// keep affected players' hands public after action-boundary reveal clears.
-fn sync_continuous_hand_reveals(state: &mut GameState) {
-    let mut reveal_all_players = false;
-    let mut reveal_controllers = HashSet::<PlayerId>::new();
-    let mut reveal_opponents_of = HashSet::<PlayerId>::new();
-
-    for (source, def) in game_active_statics(state) {
-        let StaticMode::RevealHand { who } = &def.mode else {
-            continue;
-        };
-        match who {
-            ProhibitionScope::AllPlayers => reveal_all_players = true,
-            ProhibitionScope::Controller => {
-                reveal_controllers.insert(source.controller);
-            }
-            ProhibitionScope::Opponents => {
-                reveal_opponents_of.insert(source.controller);
-            }
-            ProhibitionScope::EnchantedCreatureController => {}
-        }
-    }
-
-    if !reveal_all_players && reveal_controllers.is_empty() && reveal_opponents_of.is_empty() {
-        return;
-    }
-
-    let hand_cards = state
-        .players
-        .iter()
-        .filter(|player| {
-            reveal_all_players
-                || reveal_controllers.contains(&player.id)
-                || reveal_opponents_of
-                    .iter()
-                    .any(|controller| player.id != *controller)
-        })
-        .flat_map(|player| player.hand.iter().copied());
-
-    state.revealed_cards.extend(hand_cards);
 }
 
 /// Commander damage received by `victim`, grouped by the commander's

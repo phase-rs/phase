@@ -250,13 +250,26 @@ pub fn resolve(
                     .get(&parent)
                     .is_some_and(|obj| obj.zone == Zone::Hand)
                 {
-                    exile_tracked_set_library_only = true;
-                    effective_target_filter = crate::game::targeting::resolve_tracked_set_sentinel(
+                    let tracked_filter = crate::game::targeting::resolve_tracked_set_sentinel(
                         state,
                         TargetFilter::TrackedSet {
                             id: crate::types::identifiers::TrackedSetId(0),
                         },
                     );
+                    // Dig tails (Expressive Iteration) keep looked-at cards in a
+                    // tracked set with library members — "exile one of them" must
+                    // not re-exile the card already put in hand. RevealHand ->
+                    // "exile that card" also binds ParentTarget in hand but has
+                    // no library members in the tracked set and must exile the
+                    // chosen hand card directly.
+                    let has_library_member = tracked_set_member_zones(state, &tracked_filter)
+                        .is_some_and(|zones| zones.contains(&Zone::Library));
+                    if has_library_member {
+                        exile_tracked_set_library_only = true;
+                        effective_target_filter = tracked_filter;
+                    } else if origin.is_none() {
+                        origin = Some(Zone::Hand);
+                    }
                 }
             }
         }
@@ -1846,6 +1859,78 @@ mod tests {
                 .copied(),
             None,
             "the Other-scoped static must not grant the source itself a counter"
+        );
+    }
+
+    /// CR 122.1 + CR 614.1c + CR 608.2c: `Effect::ChangeZone.conditional_enter_with_counters`
+    /// gates entry-time counters on the moved object's type ("if you put an artifact
+    /// onto the battlefield this way, put two +1/+1 counters on it" — Oviya). The
+    /// artifact matches the `Typed(Artifact)` filter and enters with 2 counters; a
+    /// non-artifact creature put the SAME way matches nothing and enters with 0.
+    /// Drives the real `resolve()` seam (change_zone.rs single-object move →
+    /// `enter_with_counters_for_object`). REVERT: removing the filter gate makes the
+    /// non-artifact arm receive 2 counters, flipping the negative assertion.
+    #[test]
+    fn conditional_enter_with_counters_gates_on_moved_object_type() {
+        fn put_with_artifact_gate(core: CoreType) -> u32 {
+            let mut state = GameState::new_two_player(42);
+            let entering = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Card".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&entering)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core);
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        CounterType::Plus1Plus1,
+                        QuantityExpr::Fixed { value: 2 },
+                    )],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![TargetRef::Object(entering)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(state.battlefield.contains(&entering));
+            state.objects[&entering]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Artifact),
+            2,
+            "artifact put this way enters with two +1/+1 counters"
+        );
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Creature),
+            0,
+            "non-artifact creature put the same way enters with zero counters (REVERT flips this)"
         );
     }
 

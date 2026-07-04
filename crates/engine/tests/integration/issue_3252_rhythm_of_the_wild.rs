@@ -45,7 +45,7 @@ fn put_library_top(runner: &mut engine::game::scenario::GameRunner, id: ObjectId
 fn assert_riot_replacement_choice(runner: &engine::game::scenario::GameRunner) {
     let WaitingFor::ReplacementChoice {
         candidate_count,
-        candidate_descriptions,
+        candidates,
         ..
     } = &runner.state().waiting_for
     else {
@@ -56,11 +56,10 @@ fn assert_riot_replacement_choice(runner: &engine::game::scenario::GameRunner) {
     };
     assert_eq!(*candidate_count, 2);
     assert!(
-        candidate_descriptions
+        candidates
             .iter()
-            .any(|description| description.contains("Riot")),
-        "replacement choice should identify Riot, got {:?}",
-        candidate_descriptions
+            .any(|candidate| candidate.description.contains("Riot")),
+        "replacement choice should identify Riot, got {candidates:?}"
     );
 }
 

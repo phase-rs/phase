@@ -584,7 +584,13 @@ pub fn modal_choice_for_player(
     // than exist).
     if let Some(expr) = &modal.dynamic_max_choices {
         let resolved = super::quantity::resolve_quantity(state, expr, player, source_id);
-        effective.max_choices = (resolved.max(0) as usize).min(modal.mode_count);
+        // CR 700.2i: pawprint modals reinterpret `max_choices` as a point budget,
+        // not a mode-count cap — do not clamp dynamic budgets to `mode_count`.
+        effective.max_choices = if modal.mode_pawprints.is_empty() {
+            (resolved.max(0) as usize).min(modal.mode_count)
+        } else {
+            resolved.max(0) as usize
+        };
     }
     effective
 }
@@ -1927,7 +1933,15 @@ fn collect_target_slots(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // CR 608.2c + CR 701.14a: A context-ref fighter (SelfRef, ParentTarget,
+            // ParentTargetSlot, TrackedSet — the reciprocal "those creatures fight
+            // each other") resolves from chain context, never a cast-time choice,
+            // so it surfaces no target slot. Broadened from the narrow
+            // SelfRef|ParentTarget check: the reciprocal-fight lowering re-keys the
+            // target to a TrackedSet, which is equally a context ref — generating a
+            // slot for it produced a spurious all-players slot that panicked the
+            // cast (Malamet Battle Glyph).
+            if filter.is_context_ref() {
                 continue;
             }
             let legal_targets =
@@ -2352,7 +2366,7 @@ pub(crate) fn resolve_multi_target_bounds(
     })
 }
 
-fn multi_target_needs_quantity_choice(
+pub(crate) fn multi_target_needs_quantity_choice(
     state: &GameState,
     ability: &ResolvedAbility,
     spec: &MultiTargetSpec,
@@ -5006,7 +5020,12 @@ fn assign_targets_recursive(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Mirror `collect_target_slots`: a context-ref fighter (SelfRef,
+            // ParentTarget, ParentTargetSlot, reciprocal-fight TrackedSet)
+            // surfaces no slot, so it consumes no selected target here either —
+            // otherwise the assign/slot-gen counts diverge and a valid two-target
+            // selection reports a spurious "Missing required target".
+            if filter.is_context_ref() {
                 continue;
             }
             if let Some(chosen) = targets.get(*next_target) {
@@ -5909,6 +5928,16 @@ pub fn validate_modal_indices(
 
 /// CR 700.2d: Generate all valid mode selection sequences for a modal spell/ability.
 pub fn generate_modal_index_sequences(modal: &ModalChoice) -> Vec<Vec<usize>> {
+    if !modal.mode_pawprints.is_empty() {
+        // CR 700.2i: `max_choices` is the pawprint point budget (Σ weight ≤ budget),
+        // not a mode-count cap. Enumerate every budget-legal index sequence whose
+        // length meets `min_choices`.
+        let mut actions = Vec::new();
+        let mut current = Vec::new();
+        build_pawprint_budget_sequences(modal, 0, &mut current, &mut actions);
+        return actions;
+    }
+
     let mut actions = Vec::new();
     for count in modal.min_choices..=modal.max_choices {
         let mut current = Vec::with_capacity(count);
@@ -5927,6 +5956,48 @@ pub fn generate_modal_index_sequences(modal: &ModalChoice) -> Vec<Vec<usize>> {
         );
     }
     actions
+}
+
+fn build_pawprint_budget_sequences(
+    modal: &ModalChoice,
+    spent: u32,
+    current: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+) {
+    let budget = modal.max_choices as u32;
+    if current.len() >= modal.min_choices && spent <= budget {
+        out.push(current.clone());
+    }
+    if spent >= budget {
+        return;
+    }
+
+    if modal.allow_repeat_modes {
+        for idx in 0..modal.mode_count {
+            let weight = u32::from(modal.mode_pawprints[idx]);
+            if spent + weight > budget {
+                continue;
+            }
+            current.push(idx);
+            build_pawprint_budget_sequences(modal, spent + weight, current, out);
+            current.pop();
+        }
+    } else {
+        let start_index = if let Some(&last) = current.last() {
+            last + 1
+        } else {
+            0
+        };
+        for idx in start_index..modal.mode_count {
+            let weight = u32::from(modal.mode_pawprints[idx]);
+            if spent + weight > budget {
+                continue;
+            }
+            current.push(idx);
+            build_pawprint_budget_sequences(modal, spent + weight, current, out);
+            current.pop();
+        }
+    }
 }
 
 fn build_mode_sequences(
@@ -7576,6 +7647,31 @@ mod tests {
         assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 2)));
         // Turn-scoped map should NOT be populated for game-scoped constraint.
         assert!(!state.modal_modes_chosen_this_turn.contains(&(source_id, 2)));
+    }
+
+    #[test]
+    fn generate_modal_index_sequences_respects_pawprint_budget() {
+        let modal = season_pawprint_modal();
+        let sequences = generate_modal_index_sequences(&modal);
+
+        assert!(
+            sequences.contains(&Vec::<usize>::new()),
+            "min_choices=0 permits choosing no modes"
+        );
+        assert!(
+            sequences.contains(&vec![0, 0, 0, 0, 0]),
+            "five 1-point picks must fit the 5-point budget"
+        );
+        assert!(
+            !sequences.contains(&vec![2, 2, 2]),
+            "three weight-3 picks (Σ=9) must not be generated for a budget of 5"
+        );
+        assert!(
+            sequences
+                .iter()
+                .all(|indices| pawprint_budget_satisfied(&modal, indices)),
+            "every generated sequence must satisfy the pawprint budget gate"
+        );
     }
 
     #[test]
@@ -10968,6 +11064,124 @@ mod tests {
         );
     }
 
+    /// CR 122.1f + CR 109.4 + CR 115.1: `QuantityRef::TargetControllerCounter`
+    /// reads the poison counters on the controller of the ability's first object
+    /// target — "if its controller is poisoned" (Corrupted Resolve) — never the
+    /// ability's own controller. Discriminating: the caster (P0) is heavily
+    /// poisoned while the countered spell's controller (P1) is not, so a
+    /// controller-scoped misread would return a nonzero count.
+    #[test]
+    fn target_controller_poison_reads_object_target_controller_not_caster() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        let stack_id = ObjectId(77);
+        let source_id = ObjectId(12);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Stacked Spell".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        // Corrupted Resolve cast by P0 (controller), targeting P1's stacked spell.
+        let corrupted_resolve = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
+        let poisoned_check = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: PlayerCounterKind::Poison,
+            },
+        };
+
+        // Caster P0 heavily poisoned; target controller P1 not — must read P1 → 0.
+        state.players[0].poison_counters = 9;
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &corrupted_resolve,
+            ),
+            0,
+            "reads the target spell's controller (P1=0), not the caster (P0=9)"
+        );
+
+        // Poison P1: "its controller is poisoned" now reads >= 1.
+        state.players[1].poison_counters = 1;
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &corrupted_resolve,
+            ),
+            1,
+            "poisoning the target's controller (P1) flips the read to 1"
+        );
+    }
+
+    /// CR 810.10a + CR 810.10d + CR 810.5: In Two-Headed Giant, "its controller
+    /// is poisoned" reads the target controller's TEAM poison total, not their
+    /// individual counters. Discriminating: the target's controller (P0) has 0
+    /// individual poison, but their teammate (P1) carries the team's 1 poison —
+    /// the team is poisoned, so the read must be >= 1. A per-player read (the
+    /// pre-fix behavior) would return P0's individual 0 and mis-resolve the
+    /// counter's condition to false.
+    #[test]
+    fn target_controller_poison_reads_team_total_in_two_headed_giant() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::format::FormatConfig;
+        use crate::types::player::PlayerCounterKind;
+
+        // 2HG teams: {P0, P1} and {P2, P3}.
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let stack_id = ObjectId(77);
+        let source_id = ObjectId(12);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Stacked Spell".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        // The target's controller (P0) has 0 individual poison; the team's
+        // poison lives entirely on teammate P1.
+        state.players[0].poison_counters = 0;
+        state.players[1].poison_counters = 1;
+
+        let ability = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
+        let poisoned_check = QuantityExpr::Ref {
+            qty: QuantityRef::TargetControllerCounter {
+                kind: PlayerCounterKind::Poison,
+            },
+        };
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &poisoned_check,
+                &ability,
+            ),
+            1,
+            "2HG: reads the target controller's TEAM poison (P0=0 + teammate P1=1), not P0's individual 0"
+        );
+    }
+
     /// CR 108.3 + CR 608.2c: "its owner" refers to an object target's owner,
     /// not a companion player target that happens to precede it.
     #[test]
@@ -11034,6 +11248,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
 

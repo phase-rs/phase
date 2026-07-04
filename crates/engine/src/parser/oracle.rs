@@ -12,10 +12,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Effect, FilterProp, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -23,11 +23,12 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
@@ -39,20 +40,23 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
-    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
-    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
-    is_enters_with_counter_replacement_line, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    is_alternative_keyword_cost_pattern, is_as_enters_becomes_choice_pattern,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern,
+    is_collect_evidence_alt_cost_pattern, is_compound_turn_limit, is_defiler_cost_pattern,
+    is_enters_tapped_cant_untap_compound, is_enters_with_counter_replacement_line,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::dispatch_line_nom;
+use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
+    lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
+    parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
@@ -70,7 +74,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
+    parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -789,14 +794,30 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
 /// and then delegating to `parse_static_line_multi` so compound forms
 /// (e.g., cross-mode conjunctions) emit all their constituent statics
 /// rather than silently dropping the extras.
-fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<StaticDefinition> {
-    if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
-        return vec![def];
+///
+/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), cant-cast
+/// gate parentheticals stripped by `strip_reminder_text` are re-applied without
+/// passing raw reminder parentheticals through the general static parser.
+fn parse_static_line_with_graveyard_keyword_continuation(
+    line: &str,
+    raw_line_for_cant_cast_gates: Option<&str>,
+    card_name_for_cant_cast_gates: Option<&str>,
+) -> Vec<StaticDefinition> {
+    let mut defs = if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
+        vec![def]
+    } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
+        vec![def]
+    } else {
+        parse_static_line_multi(line)
+    };
+    if let (Some(raw), Some(card_name)) =
+        (raw_line_for_cant_cast_gates, card_name_for_cant_cast_gates)
+    {
+        defs = crate::parser::oracle_static::apply_raw_parenthetical_cant_cast_gate(
+            defs, raw, card_name,
+        );
     }
-    if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
-        return vec![def];
-    }
-    parse_static_line_multi(line)
+    defs
 }
 
 /// CR 614.6 + CR 701.26b: A single `<subject> can't <P1> and can't <P2>`
@@ -823,8 +844,8 @@ fn parse_static_replacement_compound(
     let left = format!("{subject} can't {p1}");
     let right = format!("{subject} can't {p2}");
 
-    let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left);
-    let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right);
+    let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left, None, None);
+    let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right, None, None);
     let left_repl = parse_replacement_line(&left, card_name);
     let right_repl = parse_replacement_line(&right, card_name);
 
@@ -1053,6 +1074,7 @@ fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[Str
                 retarget_chosen_card_type_to_creature_type(filter);
             }
         }
+        retarget_creature_type_choice_dig_filters(result);
     }
 
     let Some(chosen_kind) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
@@ -1103,6 +1125,169 @@ fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
     }
 }
 
+/// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
+/// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
+/// "cards" base defaults to `IsChosenCardType`; realign those dig filters once
+/// the persisted choice is known to be creature-type.
+fn retarget_creature_type_choice_dig_filters(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        retarget_creature_type_choice_dig_filters_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            retarget_creature_type_choice_dig_filters_in_ability(execute);
+        }
+    }
+}
+
+fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
+    if let Effect::Dig { filter, .. } = &mut *def.effect {
+        retarget_chosen_card_type_to_creature_type(filter);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        retarget_creature_type_choice_dig_filters_in_ability(sub);
+    }
+}
+
+/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
+/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
+/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
+fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        reconcile_host_bound_phase_outs_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            reconcile_host_bound_phase_outs_in_ability(execute);
+        }
+    }
+}
+
+fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
+    let should_upgrade = matches!(*def.effect, Effect::PhaseOut { .. })
+        && def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()));
+    if should_upgrade {
+        upgrade_host_bound_phase_out_at_head(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        reconcile_host_bound_phase_outs_in_ability(sub);
+    }
+}
+
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
+    if is_host_bound_phase_in_tap_rider_node(def) {
+        return true;
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()))
+}
+
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
+    let Effect::PhaseOut { target } = *def.effect.clone() else {
+        return;
+    };
+
+    let (tail, removed_rider) = remove_host_bound_tap_rider_from_chain(def.sub_ability.take());
+    if !removed_rider {
+        def.sub_ability = tail;
+        return;
+    }
+
+    let cant_phase_in = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }])],
+        duration: Some(Duration::UntilHostLeavesPlay),
+        target: Some(TargetFilter::ParentTarget),
+    };
+
+    let mut return_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseIn {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )));
+
+    let mut delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            effect: Box::new(return_ability),
+            uses_tracked_set: false,
+        },
+    );
+    delayed.sub_ability = tail;
+
+    let mut lock = AbilityDefinition::new(AbilityKind::Spell, cant_phase_in);
+    lock.sub_ability = Some(Box::new(delayed));
+
+    *def.effect = Effect::PhaseOut { target };
+    def.sub_ability = Some(Box::new(lock));
+}
+
+/// Remove only the host-bound tap rider node, preserving any intervening siblings.
+fn remove_host_bound_tap_rider_from_chain(
+    chain: Option<Box<AbilityDefinition>>,
+) -> (Option<Box<AbilityDefinition>>, bool) {
+    let Some(mut node) = chain else {
+        return (None, false);
+    };
+
+    if is_host_bound_phase_in_tap_rider_node(&node) {
+        return (node.sub_ability.take(), true);
+    }
+
+    if let Some(sub) = node.sub_ability.take() {
+        let (new_sub, found) = remove_host_bound_tap_rider_from_chain(Some(sub));
+        node.sub_ability = new_sub;
+        if found {
+            return (Some(node), true);
+        }
+    }
+
+    (Some(node), false)
+}
+
+fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition) -> bool {
+    if !matches!(
+        def.effect.as_ref(),
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return false;
+    }
+    def.description
+        .as_deref()
+        .is_some_and(host_bound_phase_in_tap_phrase)
+}
+
+fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    scan_contains(&lower, "as it phases in this way")
+        || scan_contains(&lower, "as that creature phases in this way")
+        || scan_contains(&lower, "as that permanent phases in this way")
+}
+
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     if types.iter().any(|card_type| card_type == "Creature") {
         Some(ChosenSubtypeKind::CreatureType)
@@ -1139,7 +1324,7 @@ fn chosen_subtype_kind_from_persisted_choice(
 fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSubtypeKind> {
     match def.effect.as_ref() {
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         } => Some(ChosenSubtypeKind::CreatureType),
@@ -1184,12 +1369,99 @@ where
             .statics
             .extend(parse_static_line_with_graveyard_keyword_continuation(
                 modeled_sentence,
+                None,
+                None,
             ));
         result.abilities.push(make_unimplemented(unmodeled_tail));
         return true;
     }
 
     false
+}
+
+/// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
+/// continuation across a graveyard-keyword-gated static grant (Cairn Wanderer).
+///
+/// The modeled sentence "As long as a creature card with <kw> is in a graveyard,
+/// this creature has <kw>" parses to ONE gated `StaticDefinition` (grant
+/// `AddKeyword { kw }` gated on `IsPresent(<kw>-card in a graveyard)`). Each
+/// keyword in the trailing list clones that template, swapping BOTH the granted
+/// keyword and the gate condition's `WithKeyword`, so each keyword is granted
+/// independently — only while a creature card WITH that keyword is in a graveyard
+/// (CR 611.3a per-keyword conditional continuous static). This is the plain-
+/// `StaticDefinition` analogue of `attach_same_is_true_keywords` (which operates
+/// on the trigger path's `GenericEffect`), reusing the same keyword-list parser
+/// (`try_parse_same_is_true_continuation`) and keyword-rewrite building block
+/// (`rewrite_condition_keyword`) so it covers the whole class, not one card.
+///
+/// Returns `false` (leaving the line for the generic dispatch) when the modeled
+/// sentence, the keyword list, or the gated template cannot be recovered. Any
+/// continuation keyword that resolves to `Keyword::Unknown` (unqualified
+/// `protection` / `landwalk`) is emitted as an explicit `Unimplemented` residual
+/// rather than an inert `AddKeyword(Unknown)` static, so it stays a loud
+/// unsupported gap in coverage instead of silently reading as supported.
+fn push_graveyard_keyword_same_is_true_tail(
+    result: &mut ParsedAbilities,
+    line: &str,
+    lower: &str,
+) -> bool {
+    let Some((modeled_sentence, tail)) =
+        split_same_is_true_static_tail(line, lower, parse_graveyard_keyword_grant_sentence)
+    else {
+        return false;
+    };
+    // No cant-cast gate applies to a graveyard-keyword grant, so the raw-line /
+    // card-name gate params are None (matching the other non-cant-cast callers).
+    let mut statics =
+        parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None);
+    // The modeled sentence must yield exactly the gated keyword grant to clone.
+    let Some(template) = statics.first().cloned() else {
+        return false;
+    };
+    // CR 611.3a: only distribute a genuinely gated grant. If the modeled sentence
+    // ever parsed without its graveyard-presence condition, fall through to the
+    // generic path rather than cloning an UNGATED grant per keyword — that would
+    // reintroduce the unconditional over-grant this distribution exists to remove.
+    if template.condition.is_none() {
+        return false;
+    }
+    let Some(keywords) = try_parse_same_is_true_continuation(tail) else {
+        return false;
+    };
+    // CR 611.3a coverage-honesty: a continuation keyword that resolves to
+    // `Keyword::Unknown` (an unqualified `protection` / `landwalk` — those keyword
+    // abilities require a quality/subtype that a bare continuation clause does not
+    // supply) is NOT semantically modeled. Cloning it into an
+    // `AddKeyword(Keyword::Unknown(_))` static would still read as Continuous-mode
+    // "supported" in `game/coverage.rs` (which checks static mode + child
+    // grant-abilities/triggers, not the granted keyword's identity), letting the
+    // card become coverage-supported while that clause does nothing. Keep those as
+    // an explicit `Unimplemented` residual so they remain a loud unsupported gap.
+    let mut unqualified: Vec<String> = Vec::new();
+    for keyword in &keywords {
+        if let Keyword::Unknown(name) = keyword {
+            unqualified.push(name.clone());
+            continue;
+        }
+        let mut new_def = template.clone();
+        for modification in &mut new_def.modifications {
+            if let ContinuousModification::AddKeyword { keyword: kw } = modification {
+                *kw = keyword.clone();
+            }
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_condition_keyword(condition, keyword);
+        }
+        statics.push(new_def);
+    }
+    result.statics.extend(statics);
+    if !unqualified.is_empty() {
+        result.abilities.push(make_unimplemented(&format!(
+            "the same is true for {}",
+            unqualified.join(", ")
+        )));
+    }
+    true
 }
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
@@ -1235,6 +1507,14 @@ fn strip_instead_clause(
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
     if let Some((before, after)) = tp.rsplit_around(" instead if ") {
         let condition_text = after.lower.trim().trim_end_matches('.');
+        // CR 608.2c + CR 601.2b: An inverted additional-cost / gift "instead if"
+        // is folded to the dedicated `AdditionalCostPaidInstead` by the chain's
+        // `strip_additional_cost_conditional`. Defer the whole line so the chain
+        // builds the conditional else_ability (Cinder Strike) rather than the
+        // line-level path dropping the unrecognized condition here.
+        if parse_additional_cost_instead_condition_fragment(condition_text).is_some() {
+            return (text.to_string(), None, false);
+        }
         // CR 614.1a + CR 608.2c: an inverted "instead if <cond>" followed by a further
         // printed instruction (Throw from the Saddle: "… instead if it's a Mount. Then it
         // deals damage …") is an INTRA-CHAIN override, not a whole-line replacement. The
@@ -1246,6 +1526,19 @@ fn strip_instead_clause(
         if condition_text.contains('.') {
             // allow-noncombinator: structural sentence-boundary split (mirrors the
             // pattern-3 `before_trim.contains('.')` guard below), not parsing dispatch
+            return (text.to_string(), None, false);
+        }
+        // CR 608.2c + CR 614.1a: A multi-sentence effect line
+        // ("[prior sentence]. [effect] instead if <cond>", e.g. Steer Clear) is an
+        // INTRA-CHAIN override — the "instead" replaces only the trailing sentence's
+        // effect, not the whole line, and its condition ("you controlled a Mount as
+        // you cast this spell") is owned by the chain-level `parse_condition_text`
+        // recognizers, not the line-level `parse_inner_condition`. Defer the whole
+        // line to the chain parser (mirrors the pattern-3 `before_trim.contains('.')`
+        // guard below) so `try_parse_generic_instead_clause` builds the conditional
+        // sub-ability and the prior sentence is preserved.
+        if before.original.trim().trim_end_matches('.').contains('.') {
+            // allow-noncombinator: structural sentence-boundary split, not parsing dispatch
             return (text.to_string(), None, false);
         }
         let condition = parse_inner_condition(condition_text)
@@ -1995,6 +2288,33 @@ fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
     }
 }
 
+fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
+    let stripped = strip_reminder_text(line.trim());
+    let (ability_word, effect_text) = strip_ability_word_with_name(&stripped)?;
+    if ability_word != "strive" {
+        return None;
+    }
+
+    let effect_lower = effect_text.to_lowercase();
+    let ((), rest_original) = nom_on_lower(&effect_text, &effect_lower, |i| {
+        value((), tag("this spell costs ")).parse(i)
+    })?;
+    let (cost, rest_original) = parse_mana_symbols(rest_original)?;
+    let rest_lower = rest_original.to_lowercase();
+    nom_on_lower(rest_original, &rest_lower, |i| {
+        value(
+            (),
+            all_consuming((
+                tag(" more to cast for each target beyond the first"),
+                opt(tag(".")),
+                multispace0,
+            )),
+        )
+        .parse(i)
+    })?;
+    Some(cost)
+}
+
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
 /// parse/lower split (Phase 49, Plan 03).
 ///
@@ -2190,21 +2510,9 @@ pub(crate) fn parse_oracle_ir(
     // Strive lines have the form: "Strive — This spell costs {X} more to cast for each
     // target beyond the first." — extract the per-target surcharge cost.
     for raw in &lines {
-        let stripped = strip_reminder_text(raw.trim());
-        if let Some(effect_text) = strip_ability_word(&stripped) {
-            let effect_lower = effect_text.to_lowercase();
-            if let Some(((), rest_original)) = nom_on_lower(&effect_text, &effect_lower, |i| {
-                value((), tag("this spell costs ")).parse(i)
-            }) {
-                if let Some((mana_part, _)) =
-                    rest_original.split_once(" more to cast for each target beyond the first")
-                {
-                    if let Some((cost, _)) = parse_mana_symbols(mana_part) {
-                        result.strive_cost = Some(cost);
-                        break;
-                    }
-                }
-            }
+        if let Some(cost) = parse_strive_cost_line(raw) {
+            result.strive_cost = Some(cost);
+            break;
         }
     }
 
@@ -2367,9 +2675,18 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Normalize card self-references for static parsing (replace card name with ~)
+        // Normalize card self-references for static parsing (replace card name with ~).
         let static_line = normalize_self_refs_for_static(&line, card_name);
         let static_line_lower = static_line.to_lowercase();
+        // CR 611.3a + CR 702: "As long as a creature card with <kw> is in a
+        // graveyard, this creature has <kw>. The same is true for <keyword list>."
+        // (Cairn Wanderer) — distribute the gated grant per keyword before the
+        // chosen/every-type same-is-true arms (which gap the tail) or the generic
+        // static path (which mis-tokenizes the keyword list) can claim the line.
+        if push_graveyard_keyword_same_is_true_tail(&mut result, &static_line, &static_line_lower) {
+            i += 1;
+            continue;
+        }
         if push_same_is_true_static_tail(
             &mut result,
             &static_line,
@@ -2413,7 +2730,11 @@ pub(crate) fn parse_oracle_ir(
         // Intercept only that narrow class so we do not steal ordinary spell
         // instruction lines that happen to have static-like phrasing.
         if is_spell {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             let is_self_color_cda = defs.len() == 1
                 && defs[0].characteristic_defining
                 && defs[0].affected == Some(TargetFilter::SelfRef)
@@ -2436,7 +2757,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_speed_unlock_sentence(&lower) {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -2495,7 +2820,11 @@ pub(crate) fn parse_oracle_ir(
                     if !trimmed.is_empty() {
                         let clause_dot = format!("{trimmed}.");
                         result.statics.extend(
-                            parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                            parse_static_line_with_graveyard_keyword_continuation(
+                                &clause_dot,
+                                None,
+                                None,
+                            ),
                         );
                     }
                 }
@@ -2505,7 +2834,11 @@ pub(crate) fn parse_oracle_ir(
             // Compound detection (CR 602.5 can't-be-activated, cross-mode conjunctions,
             // life-total locks, etc.) is already owned by `parse_static_line_multi`,
             // which the wrapper below delegates to.
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -3050,7 +3383,11 @@ pub(crate) fn parse_oracle_ir(
         // 2 life rather than pay that mana." K'rrik class. Must run before Priority 7
         // because is_static_pattern does not classify this shape.
         if is_pay_life_as_colored_mana_pattern(&lower) {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 i += 1;
@@ -3082,7 +3419,11 @@ pub(crate) fn parse_oracle_ir(
                 result.replacements.push(rep_def);
                 consumed = true;
             }
-            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_line,
+                Some(raw_line),
+                Some(card_name),
+            );
             if !defs.is_empty() {
                 result.statics.extend(defs);
                 consumed = true;
@@ -3175,6 +3516,10 @@ pub(crate) fn parse_oracle_ir(
             std::borrow::Cow::Borrowed(lower.as_str())
         };
         if is_static_pattern(&static_classify_view) {
+            if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
+                i += 1;
+                continue;
+            }
             // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
             // trailing "doesn't untap during…" from a reflexive "When you do"
             // clause) and a copy-replacement ("enter as a copy of") must route
@@ -3230,8 +3575,11 @@ pub(crate) fn parse_oracle_ir(
                 // otherwise consume the line before Priority 14 for instants/sorceries.
                 if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                    let mut defs =
-                        parse_static_line_with_graveyard_keyword_continuation(&effect_static);
+                    let mut defs = parse_static_line_with_graveyard_keyword_continuation(
+                        &effect_static,
+                        None,
+                        None,
+                    );
                     if !defs.is_empty() {
                         if let Some(cond) = ability_word_to_condition(&aw_name) {
                             for def in &mut defs {
@@ -3257,7 +3605,11 @@ pub(crate) fn parse_oracle_ir(
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
                             result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                                parse_static_line_with_graveyard_keyword_continuation(
+                                    &clause_dot,
+                                    None,
+                                    None,
+                                ),
                             );
                         }
                     }
@@ -3274,7 +3626,11 @@ pub(crate) fn parse_oracle_ir(
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
                             result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(&clause_dot),
+                                parse_static_line_with_graveyard_keyword_continuation(
+                                    &clause_dot,
+                                    None,
+                                    None,
+                                ),
                             );
                         }
                     }
@@ -3285,7 +3641,11 @@ pub(crate) fn parse_oracle_ir(
                 // "attacks or blocks each combat if able" → MustAttack + MustBlock, life-total
                 // locks, etc.) is already owned by `parse_static_line_multi`, which the wrapper
                 // delegates to.
-                let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+                let defs = parse_static_line_with_graveyard_keyword_continuation(
+                    &static_line,
+                    Some(raw_line),
+                    Some(card_name),
+                );
                 if !defs.is_empty() {
                     result.statics.extend(defs);
                     i += 1;
@@ -3368,6 +3728,21 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
+            // CR 208.2b + CR 614.1c + CR 614.12a: modal "As ~ enters, it becomes
+            // your choice of [P/T profiles]" as-enters replacement (Primal Plasma,
+            // Primal Clay, Corrupted Shapeshifter, Aquamorph Entity). This is a
+            // single-sentence replacement line with NO bullet block, so the
+            // Priority-1 `OracleBlockAst::AsEntersAnchorWordModal` block parser
+            // never fires — it must be lowered here. [G2] It MUST run BEFORE the
+            // generic `parse_replacement_sentence_sequence` / `parse_replacement_line`
+            // parsers so those don't claim the "becomes your choice of" line as a
+            // plain choice/animate and drop the per-mode gated statics.
+            if is_as_enters_becomes_choice_pattern(&lower)
+                && lower_as_enters_becomes_choice_modal(&line, &mut result)
+            {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -3439,16 +3814,9 @@ pub(crate) fn parse_oracle_ir(
         // Priority 8c-strive: Skip strive lines (cost already extracted in pre-parse above).
         // Must run before Priority 9 (spell imperative catch-all) which would otherwise
         // consume the entire "Strive — This spell costs..." line as an unimplemented ability.
-        if result.strive_cost.is_some() {
-            if let Some(effect_text) = strip_ability_word(&line) {
-                let effect_lower = effect_text.to_lowercase();
-                if lower_starts_with(&effect_lower, "this spell costs ")
-                    && effect_lower.contains("more to cast for each target beyond the first")
-                {
-                    i += 1;
-                    continue;
-                }
-            }
+        if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
+            i += 1;
+            continue;
         }
 
         // CR 601.3: "Cast this spell only [condition]" — applies to any card type, not just instants/sorceries.
@@ -3915,8 +4283,11 @@ pub(crate) fn parse_oracle_ir(
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                let mut defs =
-                    parse_static_line_with_graveyard_keyword_continuation(&effect_static);
+                let mut defs = parse_static_line_with_graveyard_keyword_continuation(
+                    &effect_static,
+                    None,
+                    None,
+                );
                 if !defs.is_empty() {
                     if let Some(cond) = aw_condition.clone() {
                         for def in &mut defs {
@@ -3945,7 +4316,11 @@ pub(crate) fn parse_oracle_ir(
         // heuristics miss it. Try the actual static parser before falling through
         // to generic dispatch/unimplemented categorization.
         let static_line = normalize_self_refs_for_static(&line, card_name);
-        let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+        let defs = parse_static_line_with_graveyard_keyword_continuation(
+            &static_line,
+            Some(raw_line),
+            Some(card_name),
+        );
         if !defs.is_empty() {
             result.statics.extend(defs);
             i += 1;
@@ -3971,6 +4346,7 @@ pub(crate) fn parse_oracle_ir(
 
     reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
+    reconcile_host_bound_phase_outs(&mut result);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

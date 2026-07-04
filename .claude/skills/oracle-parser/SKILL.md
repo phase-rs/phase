@@ -721,7 +721,9 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Update `is_static_pattern()` or `is_replacement_pattern()` in `oracle_classifier.rs` if text is routed to the wrong parser
 
 **Phase 6 — Tests & Verification**
-- [ ] Parser unit tests for each new pattern
+- [ ] Parser unit tests for each new pattern — using the card's **verbatim Oracle text**, never a paraphrase (a paraphrase can take a different parser branch than the real card)
+- [ ] Negative tests carry a positive reach-guard: any `!detector(...)` / "does not parse to X" assertion must also prove the input parsed past upstream short-circuits (zero `Effect::Unimplemented`, expected positive shape) — otherwise an early-return makes it pass vacuously
+- [ ] Runtime discriminating test when the change claims runtime behavior (see `/card-test`): parser shape tests alone are acceptable ONLY when unsupported semantics remain honestly `Unimplemented`/red in coverage
 - [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
 - [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.

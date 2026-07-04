@@ -1,17 +1,19 @@
 import { memo, useState, useCallback, useMemo, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
 import type { MotionValue, PanInfo } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveSingleActionDispatch,
@@ -22,71 +24,28 @@ import {
   computeHandInsertionMarker,
   computeFlankDisplacement,
   computeGapPx,
+  computeReorderedHand,
   flankingHandIndices,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
+import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
+import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
+import { PopoverMenu } from "../menu/PopoverMenu.tsx";
+import { fanGeometry } from "../card/fanGeometry.ts";
 
-// Horizontal overlap between adjacent hand cards. Negative margin pulls each
-// card leftward over the previous one. Tightens continuously as the hand grows
-// so a Commander-sized hand (up to ~20 cards) still fits on screen.
-//
-// The margin is a fraction of `--hand-card-w` — the SAME basis the cards are
-// rendered at (CardImage below). Using the base `--card-w` here while the cards
-// render at `--hand-card-w` (1.14–1.4× larger) left the real overlap off by the
-// scale factor, so the fan spread ~40% wider than the formula intends and the
-// error compounded with hand size, pushing the fan off-center to the right.
-function getHandOverlap(handSize: number): string {
-  if (handSize <= 5) return "calc(var(--hand-card-w) * -0.25)";
-  if (handSize <= 7) return "calc(var(--hand-card-w) * -0.45)";
-  // For 8+ cards: target total width ≈ 4× card width.
-  // First card occupies 1w; remaining (n-1) each contribute (1 + overlap)w.
-  // (n-1)(1 + overlap) = 3  =>  overlap = 3/(n-1) - 1, clamped to [-0.85, -0.6].
-  const overlap = Math.max(-0.85, Math.min(-0.6, 3 / (handSize - 1) - 1));
-  return `calc(var(--hand-card-w) * ${overlap})`;
-}
+// Stable empty lookup so an undefined `objects` (pre-game) never busts the
+// organizer's filter memo with a fresh `{}` each render.
+const EMPTY_OBJECTS: Record<string, GameObject> = {};
 
-// Quadratic arc lift coefficient. Scales down as the hand grows so the parabola
-// stays inside the hand band instead of pushing edge cards off-screen.
-function getArcCoefficient(handSize: number): number {
-  if (handSize <= 7) return 6;
-  // Keep max arc lift (at the edges) roughly constant at ~54px.
-  const maxDist = (handSize - 1) / 2;
-  return 54 / (maxDist * maxDist);
-}
-
-// Geometry for the WHOLE displayed row — hand cards plus the castable exile
-// (left) and graveyard (right) "wings" — as one fan. Overlap, per-card tilt and
-// arc are all sized by the TOTAL number of displayed cards, so a 3-card hand
-// shown alongside 13 graveyard delve-candidates tucks into the same tight,
-// angle-clamped arc a 16-card hand would, instead of inheriting the loose
-// 3-card spacing and spilling off-screen with near-sideways edge cards.
-//
-// `k` is a card's absolute position across the row: exile cards occupy [0, E),
-// hand cards [E, E + H), graveyard cards [E + H, N). When there are no wings
-// (N === H, E === 0) a hand card at index i sits at k === i, so the hand keeps
-// its familiar standalone fan; wings only ever shift the shared center, never
-// the hand's reorder bookkeeping (index/handSize stay hand-local).
-function fanGeometry(totalCards: number) {
-  const center = (totalCards - 1) / 2;
-  // Size the SHAPE (tilt + arc) from at least two cards so a lone card / wing
-  // still fans (a raw delta of 0 would render flat).
-  const shape = Math.max(2, totalCards);
-  const delta = Math.min(6, 36 / (shape - 1));
-  const arcCoeff = getArcCoefficient(shape);
-  // Downward parabola (edges drop, center rides highest), clamped at the row's
-  // own edges so the outermost cards rest level with the band instead of sinking
-  // below it and clipping.
-  const edgeLift = center * center * arcCoeff;
-  return {
-    overlap: getHandOverlap(totalCards),
-    rotation: (k: number) => (k - center) * delta,
-    arc: (k: number) => {
-      const d = k - center;
-      return Math.min(d * d * arcCoeff, edgeLift);
-    },
-  };
-}
+// The whole-row fan geometry — the overlap / tilt / arc that lays hand cards
+// (plus the castable exile / graveyard "wings") out as one held hand — now
+// lives in the shared `card/fanGeometry` module so the attachment fan curves
+// identically. `k` is a card's absolute position across the row: exile cards
+// occupy [0, E), hand cards [E, E + H), graveyard [E + H, N). With no wings
+// (E === 0, N === H) a hand card at index i sits at k === i, so the hand keeps
+// its familiar standalone fan; wings only shift the shared center, never the
+// hand's reorder bookkeeping (index/handSize stay hand-local).
 
 // Rendered size (px) of the bouncing drop-arrow's square box. Fixed (not
 // card-relative) so the imperative center / above-slot offsets stay exact in px.
@@ -97,6 +56,7 @@ const DROP_ARROW_PX = 28;
 const ARROW_TIP_FRAC = 20 / 24;
 
 export function PlayerHand() {
+  const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
   const player = useGameStore((s) => s.gameState?.players[playerId]);
@@ -129,6 +89,28 @@ export function PlayerHand() {
   const playableObjectIds = useMemo(() => {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
+
+  // Display-only organizing of the player's own hand: persisted sort + ephemeral
+  // hide-filter, sharing the discard grid's mechanism. This NEVER reorders
+  // `player.hand` or touches the engine — it only permutes/hides what is shown.
+  // While a sort or filter is active the displayed order diverges from
+  // `player.hand`, so drag-to-reorder (ReorderHand) is suppressed below.
+  const handSort = usePreferencesStore((s) => s.handSort);
+  const setHandSort = usePreferencesStore((s) => s.setHandSort);
+  const handFilter = useUiStore((s) => s.handFilter);
+  const setHandFilter = useUiStore((s) => s.setHandFilter);
+  const handCardIds = useMemo(
+    () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
+    [player?.hand, objects, pendingObjectId],
+  );
+  const organizer = useCardOrganizer({
+    cards: handCardIds,
+    objects: objects ?? EMPTY_OBJECTS,
+    playableIds: playableObjectIds,
+    sort: { value: handSort, onChange: setHandSort },
+    filter: { value: handFilter, onChange: setHandFilter },
+  });
+  const organizeActive = handSort !== "none" || handFilter !== "none";
 
   // Castable graveyard/exile cards, rendered as colored "wings" continuing the
   // hand fan (engine authority — see useCastableZoneObjects). These are NOT
@@ -265,6 +247,7 @@ export function PlayerHand() {
       const show =
         !isMobile &&
         pendingObjectId == null &&
+        !organizeActive &&
         marker != null &&
         insideHand &&
         info.offset.y >= DRAG_PLAY_THRESHOLD &&
@@ -283,7 +266,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
+    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -310,18 +293,21 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        // Reorder is disabled while a cast is in progress: handObjects filters
-        // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
-        // has N entries. The slot index from `computeHandInsertionSlot` would
-        // map to the wrong position in the unfiltered hand.
-        if (pendingObjectId != null) return false;
-        if (targetSlot == null || !player) return false;
-        const currentOrder = player.hand.slice();
-        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
-        if (fromIdx === -1 || fromIdx === targetSlot) return false;
-        const [moved] = currentOrder.splice(fromIdx, 1);
-        currentOrder.splice(targetSlot, 0, moved);
-        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        if (!player) return false;
+        // Reorder is suppressed while a cast is in progress (`pendingObjectId`)
+        // OR while the hand is sorted/filtered (`organizeActive`): in both cases
+        // the displayed slot index doesn't map 1:1 onto `player.hand`, so
+        // dispatching from a displayed slot would scramble the hand. The pure
+        // helper returns null in those states (and for no-op moves).
+        const nextOrder = computeReorderedHand(
+          player.hand,
+          objectId as ObjectId,
+          targetSlot,
+          pendingObjectId != null || organizeActive,
+        );
+        if (nextOrder) {
+          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
+        }
         return false;
       }
 
@@ -331,7 +317,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, player, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
@@ -420,9 +406,13 @@ export function PlayerHand() {
 
   if (!player || !objects) return null;
 
-  const handObjects = player.hand
+  // Displayed hand = the organizer's sorted/filtered order (already excludes the
+  // pending cast card via `handCardIds`). A hide-filter shrinks this list, so
+  // `handSize` and the fan geometry below resize to the visible cards. The
+  // underlying `player.hand` is never touched — organizing is display-only.
+  const handObjects = organizer.ordered
     .map((id) => objects[id])
-    .filter((obj) => obj && obj.id !== pendingObjectId);
+    .filter((obj): obj is GameObject => obj != null);
 
   // The hand and its exile (left) / graveyard (right) castable wings render as
   // ONE fan sized by the total card count, so many wings tuck in tightly instead
@@ -447,6 +437,37 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
+      {/* Hand organizer (desktop): a compact popover to sort / hide-filter the
+          player's own hand for DISPLAY only. Gated on the TRUE hand count
+          (`handCardIds`, not the post-filter `handObjects`) so a filter that
+          hides every card can still be cleared. Hidden on mobile, where the
+          drawer carries the same controls. The wrapper stops click propagation
+          so opening it never toggles the hand-lift. */}
+      {!isMobile && handCardIds.length > 0 && (
+        <div className="absolute right-2 top-0 z-50" onClick={(e) => e.stopPropagation()}>
+          <PopoverMenu ariaLabel={t("hand.organizeLabel")} menuWidthPx={220}>
+            {() => (
+              <div className="flex flex-col gap-2 px-3 py-2">
+                <CardOrganizerToolbar
+                  className="flex flex-col gap-2 text-xs text-slate-300"
+                  sort={handSort}
+                  onSortChange={setHandSort}
+                  filter={handFilter}
+                  onFilterChange={setHandFilter}
+                  showSort
+                  showFilter
+                  disabled={pendingObjectId != null}
+                />
+                {organizeActive && (
+                  <p className="text-[11px] leading-snug text-amber-300/80">
+                    {t("hand.reorderPausedHint")}
+                  </p>
+                )}
+              </div>
+            )}
+          </PopoverMenu>
+        </div>
+      )}
       {/* The whole hand lifts as one unit on hover. Keeping this uniform -50px
           lift on a container — rather than baking `expanded` into each card's
           animate target — lets the memoized HandCards skip re-rendering when the

@@ -23,6 +23,7 @@ import type {
 } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
 import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
 import { legalResultState, useGameStore } from "./gameStore";
@@ -272,6 +273,12 @@ function disposeMatchController(): void {
   activeMatchController = null;
 }
 
+/** The engine-side AI seat for a Bot draft match (the local player is game
+ *  player 0, the bot is 1). Single authority shared by the live game-loop
+ *  controller and the Resolve All batch drain, so the drain can never play
+ *  the bot at a different difficulty than the controller driving it. */
+export const DRAFT_BOT_AI_SEAT: AISeatBinding = { playerId: 1, difficulty: "Medium" };
+
 async function installMatchRuntime(
   gameId: string,
   adapter: EngineAdapter,
@@ -304,8 +311,8 @@ async function installMatchRuntime(
   disposeMatchController();
   activeMatchController = createGameLoopController({
     mode: controllerMode,
-    difficulty: "Medium",
-    aiSeats: controllerMode === "ai" ? [{ playerId: 1, difficulty: "Medium" }] : undefined,
+    difficulty: DRAFT_BOT_AI_SEAT.difficulty,
+    aiSeats: controllerMode === "ai" ? [DRAFT_BOT_AI_SEAT] : undefined,
     playerCount: 2,
   });
   activeMatchController.start();

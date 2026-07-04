@@ -77,7 +77,8 @@
     "priorityTooltip": "Priorität abgeben. Wenn der Stapel leer ist, rückt dies durch das aktuelle Prioritätsfenster vor. Tastenkürzel: Leertaste.",
     "pass": "Abgeben",
     "passToEndTooltip": "Bis zum Endschritt automatisch abgeben, sofern keine Wahl, kein Stopp oder die volle Kontrolle unterbricht. Tastenkürzel: Eingabe.",
-    "autoPassing": "Automatisch bis zum Endschritt abgeben..."
+    "autoPassing": "Automatisch bis zum Endschritt abgeben...",
+    "resolvingStack": "Stapel wird aufgelöst..."
   },
   "board": {
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
@@ -152,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Reihe einklappen",
+      "auto": "Auto",
+      "on": "Immer an",
+      "off": "Immer aus"
     }
   },
   "permanent": {
@@ -173,6 +180,10 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wählen",
+    "fanConfirm": "Bestätigen ({{count}})",
+    "viewAttachments_one": "Angelegte Karte ansehen",
+    "viewAttachments_other": "{{count}} angelegte Karten ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -216,7 +227,26 @@
     "you": "Du",
     "ally": "Verbündeter",
     "restoreDialog": "Dialog wiederherstellen",
-    "restoreDialogTitle": "Angriffsziel-Dialog wiederherstellen"
+    "restoreDialogTitle": "Angriffsziel-Dialog wiederherstellen",
+    "distribute": "Verteilen",
+    "attackersColumn": "Angreifer",
+    "unassigned": "Nicht zugewiesen",
+    "assignedBadge": "Zugewiesen",
+    "allAssigned": "Alle Angreifer zugewiesen",
+    "unassignedRemaining_one": "{{count}} nicht zugewiesen",
+    "unassignedRemaining_other": "{{count}} nicht zugewiesen",
+    "evenSplitAll": "Alle gleichmäßig aufteilen",
+    "resetAssignments": "Zurücksetzen",
+    "allHere": "Alle hierher",
+    "spread": "Aufteilen",
+    "spreadEvenly": "Gleichmäßig aufteilen",
+    "assignOne": "Einen an {{label}} zuweisen",
+    "removeOne": "Einen von {{label}} entfernen",
+    "assignAllHere": "Alle an {{label}} senden",
+    "assignRemaining_one": "Noch {{count}} zuweisen",
+    "assignRemaining_other": "Noch {{count}} zuweisen",
+    "confirmDistribute_one": "{{count}} Angreifer erklären",
+    "confirmDistribute_other": "{{count}} Angreifer erklären"
   },
   "fullControl": {
     "on": "Volle Kontrolle An",
@@ -452,7 +482,9 @@
     "viewFullHand_other": "Volle Hand ansehen ({{count}} Karten)",
     "handLabel": "Hand {{count}}",
     "handTitle": "Hand ({{count}})",
-    "cardBack": "Kartenrückseite"
+    "cardBack": "Kartenrückseite",
+    "organizeLabel": "Hand ordnen",
+    "reorderPausedHint": "Das Umsortieren per Ziehen ist pausiert, solange die Hand sortiert oder gefiltert ist."
   },
   "opponentHud": {
     "ally": "Verbündeter",
@@ -1270,6 +1302,12 @@
       "optCmc": "Manawert",
       "optType": "Typ",
       "optColor": "Farbe",
+      "filterLabel": "Anzeigen",
+      "filterNone": "Alle",
+      "filterPlayable": "Spielbar",
+      "filterCreatures": "Kreaturen",
+      "filterLands": "Länder",
+      "filterNonland": "Nichtländer",
       "counterDiscard": "{{selected}} von {{cap}} abwerfen",
       "counterKeep": "{{selected}} von {{cap}} behalten",
       "keepInstead": "Stattdessen behalten",

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine::game::deck_loading::DeckEntry;
 use engine::game::printed_cards::printed_ref_from_face;
-use engine::types::card::PrintedCardRef;
+use engine::types::card::{CardFace, PrintedCardRef};
 use engine::types::game_state::{GameState, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
@@ -82,11 +82,17 @@ pub fn remaining_deck_view(state: &GameState, player: PlayerId) -> RemainingDeck
     RemainingDeckView { counts, entries }
 }
 
-fn accounted_object_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+/// CR 400.2: the object ids in `player`'s **public** zones (graveyard,
+/// owned-battlefield, owned-exile, stack spells) whose identity every player
+/// can see. Deliberately EXCLUDES the hidden hand and library. Splitting this
+/// out lets `accounted_object_ids` keep its "public + my own hand" behavior
+/// (correct for counting the cards remaining in *my* library) while
+/// `unknown_hidden_pool` reuses the public-only account to build the pool an
+/// opponent's unknown hidden slots draw from.
+fn public_account_object_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     let player_state = &state.players[player.0 as usize];
     let mut object_ids = Vec::new();
 
-    object_ids.extend(player_state.hand.iter().copied());
     object_ids.extend(player_state.graveyard.iter().copied());
     object_ids.extend(
         state
@@ -122,6 +128,89 @@ fn accounted_object_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     }));
 
     object_ids
+}
+
+/// Public-zone objects plus `player`'s own hand — the "cards accounted for
+/// outside `player`'s library" set. Behavior-preserving wrapper over
+/// `public_account_object_ids`: `known_remaining_deck_counts` (and through it
+/// `remaining_deck_view` → tutor/threat_profile) sees exactly the ids it saw
+/// before the public/hidden split.
+fn accounted_object_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let mut object_ids = public_account_object_ids(state, player);
+    object_ids.extend(state.players[player.0 as usize].hand.iter().copied());
+    object_ids
+}
+
+/// CR 400.2: hand and library are hidden zones. From an observer's perspective
+/// an opponent's hidden cards are unknown EXCEPT those the engine has revealed
+/// (pinned via `known_ids`). Returns the ordered multiset (decklist order) of
+/// card faces that could occupy `player`'s unknown hidden-zone slots — i.e.
+/// `decklist − public-zone cards − pinned-known hidden cards`.
+///
+/// Both hand and library slots draw from this ONE pool: from the observer's
+/// perspective, which unknown card sits in the hand vs. the library is itself
+/// unknown (CR 401.2), so they redistribute together. Pool order is the
+/// deterministic decklist order (the caller seeded-shuffles it — §8 #4878
+/// discipline); order-insensitive counting uses a `HashMap` but the expansion
+/// back to a `Vec` walks `current_main` in order.
+pub fn unknown_hidden_pool(
+    state: &GameState,
+    player: PlayerId,
+    known_ids: &HashSet<ObjectId>,
+) -> Vec<CardFace> {
+    let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) else {
+        return Vec::new();
+    };
+
+    // Working multiset of remaining deck cards keyed by DeckCardKey.
+    let mut counts: HashMap<DeckCardKey, u32> = HashMap::new();
+    for entry in pool.current_main.iter() {
+        if entry.count == 0 {
+            continue;
+        }
+        *counts.entry(deck_entry_key(entry)).or_insert(0) += entry.count;
+    }
+
+    // Decrement one per public-zone object and per pinned-known hidden object.
+    // The owner/token guards below make `known_ids` from any zone/player safe
+    // to pass wholesale, and `seen` dedups the overlap: a one-shot-revealed
+    // card (`public_revealed_cards` never clears) that later reaches a public
+    // zone appears in BOTH iterators but must subtract only once.
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    for object_id in public_account_object_ids(state, player)
+        .into_iter()
+        .chain(known_ids.iter().copied())
+    {
+        if !seen.insert(object_id) {
+            continue;
+        }
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.is_token || object.owner != player {
+            continue;
+        }
+        let key = object_key(object.printed_ref.as_ref(), &object.name);
+        if let Some(count) = counts.get_mut(&key) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    // Expand back to card faces in decklist order (deterministic pre-shuffle).
+    // Zero a key after emitting so two entries sharing a key can't double-emit.
+    let mut faces = Vec::new();
+    for entry in pool.current_main.iter() {
+        if entry.count == 0 {
+            continue;
+        }
+        let key = deck_entry_key(entry);
+        let remaining = counts.get(&key).copied().unwrap_or(0);
+        for _ in 0..remaining {
+            faces.push(entry.card.clone());
+        }
+        counts.insert(key, 0);
+    }
+    faces
 }
 
 fn deck_entry_key(entry: &DeckEntry) -> DeckCardKey {
@@ -275,5 +364,35 @@ mod tests {
 
         let counts = known_remaining_deck_counts(&state, PlayerId(0));
         assert!(!counts.contains_key(&DeckCardKey::FaceName("Alpha".to_string())));
+    }
+
+    #[test]
+    fn pool_decrements_once_for_public_object_also_in_known_ids() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            current_main: std::sync::Arc::new(vec![deck_entry("Alpha", 2, None)]),
+            ..Default::default()
+        });
+
+        // A card revealed while hidden (one-shot reveals never clear) that has
+        // since moved to the public graveyard: present in BOTH the public
+        // account and `known_ids`. It must subtract exactly once, leaving one
+        // Alpha in the unknown pool.
+        let alpha = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Alpha".to_string(),
+            Zone::Graveyard,
+        );
+        let known: HashSet<ObjectId> = [alpha].into_iter().collect();
+
+        let pool = unknown_hidden_pool(&state, PlayerId(0), &known);
+        assert_eq!(
+            pool.iter().filter(|face| face.name == "Alpha").count(),
+            1,
+            "overlapping public + known object must decrement the pool once, not twice"
+        );
     }
 }

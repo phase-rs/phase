@@ -233,7 +233,7 @@ jobs:
         continue-on-error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           ./scripts/coverage-regression-check.sh \
-            "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
+            "https://data.phase-rs.dev/preview/coverage-data.json" \
             data/coverage-data.json \
             --fail-on-engine
 
@@ -295,7 +295,7 @@ jobs:
             exit 0
           fi
           echo "$PR_NUMBER" > pr-number.txt
-          URL="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
+          URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
           if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
             cargo run --profile tool --features cli --bin coverage-parse-diff -- \
               coverage-base.json data/coverage-data.json \
