@@ -2,9 +2,9 @@
 
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
-- **Canonical root causes:** 31
-- **Distinct cards implicated:** 4810
-- **Total card appearances across root causes:** 4844 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Canonical root causes:** 30
+- **Distinct cards implicated:** 4797
+- **Total card appearances across root causes:** 4831 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
