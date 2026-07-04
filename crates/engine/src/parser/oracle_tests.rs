@@ -1,6 +1,7 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::counter::{CounterMatch, CounterType};
 
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
@@ -439,6 +440,98 @@ fn parsed_has_unimplemented(r: &ParsedAbilities) -> bool {
             .iter()
             .filter_map(|t| t.execute.as_deref())
             .any(def_chain_has_unimplemented)
+}
+
+#[test]
+fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
+    let parsed = parse(
+        "First strike\nWhenever Altaïr attacks, exile up to one target Assassin creature card from your graveyard with a memory counter on it. Then for each creature card you own in exile with a memory counter on it, create a tapped and attacking token that's a copy of it. Exile those tokens at end of combat.",
+        "Altaïr Ibn-La'Ahad",
+        &[Keyword::FirstStrike],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Altaïr must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.execute.is_some())
+        .expect("Altaïr attack trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected Graveyard->Exile head effect, got {:?}",
+            execute.effect
+        );
+    };
+    let copy = execute
+        .sub_ability
+        .as_deref()
+        .expect("CopyTokenOf sub-ability after exile");
+    let Effect::CopyTokenOf {
+        source_filter: Some(TargetFilter::Typed(source_filter)),
+        tapped,
+        enters_attacking,
+        ..
+    } = copy.effect.as_ref()
+    else {
+        panic!(
+            "expected source-filtered CopyTokenOf after exile, got {:?}",
+            copy.effect
+        );
+    };
+    assert!(*tapped);
+    assert!(*enters_attacking);
+    assert!(source_filter.type_filters.contains(&TypeFilter::Creature));
+    assert!(source_filter.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        )
+    }));
+    assert!(source_filter
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })));
+    assert!(source_filter.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic(name)),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        } if name == "memory"
+    )));
+
+    let delayed = copy
+        .sub_ability
+        .as_deref()
+        .expect("delayed end-of-combat cleanup");
+    let Effect::CreateDelayedTrigger { effect, .. } = delayed.effect.as_ref() else {
+        panic!("expected delayed cleanup trigger, got {:?}", delayed.effect);
+    };
+    let Effect::ChangeZone {
+        target,
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Exile,
+        ..
+    } = effect.effect.as_ref()
+    else {
+        panic!(
+            "expected LastCreated Battlefield->Exile cleanup, got {:?}",
+            effect.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::LastCreated);
 }
 
 /// CR 702.34a / CR 702.128a / CR 702.180a: the three self-cost graveyard

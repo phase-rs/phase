@@ -3274,7 +3274,6 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
         // puts the temporary token on top/bottom of a library ("… put it on the
         // bottom of its owner's library at the beginning of the next end step")
@@ -3298,6 +3297,19 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ) {
                 *target = TargetFilter::LastCreated;
             }
+        }
+        Effect::ChangeZone { target, origin, .. }
+            if matches!(
+                target,
+                TargetFilter::ParentTarget
+                    | TargetFilter::TriggeringSource
+                    | TargetFilter::TrackedSet { .. }
+            ) =>
+        {
+            // CR 603.7c: In the gated post-token scope, both singular
+            // anaphors and plural "those tokens" refer to the token(s) just
+            // created and must still be in the battlefield zone at cleanup.
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
         }
         _ => {}
     }
@@ -3323,7 +3335,6 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c (issue #4601 review): a delayed cleanup that puts the
         // temporary token on top/bottom of a library ("… put it on the bottom
         // of its owner's library at the beginning of the next end step") has the
@@ -3333,8 +3344,22 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         {
             *target = TargetFilter::LastCreated;
         }
+        Effect::ChangeZone { target, origin, .. } if matches!(target, TargetFilter::SelfRef) => {
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
+        }
         _ => {}
     }
+}
+
+fn rewrite_change_zone_cleanup_to_last_created(
+    target: &mut TargetFilter,
+    origin: &mut Option<Zone>,
+) {
+    *target = TargetFilter::LastCreated;
+    // CR 603.7c: A delayed triggered ability affects a referenced object only
+    // if that object remains in the zone it is expected to be in when the
+    // delayed trigger resolves.
+    origin.get_or_insert(Zone::Battlefield);
 }
 
 /// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
@@ -3583,7 +3608,8 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
                 {
                     return (None, text.to_string());
                 }
-                if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                let mut copy_ctx = ParseContext::default();
+                if parse_for_each_object_copy_parts(text, &lower, &mut copy_ctx).is_some() {
                     return (None, text.to_string());
                 }
                 // CR 606.3: The Chain Veil's "For each planeswalker you control,

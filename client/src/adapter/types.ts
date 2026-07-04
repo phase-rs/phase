@@ -487,6 +487,7 @@ export type CastingVariant =
   | { type: "Awaken" }
   | { type: "Cleave" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Freerunning" }
   | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
