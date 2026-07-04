@@ -10,10 +10,13 @@ import {
   getCastableZoneViewerTarget,
   getOpponentIds,
   getSeatCount,
+  getVisibleBoardPlayerIds,
   getWaitingForObjectChoiceIds,
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
+  isSplitBoardActive,
   resolveFocusedOpponent,
+  shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
 
 // Test fixtures only populate the fields these helpers actually read.
@@ -96,6 +99,46 @@ describe("resolveFocusedOpponent", () => {
 
   it("returns null when no live opponents remain", () => {
     expect(resolveFocusedOpponent(1, [])).toBeNull();
+  });
+});
+
+describe("getVisibleBoardPlayerIds", () => {
+  it("returns local and focused live opponent in focused multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, 2, "focused")).toEqual([0, 2]);
+  });
+
+  it("falls back to the first live opponent in focused multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, null, "focused")).toEqual([0, 1]);
+  });
+
+  it("returns local and all live opponents in split multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, 2, "split")).toEqual([0, 1, 2, 3]);
+  });
+
+  it("excludes eliminated opponents in split multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3], [2]), 0, 2, "split")).toEqual([0, 1, 3]);
+  });
+
+  it("returns an empty list for null state", () => {
+    expect(getVisibleBoardPlayerIds(null, 0, 1, "split")).toEqual([]);
+  });
+
+  it("keeps 1v1 unchanged even when split is selected", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1]), 0, null, "split")).toEqual([0, 1]);
+  });
+});
+
+describe("split board ownership helpers", () => {
+  it("activates split layout only for 3+ player games", () => {
+    expect(isSplitBoardActive("split", 4)).toBe(true);
+    expect(isSplitBoardActive("split", 2)).toBe(false);
+    expect(isSplitBoardActive("focused", 4)).toBe(false);
+  });
+
+  it("suppresses the focused opponent top row only in active split mode", () => {
+    expect(shouldRenderFocusedOpponentTopRow("split", 4)).toBe(false);
+    expect(shouldRenderFocusedOpponentTopRow("split", 2)).toBe(true);
+    expect(shouldRenderFocusedOpponentTopRow("focused", 4)).toBe(true);
   });
 });
 
