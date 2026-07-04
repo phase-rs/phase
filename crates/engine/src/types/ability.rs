@@ -17604,6 +17604,15 @@ pub enum ContinuousModification {
     /// is derived from the subtype in `mana_sources.rs` (CR 305.6), so no explicit
     /// mana grant is needed here.
     SetChosenBasicLandType,
+    /// CR 612.8 + CR 613.1c: A continuous effect that sets the object's name to
+    /// the granting source's chosen card name (Layer 3, text-changing). Reads the
+    /// source's `ChosenAttribute::CardName` at layer-evaluation time; per CR 612.8
+    /// the object loses any names it had and has only the chosen name. The
+    /// chosen-read sibling of the literal `SetName` (which is a Layer-1 copy
+    /// override, CR 707.9b), mirroring how `AddChosenColor` is the chosen-read
+    /// sibling of `SetColor`. Used by "its name is the last chosen name" (Psychic
+    /// Paper). Unit variant: the read source is implicitly `ChosenAttribute::CardName`.
+    SetChosenName,
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,

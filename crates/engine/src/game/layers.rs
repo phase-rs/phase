@@ -4457,6 +4457,21 @@ fn apply_continuous_effect_filtered(
         None
     };
 
+    // Pre-read chosen card name from source (avoids borrow conflict in the loop).
+    // CR 612.8 + CR 613.1c: `SetChosenName` sets the recipient's name to the
+    // granting source's chosen card name. Read once here (the source's most recent
+    // `ChosenAttribute::CardName`) so the per-recipient loop can assign without
+    // re-borrowing `state` — mirrors the `chosen_color` / `chosen_subtype` /
+    // `chosen_card_type` pre-read blocks above.
+    let chosen_card_name = if matches!(effect.modification, ContinuousModification::SetChosenName) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_card_name().map(str::to_string))
+    } else {
+        None
+    };
+
     // CR 613.1b: For Layer 2 ChangeController, the new controller is the effect's
     // own `controller` field — set authoritatively by the effect that queued the
     // continuous modification (e.g. gain_control passes `ability.controller`,
@@ -4571,6 +4586,15 @@ fn apply_continuous_effect_filtered(
             // follows `CopyValues` in `add_transient_continuous_effect`).
             ContinuousModification::SetName { name } => {
                 obj.name = name.clone();
+            }
+            // CR 612.8 + CR 613.1c: Layer 3 — set the object's name to the
+            // granting source's chosen card name. Per CR 612.8 the object loses
+            // any other names. No-op until a name has been chosen (`chosen_card_name`
+            // pre-read above is `None`), so the printed name is retained.
+            ContinuousModification::SetChosenName => {
+                if let Some(ref name) = chosen_card_name {
+                    obj.name = name.clone();
+                }
             }
             ContinuousModification::AddPower { value } => {
                 if let Some(ref mut p) = obj.power {
@@ -10923,6 +10947,81 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Forest".to_string()),
             "Land should no longer have Forest subtype"
+        );
+    }
+
+    /// CR 612.8 + CR 613.7: SetChosenName renames the equipped creature to the
+    /// granting source's chosen card name; with no choice recorded it is a no-op,
+    /// and a re-choice (appended) supersedes the prior name (most recent wins).
+    #[test]
+    fn set_chosen_name_renames_equipped_creature_to_source_choice() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let creature_id = make_creature(&mut state, "Grizzly Bears", 2, 2, p0);
+
+        // An Equipment whose static sets the equipped creature's name to the
+        // Equipment's own chosen card name.
+        let equip_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&equip_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::SetChosenName]),
+            );
+        }
+        state.objects.get_mut(&equip_id).unwrap().attached_to = Some(creature_id.into());
+
+        // No choice recorded yet → printed name retained (no-op).
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Grizzly Bears",
+            "with no chosen name the equipped creature keeps its printed name"
+        );
+
+        // Record a chosen card name on the Equipment → creature is renamed.
+        state
+            .objects
+            .get_mut(&equip_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Llanowar Elves",
+            "the equipped creature takes the source's chosen card name"
+        );
+
+        // A re-choice appends; CR 613.7 — the most recent choice wins.
+        state
+            .objects
+            .get_mut(&equip_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Birds of Paradise".to_string()));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Birds of Paradise",
+            "the latest chosen card name supersedes the prior one"
         );
     }
 
