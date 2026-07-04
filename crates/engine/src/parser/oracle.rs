@@ -5245,6 +5245,13 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         ),
         value(ActivationRestriction::AsInstant, tag("as an instant")),
         value(
+            opponents_turn_activation_restriction(),
+            alt((
+                tag("during an opponent's turn"),
+                tag("during an opponents turn"),
+            )),
+        ),
+        value(
             ActivationRestriction::DuringYourTurn,
             alt((tag("during your turn"), tag("during their turn"))),
         ),
@@ -5268,6 +5275,20 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }]);
     }
     None
+}
+
+fn opponents_turn_activation_restriction() -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(opponents_turn_activation_condition()),
+    }
+}
+
+/// CR 602.5b + CR 102.1 + CR 109.5: "Activate only during an opponent's turn"
+/// gates activation to turns where the activator is not the active player.
+fn opponents_turn_activation_condition() -> ParsedCondition {
+    ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::IsYourTurn),
+    }
 }
 
 pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
@@ -5387,66 +5408,28 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        // CR 602.5b + CR 602.5c: "<timing> and only once [each turn]" pairings are
-        // NOT enumerated here. `peel_only_once_rider` (below) strips the limit
-        // rider and re-enters this loop so the bare "activate only <timing>" arm
-        // matches on the next pass — one composed suffix axis for the limit, one
-        // for the timing, rather than a hardcoded timing × limit table.
-
-        if let Some(prefix) = lower.strip_suffix("activate only as a sorcery") {
-            let end = remaining.len() - "activate only as a sorcery".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::AsSorcery);
-            if prefix.trim().is_empty() {
-                break;
+        // CR 602.5b: Delegate bare "Activate only <timing>" phrases to the same
+        // timing parser used by the "Any player may activate ... but only"
+        // composition path. The condition-only form stays on its specialized
+        // branch below so the once-per-turn rider is stripped before condition
+        // parsing.
+        if let Some((before, restriction)) = tp.rsplit_around("activate only ") {
+            if tag::<_, _, OracleError<'_>>("if ")
+                .parse(restriction.lower.trim_start())
+                .is_err()
+            {
+                if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
+                    constraints.restrictions.extend(parsed);
+                    remaining = before
+                        .original
+                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                        .to_string();
+                    if remaining.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
             }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only as an instant") {
-            let end = remaining.len() - "activate only as an instant".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::AsInstant);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only during your turn") {
-            let end = remaining.len() - "activate only during your turn".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourTurn);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only during your upkeep") {
-            let end = remaining.len() - "activate only during your upkeep".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourUpkeep);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
         }
 
         if let Some(prefix) = lower.strip_suffix("activate only during combat") {

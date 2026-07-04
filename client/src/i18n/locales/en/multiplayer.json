@@ -110,6 +110,7 @@
     "subtitle": "Pick a region, or connect to a self-hosted instance.",
     "noneLabel": "None (P2P only)",
     "directCodes": "direct codes",
+    "official": "Official",
     "selfHosted": "Self-hosted",
     "customUrlPlaceholder": "wss://your-server.example/ws",
     "test": "Test",

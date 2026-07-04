@@ -4979,6 +4979,49 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     })
 }
 
+/// CR 614.1a + CR 611.2 + CR 901.9c: Parse "[if] a player would planeswalk as a
+/// result of rolling the planar die, [effect] instead" (Fixed Point in Time)
+/// into `Effect::CreatePlaneswalkReplacement`. The substitute rides in
+/// `replacement_effect`; the resolver installs a floating, duration-bound
+/// (`until your next turn`) shield.
+///
+/// The subject is parsed as a distinct combinator step so it can grow into an
+/// `alt` of player scopes later. Today the only card in the class is any-player
+/// ("a player") — the resolver installs an `AnyPlayer` shield — so a non-"a
+/// player" subject fails the parse and stays an honest gap rather than a
+/// mis-scoped shield. The substitute is parsed by `parse_effect`; an
+/// Unimplemented payload is rejected so this never emits a silent misparse.
+pub(crate) fn parse_planar_die_planeswalk_replacement(norm_lower: &str) -> Option<Effect> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(norm_lower)
+        .ok()?;
+    // CR 611.2 / CR 901.9c: "a player" (any-player scope). A distinct combinator
+    // step from the predicate so the subject axis stays composable.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a player").parse(rest).ok()?;
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>(" would planeswalk as a result of rolling the planar die, ")
+            .parse(rest)
+            .ok()?;
+
+    // CR 614.6: isolate the substitute payload — everything up to (excluding)
+    // the trailing "instead". Split via the shared nom combinator, never byte
+    // math.
+    let (_, (payload_text, after_instead)) = nom_primitives::split_once_on(rest, "instead").ok()?;
+    let payload_text = payload_text.trim();
+    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
+    // Honest-gap guard: never emit a silent misparse for an unrecognized
+    // substitute (e.g. voting / villainous-choice phenomena stay Unimplemented).
+    if matches!(payload, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    // CR 614.1a: the clause must end cleanly after "instead" (optional period).
+    crate::parser::oracle_effect::parse_optional_period_and_end(after_instead)?;
+
+    Some(Effect::CreatePlaneswalkReplacement {
+        replacement_effect: Box::new(payload),
+    })
+}
+
 /// CR 614.9 + CR 614.5: Parse the en-Kor cycle's one-shot redirection —
 /// "the next N damage that would be dealt to ~ this turn is dealt to target
 /// creature you control instead" (Nomads / Lancers / Outrider / Shaman / Spirit
@@ -16464,6 +16507,66 @@ mod snapshot_tests {
             )
             .is_none(),
             "Words of Waste (each-opponent payload) must remain an honest gap"
+        );
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_parses_chaos_ensues() {
+        // Fixed Point in Time: the effect body after the trigger/duration is
+        // stripped. Building-block: the clause parses to a
+        // CreatePlaneswalkReplacement carrying the chaos-ensues substitute.
+        let effect = parse_planar_die_planeswalk_replacement(
+            "if a player would planeswalk as a result of rolling the planar die, chaos ensues instead",
+        )
+        .expect("Fixed Point in Time replacement clause must parse");
+        match effect {
+            Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+                assert!(
+                    matches!(*replacement_effect, Effect::ChaosEnsues),
+                    "substitute must be ChaosEnsues, got {replacement_effect:?}"
+                );
+            }
+            other => panic!("expected CreatePlaneswalkReplacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_routes_through_parse_effect() {
+        // End-to-end through the clause dispatch: the effect body routes to
+        // CreatePlaneswalkReplacement (never a leading-"if" strip to Unimplemented).
+        let effect = crate::parser::oracle_effect::parse_effect(
+            "if a player would planeswalk as a result of rolling the planar die, chaos ensues instead",
+        );
+        assert!(
+            matches!(effect, Effect::CreatePlaneswalkReplacement { .. }),
+            "the clause dispatch must route the planeswalk-replacement form, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn chaos_ensues_parses_as_effect_leaf() {
+        // Building-block: the substitute step depends on `parse_effect("chaos
+        // ensues") == Effect::ChaosEnsues`.
+        assert!(
+            matches!(
+                crate::parser::oracle_effect::parse_effect("chaos ensues"),
+                Effect::ChaosEnsues
+            ),
+            "\"chaos ensues\" must parse to Effect::ChaosEnsues"
+        );
+    }
+
+    #[test]
+    fn planar_die_planeswalk_replacement_rejects_unknown_substitute() {
+        // Honest-gap guard: an unrecognized substitute must NOT emit a
+        // CreatePlaneswalkReplacement wrapping Unimplemented (never a silent
+        // misparse) — it returns None so the clause stays an honest gap.
+        assert!(
+            parse_planar_die_planeswalk_replacement(
+                "if a player would planeswalk as a result of rolling the planar die, glorp the florb instead"
+            )
+            .is_none(),
+            "an unrecognized substitute must remain an honest gap"
         );
     }
 

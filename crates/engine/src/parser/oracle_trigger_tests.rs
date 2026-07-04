@@ -10967,6 +10967,99 @@ fn trigger_encounter_maps_to_planeswalked_to() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// DEFERRED GAP (documented, not fixed): Caught in a Parallel Universe is a
+/// Planechase phenomenon whose encounter effect is a per-player, left-neighbor,
+/// many-to-many choose-and-copy — "each player chooses a creature controlled by
+/// the player to their left. Each player creates a token that's a copy of the
+/// creature they chose, except it has menace."
+///
+/// Modeling this correctly needs infrastructure the engine does not yet have:
+///   * a left-neighbor `ControllerRef` — CR 103.1 fixes turn order (starting
+///     player, proceeding clockwise) and thus "the player to their left", but no
+///     filter controller ref resolves it (`ControllerRef` has no
+///     `PlayerToTheLeft`/left-neighbor variant);
+///   * a per-player PARALLEL selection where every player is simultaneously a
+///     chooser binding their own creature — `Effect::ChooseObjectsIntoTrackedSet`
+///     has a single `chooser` and one tracked set (CR 608.2c), not one binding
+///     per player; and
+///   * a per-player token copy keyed to each chooser's own binding —
+///     `CopyTokenOf { target: ParentTarget }` inherits ONE parent target, not a
+///     per-player selection (CR 707.2).
+///
+/// This is a single Planechase phenomenon, not a card class, so the per-player
+/// left-neighbor choose head is deliberately left as a strict-failure
+/// `Unimplemented { name: "choose" }` gap rather than mis-modeled with the
+/// single-chooser machinery. This test LOCKS that documented state so the card
+/// is not silently counted as fixed and a future change can't quietly alter the
+/// shape. When per-player parallel-selection infrastructure lands, replace this
+/// with a positive end-to-end test.
+#[test]
+fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap() {
+    let def = parse_trigger_line(
+        "When you encounter Caught in a Parallel Universe, each player chooses a \
+         creature controlled by the player to their left. Each player creates a \
+         token that's a copy of the creature they chose, except it has menace. \
+         (Then planeswalk away from this phenomenon.)",
+        "Caught in a Parallel Universe",
+    );
+    // CR 312.5: the encounter maps to the face-up (planeswalked-to) endpoint.
+    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("the encounter trigger must carry an execute body");
+    // The per-player left-neighbor selection head is unsupported: it must remain
+    // a documented `Unimplemented { name: "choose" }` strict-failure, NOT be
+    // mis-converted into a single-chooser `ChooseObjectsIntoTrackedSet`.
+    match &*execute.effect {
+        Effect::Unimplemented { name, .. } => assert_eq!(
+            name, "choose",
+            "the deferred per-player choose head must stay an Unimplemented choose gap"
+        ),
+        other => panic!(
+            "Caught in a Parallel Universe's per-player left-neighbor choose is a \
+             deferred gap and must remain Unimplemented, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
+    // CR 312.5 + CR 614.1a + CR 901.9c: the full production parser must carry
+    // the encounter trigger, duration shell, and planar-die replacement payload
+    // together for Fixed Point in Time.
+    let parsed = parse_oracle_text(
+        "When you encounter Fixed Point in Time, until your next turn, if a player would planeswalk as a result of rolling the planar die, chaos ensues instead.",
+        "Fixed Point in Time",
+        &[],
+        &["Phenomenon".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::PlaneswalkedTo)
+        .expect("Fixed Point in Time encounter trigger must parse");
+
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("Fixed Point in Time trigger must execute");
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    match execute.effect.as_ref() {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            assert!(matches!(replacement_effect.as_ref(), Effect::ChaosEnsues));
+        }
+        other => panic!("expected CreatePlaneswalkReplacement, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
     // CR 312.5 / CR 701.31d: every arrival/encounter phrasing in the class
@@ -13280,6 +13373,78 @@ fn trigger_source_deals_exactly_n_damage_to_player() {
     assert_eq!(def.mode, TriggerMode::DamageDone);
     assert_eq!(def.damage_amount, Some((Comparator::EQ, 5)));
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
+}
+
+#[test]
+fn ghyrson_damage_trigger_parses_mixed_permanent_or_player_recipient() {
+    let parsed = parse_oracle_text(
+        "Ward {2}\nWhenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player.",
+        "Ghyrson Starn, Kelermorph",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+        "Ghyrson must parse without unimplemented abilities: {:?}",
+        parsed.abilities
+    );
+    let trigger = parsed.triggers.first().expect("Ghyrson trigger parses");
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.damage_amount, Some((Comparator::EQ, 1)));
+    assert_eq!(trigger.valid_target, None);
+    match trigger.valid_source.as_ref() {
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) => assert!(
+            properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Another)),
+            "source filter must require another controlled source: {properties:?}"
+        ),
+        other => panic!("expected another source you control filter, got {other:?}"),
+    }
+    let execute = trigger.execute.as_ref().expect("trigger has an effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::EventTarget,
+                damage_source: None,
+                ..
+            }
+        ),
+        "Ghyrson effect must damage the event target, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn damage_trigger_mixed_permanent_or_player_requires_exact_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a permanent or player this turn, draw a card.",
+        "Test",
+    );
+    assert_ne!(
+        def.mode,
+        TriggerMode::DamageDone,
+        "mixed permanent/player recipient must not accept trailing qualifier text"
+    );
+}
+
+#[test]
+fn damage_trigger_creature_or_player_is_not_promoted_to_mixed_recipient() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a creature or player, draw a card.",
+        "Test",
+    );
+    assert_ne!(def.mode, TriggerMode::DamageDone);
 }
 
 // Same general parser must also accept the no-threshold + noncombat-kind

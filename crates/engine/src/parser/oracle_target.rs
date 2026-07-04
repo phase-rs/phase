@@ -3,8 +3,9 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{opt, peek, success, value};
+use nom::combinator::{not, opt, peek, success, value};
 use nom::multi::many0;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -163,12 +164,16 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             value(TargetFilter::ParentTargetOwner, tag("their owner")),
             value(TargetFilter::TriggeringPlayer, tag("that player")),
             value(TargetFilter::TriggeringSource, tag("that source")),
-            // "that permanent or player" before "that permanent" — longest match first.
             value(
                 TargetFilter::TriggeringSource,
-                tag("that permanent or player"),
+                terminated(
+                    tag("that permanent"),
+                    not(preceded(
+                        tag(" "),
+                        alt((tag("or player"), tag("or a player"))),
+                    )),
+                ),
             ),
-            value(TargetFilter::TriggeringSource, tag("that permanent")),
             // CR 608.2k + CR 301.5a: "that creature" inside a trigger refers to the
             // triggering source object (e.g. Pip-Boy 3000's "Whenever equipped
             // creature attacks ... put a +1/+1 counter on that creature"), not to
@@ -9759,6 +9764,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_context_that_permanent_or_player_declines() {
+        assert_eq!(parse_event_context_ref("that permanent or player"), None);
+        assert_eq!(parse_event_context_ref("that permanent or a player"), None);
+    }
+
+    #[test]
     fn parse_event_context_returns_none_for_non_event() {
         assert_eq!(parse_event_context_ref("target creature"), None);
         assert_eq!(parse_event_context_ref("any target"), None);
@@ -9785,13 +9796,6 @@ mod tests {
         let (filter, rem) = parse_event_context_ref("that player and you gain 2 life").unwrap();
         assert_eq!(filter, TargetFilter::TriggeringPlayer);
         assert_eq!(rem, " and you gain 2 life");
-
-        // "that permanent or player" — longest-match-first, no bogus " or player" remainder
-        let (filter, rem) =
-            parse_event_context_ref("that permanent or player and the damage can't be prevented")
-                .unwrap();
-        assert_eq!(filter, TargetFilter::TriggeringSource);
-        assert_eq!(rem, " and the damage can't be prevented");
 
         // "that source" with remainder
         let (filter, rem) = parse_event_context_ref("that source and you draw a card").unwrap();

@@ -1182,6 +1182,13 @@ pub(crate) enum ChooseImperativeAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it / that permanent" — pick one
+    /// of the distinct counter kinds present on the anaphoric object (The Caves
+    /// of Androzani II/III). Lowered to `Effect::ChooseCounterKind`. `target` is
+    /// the anaphor (`ParentTarget` for the per-iteration object).
+    CounterKind {
+        target: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1408,6 +1415,14 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: CounterType,
         count: QuantityExpr,
         target: TargetFilter,
+    },
+    /// CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>"
+    /// — add `count` counters of the kind chosen by a preceding
+    /// `ChooseCounterKind` (The Caves of Androzani II/III). Lowered to
+    /// `Effect::PutChosenCounter`.
+    PutChosenCounter {
+        target: TargetFilter,
+        count: QuantityExpr,
     },
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a

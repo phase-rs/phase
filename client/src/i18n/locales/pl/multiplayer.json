@@ -110,6 +110,7 @@
     "subtitle": "Wybierz region lub połącz się z własną instancją.",
     "noneLabel": "Brak (tylko P2P)",
     "directCodes": "bezpośrednie kody",
+    "official": "Oficjalny",
     "selfHosted": "Własny hosting",
     "customUrlPlaceholder": "wss://twoj-serwer.example/ws",
     "test": "Testuj",
