@@ -5312,7 +5312,7 @@ fn parse_each_of_up_to_damage_target<'a>(
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
 const MULTI_TARGET_VERBS: &[&str] = &[
-    "exile", "tap", "untap", "goad", "return", "destroy", "choose",
+    "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
 
 pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
