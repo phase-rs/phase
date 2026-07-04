@@ -342,7 +342,14 @@ fn add_foretell_sorcery(state: &mut GameState) -> ObjectId {
     );
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.card_types.core_types.push(CoreType::Sorcery);
-    obj.keywords.push(Keyword::Foretell(foretell_test_cost()));
+    // A real printed foretell keyword lives in BOTH `keywords` and
+    // `base_keywords` (the off-zone characteristic layer seeds from
+    // `base_keywords`). `effective_foretell_cost` now consults the off-zone layer
+    // as its single authority, so mirror the keyword into `base_keywords` to model
+    // a printed keyword faithfully.
+    let foretell = Keyword::Foretell(foretell_test_cost());
+    obj.keywords.push(foretell.clone());
+    obj.base_keywords.push(foretell);
     object_id
 }
 
@@ -2079,6 +2086,7 @@ fn add_brushland_like_land(
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         ))
     } else {
@@ -2127,6 +2135,7 @@ fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: crate::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         obj.mana_cost = ManaCost::Cost {
@@ -2722,6 +2731,7 @@ fn create_targeted_activated_permanent(state: &mut GameState, player: PlayerId) 
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap),
@@ -3184,6 +3194,7 @@ fn targeted_composite_mana_tap_activation_excludes_source_after_target_selection
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             damage_source: None,
+            excess: None,
         },
     );
     let target = create_object(
@@ -3766,6 +3777,7 @@ fn x_cost_deal_x_damage_lands_for_chosen_x() {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         obj.mana_cost = ManaCost::Cost {
@@ -4935,6 +4947,7 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
                     },
                     target: TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -5109,6 +5122,7 @@ fn targeted_activation_replacement_pause_preserves_selected_targets() {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Discard {
@@ -15208,6 +15222,7 @@ fn activated_modal_with_no_legal_target_modes_rejects_activation() {
                         properties: vec![],
                     }),
                     damage_source: None,
+                    excess: None,
                 },
             )],
         ),
@@ -16264,6 +16279,7 @@ fn cancel_targeted_activated_ability_does_not_untap_source() {
             amount: QuantityExpr::Fixed { value: 1 },
             target: crate::types::ability::TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     ));
 
@@ -17841,6 +17857,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Player(PlayerId(1))],
         object_id,
@@ -17937,6 +17954,7 @@ fn create_modal_charm(state: &mut GameState, player: PlayerId) -> ObjectId {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         // Mode 1: Draw a card
@@ -18114,6 +18132,7 @@ fn modal_spell_target_selection_carries_per_mode_labels() {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         // Mode 1: Destroy target creature (targets).
@@ -19154,6 +19173,7 @@ fn modal_damage_mode_to_target_player_resolves_damage() {
                     ],
                 },
                 damage_source: None,
+                excess: None,
             },
         );
         obj.modal.as_mut().unwrap().mode_descriptions[0] =
@@ -20641,6 +20661,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )],
         trigger_definitions: Default::default(),
@@ -20731,6 +20752,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )],
         trigger_definitions: Default::default(),
@@ -21004,6 +21026,7 @@ fn adventure_exile_on_resolve() {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
@@ -21054,6 +21077,7 @@ fn adventure_countered_to_graveyard() {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
@@ -25246,6 +25270,7 @@ fn raise_cost_static_prevents_unaffordable_noncreature_cast() {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
     }
@@ -25329,6 +25354,7 @@ fn raise_cost_static_allows_affordable_noncreature_cast() {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
     }
@@ -29022,6 +29048,7 @@ mod remove_counter_cost {
                         },
                         target: TargetFilter::Typed(TypedFilter::creature()),
                         damage_source: None,
+                        excess: None,
                     },
                 )],
             ),

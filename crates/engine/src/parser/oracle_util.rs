@@ -5,7 +5,7 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::parse_cda_quantity;
-use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
+use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
 use crate::types::card_type::{
     fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
 };
@@ -642,6 +642,56 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     Some((QuantityExpr::Fixed { value: base }, rest))
 }
 
+/// CR 107.1a: Parse a standalone trailing rounding marker left after another
+/// parser consumed the fractional quantity's noun phrase.
+///
+/// Examples include token text (`"half X Food tokens, rounded up"`) and
+/// sacrifice-choice text (`"half the creatures they control of their choice,
+/// rounded up"`), where `parse_count_expr` correctly builds `DivideRounded`
+/// from the leading fraction but cannot see the suffix until the token/choice
+/// parser peels its own grammar.
+pub(crate) fn parse_rounding_suffix_only(text: &str) -> Option<RoundingMode> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_lowercase();
+    nom_on_lower(trimmed, &lower, |input| {
+        let (rest, rounding) = super::oracle_nom::quantity::parse_explicit_rounding_suffix(input)?;
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest)?;
+        let (rest, _) = eof::<_, OracleError<'_>>(rest)?;
+        Ok((rest, rounding))
+    })
+    .map(|(rounding, _)| rounding)
+}
+
+/// CR 107.1a: Apply an explicit rounding mode to every fractional quantity
+/// nested inside `expr`.
+pub(crate) fn rewrite_quantity_expr_rounding(expr: &mut QuantityExpr, mode: RoundingMode) {
+    match expr {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor: _,
+            rounding,
+        } => {
+            *rounding = mode;
+            rewrite_quantity_expr_rounding(inner, mode);
+        }
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr_rounding(inner, mode),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rewrite_quantity_expr_rounding(inner, mode);
+            }
+        }
+        QuantityExpr::UpTo { max } => rewrite_quantity_expr_rounding(max, mode),
+        QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr_rounding(exponent, mode),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_quantity_expr_rounding(left, mode);
+            rewrite_quantity_expr_rounding(right, mode);
+        }
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 /// Typed signal distinguishing which count-word `parse_count_expr` consumed.
 ///
 /// The numeric value of a count is the same whether the text said "a", "an",
@@ -1214,6 +1264,32 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
         }
     }
 
+    None
+}
+
+/// CR 205.3m creature-only subtype vocabulary, loaded from the committed
+/// `oracle-subtypes.json` (creature subtypes only — before the noncreature
+/// merge that `ORACLE_SUBTYPES` applies). Sorted longest-first so multi-word
+/// types (e.g. "Time Lord") match before shorter prefixes.
+static CREATURE_ONLY_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let mut creature: Vec<String> =
+        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+            .expect("oracle-subtypes.json well-formed");
+    creature.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    creature
+});
+
+/// Try to match a *creature* subtype (CR 205.3m) at the start of `text`.
+/// Returns `(canonical_name, bytes_consumed)` or `None`. Unlike `parse_subtype`,
+/// which also matches noncreature subtypes (Aura, Saga, Equipment, …), this is
+/// restricted to creature types — the correct vocabulary for "secretly choose
+/// <T1>, <T2>, or <T3>" candidate enumeration.
+pub fn parse_creature_subtype(text: &str) -> Option<(String, usize)> {
+    for subtype in CREATURE_ONLY_SUBTYPES.iter() {
+        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+            return Some(parsed);
+        }
+    }
     None
 }
 
@@ -2756,6 +2832,19 @@ mod tests {
             }
             other => panic!("Expected DivideRounded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_rounding_suffix_only_accepts_standalone_suffixes() {
+        assert_eq!(
+            parse_rounding_suffix_only(", rounded up."),
+            Some(crate::types::ability::RoundingMode::Up)
+        );
+        assert_eq!(
+            parse_rounding_suffix_only(", round down"),
+            Some(crate::types::ability::RoundingMode::Down)
+        );
+        assert_eq!(parse_rounding_suffix_only("Food tokens, rounded up"), None);
     }
 
     #[test]

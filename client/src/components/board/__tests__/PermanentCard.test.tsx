@@ -6,6 +6,15 @@ import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPendingCast,
+  buildPlayers,
+  buildPriorityWaitingFor,
+  buildTargetSelectionProgress,
+  buildTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
 import { PermanentCard } from "../PermanentCard.tsx";
 
@@ -36,41 +45,22 @@ vi.mock("../../card/CardImage.tsx", () => ({
 }));
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObject({
     id: 1,
     card_id: 100,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Test Creature",
     power: 2,
     toughness: 2,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
     mana_cost: { type: "Cost", shards: ["Green"], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Green"],
     base_power: 2,
     base_toughness: 2,
-    base_keywords: [],
     base_color: ["Green"],
-    timestamp: 1,
     entered_battlefield_turn: null,
     ...overrides,
-  };
+  });
 }
 
 function makeState(): GameState {
@@ -104,18 +94,14 @@ function makeState(): GameState {
     base_color: ["Blue"],
   });
 
-  return {
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    objects: { 1: host, 2: equipment, 3: aura },
+  return buildGameState({
+    players: buildPlayers([0, 1]),
+    objects: buildObjectMap(host, equipment, aura),
     battlefield: [1, 2, 3],
     exile: [],
     stack: [],
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 function renderPermanent(
@@ -425,7 +411,7 @@ describe("PermanentCard attachments", () => {
       base_power: null,
       base_toughness: null,
     });
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: {
         ...makeState().objects,
@@ -437,7 +423,7 @@ describe("PermanentCard attachments", () => {
         { exiled_id: 10, source_id: 1, kind: "TrackedBySource" },
         { exiled_id: 11, source_id: 1, kind: "TrackedBySource" },
       ],
-    } as unknown as GameState;
+    };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     const { container, queryByLabelText } = renderPermanent();
@@ -488,17 +474,19 @@ describe("PermanentCard attachments", () => {
     // clicks: targets glowed (validTargetObjectIds) but the click hit the dead
     // blocker branch and `ChooseTarget` never fired. Reported on Chain of Vapor
     // cast during combat.
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
-      waiting_for: {
-        type: "TargetSelection",
+      waiting_for: buildTargetSelectionWaitingFor({
         data: {
-          pending_cast: { object_id: 99 },
+          player: 0,
+          pending_cast: buildPendingCast({ object_id: 99 }),
           target_slots: [],
-          selection: { current_slot: 0, current_legal_targets: [{ Object: 1 }] },
+          selection: buildTargetSelectionProgress({
+            current_legal_targets: [{ Object: 1 }],
+          }),
         },
-      },
-    } as unknown as GameState;
+      }),
+    };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
     const staleBlockerHandler = vi.fn();
     useUiStore.setState({
@@ -539,7 +527,7 @@ describe("PermanentCard attachments", () => {
   });
 
   it("submits a single battlefield sacrifice choice from the board", () => {
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       waiting_for: {
         type: "EffectZoneChoice",
@@ -553,7 +541,7 @@ describe("PermanentCard attachments", () => {
           destination: null,
         },
       },
-    } as unknown as GameState;
+    };
     useGameStore.setState({
       gameState,
       waitingFor: gameState.waiting_for,
@@ -570,7 +558,7 @@ describe("PermanentCard attachments", () => {
   });
 
   it("submits immediate board choices from the board", () => {
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       waiting_for: {
         type: "StationTarget",
@@ -580,7 +568,7 @@ describe("PermanentCard attachments", () => {
           eligible_creatures: [1],
         },
       },
-    } as unknown as GameState;
+    };
     useGameStore.setState({
       gameState,
       waitingFor: gameState.waiting_for,
@@ -597,7 +585,7 @@ describe("PermanentCard attachments", () => {
   });
 
   it("counts only active board-choice selections when enforcing count limits", () => {
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       waiting_for: {
         type: "PayCost",
@@ -618,7 +606,7 @@ describe("PermanentCard attachments", () => {
           },
         },
       },
-    } as unknown as GameState;
+    };
     useGameStore.setState({
       gameState,
       waitingFor: gameState.waiting_for,
@@ -698,14 +686,14 @@ describe("PermanentCard attachments", () => {
           description: "{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
           effect: { type: "GenericEffect" },
         },
-      ] as unknown as GameObject["abilities"],
+      ] satisfies GameObject["abilities"],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 39: kessig },
       battlefield: [39],
-    } as unknown as GameState;
+    };
     const manaAction = { type: "TapLandForMana", data: { object_id: 39 } } as const;
     const abilityAction = {
       type: "ActivateAbility",
@@ -796,14 +784,14 @@ describe("PermanentCard attachments", () => {
             },
           },
         },
-      ] as unknown as GameObject["abilities"],
+      ] satisfies GameObject["abilities"],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 40: holdout },
       battlefield: [40],
-    } as unknown as GameState;
+    };
     const colorlessAction = {
       type: "ActivateAbility",
       data: { source_id: 40, ability_index: 0 },
@@ -857,11 +845,11 @@ describe("PermanentCard attachments", () => {
       base_color: ["Green"],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 41: helper },
       battlefield: [41],
-    } as unknown as GameState;
+    };
     const genericAction = {
       type: "TapForConvoke",
       data: { object_id: 41, mana_type: "Colorless" },
@@ -919,11 +907,11 @@ describe("PermanentCard attachments", () => {
       base_color: [],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 54: faceDownPermanent },
       battlefield: [54],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -971,11 +959,11 @@ describe("PermanentCard attachments", () => {
         "{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
     } as Partial<GameObject>);
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 70: lander },
       battlefield: [70],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -1025,14 +1013,14 @@ describe("PermanentCard attachments", () => {
           effect: { type: "Draw" },
           consumes_source: true,
         },
-      ] as unknown as GameObject["abilities"],
+      ] satisfies GameObject["abilities"],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 80: sacker },
       battlefield: [80],
-    } as unknown as GameState;
+    };
     const abilityAction = {
       type: "ActivateAbility",
       data: { source_id: 80, ability_index: 0 },
@@ -1088,14 +1076,14 @@ describe("PermanentCard attachments", () => {
           effect: { type: "Scry" },
           consumes_source: false,
         },
-      ] as unknown as GameObject["abilities"],
+      ] satisfies GameObject["abilities"],
     });
 
-    const gameState = {
+    const gameState: GameState = {
       ...makeState(),
       objects: { 81: scryer },
       battlefield: [81],
-    } as unknown as GameState;
+    };
     const abilityAction = {
       type: "ActivateAbility",
       data: { source_id: 81, ability_index: 0 },

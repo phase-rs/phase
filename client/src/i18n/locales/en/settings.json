@@ -61,6 +61,11 @@
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
     "showOpponentBoard": "Show opponent's board on HUD hover",
+    "multiplayerBoardLayout": "Multiplayer Board Layout",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Focused opponent",
+      "split": "Split table"
+    },
     "cardPreviewDelay": "Hover Delay",
     "cardPreviewDelayInstant": "Instant",
     "cardPreviewDelayValue": "{{ms}} ms",

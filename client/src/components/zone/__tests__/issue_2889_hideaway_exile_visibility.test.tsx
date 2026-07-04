@@ -5,6 +5,8 @@ import type { GameObject, GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import { GameCardPreview } from "../../card/GameCardPreview.tsx";
 import { ZoneViewer } from "../ZoneViewer.tsx";
 
@@ -55,84 +57,32 @@ vi.mock("../../card/CardImage.tsx", () => ({
 }));
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Creature"], {
     id: 7,
     card_id: 700,
-    owner: 0,
-    controller: 0,
     zone: "Exile",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Placeholder",
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: 0 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: null,
     ...overrides,
-  };
+  });
 }
 
 function makeState(
   objects: GameObject[],
   exileLinks: NonNullable<GameState["exile_links"]> = [],
 ): GameState {
-  return {
-    active_player: 0,
+  return buildGameState({
     priority_player: 0,
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-      {
-        id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-    ],
-    objects: Object.fromEntries(objects.map((o) => [o.id, o])),
+    players: buildPlayers([0, 1]),
+    objects: buildObjectMap(...objects),
     battlefield: objects.filter((o) => o.zone === "Battlefield").map((o) => o.id),
     exile: objects.filter((o) => o.zone === "Exile").map((o) => o.id),
     stack: [],
-    combat: null,
     exile_links: exileLinks,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 describe("ZoneViewer exile face-down visibility (issue #2889)", () => {

@@ -8,7 +8,21 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameObject,
+  buildObjectMap,
+} from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildCommanderFormatConfig,
+  buildFormatConfig,
+  buildGameState,
+  buildPendingCast,
+  buildPlayers,
+  buildPriorityWaitingFor,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  buildTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
 
 function setViewportWidth(width: number) {
   Object.defineProperty(window, "innerWidth", {
@@ -20,51 +34,20 @@ function setViewportWidth(width: number) {
 }
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
+  return buildGameState({
     active_player: 2,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 2, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 3, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
+    players: buildPlayers([
+      { id: 0, life: 40 },
+      { id: 1, life: 40 },
+      { id: 2, life: 40 },
+      { id: 3, life: 40 },
+    ]),
     priority_player: 2,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 2 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
+    waiting_for: buildPriorityWaitingFor({ data: { player: 2 } }),
     seat_order: [0, 1, 2, 3],
-    format_config: {
-      format: "Commander",
-      starting_life: 40,
-      min_players: 2,
-      max_players: 4,
-      deck_size: 100,
-      singleton: true,
-      command_zone: true,
-      commander_damage_threshold: 21,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: true,
-
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
+    format_config: buildCommanderFormatConfig(),
     ...overrides,
-  };
+  });
 }
 
 describe("OpponentHud", () => {
@@ -92,7 +75,11 @@ describe("OpponentHud", () => {
 
     act(() => {
       useGameStore.setState({
-        gameState: createGameState({ active_player: 3, priority_player: 3, waiting_for: { type: "Priority", data: { player: 3 } } }),
+        gameState: createGameState({
+          active_player: 3,
+          priority_player: 3,
+          waiting_for: buildPriorityWaitingFor({ data: { player: 3 } }),
+        }),
       });
     });
 
@@ -118,7 +105,11 @@ describe("OpponentHud", () => {
 
     act(() => {
       useGameStore.setState({
-        gameState: createGameState({ active_player: 1, priority_player: 1, waiting_for: { type: "Priority", data: { player: 1 } } }),
+        gameState: createGameState({
+          active_player: 1,
+          priority_player: 1,
+          waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
+        }),
       });
     });
 
@@ -210,13 +201,25 @@ describe("OpponentHud", () => {
     expect(usePreferencesStore.getState().opponentHudDensity).toBe("comfortable");
   });
 
+  it("forces compact opponent tabs in split overview without changing the saved density", () => {
+    usePreferencesStore.setState({ opponentHudDensity: "comfortable" });
+
+    render(<OpponentHud splitOverview />);
+
+    expect(screen.queryByRole("button", { name: /compact opponent hud/i })).toBeNull();
+    expect(screen.queryByText(/hand/i)).toBeNull();
+    expect(screen.queryByText(/creatures/i)).toBeNull();
+    expect(screen.queryByText(/lands/i)).toBeNull();
+    expect(usePreferencesStore.getState().opponentHudDensity).toBe("comfortable");
+  });
+
   it("keeps Follow enabled when browsing opponents on my turn", async () => {
     usePreferencesStore.setState({ followActiveOpponent: true });
     useGameStore.setState({
       gameState: createGameState({
         active_player: 0,
         priority_player: 0,
-        waiting_for: { type: "Priority", data: { player: 0 } },
+        waiting_for: buildPriorityWaitingFor({ data: { player: 0 } }),
       }),
     });
     render(<OpponentHud />);
@@ -240,7 +243,11 @@ describe("OpponentHud", () => {
 
     act(() => {
       useGameStore.setState({
-        gameState: createGameState({ active_player: 2, priority_player: 2, waiting_for: { type: "Priority", data: { player: 2 } } }),
+        gameState: createGameState({
+          active_player: 2,
+          priority_player: 2,
+          waiting_for: buildPriorityWaitingFor({ data: { player: 2 } }),
+        }),
       });
     });
 
@@ -284,23 +291,14 @@ describe("OpponentHud", () => {
     // click on the now-focused tab commits the player target (commit).
     function targetSelectionWaitingFor(legalPlayers: number[]): WaitingFor {
       const targets: TargetRef[] = legalPlayers.map((p) => ({ Player: p }));
-      // OpponentHud reads `data.player`, `data.selection.current_legal_targets`,
-      // and (only for CopyRetarget) `data.target_slots`. The other fields
-      // (`pending_cast`, `target_slots`) are required by the TS discriminated
-      // union but the renderer never reads them under TargetSelection, so a
-      // shallow cast keeps the fixture small.
-      return {
-        type: "TargetSelection",
+      return buildTargetSelectionWaitingFor({
         data: {
           player: 0,
-          selection: {
-            current_slot: 0,
-            current_legal_targets: targets,
-          },
-          target_slots: [{ legal_targets: targets }],
-          pending_cast: {} as never,
+          selection: buildTargetSelectionProgress({ current_legal_targets: targets }),
+          target_slots: [buildTargetSelectionSlot({ legal_targets: targets })],
+          pending_cast: buildPendingCast(),
         },
-      } as WaitingFor;
+      });
     }
 
     function mountWithTargeting(legalPlayers: number[] = [1, 2, 3]) {
@@ -377,29 +375,15 @@ describe("OpponentHud", () => {
 
   it("renders compact poison and speed badges for the 1v1 opponent HUD", () => {
     const gameState = createGameState({
-      players: [
-        { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-        { id: 1, life: 20, poison_counters: 4, speed: 1, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      ],
+      players: buildPlayers([
+        { id: 0, life: 20 },
+        { id: 1, life: 20, poison_counters: 4, speed: 1 },
+      ]),
       active_player: 1,
       priority_player: 1,
-      waiting_for: { type: "Priority", data: { player: 1 } },
+      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
       seat_order: [0, 1],
-      format_config: {
-        format: "Standard",
-        starting_life: 20,
-        min_players: 2,
-        max_players: 2,
-        deck_size: 60,
-        singleton: false,
-        command_zone: false,
-        commander_damage_threshold: null,
-        range_of_influence: null,
-        team_based: false,
-        uses_commander: false,
-
-        allow_debug_actions: false,
-      },
+      format_config: buildFormatConfig(),
     });
 
     act(() => {
@@ -457,14 +441,14 @@ describe("OpponentHud", () => {
   it("does not open the desktop aura hover preview on mobile", () => {
     setViewportWidth(500);
     const gameState = createGameState({
-      objects: {
-        "101": buildGameObject({
+      objects: buildObjectMap(
+        buildGameObject({
           id: 101,
           name: "Curse of Test",
           controller: 1,
           owner: 1,
         }),
-      },
+      ),
       derived: {
         auras_attached_to_player: { "1": [101] },
       },
@@ -488,7 +472,7 @@ describe("OpponentHud", () => {
           eliminated_players: [1, 2],
           active_player: 3,
           priority_player: 3,
-          waiting_for: { type: "Priority", data: { player: 3 } },
+          waiting_for: buildPriorityWaitingFor({ data: { player: 3 } }),
         }),
       });
       useUiStore.setState({ focusedOpponent: 1 });

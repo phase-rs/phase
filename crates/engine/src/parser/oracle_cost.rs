@@ -15,13 +15,14 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
+use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, AggregateFunction, BeholdCostAction, Comparator, ControllerRef, CostReduction,
-    CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
+    CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr,
+    QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
     REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -75,11 +76,62 @@ fn is_disjunctive_alt_cost(cost: &AbilityCost) -> bool {
 
 /// Inner cost parser that handles comma-splitting but NOT top-level `or`.
 /// Prevents infinite recursion when parsing each alternative of a OneOf.
+/// CR 607.2d + CR 608.2h: "reveal the <chosen attribute> you chose" (A Killer
+/// Among Us) reveals a value already stored on the source's `chosen_attributes`
+/// and openly visible in this full-information engine — informationally a no-op,
+/// the same reason "secretly" is stripped from the linked choice. Recognize it
+/// so the cost splitter drops it instead of misparsing "Reveal the …" as a
+/// phantom `Sacrifice` and leaving a spurious second cost component.
+///
+/// The revealed descriptor must name a chosen-attribute category (a creature
+/// type word or a category noun), not an arbitrary object, so this stays scoped
+/// to CR 607.2d linked reveals.
+fn is_reveal_chosen_attribute_noop(part: &str) -> bool {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let lower = part.trim().trim_end_matches('.').to_lowercase();
+    let Ok((mid, _)) = tag::<_, _, E<'_>>("reveal the ").parse(lower.as_str()) else {
+        return false;
+    };
+    let Ok((rest, attr)) = terminated(
+        take_until::<_, _, E<'_>>(" you chose"),
+        tag::<_, _, E<'_>>(" you chose"),
+    )
+    .parse(mid) else {
+        return false;
+    };
+    if !rest.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        attr,
+        "creature type"
+            | "color"
+            | "card type"
+            | "card name"
+            | "name"
+            | "land type"
+            | "basic land type"
+    ) || parse_creature_subtype(attr).is_some_and(|(_, len)| len == attr.len())
+}
+
 fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
     let parts = fixup_from_among_remove_counter_parts(split_cost_parts(text));
+    // Drop no-op "reveal the <chosen attribute> you chose" components so the
+    // remaining cost list is exactly the real costs (e.g. a single Sacrifice),
+    // never a Composite carrying a phantom reveal-Sacrifice. Keep the original
+    // parts if this would eliminate everything (defensive — never happens for a
+    // real cost line, which always has a paying component).
+    // ponytail: filtered here rather than modeled as an AbilityCost::None
+    // variant — dropping a part is a smaller diff than a new no-op cost arm.
+    let filtered: Vec<String> = parts
+        .iter()
+        .filter(|p| !is_reveal_chosen_attribute_noop(p))
+        .cloned()
+        .collect();
+    let parts = if filtered.is_empty() { parts } else { filtered };
     if parts.len() > 1 {
         let mut costs: Vec<AbilityCost> =
             parts.iter().map(|p| parse_single_cost(p.trim())).collect();
@@ -231,6 +283,47 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
     }
 }
 
+/// CR 601.2b + CR 701.4a: Parse the pre-choice behold cost "choose a creature
+/// type and behold N creatures of that type" (Celestial Reunion). Emits a
+/// `Behold { type_choice: Some(CreatureType) }` whose `filter` carries the
+/// `IsChosenCreatureType` leg — the "of that type" scoping resolved at cost time
+/// against the type the player will choose. Combinators only (one `alt` per
+/// axis); the found creatures are beheld from hand/battlefield as usual.
+fn parse_choose_type_and_behold_cost(lower: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (input, _) = tag::<_, _, E<'_>>("choose ").parse(lower).ok()?;
+    let (input, _) = alt((tag::<_, _, E<'_>>("a "), tag("an ")))
+        .parse(input)
+        .ok()?;
+    let (input, _) = tag::<_, _, E<'_>>("creature type and behold ")
+        .parse(input)
+        .ok()?;
+    let (input, count) =
+        if let Ok((rest, _)) = alt((tag::<_, _, E<'_>>("a "), tag("an "))).parse(input) {
+            (rest, 1)
+        } else if let Ok((rest, count)) =
+            terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")).parse(input)
+        {
+            (rest, count)
+        } else {
+            return None;
+        };
+    all_consuming(alt((
+        tag::<_, _, E<'_>>("creatures of that type"),
+        tag("creature of that type"),
+    )))
+    .parse(input.trim())
+    .ok()?;
+    Some(AbilityCost::Behold {
+        count,
+        filter: TypedFilter::creature()
+            .properties(vec![FilterProp::IsChosenCreatureType])
+            .into(),
+        action: BeholdCostAction::ChooseOrReveal,
+        type_choice: Some(ChoiceType::creature_type()),
+    })
+}
+
 fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let (input, _) = tag::<_, _, E<'_>>("behold ").parse(lower).ok()?;
@@ -272,6 +365,7 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
         count,
         filter,
         action,
+        type_choice: None,
     })
 }
 
@@ -338,6 +432,7 @@ fn parse_choose_or_reveal_behold_cost(lower: &str) -> Option<AbilityCost> {
         count: 1,
         filter: choose_filter,
         action: BeholdCostAction::ChooseOrReveal,
+        type_choice: None,
     })
 }
 
@@ -447,11 +542,18 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
+    // CR 601.2b + CR 701.4a: pre-choice behold ("choose a creature type and
+    // behold N creatures of that type") — tried first so the "choose … and
+    // behold …" shape is not swallowed by the generic choose-effect cost.
+    if let Some(cost) = parse_choose_type_and_behold_cost(&lower) {
+        return cost;
+    }
+
     if let Some(cost) = parse_behold_cost(&lower) {
         return cost;
     }
 
-    // CR 701.4a + CR 601.2b/f: spelled-out "choose … or reveal …" behold cost
+    // CR 701.4a + CR 601.2f: spelled-out "choose … or reveal …" behold cost
     // (Monstrous Emergence). Tried after the keyword form; both yield `Behold`.
     if let Some(cost) = parse_choose_or_reveal_behold_cost(&lower) {
         return cost;

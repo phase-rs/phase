@@ -1,10 +1,12 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { CardPreview } from "../CardPreview.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -23,66 +25,23 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
 }));
 
 function battlefieldObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObject({
     id: 101,
     card_id: 1,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Pithing Needle",
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
-    timestamp: 1,
-    entered_battlefield_turn: 1,
     ...overrides,
-  };
+  });
 }
 
-function gameStateWithObject(object: GameObject): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [],
-    priority_player: 0,
-    objects: { [String(object.id)]: object },
+function gameStateWithObject(object: GameObject) {
+  return buildGameState({
+    objects: buildObjectMap(object),
     next_object_id: 102,
     battlefield: [object.id],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 2,
-  } as GameState;
+  });
 }
 
 afterEach(() => {

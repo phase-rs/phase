@@ -942,6 +942,53 @@ fn any_ability_has_dealt_damage_this_way_life_lock(parsed: &ParsedAbilities) -> 
         })
 }
 
+/// CR 608.2c: True when any ability/trigger tree contains an `Effect::Discard`
+/// whose target is `ParentTarget` — the structural encoding of Sonic Shrieker's
+/// "If a player is dealt damage this way, they discard a card" rider. The
+/// `ParentTarget` target IS the CR 608.2c "this way" back-reference: it resolves
+/// to the damage recipient and only forces a discard when that recipient is a
+/// player (a creature/planeswalker target no-ops), so the leading "if" is
+/// represented, not swallowed. Mirrors `def_tree_has_parent_target_cant_gain_life`.
+/// ponytail: prevented-damage ceiling (CR 615.5) not gated — a fully prevented
+/// hit still discards here, the identical fidelity ceiling Screaming Nemesis
+/// ships; upgrade path = damage-recipient AbilityCondition when a card forces it.
+fn def_tree_has_parent_target_discard(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::Discard {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_parent_target_discard(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_parent_target_discard(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_parent_target_discard)
+}
+
+fn any_ability_has_parent_target_discard(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_parent_target_discard)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_parent_target_discard)
+        })
+}
+
 fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
     let has = |f: fn(&AbilityDefinition) -> bool| {
         parsed.abilities.iter().any(f)
@@ -1138,6 +1185,46 @@ fn any_replacement_has_may_cost_decline(parsed: &ParsedAbilities) -> bool {
                 ..
             }
         )
+    })
+}
+
+/// CR 614.1a + CR 120.8: "If a [source] would deal damage ..., it deals double
+/// that damage instead" is an UNCONDITIONAL value-modifier replacement (CR 120.8
+/// damage-increase replacement). The leading "if" is CR 614.1a replacement
+/// syntax introducing the replacement's applicability — NOT an independent
+/// CR 608.2c game-state gate — and is fully represented by the
+/// `ReplacementDefinition`'s `damage_modification`/`quantity_modification` with
+/// no `condition`. Only false-positives on ability-word-prefixed lines
+/// ("Flare Star — if a wizard ...") where the `— if` injects the leading space
+/// the bare-" if " marker keys on. The single-`if` + no-residual-gate guard
+/// keeps a genuinely gated value-modifier (a delirium/threshold clause that DOES
+/// want a `condition` field) from being masked here.
+fn unconditional_valmod_leading_if_is_only_if_marker(
+    stripped: &str,
+    parsed: &ParsedAbilities,
+) -> bool {
+    let Some(body) = super::oracle_modal::strip_ability_word(stripped) else {
+        return false;
+    };
+    let body = body.trim_start();
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !body.starts_with("if ") {
+        return false;
+    }
+    // A residual while/as-long-as/only-if is a genuine second gate (card 2's
+    // delirium threshold) that must still flag / be captured as `condition`.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if body.contains("while") || body.contains("as long as") || body.contains("only if") {
+        return false;
+    }
+    // Exactly the single leading replacement-`if`; a future value-modifier card
+    // carrying a SECOND genuine if-gate must still flag.
+    if body.split_whitespace().filter(|w| *w == "if").count() != 1 {
+        return false;
+    }
+    parsed.replacements.iter().any(|r| {
+        (r.damage_modification.is_some() || r.quantity_modification.is_some())
+            && r.condition.is_none()
     })
 }
 
@@ -2204,6 +2291,43 @@ fn strip_represented_replacement_instead_sentences(
     out
 }
 
+/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: "If you put a[n] <type> onto the
+/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan)
+/// is represented by the typed `Effect::ChangeZone.conditional_enter_with_counters`
+/// gate — the moved object's entry-time counters are applied only when it matches
+/// the carried filter (runtime-verified in
+/// `change_zone::enter_with_counters_for_object`), so the leading "if" is a
+/// representation marker, not a swallowed condition.
+///
+/// Mirrors `enters_modified_if_is_only_if_marker`: an inside AST probe
+/// (`conditional_enter_with_counters` carries `skip_serializing_if = Vec::is_empty`,
+/// so the key serializes ONLY when non-empty — keying tightly on the
+/// ChangeScope→Battlefield-with-counters shape the resolver handles) plus
+/// text-scoping — the represented put-onto-battlefield-this-way counter clause is
+/// located via the shared `is_moved_object_put_onto_battlefield_counters_clause`
+/// combinator and dropped sentence-by-sentence, and suppression fires ONLY when no
+/// OTHER bare " if " survives, so a compound card carrying the gate AND a separate
+/// unrelated " if " still flags.
+fn conditional_enter_counters_if_is_only_if_marker(stripped: &str, ast_json: &str) -> bool {
+    // allow-noncombinator: structural AST-shape JSON probe (mirrors enters_modified_if)
+    if !ast_json.contains("\"conditional_enter_with_counters\":") {
+        return false;
+    }
+    let residual: String = stripped
+        .split('.')
+        .filter(|sentence| {
+            !crate::parser::oracle_effect::sequence::is_moved_object_put_onto_battlefield_counters_clause(
+                sentence,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -2273,6 +2397,14 @@ fn detect_condition_if(
     let stripped = strip_represented_replacement_instead_sentences(&stripped, parsed);
     let stripped =
         strip_represented_tiered_enters_with_additional_counter_if_pairs(&stripped, parsed);
+    // CR 608.2c: "if a player is dealt damage this way, they discard" — the ParentTarget
+    // discard rider is structurally represented (Effect::Discard{target:ParentTarget}); the
+    // leading "if" is the CR 608.2c back-reference, not a swallowed game-state condition.
+    // Mirrors the Screaming Nemesis "dealt damage this way" life-lock exemption above.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if stripped.contains("dealt damage this way") && any_ability_has_parent_target_discard(parsed) {
+        return;
+    }
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
     // the "if you do" is the optional-exile linkage, represented by the
     // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
@@ -2294,6 +2426,12 @@ fn detect_condition_if(
     // `enters_modified_if` gate on the absorbed ChangeZone. Text-scoped: only
     // suppresses when that enters-modifier clause is the card's only bare " if ".
     if enters_modified_if_is_only_if_marker(&stripped, ast_json) {
+        return;
+    }
+    // CR 122.1 + CR 614.1c + CR 608.2c: "If you put a[n] <type> onto the
+    // battlefield this way, put [N] +1/+1 counters on it" (Oviya) is represented
+    // by `Effect::ChangeZone.conditional_enter_with_counters`.
+    if conditional_enter_counters_if_is_only_if_marker(&stripped, ast_json) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -2351,6 +2489,14 @@ fn detect_condition_if(
     if parsed.casting_options.iter().any(|o| o.cost.is_some()) && has_pay_phrase {
         return;
     }
+    // CR 614.1a + CR 120.8: unconditional value-modifier replacement whose
+    // ability-word-stripped line leads with its own CR 614.1a applicability "if"
+    // ("Flare Star — if a wizard you control would deal damage ... it deals
+    // double that damage instead") — represented by the replacement's
+    // damage/quantity modification, not a swallowed conditional gate.
+    if unconditional_valmod_leading_if_is_only_if_marker(&stripped, parsed) {
+        return;
+    }
     // Bare " if " — covers prefix conditional ("if X, do Y") and suffix
     // conditional ("do Y if X"). Excluded: "as if", "even if" — modifiers,
     // not conditions. Also "if able" (CR 508.1d / CR 509.1c) —
@@ -2384,7 +2530,14 @@ fn detect_condition_if(
         // `ForceBlock`/`ForceAttack` effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
         "\"mode\":\"MustBlock\"",
-        "\"mode\":\"MustBeBlocked\"",
+        // `MustBeBlocked` is data-carrying (`MustBeBlocked { by: Option<_> }`).
+        // The `by` field has no `skip_serializing_if`, so serde emits the object
+        // form `{"MustBeBlocked":{"by":...}}` for BOTH shapes: `{"by":null}` for
+        // the bare "must be blocked if able" rider (`by: None`) and
+        // `{"by":{...}}` for typed riders (Ace's Baseball Bat, Slayer's Cleaver).
+        // Match the quoted variant key `"MustBeBlocked"`, which is common to both
+        // serializations, so both suppress the "if able" Condition_If marker.
+        "\"MustBeBlocked\"",
         "\"type\":\"ForceBlock\"",
         "\"type\":\"ForceAttack\"",
         // CR 305.9: "as ~ enters, you may pay X. If you don't, it enters
@@ -2982,6 +3135,9 @@ fn detect_duration_this_turn(
         "CardsDrawnThisTurn",
         "BattlefieldEntriesThisTurn",
         "PlayerActionsThisTurn",
+        // CR 603.4: "if you've done all four this turn" — the distinct-bend-count
+        // intervening-if condition consumes the "this turn" scope (Avatar Aang).
+        "BendTypesThisTurn",
         "OpponentLostLife",
         "OpponentDealtCombatDamage",
         // CR 611.3: a condition slot serialized as the typed `Unrecognized`
@@ -4317,6 +4473,54 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
     }
 
+    /// CR 509.1c: "must be blocked if able" riders are represented by
+    /// `StaticMode::MustBeBlocked { by }`, so the trailing "if able" must not be
+    /// reported as a swallowed `Condition_If`. The `by` field has no
+    /// `skip_serializing_if`, so serde emits the object form for BOTH shapes:
+    /// `{"MustBeBlocked":{"by":null}}` for the bare rider (`by: None`, Gaea's
+    /// Protector) and `{"MustBeBlocked":{"by":{...}}}` for the typed form
+    /// (`by: Some(filter)`, Slayer's Cleaver). The suppression marker matches the
+    /// quoted variant key `"MustBeBlocked"` common to both serializations.
+    #[test]
+    fn condition_if_accepts_must_be_blocked_rider() {
+        let bare = parse_named(
+            "This creature must be blocked if able.",
+            "Gaea's Protector",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&bare, "Condition_If"),
+            "bare must-be-blocked static must not report Condition_If: {:?}",
+            bare.parse_warnings
+        );
+        assert!(
+            bare.statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: None })),
+            "expected bare MustBeBlocked static, got {:?}",
+            bare.statics
+        );
+
+        let typed = parse_named(
+            "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.\nEquip {4}",
+            "Slayer's Cleaver",
+            &["Artifact"],
+        );
+        assert!(
+            !has_swallowed_detector(&typed, "Condition_If"),
+            "typed must-be-blocked static must not report Condition_If: {:?}",
+            typed.parse_warnings
+        );
+        assert!(
+            typed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: Some(_) })),
+            "expected typed MustBeBlocked static, got {:?}",
+            typed.statics
+        );
+    }
+
     #[test]
     fn condition_if_accepts_tiered_enters_with_counter_static() {
         let parsed = parse_named(
@@ -4346,6 +4550,58 @@ mod tests {
                 >= 2,
             "expected tiered ETB-counter statics, got {:?}",
             parsed.statics
+        );
+    }
+
+    /// CR 122.1 + CR 614.1c + CR 608.2c: Oviya's "If you put an artifact onto the
+    /// battlefield this way, put two +1/+1 counters on it" rider is represented by
+    /// `Effect::ChangeZone.conditional_enter_with_counters`, so the leading "if"
+    /// must NOT be reported as a swallowed condition. REVERT: without the
+    /// `conditional_enter_counters_if_is_only_if_marker` guard the false
+    /// `Condition_If` swallow returns and this assertion flips.
+    #[test]
+    fn condition_if_accepts_conditional_enter_with_counters_put_this_way() {
+        let parsed = parse_named(
+            "Each creature that's attacking one of your opponents has trample.\n\
+             {G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+            "Oviya, Automech Artisan",
+            &["Creature"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "represented conditional_enter_with_counters put-this-way rider must not report Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The put-this-way counter guard is text-scoped: a card carrying the
+    /// represented rider PLUS a separate, genuinely-unrepresented " if " must still
+    /// flag Condition_If (mirrors `represented_tiered_counter_pair_does_not_hide_unrelated_if`).
+    #[test]
+    fn conditional_enter_counters_does_not_hide_unrelated_if() {
+        let parsed = parse_named(
+            "{G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+            "Oviya, Automech Artisan",
+            &["Creature"],
+        );
+        let synthetic = format!(
+            "{}\nDraw a card if the moon is bright.",
+            "You may put a creature card from your hand onto the battlefield. \
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it."
+        );
+        let mut diagnostics = Vec::new();
+
+        check_swallowed_clauses(&synthetic, &parsed, &mut diagnostics);
+
+        assert!(
+            diagnostics.iter().any(|warning| matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )),
+            "separate unrelated if text must remain visible to Condition_If, got {diagnostics:?}"
         );
     }
 
@@ -4386,6 +4642,61 @@ mod tests {
             !has_swallowed_detector(&parsed, "Condition_If"),
             "lost-life-this-way result-reference draw must not report a swallowed condition: {:?}",
             parsed.parse_warnings
+        );
+    }
+
+    /// CR 614.1a + CR 120.8: An UNCONDITIONAL value-modifier replacement whose
+    /// ability-word-stripped body leads with its own CR 614.1a applicability
+    /// "if" ("Flare Star — If a Wizard you control would deal damage ..., it
+    /// deals double that damage instead") is fully represented by the
+    /// `ReplacementDefinition`'s `damage_modification` — the leading "if" is
+    /// replacement syntax, not a swallowed CR 608.2c gate. Revert discriminator:
+    /// removing the `unconditional_valmod_leading_if_is_only_if_marker` exemption
+    /// re-emits the `Condition_If` warning and this assertion flips.
+    #[test]
+    fn condition_if_accepts_unconditional_valmod_leading_if() {
+        let parsed = parse_named(
+            "Flare Star — If a Wizard you control would deal damage to a permanent \
+             or player, it deals double that damage instead.",
+            "Trance Kuja, Fate Defied",
+            &["Legendary", "Creature", "Wizard"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "unconditional value-modifier replacement's leading applicability-if \
+             must not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The exemption is guarded: a value-modifier replacement that ALSO carries a
+    /// genuine `while` gate (The Rollercrusher Ride's delirium threshold) does
+    /// NOT take the unconditional carve-out — its residual `while` blocks it. The
+    /// gate is instead captured as a `condition`, which self-suppresses
+    /// `Condition_If` via the `"condition":{` marker. Either way the warning must
+    /// be absent, but for the RIGHT reason (captured gate, not blanket exemption).
+    #[test]
+    fn condition_if_gated_valmod_captures_condition_not_blanket_exemption() {
+        let parsed = parse_named(
+            "Delirium — If a source you control would deal noncombat damage to a \
+             permanent or player while there are four or more card types among \
+             cards in your graveyard, it deals double that damage instead.",
+            "The Rollercrusher Ride",
+            &["Legendary", "Enchantment"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "gated value-modifier must capture its while-gate as a condition and \
+             not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.replacements.iter().any(|r| r.condition.is_some()),
+            "the delirium while-gate must be captured as a replacement condition, \
+             not dropped: {:?}",
+            parsed.replacements
         );
     }
 

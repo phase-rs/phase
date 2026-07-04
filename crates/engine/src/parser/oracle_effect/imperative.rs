@@ -45,12 +45,13 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_mass_type_union, parse_target, parse_target_with_ctx, parse_target_with_syntax,
-    parse_type_phrase, resolve_pronoun_target, TargetSyntax,
+    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_type_phrase, resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, split_around, starts_with_possessive, TextPair,
+    parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
+    starts_with_possessive, TextPair,
 };
 
 /// CR 702.26: Phasing direction used by the "phase in"/"phase out" dispatch.
@@ -1328,7 +1329,7 @@ pub(super) fn parse_targeted_action_ast(
         // bare count of 1. `parse_count_expr` discards the word's identity, so
         // without this the parsed target never regains `FilterProp::Another`
         // and the source could sacrifice itself (Morkrut Necropod, #4513).
-        let (count, after_count, count_word) =
+        let (mut count, after_count, count_word) =
             super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
                 crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 rest,
@@ -1342,7 +1343,12 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(target_text));
+        let target_text = strip_sacrifice_choice_marker(target_text);
+        // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+        if let Some(rounding) = parse_rounding_suffix_only(&target_text) {
+            rewrite_quantity_expr_rounding(&mut count, rounding);
+        }
+        let target_text = strip_sacrifice_count_suffix(&target_text);
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -1839,7 +1845,7 @@ pub(super) fn parse_targeted_action_ast(
         // Preserve the optional-target spec through the AST; it is stamped onto
         // the clause in `lower_imperative_family_ast`.
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+        let (target, _rem) = parse_fight_target(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight {
@@ -4324,7 +4330,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
-                    | ChoiceType::CreatureType
+                    | ChoiceType::CreatureType { .. }
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
@@ -7625,6 +7631,7 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 damage_source: None,
+                excess: _,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
@@ -7684,6 +7691,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }
             }
         }
@@ -7841,6 +7849,7 @@ pub(super) fn parse_imperative_family_ast(
                 vec![]
             },
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -7850,6 +7859,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::Upkeep,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
     // CR 500.8 + CR 513.1: "there is an additional end step after this step"
@@ -7862,6 +7872,7 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::End,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
         }));
     }
 
@@ -10180,16 +10191,17 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
-        ImperativeFamilyAst::MustBeBlocked => {
-            Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
-                duration: Some(Duration::UntilEndOfTurn),
-                target: None,
-            }
-        }
+        ImperativeFamilyAst::MustBeBlocked => Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: None }).modifications(vec![
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustBeBlocked { by: None },
+                    },
+                ]),
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
@@ -10483,7 +10495,18 @@ pub(super) fn parse_zone_counter_ast(
                 _remainder,
                 multi_target,
             )) => {
-                if is_all && multi_target.is_none() {
+                // CR 608.2c: A `ParentTarget` placement subject ("each of them")
+                // is an anaphor to a bounded set of chosen objects, not a
+                // battlefield-wide type scan. The `PutCounterAll` resolver
+                // matches its filter against every battlefield object and cannot
+                // resolve a bare `ParentTarget` (it has no target slot to bind),
+                // so route the anaphor to `PutCounter`, whose
+                // `resolve_defined_or_targets` binds `ability.targets` (the
+                // chosen creatures). Typed mass placements ("on each creature you
+                // control") and tracked-set demonstratives still take the
+                // `PutCounterAll` path.
+                if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
+                {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),
@@ -13297,6 +13320,39 @@ mod tests {
                             crate::types::ability::TypeFilter::Subtype("God".to_string())
                         )),
                     ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_half_creatures_choice_rounding_up_suffix_is_applied() {
+        let text = "sacrifice half the creatures they control of their choice, rounded up";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx);
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count, .. }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::DivideRounded {
+                        rounding: crate::types::ability::RoundingMode::Up,
+                        ..
+                    }
+                ));
+                assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                }) = target
+                else {
+                    panic!("expected ScopedPlayer-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![crate::types::ability::TypeFilter::Creature]
                 );
             }
             other => panic!("Expected Sacrifice, got {other:?}"),
