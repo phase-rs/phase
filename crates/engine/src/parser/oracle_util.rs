@@ -13,7 +13,7 @@ use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, opt};
+use nom::combinator::{eof, opt, peek, value};
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -1581,31 +1581,6 @@ fn unmask_ring_tempts_you_phrase(text: String) -> String {
 const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
 const CARD_NAMED_LITERAL_PLACEHOLDER: &str = "\u{E0002}";
 
-const CARD_NAMED_LITERAL_PREFIXES: &[&str] = &["card named ", "cards named "];
-const CARD_NAMED_LITERAL_TERMINATORS: &[&str] = &[
-    " and a card named ",
-    " and cards named ",
-    " or a card named ",
-    " or cards named ",
-    " onto ",
-    " into ",
-    " from ",
-    " in ",
-    " was ",
-    " this turn",
-    " this game",
-    ":",
-    ", reveal ",
-    ", put ",
-    ", sacrifice ",
-    ", then ",
-    ", you ",
-    ", it ",
-    ", that ",
-    ", this ",
-    ".",
-];
-
 /// CR 701.40a / CR 701.58a / CR 701.62a: A handful of cards are *named* after a
 /// keyword action ("Manifest Dread" → "Manifest dread.", "Cloak" → "Cloak …").
 /// Multi-word self-reference normalization is case-insensitive, so it would
@@ -1678,25 +1653,177 @@ fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String
     result
 }
 
+fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, usize> {
+    alt((
+        value("cards named ".len(), tag("cards named ")),
+        value("card named ".len(), tag("card named ")),
+    ))
+    .parse(input)
+}
+
+fn parse_card_named_article(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("a "), tag("another ")))).parse(input)
+}
+
+fn parse_card_named_list_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = alt((tag("and"), tag("or"))).parse(input)?;
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = opt(parse_card_named_article).parse(input)?;
+    let (input, _) = parse_card_named_literal_prefix(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_zone_qualifier(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("your "),
+            tag("their "),
+            tag("his "),
+            tag("her "),
+            tag("that player's "),
+            tag("target player's "),
+            tag("a player's "),
+            tag("each player's "),
+            tag("its owner's "),
+            tag("an opponent's "),
+            tag("each opponent's "),
+            tag("opponent's "),
+            tag("the "),
+            tag("a "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_card_named_possessed_zone(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = opt(parse_card_named_zone_qualifier).parse(input)?;
+    let (input, _) = alt((
+        tag("hands"),
+        tag("hand"),
+        tag("graveyards"),
+        tag("graveyard"),
+        tag("libraries"),
+        tag("library"),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_any_zone(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("the battlefield")),
+        value((), tag("battlefield")),
+        value((), tag("exile")),
+        parse_card_named_possessed_zone,
+    ))
+    .parse(input)
+}
+
+fn parse_card_named_zone_tail_boundary(input: &str) -> OracleResult<'_, ()> {
+    if input.is_empty() {
+        return Ok((input, ()));
+    }
+    value(
+        (),
+        peek(alt((
+            tag("."),
+            tag(","),
+            tag(";"),
+            tag(":"),
+            tag(" tapped"),
+            tag(" face down"),
+            tag(" under "),
+            tag(" this way"),
+            tag(" and "),
+            tag(" then "),
+        ))),
+    )
+    .parse(input)
+}
+
+fn parse_card_named_zone_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = alt((
+        value((), (tag("into "), parse_card_named_any_zone)),
+        value((), (tag("onto "), parse_card_named_any_zone)),
+        value((), (tag("from "), parse_card_named_any_zone)),
+        value((), (tag("in "), parse_card_named_any_zone)),
+    ))
+    .parse(input)?;
+    let (input, _) = parse_card_named_zone_tail_boundary(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_revealed_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = alt((tag("was"), tag("were"))).parse(input)?;
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = tag("revealed").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_turn_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = alt((tag("this turn"), tag("this game"))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_comma_instruction_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag(", ").parse(input)?;
+    let (input, _) = alt((
+        tag("reveal "),
+        tag("put "),
+        tag("sacrifice "),
+        tag("then "),
+        tag("you "),
+        tag("it "),
+        tag("that "),
+        tag("this "),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_clause_boundary(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("."), tag(":")))).parse(input)
+}
+
+fn parse_card_named_literal_boundary(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_card_named_list_boundary,
+        parse_card_named_zone_boundary,
+        parse_card_named_revealed_boundary,
+        parse_card_named_turn_boundary,
+        parse_card_named_comma_instruction_boundary,
+        parse_card_named_clause_boundary,
+    ))
+    .parse(input)
+}
+
 fn next_card_named_literal_prefix(lower: &str) -> Option<(usize, usize)> {
-    CARD_NAMED_LITERAL_PREFIXES
-        .iter()
-        .flat_map(|prefix| {
-            lower
-                .match_indices(prefix)
-                .map(move |(idx, _)| (idx, prefix.len()))
-        })
-        .filter(|(idx, _)| {
-            *idx == 0 || !lower.as_bytes()[idx.saturating_sub(1)].is_ascii_alphanumeric()
-        })
-        .min_by_key(|(idx, _)| *idx)
+    lower.char_indices().find_map(|(idx, _)| {
+        let is_word_boundary = idx == 0
+            || lower[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+        is_word_boundary
+            .then(|| parse_card_named_literal_prefix(&lower[idx..]).ok())
+            .flatten()
+            .map(|(_, prefix_len)| (idx, prefix_len))
+    })
 }
 
 fn card_named_literal_span_len(lower: &str) -> usize {
-    CARD_NAMED_LITERAL_TERMINATORS
-        .iter()
-        .filter_map(|terminator| lower.match_indices(terminator).next().map(|(idx, _)| idx))
-        .min()
+    lower
+        .char_indices()
+        .find_map(|(idx, _)| {
+            parse_card_named_literal_boundary(&lower[idx..])
+                .is_ok()
+                .then_some(idx)
+        })
         .unwrap_or(lower.len())
 }
 
@@ -2178,6 +2305,37 @@ mod tests {
                 "Nabob Collector",
             ),
             "Search your library for a card named Squee, Goblin Nabob, reveal it."
+        );
+    }
+
+    #[test]
+    fn normalize_card_named_literal_keeps_in_inside_card_name() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Search your library for a card named Lost in the Woods, reveal it.",
+                "Woods Collector",
+            ),
+            "Search your library for a card named Lost in the Woods, reveal it."
+        );
+    }
+
+    #[test]
+    fn normalize_card_named_literal_keeps_from_inside_card_name() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Conjure a card named Extract from Darkness into your hand.",
+                "Darkness Collector",
+            ),
+            "Conjure a card named Extract from Darkness into your hand."
+        );
+    }
+
+    #[test]
+    fn normalize_card_named_literal_prefix_requires_unicode_boundary() {
+        assert!(next_card_named_literal_prefix("nazgûlcard named mox emerald").is_none());
+        assert_eq!(
+            next_card_named_literal_prefix("nazgûl card named mox emerald"),
+            Some(("nazgûl ".len(), "card named ".len()))
         );
     }
 
