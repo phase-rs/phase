@@ -2398,6 +2398,132 @@ mod tests {
         assert_eq!(state.objects[&src_b].damage_marked, 0);
     }
 
+    /// CR 120.1 + CR 616.1e: `EachSourceDealsDamage` Phase B can pause before
+    /// damage is applied when an optional damage replacement needs a player
+    /// choice. The paused source resumes through `ChooseReplacement`, while the
+    /// remaining sources stay parked as source-preserving damage continuations.
+    #[test]
+    fn each_source_deals_damage_phase_b_replacement_pause_resumes_remaining_sources() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+
+        let source_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Pinger A".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Pinger B".to_string(),
+            Zone::Battlefield,
+        );
+        for source in [source_a, source_b] {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.base_power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let recipient = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.base_power = Some(0);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+
+        install_optional_damage_replacement(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+            },
+            vec![TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("remaining source must be stashed while first source waits");
+        assert_eq!(
+            cont.parent_kind,
+            Some(EffectKind::EachSourceDealsDamage),
+            "drain must re-emit the EachSourceDealsDamage parent event"
+        );
+        let summary = collect_chain_summary(&cont.chain);
+        assert_eq!(
+            summary,
+            vec![(source_b, TargetRef::Object(recipient), 1)],
+            "remaining raw Phase-B source must resume with its own source id"
+        );
+
+        let mut parent_event_seen = false;
+        let mut replacement_choices = 0;
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept EachSourceDealsDamage damage replacement");
+            parent_event_seen |= result.events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::EachSourceDealsDamage,
+                        ..
+                    }
+                )
+            });
+            replacement_choices += 1;
+            assert!(
+                replacement_choices <= 4,
+                "replacement resume should not loop indefinitely"
+            );
+        }
+        assert_eq!(
+            state.objects[&recipient].damage_marked, 2,
+            "accepted first source and resumed second source must both mark damage"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(
+            state.pending_continuation.is_none(),
+            "continuation must be consumed after replacement resume"
+        );
+        assert!(
+            parent_event_seen,
+            "pause-and-resume path must emit the parent effect resolution event"
+        );
+    }
+
     /// CR 109.4 + CR 120.3a: `EachSourceDealsDamage { EachController }` — each
     /// creature deals to the player that controls it, so two creatures under
     /// different controllers each ping a different player (Rakdos Charm / Aura Barbs
@@ -2645,6 +2771,167 @@ mod tests {
             }
             other => panic!("expected post-replacement damage continuation, got {other:?}"),
         }
+    }
+
+    /// CR 120.3f + CR 120.4b + CR 616.1e: `EachSourceDealsDamage` uses the same
+    /// Phase-C survivor parking as the `EachTarget` source batch. A lifelink
+    /// life-gain replacement can pause after the first source's damage is
+    /// already marked; the remaining already-replaced source must resume as
+    /// `ApplyPostReplacementDamage`, not as fresh damage that would re-run Phase B.
+    #[test]
+    fn each_source_deals_damage_phase_c_lifelink_pause_resumes_post_replacement_survivors() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::actions::GameAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(43);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+
+        let source_a = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Lifelink Source A".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Lifelink Source B".to_string(),
+            Zone::Battlefield,
+        );
+        for source in [source_a, source_b] {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.base_power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_toughness = Some(2);
+            obj.keywords.push(Keyword::Lifelink);
+        }
+        let recipient = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.base_power = Some(0);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+
+        let replacement_host = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Life Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_host)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::GainLife)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Life replacement".to_string()),
+            );
+
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 2 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+            },
+            vec![TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state.objects[&recipient].damage_marked, 2,
+            "first source's damage applies before lifelink gain pauses"
+        );
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("remaining post-replacement source must be stashed");
+        assert_eq!(
+            cont.parent_kind,
+            Some(EffectKind::EachSourceDealsDamage),
+            "drain must preserve the EachSourceDealsDamage parent kind"
+        );
+        match &cont.chain.effect {
+            Effect::ApplyPostReplacementDamage {
+                context,
+                target,
+                amount,
+                is_combat,
+            } => {
+                assert_eq!(context.source_id, source_b);
+                assert_eq!(context.controller, PlayerId(0));
+                assert!(context.has_lifelink);
+                assert_eq!(*target, TargetRef::Object(recipient));
+                assert_eq!(*amount, 2);
+                assert!(!*is_combat);
+            }
+            other => panic!("expected post-replacement damage continuation, got {other:?}"),
+        }
+
+        let mut parent_event_seen = false;
+        let mut replacement_choices = 0;
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept lifelink replacement and resume post-replacement survivor");
+            parent_event_seen |= result.events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::EachSourceDealsDamage,
+                        ..
+                    }
+                )
+            });
+            replacement_choices += 1;
+            assert!(
+                replacement_choices <= 4,
+                "replacement resume should not loop indefinitely"
+            );
+        }
+        assert_eq!(
+            state.objects[&recipient].damage_marked, 4,
+            "remaining post-replacement survivor must apply without re-running Phase B"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(
+            state.pending_continuation.is_none(),
+            "continuation must be consumed after post-replacement survivor resumes"
+        );
+        assert!(
+            parent_event_seen,
+            "pause-and-resume path must emit the parent effect resolution event"
+        );
     }
 
     /// CR 122.1c: damage to a permanent with a shield counter is prevented and

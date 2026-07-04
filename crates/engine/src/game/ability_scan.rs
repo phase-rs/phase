@@ -73,10 +73,10 @@
 //! plus a `..`-free destructure so a future field forces re-audit.
 
 use crate::types::ability::{
-    AbilityCondition, ControllerRef, CountScope, Duration, Effect, ModalChoice, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ReplacementCondition, ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition,
+    AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
+    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -339,6 +339,19 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(sources));
             acc = acc.or(scan_target_filter(recipient));
+            acc
+        }
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(sources));
+            acc = acc.or(scan_quantity_expr(amount));
+            if let EachDamageRecipient::Shared(filter) = recipient {
+                acc = acc.or(scan_target_filter(filter));
+            }
             acc
         }
         Effect::Draw { count, target } => {
@@ -3442,6 +3455,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
