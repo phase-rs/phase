@@ -741,6 +741,14 @@ pub(super) fn handle_replacement_choice(
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
                 }
+                // CR 120.4a: a SECOND material replacement ordering choice on the
+                // same damage event re-parked a fresh record with
+                // `excess_recipient: None`. Reapply the rider captured before
+                // `continue_replacement` consumed the prior record so the eventual
+                // delivery still redirects the excess to the creature's controller.
+                if pending.excess_recipient.is_none() {
+                    pending.excess_recipient = parked_excess_recipient;
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,

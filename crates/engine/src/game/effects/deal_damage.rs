@@ -695,10 +695,16 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
+    // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to the damage
+    // this leg actually dealt. Under an excess-redirect rider that is the lethal
+    // `primary_amount` dealt to the creature here; the redirected excess leg deals
+    // its own damage to the controller and gains lifelink for that portion
+    // separately (CR 120.7, same source), so the two legs together gain for exactly
+    // `actual_amount` — and if the redirected leg is prevented, no life is gained
+    // for the excess. Without the rider `primary_amount == actual_amount`.
     if ctx.has_lifelink
-        && actual_amount > 0
-        && super::life::apply_life_gain(state, ctx.controller, actual_amount, events).is_err()
+        && primary_amount > 0
+        && super::life::apply_life_gain(state, ctx.controller, primary_amount, events).is_err()
     {
         // CR 614.7: Life gain replacement needs player choice.
         // Damage was already dealt; lifelink gain is deferred.

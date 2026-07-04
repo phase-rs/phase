@@ -14,6 +14,7 @@ use engine::types::ability::{
     AbilityDefinition, DamageContextSnapshot, Effect, ExcessRecipient, TargetRef,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -137,6 +138,29 @@ fn t10_creature_dealt_only_lethal_not_full_amount() {
         4,
         "total damage dealt = actual_amount (4), never actual_amount + excess (6)"
     );
+}
+
+/// T11 — CR 702.15b + CR 120.7: lifelink gains for each leg's actually-dealt
+/// damage exactly once, not twice. A lifelink source dealing 4 to a 2-toughness
+/// creature deals 2 (lethal) to the creature and redirects 2 to its controller;
+/// the source's controller gains 2 (creature leg) + 2 (redirect leg) = 4 total,
+/// NOT actual_amount (4) for the primary leg plus the excess (2) again = 6. The
+/// creature belongs to P1, so the excess redirect also costs P1 2 life.
+#[test]
+fn t11_lifelink_counts_each_leg_once_not_twice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Victim", 2, 2).id();
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Flame Spill", false, FLAME_SPILL);
+        b.with_mana_cost(ManaCost::generic(0))
+            .with_keyword(Keyword::Lifelink);
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+    outcome.assert_life_delta(P0, 4); // lifelink for 2 (creature) + 2 (redirect), not 6
+    outcome.assert_life_delta(P1, -2); // the redirected excess
 }
 
 /// Collect every effect in an ability's `sub_ability` chain.
