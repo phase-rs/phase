@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
 
 const dispatchAction = vi.fn();
 const dispatchResolveAll = vi.fn();
@@ -49,18 +51,18 @@ vi.mock("../../../stores/uiStore", () => ({
 import { createGameLoopController } from "../gameLoopController";
 
 function priority(player: number): WaitingFor {
-  return { type: "Priority", data: { player } } as WaitingFor;
+  return buildPriorityWaitingFor({ data: { player } });
 }
 
 function stateFor(waitingFor: WaitingFor, priorityPlayer: number): GameState {
-  return {
+  return buildGameState({
     waiting_for: waitingFor,
     priority_player: priorityPlayer,
     phase: "PreCombatMain",
     stack: [],
-    objects: { 1: { id: 1 } },
-    players: [{ id: 0 }, { id: 1 }],
-  } as unknown as GameState;
+    objects: buildObjectMap(buildGameObject({ id: 1 })),
+    players: buildPlayers([0, 1]),
+  });
 }
 
 describe("gameLoopController auto-pass authorization", () => {

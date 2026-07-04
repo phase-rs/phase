@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameObject } from "../../../adapter/types.ts";
 import { GameCardPreview } from "../../card/GameCardPreview.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
 import { BattlefieldZoneOverflow } from "../BattlefieldZoneOverflow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -27,67 +29,27 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
 }));
 
 function makeObject(id: number, coreTypes: string[] = ["Land"]): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(coreTypes, {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: `Permanent ${id}`,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: coreTypes, subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: id,
     entered_battlefield_turn: null,
     available_mana_pips: [{ type: "Color", data: "Green" }],
-  };
+  });
 }
 
-function makeState(objects: Record<number, GameObject>): GameState {
-  const ids = Object.keys(objects).map(Number);
-  return {
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-    ],
+function makeState(objects: Record<string, GameObject>) {
+  const permanents = Object.values(objects);
+  return buildGameState({
+    players: buildPlayers([0]),
     objects,
-    battlefield: ids,
+    battlefield: permanents.map((object) => object.id),
     exile: [],
     stack: [],
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 function makeGroups(count: number): GroupedPermanentType[] {
@@ -109,7 +71,7 @@ function makeCreature(id: number, power = 2, toughness = 2): GameObject {
 function renderOverflow(options: {
   groups?: GroupedPermanentType[];
   includePreview?: boolean;
-  objects?: Record<number, GameObject>;
+  objects?: Record<string, GameObject>;
   boardChoiceObjectIds?: Set<number>;
   selectableSacrificeObjectIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
@@ -117,8 +79,8 @@ function renderOverflow(options: {
   zone?: "lands" | "support" | "creatures";
 } = {}) {
   const groups = options.groups ?? makeGroups(9);
-  const objects = options.objects ?? Object.fromEntries(
-    groups.flatMap((group) => group.ids).map((id) => [id, makeObject(id)]),
+  const objects = options.objects ?? buildObjectMap(
+    ...groups.flatMap((group) => group.ids).map((id) => makeObject(id)),
   );
   useGameStore.setState({ gameState: makeState(objects) });
   return render(
