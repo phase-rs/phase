@@ -776,9 +776,8 @@ fn parse_any_one_and_any_other_color_options(
     }
 
     let mut options = Vec::new();
-    let colors = all_mana_colors();
-    for (first_index, first_color) in colors.iter().enumerate() {
-        for (second_index, second_color) in colors.iter().enumerate() {
+    for (first_index, first_color) in ManaColor::ALL.iter().enumerate() {
+        for (second_index, second_color) in ManaColor::ALL.iter().enumerate() {
             if first_index == second_index {
                 continue;
             }
