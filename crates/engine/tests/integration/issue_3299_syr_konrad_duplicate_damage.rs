@@ -115,6 +115,7 @@ fn syr_konrad_deals_one_damage_per_milled_creature() {
         p0.mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: dummy,
+            pip_id: engine::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -124,6 +125,7 @@ fn syr_konrad_deals_one_damage_per_milled_creature() {
         p0.mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: dummy,
+            pip_id: engine::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),

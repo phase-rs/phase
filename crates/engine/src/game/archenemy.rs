@@ -101,7 +101,7 @@ pub fn active_schemes(state: &GameState) -> Vec<ObjectId> {
 /// `process_triggers` rather than deferring it; this is rules-equivalent under
 /// CR 603.2 / CR 603.3.) Self-collecting here in addition would double-collect.
 pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let Some(archenemy) = state.archenemy else {
+    let Some(archenemy) = crate::game::topology::archenemy(state).or(state.archenemy) else {
         return;
     };
     // CR 701.32b: move the scheme off the top of the scheme deck.
@@ -178,6 +178,7 @@ pub fn abandon(state: &mut GameState, scheme_id: ObjectId, events: &mut Vec<Game
     // CR 904.7 / CR 314.5: the owner/controller of a scheme is the archenemy.
     let owner = state
         .archenemy
+        .or_else(|| crate::game::topology::archenemy(state))
         .or_else(|| state.objects.get(&scheme_id).map(|o| o.controller));
 
     // CR 701.33b: announce that the ongoing scheme was abandoned.
@@ -219,7 +220,10 @@ pub fn check_scheme_abandon_sba(
     _events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
 ) {
-    if state.archenemy.is_none() {
+    if crate::game::topology::archenemy(state)
+        .or(state.archenemy)
+        .is_none()
+    {
         return;
     }
     // CR 904.10: do nothing while any scheme's triggered ability is on the stack

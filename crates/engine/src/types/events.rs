@@ -8,6 +8,7 @@ use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::stickers::StickerKind;
 use super::zones::Zone;
 
 /// CR 121.1: Default `nth_in_step` for `CardDrawn` events deserialized from
@@ -45,6 +46,20 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
+/// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
+/// that "Whenever you activate a loyalty ability" triggers (CR 606.2) can be told
+/// apart from ordinary activated abilities (CR 602.2) while both share the single
+/// `GameEvent::AbilityActivated` event family. A loyalty ability is an activated
+/// ability of a planeswalker paid for by adding or removing loyalty counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ActivatedAbilityKind {
+    /// CR 602.2: An ordinary activated ability.
+    #[default]
+    Normal,
+    /// CR 606.1 + CR 606.2: A loyalty ability of a planeswalker.
+    Loyalty,
+}
+
 impl ManaTapState {
     /// True when the mana was produced by tapping a source, regardless of
     /// whether the coupled triggered mana abilities have been resolved yet.
@@ -79,6 +94,8 @@ pub enum BendingType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
+    /// A player accepted a resolution-time optional effect.
+    AcceptedOptionalEffect,
     SearchedLibrary,
     Scry,
     Surveil,
@@ -140,6 +157,19 @@ pub enum GameEvent {
         merging_id: ObjectId,
         controller: PlayerId,
     },
+    /// Unstable Host/Augment: a card with augment combined with a Host
+    /// creature, forming a merged permanent. Emitted by `augment.rs`.
+    /// `merged_id` is the surviving permanent's `ObjectId` (the Host
+    /// creature's continuity id); `augmenting_id` is the augment component that
+    /// merged onto it; `controller` is the player who performed the combine.
+    ///
+    /// Distinct from `Mutated`: Augment reuses merge-like bookkeeping but is a
+    /// separate mechanic and must not satisfy `TriggerMode::Mutates`.
+    Augmented {
+        merged_id: ObjectId,
+        augmenting_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -173,6 +203,14 @@ pub enum GameEvent {
         /// ability's effect (Burning-Tree Shaman, Flamescroll Celebrant).
         player_id: PlayerId,
         source_id: ObjectId,
+        /// CR 606.2: Distinguishes loyalty-ability activations (planeswalker
+        /// abilities paid with loyalty counters) from ordinary activated
+        /// abilities so the "Whenever you activate a loyalty ability" trigger
+        /// class can match without a separate event. `#[serde(default)]` keeps
+        /// older serialized `AbilityActivated` events (which predate this field)
+        /// deserializing as `Normal`.
+        #[serde(default)]
+        kind: ActivatedAbilityKind,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -264,6 +302,14 @@ pub enum GameEvent {
     /// CR 702.143a: A player foretold a card from their hand.
     Foretold {
         player_id: PlayerId,
+        object_id: ObjectId,
+    },
+    /// CR 702.143d: a card in exile became foretold via an effect (e.g. The
+    /// Foretold Soldier "exile it face down. It becomes foretold."). Distinct
+    /// from the CR 702.143a foretell special action — it does NOT fire
+    /// "whenever you foretell" triggers (CR 702.143c reserves "foretell" for
+    /// the special action).
+    BecameForetold {
         object_id: ObjectId,
     },
     PlayerLost {
@@ -468,7 +514,7 @@ pub enum GameEvent {
         target: TargetRef,
         source_id: ObjectId,
     },
-    /// CR 702.122d: A Vehicle's crew ability resolved.
+    /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
     VehicleCrewed {
         vehicle_id: ObjectId,
@@ -510,6 +556,14 @@ pub enum GameEvent {
         new_state: String,
     },
     TurnedFaceUp {
+        object_id: ObjectId,
+    },
+    /// CR 701.27b: A face-up permanent was turned face down by a resolving effect
+    /// (Cyber Conversion). Distinct from `Transformed` — turning face down and
+    /// transforming are different game actions, so a "whenever a permanent is
+    /// turned face down" trigger must observe THIS event, not `Transformed`.
+    /// Drives the game log and the public-state/frontend re-render.
+    TurnedFaceDown {
         object_id: ObjectId,
     },
     CardsRevealed {
@@ -564,6 +618,12 @@ pub enum GameEvent {
     },
     /// CR 701.60a: A creature was suspected.
     CreatureSuspected {
+        object_id: ObjectId,
+    },
+    /// CR 701.60a: A creature is no longer suspected — the un-designation
+    /// transition. Emitted only when the toggle actually flips (idempotent
+    /// resolver). Mirrors `BecameUnprepared`.
+    CreatureNoLongerSuspected {
         object_id: ObjectId,
     },
     /// CR 701.35a: A permanent was detained — until the detaining player's next
@@ -694,6 +754,18 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// Unstable Contraptions: a Contraption was assembled from a player's
+    /// supplementary Contraption deck onto a sprocket.
+    ContraptionAssembled {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        sprocket: u8,
+    },
+    StickerPlaced {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        kind: StickerKind,
+    },
     /// CR 701.52: The active player rolled to visit their Attractions.
     AttractionsRolledToVisit {
         player_id: PlayerId,
@@ -704,6 +776,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         roll: u8,
         attraction_id: ObjectId,
+    },
+    /// Unstable Contraptions: a specific Contraption on a sprocket was
+    /// cranked. `TriggerMode::CrankContraption` listens to this event.
+    ContraptionCranked {
+        player_id: PlayerId,
+        sprocket: u8,
+        contraption_id: ObjectId,
     },
     /// Avatar crossover: A firebending ability resolved and produced mana.
     Firebend {
@@ -865,6 +944,42 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "TurnStarted");
         assert_eq!(json["data"]["turn_number"], 1);
+    }
+
+    #[test]
+    fn ability_activated_kind_defaults_to_normal_for_legacy_state() {
+        // CR 606.2: an older serialized `AbilityActivated` event predates the
+        // `kind` field. `#[serde(default)]` must deserialize it as `Normal`,
+        // never failing or silently treating it as `Loyalty`.
+        let legacy = serde_json::json!({
+            "type": "AbilityActivated",
+            "data": { "player_id": 0, "source_id": 7 }
+        });
+        let event: GameEvent = serde_json::from_value(legacy).unwrap();
+        match event {
+            GameEvent::AbilityActivated { kind, .. } => {
+                assert_eq!(kind, ActivatedAbilityKind::Normal);
+            }
+            other => panic!("expected AbilityActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ability_activated_kind_round_trips() {
+        // CR 606.2: the discriminator survives serialization.
+        for kind in [ActivatedAbilityKind::Normal, ActivatedAbilityKind::Loyalty] {
+            let event = GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: ObjectId(9),
+                kind,
+            };
+            let json = serde_json::to_value(&event).unwrap();
+            let back: GameEvent = serde_json::from_value(json).unwrap();
+            match back {
+                GameEvent::AbilityActivated { kind: k, .. } => assert_eq!(k, kind),
+                other => panic!("expected AbilityActivated, got {other:?}"),
+            }
+        }
     }
 
     #[test]

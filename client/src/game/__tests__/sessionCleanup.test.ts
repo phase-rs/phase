@@ -11,6 +11,7 @@ describe("clearPromptOverlayState", () => {
     useUiStore.setState({
       pendingAbilityChoice: null,
       enchantmentsDialogPlayer: null,
+      manualManaOverride: false,
     });
   });
 
@@ -27,6 +28,7 @@ describe("clearPromptOverlayState", () => {
       spellCosts: { "1": { type: "Cost", shards: ["G"], generic: 0 } },
       legalActionsByObject: { 1: [{ type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } }] },
       resolutionProgress: { resolved: 2, total: 5 },
+      isResolvingAll: true,
       gameState: { waiting_for: { type: "ManaPayment", data: { player: 0, convoke_mode: "Convoke" } } } as GameState,
     });
     useUiStore.setState({
@@ -46,9 +48,26 @@ describe("clearPromptOverlayState", () => {
     expect(state.spellCosts).toEqual({});
     expect(state.legalActionsByObject).toEqual({});
     expect(state.resolutionProgress).toBeNull();
+    expect(state.isResolvingAll).toBe(false);
     expect(state.adapter).toBe(adapter);
     expect(state.gameState).not.toBeNull();
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
     expect(useUiStore.getState().enchantmentsDialogPlayer).toBeNull();
+  });
+
+  it("resets the per-game manualManaOverride toggle so it can't leak across games", () => {
+    useUiStore.setState({ manualManaOverride: true });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().manualManaOverride).toBe(false);
+  });
+
+  it("resets the ephemeral hand hide-filter so it can't leak across games", () => {
+    useUiStore.setState({ handFilter: "playable" });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().handFilter).toBe("none");
   });
 });

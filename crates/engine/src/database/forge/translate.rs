@@ -176,6 +176,7 @@ fn translate_charm(
         allow_repeat_modes: false,
         constraints: Vec::new(),
         mode_costs: Vec::new(),
+        dynamic_max_choices: None,
     };
 
     let mut ability = AbilityDefinition::new(
@@ -475,6 +476,7 @@ mod tests {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let unimpl = AbilityDefinition::new(

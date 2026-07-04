@@ -1,4 +1,6 @@
-use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction, TargetFilter};
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesAggregate, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -133,11 +135,13 @@ pub(super) fn handle_return_to_hand_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
     count: usize,
+    aggregate: Option<TapCreaturesAggregate>,
     creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
@@ -147,6 +151,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
         player,
         pending_cast,
         count,
+        aggregate,
         creatures,
         chosen,
         events,
@@ -268,6 +273,37 @@ pub(super) fn handle_exile_for_cost(
         zone,
         pending_cast,
         count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_aggregate_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    zone: crate::types::zones::Zone,
+    function: crate::types::ability::AggregateFunction,
+    property: crate::types::ability::ObjectProperty,
+    comparator: crate::types::ability::Comparator,
+    value: i32,
+    filter: &TargetFilter,
+    pending_cast: PendingCast,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_aggregate_for_cost(
+        state,
+        player,
+        zone,
+        function,
+        property,
+        comparator,
+        value,
+        filter,
+        pending_cast,
         legal_cards,
         chosen,
         events,

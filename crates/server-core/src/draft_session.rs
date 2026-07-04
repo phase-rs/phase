@@ -99,6 +99,29 @@ impl DraftSession {
     }
 }
 
+/// Seats that still owe a pick this round and have not yet submitted one.
+/// Skips seats already recorded in `seats_picked_this_round` so auto-pick
+/// sweeps do not hit `SeatAlreadyPickedThisRound` (issue #1193).
+pub fn draft_seats_needing_auto_pick(
+    session: &mut draft_core::types::DraftSession,
+    pod_size: usize,
+) -> Vec<usize> {
+    let pod_size_u8 = pod_size as u8;
+    session
+        .seats_picked_this_round
+        .ensure_len(pod_size_u8, false);
+    (0..pod_size)
+        .filter(|&seat_idx| {
+            if session.seats_picked_this_round.get(seat_idx as u8) {
+                return false;
+            }
+            session.current_pack[seat_idx]
+                .as_ref()
+                .is_some_and(|pack| !pack.0.is_empty())
+        })
+        .collect()
+}
+
 pub struct DraftSessionManager {
     pub sessions: HashMap<String, DraftSession>,
     pub reconnect: ReconnectManager,
@@ -1080,5 +1103,63 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn draft_seats_needing_auto_pick_skips_already_picked() {
+        use draft_core::pack_source::FixturePackSource;
+        use draft_core::session;
+        use draft_core::types::{
+            DeckAddableCards, DraftAction, DraftKind, DraftSeat, DraftSource, PodPolicy,
+            SpectatorVisibility, TournamentFormat,
+        };
+        use engine::types::player::PlayerId;
+
+        let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 2,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..2)
+            .map(|i| DraftSeat::Human {
+                player_id: PlayerId(i),
+                display_name: format!("Player {i}"),
+            })
+            .collect();
+        let source = FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        let mut session =
+            draft_core::types::DraftSession::new(config, seats, "TEST-001".to_string());
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let card_id = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session::apply(
+            &mut session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_id: card_id,
+            },
+            None,
+        )
+        .unwrap();
+
+        let seats = draft_seats_needing_auto_pick(&mut session, 2);
+        assert_eq!(seats, vec![1]);
+        assert!(!seats.contains(&0));
     }
 }

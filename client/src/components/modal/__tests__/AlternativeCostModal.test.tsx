@@ -135,7 +135,7 @@ describe("AlternativeCostModal", () => {
 
   // The other engine `AlternativeCastKeyword` variants that the FE switch had
   // also been missing must likewise render without throwing.
-  it.each<AltKeyword>(["Emerge", "Impending", "Prototype"])(
+  it.each<AltKeyword>(["Emerge", "Impending", "Prototype", "Prowl"])(
     "renders the %s prompt without crashing",
     (keyword) => {
       setSpectacleChoice(keyword);

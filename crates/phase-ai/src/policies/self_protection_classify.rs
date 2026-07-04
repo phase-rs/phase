@@ -646,7 +646,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
@@ -704,6 +706,7 @@ mod tests {
                 amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Player,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(ai)],
             spell_id,

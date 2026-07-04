@@ -20,6 +20,8 @@ export interface RegisterHostRequest {
     main_deck: string[];
     sideboard: string[];
     commander: string[];
+    planar_deck?: string[];
+    scheme_deck?: string[];
   };
   displayName: string;
   public: boolean;
@@ -381,7 +383,7 @@ export function resolveGuestOver(
           // P2P channel once the guest has dialed the host. The display
           // name, however, must be non-blank — the broker validates it with
           // the required-label rule and silently drops the frame otherwise.
-          deck: { main_deck: [], sideboard: [], commander: [] },
+          deck: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
           display_name: opts.displayName ?? "",
           password: password ?? null,
           reservation_token: opts.reservationToken ?? null,

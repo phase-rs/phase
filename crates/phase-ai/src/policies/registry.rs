@@ -4,16 +4,13 @@ use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
 use super::blight_value::BlightValuePolicy;
-use super::blink_payoff::BlinkPayoffPolicy;
 use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
-use super::context::PolicyContext;
+use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
-use super::enchantments_payoff::EnchantmentsPayoffPolicy;
-use super::equipment_payoff::EquipmentPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
@@ -24,29 +21,32 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
-use super::lifegain_payoff::LifegainPayoffPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
+use super::payoff::{
+    PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
+    EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
+};
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
-use super::reanimator_payoff::ReanimatorPayoffPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
+use super::self_cost_value::SelfCostValuePolicy;
 use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
 use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
 use super::tribal_lord_priority::TribalLordPriorityPolicy;
 use super::tutor::TutorPolicy;
+use super::x_cast_gate::XCastGatePolicy;
 use super::x_value::XValuePolicy;
 use crate::cast_facts::cast_facts_for_action;
-use crate::config::AiConfig;
 use crate::decision_kind::classify as classify_decision;
 use crate::features::DeckFeatures;
 use crate::planner::PolicyPrior;
-use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::ai_support::CandidateAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -106,6 +106,7 @@ pub enum PolicyId {
     CombatTaxPayment,
     ReactiveSelfProtection,
     SacrificeLandProtection,
+    SelfCostValue,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
@@ -118,9 +119,12 @@ pub enum PolicyId {
     XValue,
     LandAnimation,
     MillTargeting,
+    MillPayoff,
+    EnergyPayoff,
     ChaliceAvoidance,
     PaymentSelection,
     SeparatePilesTiming,
+    XCastGate,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -280,11 +284,11 @@ impl Default for PolicyRegistry {
     fn default() -> Self {
         let policies: Vec<Box<dyn TacticalPolicy>> = vec![
             Box::new(AntiSelfHarmPolicy),
-            Box::new(super::artifact_synergy::ArtifactSynergyPolicy),
+            Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
-            Box::new(EnchantmentsPayoffPolicy),
-            Box::new(EquipmentPayoffPolicy),
+            Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
+            Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
             Box::new(TutorPolicy),
             Box::new(HandDisruptionPolicy),
@@ -302,7 +306,7 @@ impl Default for PolicyRegistry {
             Box::new(RecursionAwarenessPolicy),
             Box::new(BoardWipeTelegraphPolicy),
             Box::new(LifeTotalResourcePolicy),
-            Box::new(LifegainPayoffPolicy),
+            Box::new(PayoffPolicy::new(&LIFEGAIN_PAYOFF)),
             Box::new(CardAdvantagePolicy),
             Box::new(LandfallTimingPolicy),
             Box::new(RampTimingPolicy),
@@ -320,6 +324,7 @@ impl Default for PolicyRegistry {
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
             Box::new(SacrificeLandProtectionPolicy),
+            Box::new(SelfCostValuePolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
@@ -327,14 +332,17 @@ impl Default for PolicyRegistry {
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
             Box::new(XValuePolicy),
+            Box::new(XCastGatePolicy),
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
+            Box::new(PayoffPolicy::new(&MILL_PAYOFF)),
+            Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
             Box::new(SeparatePilesTimingPolicy),
-            Box::new(ReanimatorPayoffPolicy),
-            Box::new(BlinkPayoffPolicy),
+            Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
+            Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
@@ -445,15 +453,7 @@ impl PolicyRegistry {
         self.policies.iter().any(|p| p.id() == id)
     }
 
-    pub fn priors(
-        &self,
-        state: &GameState,
-        decision: &AiDecisionContext,
-        candidates: &[CandidateAction],
-        ai_player: PlayerId,
-        config: &AiConfig,
-        context: &crate::context::AiContext,
-    ) -> Vec<PolicyPrior> {
+    pub fn priors(&self, env: &PriorsEnv<'_>, candidates: &[CandidateAction]) -> Vec<PolicyPrior> {
         if candidates.is_empty() {
             return Vec::new();
         }
@@ -461,15 +461,16 @@ impl PolicyRegistry {
         let raw_scores: Vec<f64> = candidates
             .iter()
             .map(|candidate| {
-                let cast_facts = cast_facts_for_action(state, &candidate.action, ai_player);
+                let cast_facts = cast_facts_for_action(env.state, &candidate.action, env.ai_player);
                 self.score(&PolicyContext {
-                    state,
-                    decision,
+                    state: env.state,
+                    decision: env.decision,
                     candidate,
-                    ai_player,
-                    config,
-                    context,
+                    ai_player: env.ai_player,
+                    config: env.config,
+                    context: env.context,
                     cast_facts,
+                    search_depth: env.search_depth,
                 })
             })
             .collect();
@@ -531,6 +532,8 @@ impl PolicyRegistry {
 #[cfg(test)]
 mod shared_invariant_tests {
     use super::*;
+    use crate::config::AiConfig;
+    use crate::policies::context::SearchDepth;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{GameState, WaitingFor};
@@ -642,14 +645,15 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert_eq!(priors[0].prior, 0.0);
@@ -667,14 +671,15 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert!(priors

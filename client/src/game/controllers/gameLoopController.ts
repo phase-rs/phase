@@ -2,7 +2,8 @@ import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
-import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
 import { dispatchAction, dispatchResolveAll } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
@@ -34,8 +35,16 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
   let unsubscribe: (() => void) | null = null;
   let autoPassTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  function clearAutoPassTimeout(): void {
+    if (autoPassTimeout != null) {
+      clearTimeout(autoPassTimeout);
+      autoPassTimeout = null;
+    }
+  }
+
   function onWaitingForChanged(): void {
     if (!active) return;
+    clearAutoPassTimeout();
 
     const { waitingFor, gameState } = useGameStore.getState();
     if (!waitingFor || waitingFor.type === "GameOver") return;
@@ -60,9 +69,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
   }
 
   function scheduleBatchResolve(): void {
-    if (autoPassTimeout != null) {
-      clearTimeout(autoPassTimeout);
-    }
+    clearAutoPassTimeout();
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;
       if (!active) return;
@@ -78,14 +85,30 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
   }
 
   function scheduleAutoPass(): void {
-    if (autoPassTimeout != null) {
-      clearTimeout(autoPassTimeout);
-    }
+    clearAutoPassTimeout();
+    // Scale the auto-pass beat by stack pressure. A low-depth-high-churn loop
+    // (Exquisite Blood + Sanguine Bond) keeps depth < Elevated forever, so the
+    // batch path never engages and the human seat pays a full 200ms beat per
+    // cycle — the dominant artificial wait in that case. Rate-driven pressure
+    // collapses the beat (Rapid → ~30ms) once the loop is churning.
+    const stackLen = useGameStore.getState().gameState?.stack?.length ?? 0;
+    const beat = Math.round(
+      AUTO_PASS_BEAT_MS * pressureMultiplier(effectiveStackPressure(stackLen)),
+    );
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;
       if (!active) return;
+      const { waitingFor, gameState, autoPassRecommended } = useGameStore.getState();
+      const { fullControl } = useUiStore.getState();
+      if (
+        !waitingFor ||
+        !gameState ||
+        !shouldAutoPass(gameState, waitingFor, fullControl, autoPassRecommended)
+      ) {
+        return;
+      }
       dispatchAction({ type: "PassPriority" });
-    }, AUTO_PASS_BEAT_MS);
+    }, beat);
   }
 
   function start(): void {
@@ -120,10 +143,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
   function stop(): void {
     active = false;
 
-    if (autoPassTimeout != null) {
-      clearTimeout(autoPassTimeout);
-      autoPassTimeout = null;
-    }
+    clearAutoPassTimeout();
 
     if (opponentController) {
       opponentController.stop();

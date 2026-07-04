@@ -6,6 +6,7 @@ import type {
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
+import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
 
 /**
  * A dice-roll / coin-flip moment to animate, surfaced from engine-authored
@@ -141,7 +142,21 @@ interface UiStoreState {
    *  inherit Tailwind's `transform` containing block and shrink the
    *  dialog. See DialogHost.tsx:113-122 for the contract. */
   enchantmentsDialogPlayer: number | null;
+  /** When non-null, the AttachmentFan is open: a centered spread of this host
+   *  plus every permanent (Aura / Equipment / Fortification) attached to it,
+   *  each card carrying its own live selection affordance. Opened by clicking
+   *  a permanent-with-attachments during a target / board-choice prompt (so an
+   *  attached Equipment that overlaps its host is reachable) and by the host's
+   *  ⧉ badge for out-of-prompt viewing / re-equip. The object-host counterpart
+   *  to `enchantmentsDialogPlayer` (player-attached Aura curses, which still
+   *  use the modal AttachmentsDialog). Cleared by `clearPromptOverlayState`. */
+  attachmentFanHostId: ObjectId | null;
   mobileHandOpen: boolean;
+  /** Ephemeral hide-filter for the player's own hand (display-only). Lives here
+   *  rather than in `preferencesStore` so it resets each game (cleared by
+   *  `clearPromptOverlayState`) — a per-game focus aid, not a durable
+   *  preference. The companion sort lives in `preferencesStore.handSort`. */
+  handFilter: FilterKey;
   debugPanelOpen: boolean;
   /** Which top-level tab the debug panel shows. Lifted out of DebugPanel's
    *  local state so entry points (Sandbox Tools nudge/button) can open the
@@ -168,6 +183,12 @@ interface UiStoreState {
    *  transient "the user is currently rearranging the board" toggle that gates
    *  the edit overlay, widget dragging, and resize grabbers. */
   flexEditMode: boolean;
+  /** Per-game override that forces Manual mana payment for the current game
+   *  only, without touching the persisted `spellPaymentMode` preference.
+   *  Ephemeral (never persisted) and reset on every game-session boundary
+   *  (see `clearPromptOverlayState`) so it can't leak across games. Manual
+   *  payment wins if EITHER this override or the durable preference is on. */
+  manualManaOverride: boolean;
 }
 
 interface UiStoreActions {
@@ -210,7 +231,9 @@ interface UiStoreActions {
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
+  setAttachmentFanHost: (id: ObjectId | null) => void;
   setMobileHandOpen: (open: boolean) => void;
+  setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
@@ -230,6 +253,8 @@ interface UiStoreActions {
   toggleLogPanel: () => void;
   setFlexEditMode: (active: boolean) => void;
   toggleFlexEditMode: () => void;
+  setManualManaOverride: (on: boolean) => void;
+  toggleManualManaOverride: () => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -259,7 +284,9 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   focusedOpponent: null,
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
+  attachmentFanHostId: null,
   mobileHandOpen: false,
+  handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
   debugInteractionMode: false,
@@ -270,6 +297,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugHighlightedPlayerId: null,
   logPanelOpen: false,
   flexEditMode: false,
+  manualManaOverride: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -506,7 +534,9 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
+  setAttachmentFanHost: (id) => set({ attachmentFanHostId: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
+  setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
   openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),
@@ -524,4 +554,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
   setFlexEditMode: (active) => set({ flexEditMode: active }),
   toggleFlexEditMode: () => set((state) => ({ flexEditMode: !state.flexEditMode })),
+  setManualManaOverride: (on) => set({ manualManaOverride: on }),
+  toggleManualManaOverride: () =>
+    set((s) => ({ manualManaOverride: !s.manualManaOverride })),
 }));

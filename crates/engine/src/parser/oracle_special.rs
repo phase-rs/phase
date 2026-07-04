@@ -22,6 +22,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_subtype, strip_reminder_text,
 };
@@ -359,7 +360,7 @@ fn parse_optional_modifier_suffix(after: &str) -> Option<crate::types::ability::
     ))
     .parse(after_and)
     .ok()?;
-    let qty = crate::parser::oracle_quantity::parse_quantity_ref(modifier_text)?;
+    let (_, qty) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
     let value = crate::types::ability::QuantityExpr::Ref { qty };
     Some(if sign {
         crate::types::ability::DieRollModifier::Add { value }

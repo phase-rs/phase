@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Introduce una URL válida de Moxfield o Archidekt.",
     "errorNetworkFailure": "No se pudo contactar con el servicio de importación. Comprueba tu conexión e inténtalo de nuevo.",
     "errorGeneric": "No se pudo importar el mazo.",
+    "errorNoCards": "No se encontraron cartas. Pega un mazo en formato MTGA o .dck.",
     "fileSupports": "Admite formatos .dck, .dec, .txt y MTGA",
     "chooseFile": "Elegir archivo",
     "importedSuccessTitle": "Mazo importado",
@@ -173,7 +174,9 @@
     "totalCount": "· {{count}} en total",
     "searchPlaceholder": "Buscar por nombre, código de colección o tipo…",
     "allTypes": "Todos ({{count}})",
+    "typeFilter": "Tipo de mazo",
     "loadingCatalog": "Cargando catálogo de mazos…",
+    "loadFailed": "No se pudo cargar el catálogo de mazos preconstruidos. Comprueba tu conexión e inténtalo de nuevo.",
     "noMatch": "Ningún mazo coincide.",
     "selectDeck": "Seleccionar {{name}}",
     "cardCount_one": "{{count}} carta",
@@ -197,7 +200,13 @@
     "unknown": "Desconocidas {{count}}",
     "unknownCardsTitle": "Cartas desconocidas:\n{{cards}}",
     "unsupportedTitle": "No compatibles ({{unique}} únicas, {{copies}} copias):\n{{cards}}",
-    "setIconAlt": "Icono de la colección {{code}}"
+    "setIconAlt": "Icono de la colección {{code}}",
+    "actionsMenu": "Opciones del mazo",
+    "star": "Destacar",
+    "unstar": "Quitar destacado",
+    "moveToFolder": "Mover a carpeta",
+    "unfiled": "Sin clasificar",
+    "newFolder": "Nueva carpeta…"
   },
   "myDecks": {
     "headingManage": "Mis mazos",
@@ -252,7 +261,11 @@
     "loadMore": "Cargar más",
     "selectedDeck": "Mazo seleccionado",
     "chooseDeckToContinue": "Elige un mazo para continuar",
-    "filterAll": "Todos"
+    "filterAll": "Todos",
+    "sectionStarred": "Destacados",
+    "sectionUnfiled": "Sin clasificar",
+    "collapseAll": "Contraer todo",
+    "expandAll": "Expandir todo"
   },
   "subscriptions": {
     "emptyTitle": "Sin suscripciones a feeds",
@@ -278,6 +291,44 @@
     "decks": "Mazos",
     "alpha": "Alfa",
     "profile": "Perfil",
-    "settings": "Ajustes"
+    "settings": "Ajustes",
+    "whatsNew": "Novedades"
+  },
+  "folder": {
+    "actionsMenu": "Opciones de carpeta",
+    "rename": "Renombrar",
+    "delete": "Eliminar",
+    "newFolder": "Nueva carpeta",
+    "newFolderPrompt": "Nombre de la carpeta:",
+    "createButton": "Crear",
+    "renamePrompt": "Renombrar carpeta:",
+    "deleteConfirm": "¿Eliminar la carpeta «{{name}}»? Los mazos pasarán a Sin clasificar.",
+    "emptyHint": "Esta carpeta está vacía.",
+    "unfiledEmptyHint": "No hay mazos sin clasificar."
+  },
+  "whatsNew": {
+    "title": "Novedades",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

@@ -324,11 +324,16 @@ fn no_choice_persisted_means_neither_linked_ability_functions() {
     let _f2 = scenario.add_real_card(P0, "Plains", Zone::Library, db);
     let mut runner = scenario.build();
 
+    // `add_real_card` models a pre-existing permanent and abandons any as-enters
+    // `NamedChoice` without persisting a label — the same shape as a copied Siege
+    // that never made the entry choice (CR 614.12c ruling quoted above).
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
-        "battlefield entry should raise Frostcliff Siege's as-enters choice before this no-choice fixture suppresses it"
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "pre-existing battlefield setup must settle to priority without a label"
     );
-    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
 
     // CR 614.12c precondition: NO `ChosenAttribute::Label` on the Siege
     // (simulating a copied/cloned permanent that never made the as-enters

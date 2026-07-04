@@ -125,6 +125,16 @@ ActivateAbility action
 6. Push StackEntry(ActivatedAbility) → WaitingFor::Priority
 ```
 
+### Casting Authority / Provenance Checklist
+
+For any new or modified casting permission, alternate cost, additional cost, spend restriction, "cast this way" rider, "as though" permission, face-down / turn-face-up path, or timing permission:
+
+- Carry the selected permission / source / cost through prepared-cast and finalized-cast state. Do not rescan all matching statics later unless a multi-authority fixture proves the rescan is equivalent.
+- Add a hostile test with two active permissions or sources for the same object where only one has the rider, cost, restriction, or frequency. The selected variant must determine the result.
+- Face-down, turn-face-up, and spend-restriction changes must prove the actual `GameAction` path reaches payment / restriction logic. Direct `ManaPool`, `SpellMeta`, or helper tests are not enough by themselves.
+- For "your", "you don't control", "opponent", source-controller, owner, or controller-relative text, include a negative fixture with source/controller/owner divergence when that divergence is production-reachable.
+- For "this way" costs or riders, name the field that stores the consumed permission/rider and the function that consumes it during finalization.
+
 ### Mana Abilities During Priority — `engine/src/ai_support/candidates.rs`
 
 Legal action generation (including priority actions) now lives in the engine crate at `engine::ai_support`. The entry point is `legal_actions(state)` → `candidate_actions()`. It generates both:

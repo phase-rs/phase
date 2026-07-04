@@ -580,6 +580,16 @@ pub(crate) fn contextual_continuous_subject_filter(
     subject_original: &str,
     condition: Option<&StaticCondition>,
 ) -> Option<TargetFilter> {
+    // CR 613.1: a distributive "each" trailing a multi-subject list ("this
+    // creature and enchanted creature each get +1/+1 …", Eidolon of Countless
+    // Battles) shares one predicate across every named subject. Strip the marker
+    // from both views so the compound subject parses; the `Or` union below
+    // already applies the predicate to each branch. Stripping each view with the
+    // same combinator keeps them aligned without slicing one by the other's byte
+    // length (safe when case-folding changes width).
+    let subject_lower = strip_trailing_distributive_each(subject_lower);
+    let subject_original = strip_trailing_distributive_each(subject_original);
+
     if subject_lower == "that creature" {
         return condition
             .and_then(exactly_one_creature_you_control_filter)
@@ -703,11 +713,17 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    attached-subject statics (an Aura/Equipment whose "it" refers to the
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
-///    typed condition are rewritten. "it" is otherwise overloaded: "it's your
+///    typed condition are rewritten — the tapped/untapped pair plus their
+///    combat-state siblings "attacking"/"blocking"/"blocked" and the compound
+///    "attacking or blocking" (which `~ is …` lowers to
+///    `Or([SourceIsAttacking, SourceIsBlocking])`)
+///    (CR 508.1k / 509.1g / 509.1h). "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
 ///    parse paths. Rewriting those would break or mis-bind them, so they are
-///    left untouched.
+///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
+///    trailing word and falls through to `SourceAttackingAlone` rather than
+///    collapsing to `SourceIsAttacking`.
 ///
 /// Returns the condition unchanged when neither guard matches.
 fn rewrite_self_pronoun_subject(condition: &str) -> String {
@@ -715,8 +731,39 @@ fn rewrite_self_pronoun_subject(condition: &str) -> String {
     if let Some(rest) =
         nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
     {
-        if matches!(rest.trim(), "tapped" | "untapped") {
+        // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
+        // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
+        // for "it's modified" (Obstinate Gargoyle, Skyward Spider). CR 301.5a:
+        // "equipped"; CR 303.4: "enchanted" — self-state predicates for SelfRef
+        // statics (Merry "as long as it's equipped"; Fledgling Osprey "as long as
+        // it's enchanted"). Exact-match only — "attacking alone" keeps its trailing
+        // word and is left for SourceAttackingAlone; "modified creature" and
+        // "enchanted by N Auras" keep their trailing words and never hit this arm.
+        if matches!(
+            rest.trim(),
+            "tapped"
+                | "untapped"
+                | "attacking"
+                | "blocking"
+                | "blocked"
+                | "attacking or blocking"
+                | "modified"
+                | "equipped"
+                | "enchanted"
+        ) {
             return format!("~ is {}", rest.trim());
+        }
+    }
+    // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
+    // this turn" / "it entered the battlefield this turn" (Crew Captain's
+    // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
+    // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
+    // canonical "~ entered …" templating the context-free grammar resolves to
+    // SourceEnteredThisTurn. Exact match on the tail; only reached on the
+    // SelfRef path, so the attached-subject "it" stays an honest gap.
+    if let Some(rest) = nom_tag_lower(&lower, &lower, "it entered ") {
+        if matches!(rest.trim(), "this turn" | "the battlefield this turn") {
+            return format!("~ entered {}", rest.trim());
         }
     }
     condition.to_string()
@@ -755,6 +802,60 @@ pub(crate) fn parse_continuous_gets_has(
         }
     }
 
+    // CR 611.3a: Split a trailing " unless [condition]" gate, mirroring the
+    // " as long as " form above. An "unless <cond>" rider grants the modification
+    // precisely when <cond> is FALSE, so the parsed condition is wrapped in `Not`
+    // (Tadeas, Juniper Ascendant: "has hexproof unless it's attacking" → AddKeyword
+    // gated on Not(SourceIsAttacking)). Only peel when the split sits OUTSIDE a
+    // quoted granted ability — a granted ability's own inner "unless" (e.g. "gains
+    // 'counter target spell unless its controller pays {1}'") must stay with the
+    // quoted text; balanced double quotes in the body signal the split is outside
+    // any "...". As with the " as long as " form, the self-pronoun condition
+    // subject ("it's attacking"/"it's tapped") is resolved to the source only for
+    // SelfRef grants — an attached-subject "it" keeps its enchanted/equipped
+    // binding and stays an honest gap.
+    if let Some((before_cond, after_cond)) = tp
+        .split_around(" unless ")
+        .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
+    {
+        let continuous_text = before_cond.original;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        if let Some(mut def) =
+            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+        {
+            let typed = if matches!(affected, TargetFilter::SelfRef) {
+                parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
+            } else {
+                parse_static_condition(condition_text)
+            };
+            let condition = match typed {
+                Some(inner) => StaticCondition::Not {
+                    condition: Box::new(inner),
+                },
+                None => StaticCondition::Not {
+                    condition: Box::new(StaticCondition::Unrecognized {
+                        text: format!("unless {condition_text}"),
+                    }),
+                },
+            };
+            def.condition = Some(condition);
+            return Some(def);
+        }
+    }
+
+    // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and
+    // +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
+    // by its own count. Try this before the single-"for each" path so the second
+    // term isn't silently dropped and the pump collapsed to a fixed value.
+    if let Some(modifications) = parse_repeated_for_each_pt_modifications(text) {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(description.to_string()),
+        );
+    }
+
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
     if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
         let pt_text = before_for_each.original.trim();
@@ -766,9 +867,24 @@ pub(crate) fn parse_continuous_gets_has(
         let for_each_clause = strip_trailing_keyword_clause(raw_for_each);
 
         let pt_lower = pt_text.to_lowercase();
-        let pt_source = nom_tag_lower(&pt_lower, &pt_lower, "gets ")
-            .or_else(|| nom_tag_lower(&pt_lower, &pt_lower, "get "))
-            .unwrap_or(&pt_lower);
+        // CR 613.4c: the "gets +N/+M" verb may sit AFTER a leading keyword clause
+        // ("equipped creature has first strike and gets +1/+0 for each ...",
+        // Glamdring), not only at the head of the clause. Scan word boundaries for
+        // the verb with `nom_tag_lower` (the multi-position phrase-scan idiom, cf.
+        // `scan_timing_restrictions`) so the dynamic P/T is still extracted; the
+        // leading keyword is recovered separately via `extract_keyword_clause`.
+        let mut pt_scan: &str = &pt_lower;
+        let pt_source = loop {
+            if let Some(rest) = nom_tag_lower(pt_scan, pt_scan, "gets ")
+                .or_else(|| nom_tag_lower(pt_scan, pt_scan, "get "))
+            {
+                break rest;
+            }
+            match pt_scan.find(' ') {
+                Some(idx) => pt_scan = pt_scan[idx + 1..].trim_start(),
+                None => break pt_lower.as_str(),
+            }
+        };
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
             if let Some(quantity) =
@@ -834,6 +950,96 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     let mut modifications = Vec::new();
     push_dynamic_pt_modifications(&mut modifications, power, toughness, quantity);
     (!modifications.is_empty()).then_some(modifications)
+}
+
+/// CR 613.4c: A compound of repeated dynamic pump terms — "gets +N/+M for each X
+/// and +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
+/// by its own count. Splits on the " and " that introduces another "+n/+m for
+/// each" pump term (so a single term's embedded "for each A and B" count-list
+/// stays with the single-term path) and accumulates every term's dynamic
+/// modifications. Returns `None` unless at least two whole pump terms parse, so
+/// the single-term path keeps ownership of every non-repeated case.
+fn parse_repeated_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    let lower = text.to_lowercase();
+    let mut terms: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (index, segment) in split_on_and(&lower).into_iter().enumerate() {
+        if index > 0 && segment_starts_pump_term(segment) {
+            terms.push(std::mem::take(&mut current));
+            current.push_str(segment);
+        } else {
+            if !current.is_empty() {
+                current.push_str(" and ");
+            }
+            current.push_str(segment);
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    if terms.len() < 2 {
+        return None;
+    }
+
+    let mut modifications = Vec::new();
+    for term in &terms {
+        // `parse_dynamic_for_each_pt_modifications` expects the "gets"/"get" verb;
+        // only the first term carries it once the predicate is split.
+        let owned;
+        let term = if segment_has_gets_verb(term) {
+            term.as_str()
+        } else {
+            owned = format!("gets {term}");
+            owned.as_str()
+        };
+        modifications.extend(parse_dynamic_for_each_pt_modifications(term)?);
+    }
+    (!modifications.is_empty()).then_some(modifications)
+}
+
+/// Split `s` into its " and "-delimited segments via a forward `take_until`
+/// scan (the combinator form of `str::split(" and ")`).
+fn split_on_and(s: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut remaining = s;
+    while let Ok((rest, before)) =
+        terminated(take_until::<_, _, OracleError<'_>>(" and "), tag(" and ")).parse(remaining)
+    {
+        segments.push(before);
+        remaining = rest;
+    }
+    segments.push(remaining);
+    segments
+}
+
+/// True iff `segment` (already lowercased) opens with a "gets"/"get" verb.
+fn segment_has_gets_verb(segment: &str) -> bool {
+    alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
+        .parse(segment)
+        .is_ok()
+}
+
+/// True iff `segment` (already lowercased) begins a "+N/+M for each …" pump term:
+/// an optional "gets"/"get" verb, a P/T modifier, then " for each ". Used to tell
+/// a repeated-pump term boundary apart from an " and " inside a count clause.
+fn segment_starts_pump_term(segment: &str) -> bool {
+    preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))),
+        preceded(nom_primitives::parse_pt_modifier, tag(" for each ")),
+    )
+    .parse(segment.trim_start())
+    .is_ok()
+}
+
+/// Strip a trailing distributive " each" ("this creature and enchanted creature
+/// each") so a multi-subject list parses. Only strips when " each" is the final
+/// token, and returns `s` unchanged otherwise, so applying it to both the lower
+/// and original views of a subject keeps them aligned without length slicing.
+fn strip_trailing_distributive_each(s: &str) -> &str {
+    match terminated(take_until::<_, _, OracleError<'_>>(" each"), tag(" each")).parse(s) {
+        Ok(("", before)) => before,
+        _ => s,
+    }
 }
 
 pub(crate) fn parse_dynamic_pt_in_text(
@@ -909,24 +1115,57 @@ pub(crate) fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     parse_pt_mod(pt_text)
 }
 
-pub(crate) fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+/// CR 613.4b + CR 208.1: Parse the dynamic base-P/T set value in a
+/// "[base] power and [base] toughness [are] each equal to <quantity>" static
+/// grant (layer 7b). The grammar is factored per the nom mandate into
+/// orthogonal axes — the optional "base " on each characteristic, the optional
+/// "are " copula, and the shared " each equal to " suffix — so the arm count is
+/// the SUM of per-axis choices, not their product. The trailing quantity is
+/// dispatched: "its mana value" reads the recipient's mana value (Animate
+/// Artifact class); any other tail routes through the shared CDA quantity
+/// grammar so the same building block covers "the number of creatures you
+/// control" (Porcelain Gallery) and every other recognized count/aggregate
+/// phrase — not just the one card.
+pub(crate) fn parse_base_pt_each_equal_dynamic(lower: &str) -> Option<QuantityExpr> {
     type VE<'a> = OracleError<'a>;
-    nom_primitives::scan_split_at_phrase(lower, |input| {
-        alt((
-            tag::<_, _, VE<'_>>("base power and base toughness each equal to its mana value"),
-            tag("base power and toughness each equal to its mana value"),
-            tag("power and toughness each equal to its mana value"),
-            tag("base power and base toughness are each equal to its mana value"),
-            tag("base power and toughness are each equal to its mana value"),
-            tag("power and toughness are each equal to its mana value"),
-        ))
-        .parse(input)
+    let (_, _, tail) = nom_primitives::scan_preceded(lower, |input| {
+        // CR 208.1: which characteristics are set. "base power and base
+        // toughness", "base power and toughness", and "power and toughness" are
+        // the three observed surface forms; the "base " on the first noun is the
+        // only one that varies in the corpus.
+        let (input, _) = alt((tag::<_, _, VE<'_>>("base power"), tag("power"))).parse(input)?;
+        let (input, _) = tag(" and ").parse(input)?;
+        let (input, _) = opt(tag("base ")).parse(input)?;
+        let (input, _) = tag("toughness ").parse(input)?;
+        // Optional "are " copula ("… are each equal to …").
+        let (input, _) = opt(tag("are ")).parse(input)?;
+        tag("each equal to ").parse(input)
     })?;
-    Some(QuantityExpr::Ref {
-        qty: QuantityRef::ObjectManaValue {
-            scope: ObjectScope::Recipient,
-        },
-    })
+    let tail = tail.trim().trim_end_matches('.').trim();
+
+    // CR 202.3: "its mana value" reads the recipient's own mana value (the
+    // animation-grant idiom). Kept as a dedicated arm because its `ObjectScope`
+    // is `Recipient` (the granted-to object), which the general CDA grammar does
+    // not produce for a bare "its mana value".
+    if tail == "its mana value" {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        });
+    }
+
+    // Everything else routes through the shared CDA quantity grammar so the
+    // dynamic base-P/T set composes over every count/aggregate phrase the
+    // engine already recognizes (e.g. "the number of creatures you control").
+    parse_cda_quantity(tail)
+}
+
+/// Back-compat shim: the historical name used by callers that only need the
+/// "its mana value" recipient form. Delegates to the generalized parser so the
+/// CDA-quantity tail is also accepted at every existing call site.
+pub(crate) fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+    parse_base_pt_each_equal_dynamic(lower)
 }
 
 pub(crate) fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError<'_>> {

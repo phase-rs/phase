@@ -2,6 +2,7 @@ interface CubeCobraCard {
   name?: unknown;
   details?: {
     name?: unknown;
+    oracle_id?: unknown;
   };
 }
 
@@ -43,18 +44,30 @@ function cubeCobraJsonToCountedList(data: CubeCobraExport): string {
     throw new Error("CubeCobra response did not include a mainboard");
   }
 
-  const counts = new Map<string, number>();
+  // Carry each card's Scryfall oracle id as a `[oracle-id]` annotation. The
+  // engine resolves by name first, falling back to the id when CubeCobra's
+  // cached name no longer matches the printed name (e.g. a cube snapshotted
+  // under a set's pre-reveal placeholder names).
+  const entries = new Map<string, { count: number; oracleId?: string }>();
   for (const card of cards as CubeCobraCard[]) {
     const rawName = typeof card.name === "string" ? card.name : card.details?.name;
     if (typeof rawName !== "string" || rawName.trim().length === 0) {
       throw new Error("CubeCobra response included a card without a name");
     }
     const name = rawName.trim();
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    const oracleId = typeof card.details?.oracle_id === "string" ? card.details.oracle_id : undefined;
+    const existing = entries.get(name);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      entries.set(name, { count: 1, oracleId });
+    }
   }
 
-  return [...counts.entries()]
-    .map(([name, count]) => `${count} ${name}`)
+  return [...entries.entries()]
+    .map(([name, { count, oracleId }]) =>
+      oracleId ? `${count} ${name} [${oracleId}]` : `${count} ${name}`,
+    )
     .join("\n");
 }
 

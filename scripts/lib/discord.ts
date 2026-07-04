@@ -6,6 +6,7 @@ export interface DiscordThread {
   parent_id: string;
   type: number;
   owner_id: string | null;
+  last_message_id?: string | null;
   message_count: number | null;
   total_message_sent: number | null;
   thread_metadata?: {
@@ -160,6 +161,33 @@ export async function createMessage(
   return posted;
 }
 
+// PATCH /channels/{channel.id}/messages/{message.id} — edit the bot's own message.
+export async function editMessage(
+  channelId: string,
+  messageId: string,
+  content: string,
+): Promise<void> {
+  await discordRequest<DiscordPostedMessage>(
+    "PATCH",
+    `/channels/${channelId}/messages/${messageId}`,
+    { content },
+  );
+}
+
+// POST /channels/{channel.id}/messages/{message.id}/crosspost — publish a message
+// from an Announcement/News channel (type 5) to all servers following it.
+// Authoring the message only requires SEND_MESSAGES (MANAGE_MESSAGES is needed
+// only to crosspost someone else's message).
+export async function crosspostMessage(
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await discordRequest<DiscordPostedMessage>(
+    "POST",
+    `/channels/${channelId}/messages/${messageId}/crosspost`,
+  );
+}
+
 export async function fetchActiveThreads(
   guildId: string,
   channelId: string,
@@ -173,6 +201,7 @@ export async function fetchActiveThreads(
 export async function fetchArchivedThreads(
   channelId: string,
   type: "public" | "private",
+  afterArchiveTimestamp?: string,
 ): Promise<DiscordThread[]> {
   const threads: DiscordThread[] = [];
   let before: string | undefined;
@@ -184,12 +213,22 @@ export async function fetchArchivedThreads(
     const body = await discordGet<{ threads: DiscordThread[]; has_more: boolean }>(
       `/channels/${channelId}/threads/archived/${type}?${params}`,
     );
-    threads.push(...body.threads);
+    threads.push(
+      ...body.threads.filter((thread) => {
+        const archivedAt = thread.thread_metadata?.archive_timestamp;
+        return (
+          afterArchiveTimestamp === undefined ||
+          archivedAt === undefined ||
+          archivedAt > afterArchiveTimestamp
+        );
+      }),
+    );
 
     if (!body.has_more || body.threads.length === 0) break;
 
     before = body.threads.at(-1)?.thread_metadata?.archive_timestamp;
     if (!before) break;
+    if (afterArchiveTimestamp !== undefined && before <= afterArchiveTimestamp) break;
   }
 
   return threads;

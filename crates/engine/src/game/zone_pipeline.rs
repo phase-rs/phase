@@ -17,8 +17,8 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AdditionalCostInstancePayment, CastTimingPermission, Duration, Effect, KickerVariant,
-    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
+    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -488,6 +488,10 @@ struct CastLinkSnapshot {
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
+    // CR 400.7d: the object paid as a cost to cast the spell (e.g. the
+    // emerge-sacrificed creature) is part of the cast-link family cleared on
+    // entry; snapshot and restore it like the other members.
+    cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -602,6 +606,17 @@ pub(crate) fn move_object(
                     // CR: `NthFromTop { n }` is 1-based ("second from the top" =>
                     // n=2, index 1); `move_to_library_at_index` is 0-based.
                     LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                    // CR 401.7: "beneath the top N cards" is only produced by the
+                    // `PutAtLibraryPosition` resolver, which moves directly and never
+                    // routes through this rebuilt-tail path. Handled for exhaustiveness:
+                    // a literal depth is honored (0-based index), a runtime-resolved
+                    // depth cannot be evaluated without the originating ability here.
+                    LibraryPosition::BeneathTop { depth } => match depth {
+                        crate::types::ability::QuantityExpr::Fixed { value } => {
+                            Some(value.max(0) as usize)
+                        }
+                        _ => None,
+                    },
                 };
                 zones::move_to_library_at_index(state, req.object_id, index, events);
                 return ZoneMoveResult::Done;
@@ -1274,6 +1289,25 @@ pub(crate) fn apply_zone_delivery_tail(
     if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
         && state.post_replacement_continuation.is_some()
     {
+        // CR 603.6d + CR 614.12a: For an "as-enters" (battlefield-entry) Moved
+        // post-effect, the effect resolves against the zone-changing object (the
+        // ENTRANT), NOT the replacement's host source. Drop the stashed host
+        // source slot for battlefield entries — exactly as the cast-resolution
+        // (`stack.rs`), land-play (`engine.rs`), and replacement-choice resume
+        // (`engine_replacement.rs`) drain sites already do — so a non-self `Moved`
+        // GenericEffect (Displaced Dinosaurs: "As a historic permanent you control
+        // enters, it becomes a 7/7 Dinosaur creature in addition to its other
+        // types") binds its `SelfRef` execute to the entrant, not the host.
+        //
+        // Scoped to `to == Battlefield`: only as-enters replacements bind to the
+        // entrant. A non-battlefield delivery that incidentally drains an outer
+        // effect's still-pending continuation here (e.g. a Mill replacement's
+        // doubling continuation while its milled cards move to the graveyard)
+        // must keep the host source slot — its post-effect belongs to the host,
+        // not the moved card.
+        if to == Zone::Battlefield {
+            state.post_replacement_source = None;
+        }
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
             Some(object_id),
@@ -1281,8 +1315,11 @@ pub(crate) fn apply_zone_delivery_tail(
             Some(crate::types::replacements::ReplacementEvent::Moved),
             events,
         );
-        if matches!(waiting_for, Some(WaitingFor::EffectZoneChoice { .. })) {
-            return replacement_pause_delivery_result(state);
+        if let Some(wf) = waiting_for {
+            if !matches!(wf, WaitingFor::Priority { .. }) {
+                state.waiting_for = wf;
+                return replacement_pause_delivery_result(state);
+            }
         }
     }
     ZoneDeliveryResult::Done
@@ -1561,6 +1598,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
+                    cast_cost_paid_object: obj.cast_cost_paid_object.clone(),
                 })
             })
             .flatten();
@@ -1598,6 +1636,16 @@ pub(crate) fn deliver_replaced_zone_change(
                     // CR: `NthFromTop { n }` is 1-based ("second from the top"
                     // => n=2, index 1); `move_to_library_at_index` is 0-based.
                     LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                    // CR 401.7: "beneath the top N cards" only flows from the
+                    // `PutAtLibraryPosition` resolver (direct move), never this
+                    // path. Exhaustiveness arm: honor a literal depth; a
+                    // runtime-resolved depth needs the originating ability.
+                    LibraryPosition::BeneathTop { depth } => match depth {
+                        crate::types::ability::QuantityExpr::Fixed { value } => {
+                            Some((*value).max(0) as usize)
+                        }
+                        _ => None,
+                    },
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }
@@ -1630,6 +1678,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
+                obj.cast_cost_paid_object = link.cast_cost_paid_object;
             }
         }
         if to == Zone::Battlefield || from == Zone::Battlefield {
@@ -1809,11 +1858,17 @@ pub(crate) fn deliver_replaced_zone_change(
 
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
-        WaitingFor::ReplacementChoice { player, .. } => ZoneDeliveryResult::NeedsChoice(*player),
+        WaitingFor::ReplacementChoice { player, .. }
         // CR 614.12a: a Devour as-enters sacrifice surfaced its own
         // `EffectZoneChoice`; carry its chooser so the caller's `park_waiting_for`
         // doesn't clobber the already-surfaced prompt.
-        WaitingFor::EffectZoneChoice { player, .. } => ZoneDeliveryResult::NeedsChoice(*player),
+        | WaitingFor::EffectZoneChoice { player, .. }
+        // CR 707.9 + CR 614.12a: enter-as-copy and other mid-entry choices
+        // surface their own `WaitingFor` variant with the correct chooser.
+        | WaitingFor::CopyTargetChoice { player, .. }
+        | WaitingFor::ChooseOneOfBranch { player, .. }
+        | WaitingFor::NamedChoice { player, .. }
+        | WaitingFor::ReturnAsAuraTarget { player, .. } => ZoneDeliveryResult::NeedsChoice(*player),
         _ => ZoneDeliveryResult::NeedsChoice(state.active_player),
     }
 }
@@ -2130,7 +2185,9 @@ mod w3_library_placement_tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .destination_zone(Zone::Library),
@@ -2316,7 +2373,9 @@ mod w3_library_placement_tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .destination_zone(Zone::Library),
@@ -2428,7 +2487,9 @@ mod w3_library_placement_tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .destination_zone(Zone::Library),
@@ -2551,7 +2612,9 @@ mod w3_library_placement_tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .destination_zone(Zone::Library);

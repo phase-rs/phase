@@ -13,6 +13,28 @@ pub struct AtomicCardsFile {
     pub data: HashMap<String, Vec<AtomicCard>>,
 }
 
+/// Root structure of an MTGJSON CardTypes.json file (CR 205.3 canonical lists).
+#[derive(Deserialize, Debug, Clone)]
+pub struct CardTypesFile {
+    pub data: CardTypesData,
+}
+
+/// CR 205.3: per-category subtype and supertype lists from MTGJSON CardTypes.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTypesData {
+    pub creature: CardTypeEntry,
+}
+
+/// Subtype/supertype entry for one card category in CardTypes.json.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTypeEntry {
+    pub sub_types: Vec<String>,
+    #[serde(default)]
+    pub super_types: Vec<String>,
+}
+
 /// A single card face from MTGJSON's atomic card data.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +230,13 @@ pub struct SetRelatedCards {
 pub fn load_atomic_cards(path: &Path) -> Result<AtomicCardsFile, Box<dyn Error>> {
     let contents = std::fs::read_to_string(path)?;
     let file: AtomicCardsFile = serde_json::from_str(&contents)?;
+    Ok(file)
+}
+
+/// Load and deserialize a CardTypes.json file.
+pub fn load_card_types(path: &Path) -> Result<CardTypesFile, Box<dyn Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    let file: CardTypesFile = serde_json::from_str(&contents)?;
     Ok(file)
 }
 

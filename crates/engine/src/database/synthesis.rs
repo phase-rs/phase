@@ -13,12 +13,12 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
     CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
-    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
 };
@@ -666,7 +666,9 @@ pub fn synthesize_craft(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -1758,7 +1760,9 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1840,7 +1844,9 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1934,7 +1940,9 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
@@ -2186,6 +2194,18 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
 }
 
 fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> AbilityDefinition {
+    casualty_copy_ability_definition_for_ordinal_with_rider(origin_ordinal, &[], false)
+}
+
+fn casualty_copy_rider_from_oracle(oracle: &str) -> (Vec<ContinuousModification>, bool) {
+    crate::parser::oracle_effect::become_copy_except::parse_casualty_copy_riders_from_oracle(oracle)
+}
+
+fn casualty_copy_ability_definition_for_ordinal_with_rider(
+    origin_ordinal: Option<u32>,
+    additional_modifications: &[ContinuousModification],
+    starting_loyalty_from_casualty_sacrifice: bool,
+) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         // CR 702.153a: Casualty — "If the spell has any targets, you may choose
@@ -2194,6 +2214,8 @@ fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> 
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: additional_modifications.to_vec(),
+            starting_loyalty_from_casualty_sacrifice,
         },
     )
     .condition(AbilityCondition::AdditionalCostPaid {
@@ -2246,9 +2268,18 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 
     // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
     // If the spell has any targets, you may choose new targets for the copy."
+    let (casualty_copy_mods, starting_loyalty) = face
+        .oracle_text
+        .as_deref()
+        .map(casualty_copy_rider_from_oracle)
+        .unwrap_or_default();
     for (casualty_ordinal, _) in casualty_thresholds.iter().enumerate() {
         let casualty_ordinal = u32::try_from(casualty_ordinal).unwrap_or(u32::MAX);
-        let execute = casualty_copy_ability_definition_for_ordinal(Some(casualty_ordinal));
+        let execute = casualty_copy_ability_definition_for_ordinal_with_rider(
+            Some(casualty_ordinal),
+            &casualty_copy_mods,
+            starting_loyalty,
+        );
         let already_has_trigger = face.triggers.iter().any(|t| {
             matches!(t.mode, TriggerMode::SpellCast)
                 && matches!(t.valid_card, Some(TargetFilter::SelfRef))
@@ -2299,6 +2330,8 @@ pub(crate) fn replicate_copy_ability_definition_for_ordinal(
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
     )
     // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
@@ -2418,6 +2451,8 @@ pub fn demonstrate_copy_ability_definition() -> AbilityDefinition {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: Some(ControllerRef::Opponent),
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
     )
     .description(
@@ -2432,6 +2467,8 @@ pub fn demonstrate_copy_ability_definition() -> AbilityDefinition {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
     )
     .optional()
@@ -2539,7 +2576,7 @@ pub fn synthesize_conspire(face: &mut CardFace) {
     if face.additional_cost.is_none() {
         face.additional_cost = Some(AdditionalCost::Optional {
             cost: AbilityCost::TapCreatures {
-                count: 2,
+                requirement: crate::types::ability::TapCreaturesRequirement::count(2),
                 filter: conspire_tap_filter(),
             },
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
@@ -2589,6 +2626,8 @@ pub fn conspire_copy_ability_definition() -> AbilityDefinition {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())
@@ -2616,6 +2655,43 @@ fn is_conspire_copy_trigger(t: &TriggerDefinition) -> bool {
         })
 }
 
+/// CR 601.2b/f: Teamwork N — "As an additional cost to cast this spell, you may
+/// tap any number of creatures you control with total power N or more." Builds
+/// the optional additional cost. Unlike Conspire, Teamwork adds no trigger: the
+/// spell's body references whether the cost was paid via an `AdditionalCostPaid`
+/// condition (parsed from "if this spell was cast using teamwork").
+///
+/// The tap requirement is the aggregate "total power N or greater" shape shared
+/// with Crew (CR 702.122a) and Saddle (CR 702.171a); CR 208.1 defines power.
+/// Mirrors `synthesize_conspire`'s optional-additional-cost construction.
+pub fn synthesize_teamwork(face: &mut CardFace) {
+    // allow-raw-authority: parse-time read of the printed Teamwork(N) keyword to extract N for cost synthesis (not a runtime effective-keyword query)
+    let Some(n) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Teamwork(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::TapCreatures {
+                requirement: crate::types::ability::TapCreaturesRequirement::total_power_at_least(
+                    n as i32,
+                ),
+                filter: teamwork_tap_filter(),
+            },
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+        });
+    }
+}
+
+/// CR 601.2b: "creatures you control" — Teamwork's tap-cost candidate filter.
+/// (No color-sharing constraint, unlike Conspire.)
+pub fn teamwork_tap_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+}
+
 /// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
 /// self-referential `CopySpell` repeated once for each permanent put into a
 /// graveyard from the battlefield this turn. Mirrors
@@ -2631,6 +2707,8 @@ pub fn gravestorm_copy_ability_definition() -> AbilityDefinition {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         },
     );
     // CR 702.69a: "copy it for each permanent that was put into a graveyard from
@@ -2768,7 +2846,9 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         face.replacements.push(replacement);
@@ -2837,7 +2917,9 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
@@ -4154,7 +4236,9 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     // CR 603.5 + CR 702.46a "you may": optionality lives on the execute ability
@@ -5969,7 +6053,9 @@ fn build_recover_self_change_zone(destination: Zone) -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }
 
@@ -6266,7 +6352,9 @@ fn build_dies_return_with_counter_trigger(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
@@ -6350,6 +6438,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // resolves, not via a lingering permission — this arms the
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
         },
     )
     .optional();
@@ -6469,6 +6558,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
     .condition(AbilityCondition::PreviousEffectAmount {
         comparator: Comparator::EQ,
         rhs: QuantityExpr::Fixed { value: 0 },
+        channel: crate::types::ability::DamageChannel::Total,
     });
     let remove_one = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -6564,6 +6654,7 @@ fn is_fading_upkeep_trigger(t: &TriggerDefinition) -> bool {
                     Some(AbilityCondition::PreviousEffectAmount {
                         comparator: Comparator::EQ,
                         rhs: QuantityExpr::Fixed { value: 0 },
+                        ..
                     })
                 ) && matches!(
                     &*sub.effect,
@@ -7260,6 +7351,43 @@ fn backup_grant_modifications(face: &CardFace) -> Vec<ContinuousModification> {
     modifications
 }
 
+/// CR 702 + CR 201.5: Collect the keywords the raw Oracle text grants as standalone
+/// keyword lines (e.g. "Flying" or "Flying, vigilance"). A line counts only when EVERY
+/// comma-separated part parses as a real keyword via `parse_keyword_from_oracle`, so
+/// ability lines that merely mention a keyword word ("Whenever Storm attacks, ...") are
+/// excluded. Used to corroborate name-colliding MTGJSON keywords before they are kept.
+fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
+    let mut keywords = Vec::new();
+    for line in raw_oracle_text.lines() {
+        let without_reminder = strip_reminder_text(line);
+        let parts: Vec<&str> = without_reminder
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let mut line_keywords = Vec::new();
+        let mut all_keywords = true;
+        for part in parts {
+            match parse_keyword_from_oracle(&part.to_ascii_lowercase()) {
+                Some(keyword) if !matches!(keyword, Keyword::Unknown(_)) => {
+                    line_keywords.push(keyword)
+                }
+                _ => {
+                    all_keywords = false;
+                    break;
+                }
+            }
+        }
+        if all_keywords {
+            keywords.extend(line_keywords);
+        }
+    }
+    keywords
+}
+
 fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModification> {
     let mut modifications = Vec::new();
     for line in granted_text.lines() {
@@ -7384,6 +7512,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                     condition: Box::new(AbilityCondition::TargetMatchesFilter {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
+                        subject_slot: None,
                     }),
                 })
                 .description(
@@ -7517,7 +7646,9 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description(format!("Exile another {type_str} you control"));
@@ -7574,7 +7705,9 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description("Return the exiled card to the battlefield under its owner's control".to_string());
@@ -7963,6 +8096,8 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                channel: DamageChannel::Total,
             },
         },
     }
@@ -8523,15 +8658,19 @@ pub fn synthesize_suspend(face: &mut CardFace) {
 /// Printed text (CR 702.170a): "Plot [cost]" means "Any time you have priority
 /// during your main phase while the stack is empty, you may exile this card
 /// from your hand and pay [cost]. It becomes a plotted card." Plotting is a
-/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack; we
-/// approximate it as an activated ability with `activation_zone = Hand`, the
-/// `.sorcery_speed()` single-authority builder, and a composite cost
-/// `(pay [cost], exile self from hand)`. This is the same controlled
-/// approximation Suspend uses (see `synthesize_suspend`); no card today
-/// interacts with the "doesn't use the stack" distinction.
+/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack. It is
+/// modeled as a sorcery-speed activated-ability *shape* (`activation_zone =
+/// Hand`, the `.sorcery_speed()` single-authority builder, and a composite cost
+/// `(pay [cost], exile self from hand)`) so the timing/cost machinery is reused,
+/// but the "doesn't use the stack" semantics are honored at runtime:
+/// `handle_activate_ability` intercepts plot via `is_plot_special_action` after
+/// cost payment and applies the grant IMMEDIATELY (no stack entry, no
+/// `AbilityActivated` event), rather than pushing the grant to the stack.
 ///
-/// On resolution the activation grants `CastingPermission::Plotted { turn_plotted: 0 }`
-/// to the now-exiled card (SelfRef). `grant_permission::resolve` stamps the
+/// As part of taking the special action (NOT on a later stack resolution) the
+/// activation grants `CastingPermission::Plotted { turn_plotted: 0 }` to the
+/// now-exiled card (SelfRef). `grant_permission::resolve` — called directly by
+/// the intercept, the same single authority the stack path used — stamps the
 /// real `state.turn_number` into `turn_plotted` (mirroring how it resolves
 /// `PlayFromExile { granted_to }` for the ability controller). The cast side
 /// is detected by `prepare_spell_cast` via `is_plot_cast` — exile-zone source
@@ -8547,7 +8686,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
 /// same face). Build-for-the-class: every Plot card flows through this single
 /// synthesizer regardless of card type.
 pub fn synthesize_plot(face: &mut CardFace) {
-    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+    use crate::types::ability::{ActivationRestriction, CastingPermission};
 
     // CR 702.170a: Find the first Plot keyword. Cards do not print multiple Plots.
     let Some(plot_cost) = face.keywords.iter().find_map(|k| match k {
@@ -8574,41 +8713,74 @@ pub fn synthesize_plot(face: &mut CardFace) {
             )
     });
     if !already_has_plot_activation {
-        let composite_cost = AbilityCost::Composite {
-            costs: vec![
-                AbilityCost::Mana {
-                    cost: plot_cost.clone(),
-                },
-                // CR 702.170a: "exile this card from your hand" — self-targeted
-                // exile from hand. Mirrors Suspend's self-exile cost component.
-                AbilityCost::Exile {
-                    count: 1,
-                    zone: Some(Zone::Hand),
-                    filter: Some(TargetFilter::SelfRef),
-                },
-            ],
-        };
-        let mut def = AbilityDefinition::new(
-            AbilityKind::Activated,
-            // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission
-            // to the exiled card. `turn_plotted: 0` is a placeholder stamped
-            // by `grant_permission::resolve` to `state.turn_number` at
-            // resolution. Grantee is the default `AbilityController` — the
-            // plot owner — which is the player allowed to cast it later.
-            Effect::GrantCastingPermission {
-                permission: CastingPermission::Plotted { turn_plotted: 0 },
-                target: TargetFilter::SelfRef,
-                grantee: PermissionGrantee::AbilityController,
-            },
-        )
-        .cost(composite_cost)
-        // CR 702.170a: "Any time you have priority during your main phase while
-        // the stack is empty" — i.e. sorcery-speed timing. `.sorcery_speed()`
-        // is the single-authority builder (see `AbilityDefinition::sorcery_speed`).
-        .sorcery_speed();
-        def.activation_zone = Some(Zone::Hand);
-        face.abilities.push(def);
+        // CR 702.170a: printed Plot functions from hand — activation and exile
+        // both occur in the Hand zone. `build_plot_activation` is the single
+        // authority for the cost/effect shape (shared with effect-granted plot
+        // from other zones per CR 702.170f).
+        face.abilities
+            .push(build_plot_activation(plot_cost, Zone::Hand, Zone::Hand));
     }
+}
+
+/// CR 702.170a + CR 702.170f: single-authority builder for the plot special
+/// action. It builds a sorcery-speed activated-ability *shape* to reuse the
+/// timing/cost machinery, but plot is a special action that doesn't use the
+/// stack (CR 702.170b): `handle_activate_ability` intercepts this shape via
+/// `is_plot_special_action` and applies the grant immediately (see that intercept
+/// and `synthesize_plot`). Parameterized over the two zone seams so it serves
+/// both the printed default (hand-Plot: `activation_zone` = `exile_zone` =
+/// `Hand`) and an effect-granted plot whose ability functions in another zone
+/// (CR 702.170f — "the card is exiled from the zone it is in"; e.g. Fblthp's
+/// plot-from-library, both = `Library`).
+///
+/// Cost = `Composite[Mana(plot_cost), Exile{ self, from exile_zone }]`; effect =
+/// grant `CastingPermission::Plotted` (the real turn is stamped when the special
+/// action is taken by `grant_permission::resolve`) to the now-exiled SelfRef for
+/// the ability controller. `.sorcery_speed()` is the single-authority timing
+/// builder (CR 702.170a: main phase + empty stack + active player). The Exile
+/// cost `zone` and `def.activation_zone` are the only parameterized seams —
+/// everything downstream of "exiled card carrying Plotted" is zone-of-origin
+/// agnostic.
+pub(crate) fn build_plot_activation(
+    plot_cost: ManaCost,
+    activation_zone: Zone,
+    exile_zone: Zone,
+) -> AbilityDefinition {
+    use crate::types::ability::{CastingPermission, PermissionGrantee};
+
+    let composite_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana { cost: plot_cost },
+            // CR 702.170a / CR 702.170f: "exile this card from <zone>" — self-
+            // targeted exile from the zone the card is in. Mirrors Suspend's
+            // self-exile cost component.
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(exile_zone),
+                filter: Some(TargetFilter::SelfRef),
+            },
+        ],
+    };
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission to
+        // the exiled card. `turn_plotted: 0` is a placeholder stamped by
+        // `grant_permission::resolve` to `state.turn_number` at resolution.
+        // Grantee is the default `AbilityController` — the plot owner — which is
+        // the player allowed to cast it later.
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::Plotted { turn_plotted: 0 },
+            target: TargetFilter::SelfRef,
+            grantee: PermissionGrantee::AbilityController,
+        },
+    )
+    .cost(composite_cost)
+    // CR 702.170a: "Any time you have priority during your main phase while the
+    // stack is empty" — sorcery-speed timing. `.sorcery_speed()` is the
+    // single-authority builder (see `AbilityDefinition::sorcery_speed`).
+    .sorcery_speed();
+    def.activation_zone = Some(activation_zone);
+    def
 }
 
 /// CR 702.155a-b + CR 714.3b: Read Ahead — a Saga with read ahead lets its
@@ -8862,6 +9034,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);
+    crate::database::augment::synthesize_augment(face);
+    crate::database::contraptions::synthesize_contraptions(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
@@ -8871,6 +9045,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.78a: Conspire — optional "tap two color-sharing creatures" additional
     // cost + a copy-once-on-cast trigger gated on that cost being paid.
     synthesize_conspire(face);
+    // CR 601.2b/f: Teamwork N — optional "tap any number of creatures you control
+    // with total power N or more" additional cost. The body's "if this spell was
+    // cast using teamwork" condition reads the resulting additional-cost-paid flag.
+    synthesize_teamwork(face);
     // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
     // graveyard from the battlefield this turn.
     synthesize_gravestorm(face);
@@ -9262,7 +9440,9 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .sub_ability(shuffle);
@@ -9379,6 +9559,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // router already routed this shape through during-resolution;
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
             },
         )
         .optional();
@@ -9395,7 +9576,9 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         .sub_ability(cast_sub);
@@ -9671,6 +9854,35 @@ fn build_oracle_face_inner(
     if oracle_has_craft_materials && !extracted_has_craft {
         keywords.retain(|keyword| !matches!(keyword, Keyword::Craft { .. }));
     }
+
+    // CR 702.40 + CR 201.5: MTGJSON sometimes asserts a keyword whose token coincides
+    // with a word in the card's own name (e.g. it tags the Storm keyword for "Storm,
+    // Queen of Wakanda"). A keyword ability is only real if the card's rules text grants
+    // it. Drop a name-colliding MTGJSON keyword that the Oracle text does NOT corroborate
+    // as a standalone keyword line; corroborated keywords (e.g. Flying on a card literally
+    // named "Flying Men") and non-colliding keywords (e.g. Storm's real Flying) are kept.
+    // Corroboration re-scans the raw Oracle lines via `parse_keyword_from_oracle` rather
+    // than reading `extracted_keywords`, because the latter deliberately omits evergreen
+    // keywords already present in the MTGJSON list (only multi-instance keywords survive
+    // there — see `extract_keyword_line`). Value-equality (e == kw) matches the
+    // `merge_extracted_keywords` convention.
+    let name_words: std::collections::HashSet<String> = face_name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let oracle_corroborated = oracle_corroborated_keywords(raw_oracle_text);
+    // Multi-word / parameterized keywords are safely out of scope here: their
+    // Display contains a space or brace (e.g. "Double Strike", "Ward {2}"), while
+    // `name_words` holds only single alphanumeric tokens (the name is split on
+    // every non-alphanumeric char). Such a multi-token `token` can never equal a
+    // single name word, so `name_words.contains(&token)` is always false and the
+    // keyword is always retained — only genuinely single-word keywords (Flying,
+    // Storm) can ever collide with a name word and be dropped.
+    keywords.retain(|kw| {
+        let token = kw.to_string().to_lowercase();
+        !name_words.contains(&token) || oracle_corroborated.iter().any(|e| e == kw)
+    });
 
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
@@ -10344,6 +10556,107 @@ mod cycling_synthesis_tests {
                 )
             }),
             "cycling line must not become an Unimplemented spell ability"
+        );
+    }
+
+    /// MSH Wave 2 (Storm, Queen of Wakanda): MTGJSON phantom-tags the Storm keyword
+    /// (CR 702.40) because the card's name embeds the word "Storm". The synthesis
+    /// name-guard must drop the uncorroborated Storm keyword while keeping the real
+    /// standalone Flying line. CR 201.5: a name reference means just that object.
+    #[test]
+    fn synthesis_drops_name_colliding_uncorroborated_keyword() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+
+        let oracle = "Flying\n\
+                      Whenever Storm attacks, until end of turn, another target attacking \
+                      creature gains flying and gets +X/+0, where X is Storm's power.";
+        let storm = AtomicCard {
+            name: "Storm, Queen of Wakanda".to_string(),
+            mana_cost: Some("{3}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            text: Some(oracle.to_string()),
+            power: Some("4".to_string()),
+            toughness: Some("4".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Legendary Creature — Human Hero".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string(), "Hero".to_string()],
+            supertypes: vec!["Legendary".to_string()],
+            keywords: Some(vec!["Flying".to_string(), "Storm".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 4.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("storm-queen-test".to_string()),
+                scryfall_id: Some("storm-queen-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&storm, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::Flying),
+            "real standalone Flying line must survive"
+        );
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            !face.keywords.iter().any(|k| matches!(k, Keyword::Storm)),
+            "phantom name-colliding Storm keyword must be dropped (not in Oracle text)"
+        );
+    }
+
+    /// Negative: a keyword that collides with the card's name but IS corroborated by
+    /// a standalone Oracle keyword line (a card literally named "Flying Men" with a
+    /// "Flying" line) must be kept — corroboration overrides the name collision.
+    #[test]
+    fn synthesis_keeps_name_colliding_corroborated_keyword() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+
+        let men = AtomicCard {
+            name: "Flying Men".to_string(),
+            mana_cost: Some("{U}".to_string()),
+            colors: vec!["U".to_string()],
+            color_identity: vec!["U".to_string()],
+            text: Some("Flying".to_string()),
+            power: Some("1".to_string()),
+            toughness: Some("1".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Human".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string()],
+            supertypes: vec![],
+            keywords: Some(vec!["Flying".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 1.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("flying-men-test".to_string()),
+                scryfall_id: Some("flying-men-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&men, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::Flying),
+            "name-colliding Flying corroborated by a standalone Oracle line must be kept"
         );
     }
 }
@@ -16746,24 +17059,7 @@ mod station_synthesis_tests {
     ///     (not support-only despite first-draft speculation).
     #[test]
     fn station_32_tdm_spacecraft_regression_suite() {
-        use crate::database::CardDatabase;
-        use std::path::PathBuf;
-
-        // CARGO_MANIFEST_DIR points at crates/engine; the workspace root is
-        // two levels up. Skip gracefully if the export has not been generated
-        // (fresh clone before setup.sh).
-        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        let path = workspace_root.join("client/public/card-data.json");
-        if !path.exists() {
-            eprintln!(
-                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
-                path.display()
-            );
-            return;
-        }
-        let db = CardDatabase::from_export(&path).expect("card-data.json loads as a valid export");
+        let db = crate::test_support::shared_card_db();
 
         // Ground truth: (card name, expected creature-shift). None = support-only
         // or excluded (non-Station Spacecraft crossover).
@@ -16852,12 +17148,10 @@ mod station_synthesis_tests {
             }
         }
 
-        if !missing.is_empty() {
-            eprintln!(
-                "skipping regression for cards missing from export: {}",
-                missing.join(", ")
-            );
-        }
+        assert!(
+            missing.is_empty(),
+            "fixture missing TDM Spacecraft cards: {missing:?}"
+        );
         assert!(
             wrong.is_empty(),
             "synthesize_station produced wrong thresholds:\n  {}",
@@ -17578,6 +17872,48 @@ mod idempotency_tests {
             "intrinsic casualty trigger's execute must equal the canonical \
              casualty_copy_ability_definition() — single source of truth for \
              both intrinsic and dynamically-granted casualty"
+        );
+    }
+
+    #[test]
+    fn synthesize_casualty_ob_nixilis_rider_strips_legendary_and_sets_starting_loyalty() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Planeswalker);
+        face.card_type.supertypes.push(Supertype::Legendary);
+        face.keywords.push(Keyword::Casualty(1));
+        face.oracle_text = Some(
+            "Casualty X. The copy isn't legendary and has starting loyalty X. \
+             (As you cast this spell, you may sacrifice a creature with power X. \
+             When you do, copy this spell. The copy becomes a token.)"
+                .to_string(),
+        );
+        synthesize_casualty(&mut face);
+
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_ref())
+            .expect("casualty trigger");
+        let Effect::CopySpell {
+            additional_modifications,
+            starting_loyalty_from_casualty_sacrifice,
+            ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected CopySpell casualty execute, got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            additional_modifications.contains(&ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }),
+            "Ob Nixilis rider must strip legendary from the copy"
+        );
+        assert!(
+            *starting_loyalty_from_casualty_sacrifice,
+            "Ob Nixilis rider must set starting loyalty from the casualty sacrifice"
         );
     }
 }
@@ -18725,7 +19061,9 @@ mod backup_synthesis_tests {
         // Verify the condition is Not(TargetMatchesFilter(SelfRef))
         match &sub_ability.condition {
             Some(AbilityCondition::Not { condition }) => match condition.as_ref() {
-                AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                AbilityCondition::TargetMatchesFilter {
+                    filter, use_lki, ..
+                } => {
                     assert!(matches!(filter, TargetFilter::SelfRef));
                     assert!(!use_lki);
                 }
@@ -19043,10 +19381,14 @@ mod conspire_synthesis_tests {
         // CR 702.78a: optional "tap two color-sharing creatures" additional cost.
         match face.additional_cost.as_ref().expect("additional_cost set") {
             AdditionalCost::Optional {
-                cost: AbilityCost::TapCreatures { count, filter },
+                cost:
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    },
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                assert_eq!(*count, 2);
+                assert_eq!(requirement.fixed_count(), Some(2));
                 let TargetFilter::Typed(tf) = filter else {
                     panic!("expected typed creature filter, got {filter:?}");
                 };
@@ -22809,6 +23151,7 @@ mod fading_vanishing_tests {
             Some(AbilityCondition::PreviousEffectAmount {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
+                ..
             })
         ));
         assert!(matches!(
@@ -24709,6 +25052,7 @@ mod demonstrate_synthesis_tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                ..
             }
         ));
         // Opponent's copy — sub-ability with the opponent copier, may retarget.
@@ -24719,6 +25063,7 @@ mod demonstrate_synthesis_tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: Some(ControllerRef::Opponent),
+                ..
             }
         ));
     }
@@ -24810,6 +25155,7 @@ mod absorb_synthesis_tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target)],
             source,

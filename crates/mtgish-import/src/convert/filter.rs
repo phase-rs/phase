@@ -9,10 +9,12 @@ use engine::types::ability::{
     ChoiceType, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
     SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterMatch;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::ManaColor;
 
+use crate::convert::condition::card_type_to_core;
 use crate::convert::quantity::convert as convert_quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
@@ -230,7 +232,9 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // CR 400.7: object entered the battlefield this turn.
         Permanents::EnteredTheBattlefieldThisTurn => prop_filter(FilterProp::EnteredThisTurn),
         // CR 508.1a: creature attacked this turn.
-        Permanents::AttackedThisTurn => prop_filter(FilterProp::AttackedThisTurn),
+        Permanents::AttackedThisTurn => {
+            prop_filter(FilterProp::AttackedThisTurn { defender: None })
+        }
         // CR 509.1a: creature blocked this turn.
         Permanents::BlockedThisTurn => prop_filter(FilterProp::BlockedThisTurn),
         // CR 510.1: object was dealt damage during this turn.
@@ -387,7 +391,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         },
         // CR 508.1a: "didn't attack this turn" — negation of attacked-this-turn.
         Permanents::DidntAttackThisTurn => TargetFilter::Not {
-            filter: Box::new(prop_filter(FilterProp::AttackedThisTurn)),
+            filter: Box::new(prop_filter(FilterProp::AttackedThisTurn { defender: None })),
         },
         // CR 400.7: "didn't enter the battlefield this turn" — negation of EnteredThisTurn.
         Permanents::DidntEnterTheBattlefieldThisTurn => TargetFilter::Not {
@@ -410,6 +414,28 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
                     idiom: "Permanents/convert",
                     path: String::new(),
                     detail: format!("IsAttackingPlayer with non-You axis: {other:?}"),
+                });
+            }
+        },
+        // CR 508.6 + CR 508.1b: "creature that attacked [a player] this turn" —
+        // the historical, defender-scoped sibling of `IsAttackingPlayer` above
+        // (Jabari's Influence). Only the `You` axis is expressible, via
+        // `FilterProp::AttackedThisTurn { defender: Some(You) }` (read from the
+        // per-defender attack ledger); specific-opponent / chosen-player axes need
+        // a source-relative defender primitive we don't have, so they strict-fail
+        // rather than erasing the defender (which would wrongly widen to the
+        // board-wide `defender: None` and match creatures that attacked anyone).
+        Permanents::AttackedPlayerThisTurn(player) => match player_to_controller(player)? {
+            ControllerRef::You => TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::AttackedThisTurn {
+                    defender: Some(ControllerRef::You),
+                },
+            ])),
+            other => {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Permanents/convert",
+                    path: String::new(),
+                    detail: format!("AttackedPlayerThisTurn with non-You axis: {other:?}"),
                 });
             }
         },
@@ -700,6 +726,37 @@ pub(crate) fn choice_type_for_choosable_color(choice: &ChoosableColor) -> Choice
         | ChoosableColor::ColorAmoungPermanents(_)
         | ChoosableColor::NotColorAmoungPermanents(_) => ChoiceType::color(),
     }
+}
+
+/// CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+/// artifact, enchantment, instant, sorcery, or planeswalker" — Archon of
+/// Valor's Reach; "choose creature or land" — Winding Way) is a narrowed
+/// `ChoiceType::CardType`, not a free-form `Labeled` choice — it must
+/// persist as `ChosenAttribute::CardType` so `FilterProp::IsChosenCardType`
+/// (read by both the "can't cast spells of the chosen type" prohibition and
+/// `Permanents::IsCardtypeVariable(TheChosenCardtype)` consumers) can bind.
+/// The `excluded` set is the complement of the listed types within the
+/// engine's seven choosable types (`CoreType::CHOOSABLE_TYPES`). Shared by
+/// both `ReplacementActionWouldEnter::ChooseACardtypeFromList` (the ETB
+/// axis, in `replacement.rs`) and `Action::ChooseACardtypeFromList` (the
+/// spell-action axis, in `action.rs`) since mtgish duplicates this shape
+/// across both schema locations.
+pub(crate) fn restricted_card_type_choice(opts: &[CardType]) -> ConvResult<ChoiceType> {
+    if opts.is_empty() {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ChoiceType::CardType",
+            needed_variant: "ChooseACardtypeFromList with empty option list".into(),
+        });
+    }
+    let mut allowed = Vec::with_capacity(opts.len());
+    for opt in opts {
+        allowed.push(card_type_to_core(opt)?);
+    }
+    let excluded = CoreType::CHOOSABLE_TYPES
+        .into_iter()
+        .filter(|core_type| !allowed.contains(core_type))
+        .collect();
+    Ok(ChoiceType::card_type_excluding(excluded))
 }
 
 pub(crate) fn supertype_name(s: &SuperType) -> String {
@@ -1997,6 +2054,44 @@ mod tests {
                 Players::SinglePlayer(Box::new(Player::You)),
             )))
             .expect("convert owner-scoped permanent filter"),
+        );
+    }
+
+    #[test]
+    fn attacked_you_this_turn_maps_to_defender_scoped_filter() {
+        // CR 508.6: the historical defender-scoped attack filter (Jabari's
+        // Influence) must produce `AttackedThisTurn { defender: Some(You) }`,
+        // mirroring the present-tense `IsAttackingPlayer(You)` — never erase the
+        // defender to the board-wide `None`.
+        let TargetFilter::Typed(tf) =
+            convert(&Permanents::AttackedPlayerThisTurn(Box::new(Player::You)))
+                .expect("convert AttackedPlayerThisTurn(You)")
+        else {
+            panic!("expected typed filter");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::AttackedThisTurn {
+                    defender: Some(ControllerRef::You)
+                }
+            )),
+            "expected AttackedThisTurn {{ defender: Some(You) }}, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn attacked_player_this_turn_non_you_axis_strict_fails() {
+        // Non-You defender axes have no source-relative primitive — they must
+        // strict-fail rather than erasing the defender (which would wrongly widen
+        // to the board-wide `AttackedThisTurn { defender: None }`).
+        assert!(
+            convert(&Permanents::AttackedPlayerThisTurn(Box::new(
+                Player::Ref_TargetPlayer
+            )))
+            .is_err(),
+            "non-You AttackedPlayerThisTurn must strict-fail, not erase the defender"
         );
     }
 

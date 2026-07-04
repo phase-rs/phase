@@ -136,12 +136,18 @@ describe("TargetingOverlay", () => {
   it("allows cancelling tap-creatures spell costs", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
+      objects: {
+        "7": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 7,
+          name: "Memnite",
+        }),
+      },
       waiting_for: {
         type: "PayCost",
         data: {
           player: 0,
           kind: { type: "TapCreatures" },
-          choices: [],
+          choices: [7],
           count: 1,
           min_count: 0,
           resume: {
@@ -225,6 +231,58 @@ describe("TargetingOverlay", () => {
     expect(dispatch).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [7] },
+    });
+  });
+
+  it("confirms aggregate-power board choices when the selected power is high enough", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: {
+        "20": buildGameObjectWithCoreTypes(["Artifact"], {
+          id: 20,
+          name: "Vehicle",
+        }),
+        "21": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Pilot One",
+          power: 2,
+        }),
+        "22": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 22,
+          name: "Pilot Two",
+          power: 3,
+        }),
+      },
+      waiting_for: {
+        type: "CrewVehicle",
+        data: {
+          player: 0,
+          vehicle_id: 20,
+          crew_power: 4,
+          eligible_creatures: [21, 22],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [21, 22] });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm (5/4 power)" }));
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "CrewVehicle",
+      data: { vehicle_id: 20, creature_ids: [21, 22] },
     });
   });
 
@@ -432,6 +490,37 @@ describe("TargetingOverlay", () => {
     expect(screen.getAllByAltText("U")).toHaveLength(2);
   });
 
+  it("shows the active trigger damage amount during target selection", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          trigger_controller: 0,
+          trigger_event: {
+            type: "DamageDealt",
+            data: { source_id: 9, target: { Object: 7 }, amount: 3, is_combat: true },
+          },
+          target_slots: [{ legal_targets: [{ Object: 7 }], optional: false }],
+          selection: { current_slot: 0, current_legal_targets: [{ Object: 7 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("This trigger: 3 damage")).toBeInTheDocument();
+  });
+
   it("prefixes the prompt with the active slot's mode label when present", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
@@ -459,6 +548,51 @@ describe("TargetingOverlay", () => {
     expect(
       screen.getByText("Deal 2 damage to any target. — a player"),
     ).toBeInTheDocument();
+  });
+
+  it("renders mana symbols and source names in active mode labels", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const sourceObject = buildGameObjectWithCoreTypes(["Instant"], {
+      id: 9,
+      card_id: 9,
+      name: "Kozilek's Command",
+      color: [],
+      base_color: [],
+    });
+    const gameState = createGameState({
+      objects: {
+        "9": sourceObject,
+      },
+      waiting_for: {
+        type: "TargetSelection",
+        data: {
+          player: 0,
+          pending_cast: {
+            object_id: 9,
+            card_id: 9,
+            ability: { targets: [] },
+            cost: { type: "NoCost" },
+          },
+          target_slots: [{ legal_targets: [{ Player: 1 }], optional: false }],
+          mode_labels: ["Target player creates a token with \"Sacrifice ~: Add {C}.\""],
+          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText(/Sacrifice Kozilek's Command: Add/)).toBeInTheDocument();
+    expect(screen.getByAltText("C")).toBeInTheDocument();
+    expect(screen.queryByText(/Sacrifice ~:/)).toBeNull();
   });
 
   it("renders the populate creature-token prompt", () => {
@@ -510,5 +644,83 @@ describe("TargetingOverlay", () => {
 
     expect(screen.getByText("a player")).toBeInTheDocument();
     expect(screen.queryByText(/—/)).toBeNull();
+  });
+
+  // Regression for issue #3681 (Inferno Titan): a trigger that divides an effect
+  // among "one, two, or three targets" surfaces multiple slots. The prompt must
+  // report progress ("Choose target 1 of 3") instead of always reading
+  // "a creature", which misled players into selecting only one target.
+  it("shows 'Choose target N of M' for a multi-slot trigger (divide among targets)", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const bear = buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Bear" });
+    const elf = buildGameObjectWithCoreTypes(["Creature"], { id: 8, name: "Elf" });
+    const titan = buildGameObjectWithCoreTypes(["Creature"], { id: 9, name: "Inferno Titan" });
+    const legal = [{ Object: 7 }, { Object: 8 }, { Object: 9 }, { Player: 1 }];
+
+    const gameState = createGameState({
+      objects: { "7": bear, "8": elf, "9": titan },
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [
+            { legal_targets: legal, optional: false },
+            { legal_targets: legal, optional: true },
+            { legal_targets: legal, optional: true },
+          ],
+          selection: { current_slot: 0, current_legal_targets: legal },
+          source_id: 9,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("Choose target 1 of 3")).toBeInTheDocument();
+    expect(screen.queryByText("a creature")).toBeNull();
+  });
+
+  it("advances the slot progress as each target is chosen for a multi-slot trigger", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const legal = [{ Object: 7 }, { Object: 8 }, { Player: 1 }];
+
+    const gameState = createGameState({
+      objects: {
+        "7": buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Bear" }),
+        "8": buildGameObjectWithCoreTypes(["Creature"], { id: 8, name: "Elf" }),
+      },
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [
+            { legal_targets: legal, optional: false },
+            { legal_targets: legal, optional: true },
+            { legal_targets: legal, optional: true },
+          ],
+          selection: { current_slot: 1, current_legal_targets: legal },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("Choose target 2 of 3")).toBeInTheDocument();
   });
 });

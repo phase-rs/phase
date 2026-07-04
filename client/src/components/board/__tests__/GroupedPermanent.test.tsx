@@ -86,6 +86,7 @@ function makeGroup(): GroupedPermanentType {
 }
 
 function renderGroup(options: {
+  boardChoiceObjectIds?: Set<number>;
   validAttackerIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
@@ -94,9 +95,11 @@ function renderGroup(options: {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set(),
+        selectableSacrificeObjectIds: new Set(),
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds: new Set(),
         validAttackerIds: options.validAttackerIds ?? new Set(),
@@ -118,9 +121,11 @@ function renderCreatureRow() {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        boardChoiceObjectIds: new Set(),
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set(),
+        selectableSacrificeObjectIds: new Set(),
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds: new Set(),
         validAttackerIds: new Set(),
@@ -250,6 +255,98 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "Equip",
       data: { equipment_id: 42, target_id: 2 },
+    });
+  });
+
+  it("dispatches an immediate board choice from a collapsed group picker", () => {
+    const waitingFor: WaitingFor = {
+      type: "StationTarget",
+      data: {
+        player: 0,
+        spacecraft_id: 42,
+        eligible_creatures: [1, 2, 3],
+      },
+    };
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+    // All eligible creatures in a collapsed group are visually identical, so the
+    // picker resolves with a single labelled action instead of a #1..#N list.
+    fireEvent.click(screen.getByRole("button", { name: "Station" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ActivateStation",
+      data: { spacecraft_id: 42, creature_id: 1 },
+    });
+  });
+
+  it("sacrifices one of many identical tokens with a single action (no #1-#N list) — #4375", () => {
+    const waitingFor: WaitingFor = {
+      type: "EffectZoneChoice",
+      data: {
+        player: 0,
+        cards: [1, 2, 3, 4, 5],
+        count: 1,
+        source_id: 99,
+        effect_kind: "Sacrifice",
+        zone: "Battlefield",
+        destination: null,
+      },
+    } as unknown as WaitingFor;
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3, 4, 5]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+
+    // No numbered per-token list — the indistinguishable tokens collapse to one
+    // action button labelled by intent.
+    expect(screen.queryByRole("button", { name: "#1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "#5" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sacrifice" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [1] },
+    });
+  });
+
+  it("picks a quantity of identical tokens via the stepper for a multi sacrifice — #4375", () => {
+    const waitingFor: WaitingFor = {
+      type: "EffectZoneChoice",
+      data: {
+        player: 0,
+        cards: [1, 2, 3, 4, 5],
+        count: 2,
+        source_id: 99,
+        effect_kind: "Sacrifice",
+        zone: "Battlefield",
+        destination: null,
+      },
+    } as unknown as WaitingFor;
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3, 4, 5]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+
+    // Count stepper replaces the #1..#N toggle grid.
+    expect(screen.queryByRole("button", { name: "#1" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [1, 2] },
     });
   });
 

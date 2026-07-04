@@ -31,6 +31,10 @@ pub fn resolve(
         }
     };
 
+    // CR 805.8: With shared team turns, skipping a player skips that player's
+    // team turn once; store the team's seat-order representative as anchor.
+    let player = crate::game::topology::normalize_shared_turn_recipient(state, player);
+
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
     let n = resolve_quantity(state, count, ability.controller, ability.source_id).max(0) as u32;
     if n == 0 {
@@ -60,6 +64,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetRef};
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -114,6 +119,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
@@ -190,5 +196,30 @@ mod tests {
 
         // No side-effect on turns_to_skip (vector may stay empty).
         assert!(state.turns_to_skip.is_empty() || state.turns_to_skip[0] == 0);
+    }
+
+    #[test]
+    fn two_hg_skip_next_turn_uses_team_representative_once() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let mut events = Vec::new();
+        let mut ability = make_ability(TargetFilter::Any, PlayerId(2));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.turns_to_skip[0], 1);
+        assert_eq!(state.turns_to_skip.get(1).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn standard_skip_next_turn_targeted_player_is_not_normalized() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 0);
+        let mut events = Vec::new();
+        let mut ability = make_ability(TargetFilter::Any, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.turns_to_skip[1], 1);
     }
 }

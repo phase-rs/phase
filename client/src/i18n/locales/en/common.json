@@ -28,6 +28,12 @@
     "updateIssue": "update issue",
     "updated": "updated"
   },
+  "comboDetector": {
+    "label": "Combo Detector",
+    "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
+    "on": "On",
+    "off": "Off"
+  },
   "gameMenu": {
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",
@@ -37,6 +43,7 @@
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
+    "requestTakeback": "Request Takeback",
     "concede": "Concede",
     "backToDraft": "Back to Draft",
     "mainMenu": "Main Menu",
@@ -55,6 +62,7 @@
     "seatPlayer": "Player",
     "seatOpen": "Open",
     "seatAi": "AI ({{difficulty}})",
+    "teamLabel": "Team {{number}}",
     "waiting": "Waiting…",
     "seatLabel": "Seat {{id}}",
     "addAi": "Add AI",

@@ -33,11 +33,14 @@ import type {
   CardSizePreference,
   CommandZoneDisplay,
   LogDefaultState,
+  MultiplayerBoardLayout,
+  ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
+import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
@@ -66,9 +69,11 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
+const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
+const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
  *  max = instant (skip animations). `0` = slowest, `1` = normal. The endpoint
@@ -152,7 +157,10 @@ export function PreferencesModal({
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
+  const collapseLands = usePreferencesStore((s) => s.collapseLands);
+  const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -160,7 +168,10 @@ export function PreferencesModal({
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
+  const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
+  const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
+  const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
@@ -361,6 +372,24 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.collapseLands")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseLands}
+                      onChange={setCollapseLands}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseSupport")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseSupport}
+                      onChange={setCollapseSupport}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.logDefault")}>
                     <SegmentedControl
                       options={LOG_DEFAULTS}
@@ -450,6 +479,15 @@ export function PreferencesModal({
                     </label>
                   </SettingGroup>
 
+                  <SettingGroup label={t("visual.multiplayerBoardLayout")}>
+                    <SegmentedControl
+                      options={MULTIPLAYER_BOARD_LAYOUTS}
+                      value={multiplayerBoardLayout}
+                      onChange={setMultiplayerBoardLayout}
+                      renderLabel={(opt) => t(`visual.multiplayerBoardLayoutOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
                   <SettingGroup label={t("visual.cardPreview")}>
                     <SegmentedControl
                       options={CARD_PREVIEW_MODES}
@@ -498,17 +536,10 @@ export function PreferencesModal({
                       onMove={moveArtChainEntry}
                     />
                     {artOverrideCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (window.confirm(t("visual.clearArtOverridesConfirm", { count: artOverrideCount }))) {
-                            clearAllArtOverrides();
-                          }
-                        }}
-                        className="mt-2 rounded-[14px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
-                      >
-                        {t("visual.clearArtOverrides", { count: artOverrideCount })}
-                      </button>
+                      <ClearArtOverridesButton
+                        count={artOverrideCount}
+                        onClear={clearAllArtOverrides}
+                      />
                     )}
                   </SettingGroup>
 
@@ -696,6 +727,43 @@ export function PreferencesModal({
   );
 }
 
+function ClearArtOverridesButton({
+  count,
+  onClear,
+}: {
+  count: number;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation("settings");
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const onConfirm = useCallback(() => {
+    onClear();
+    setConfirmOpen(false);
+  }, [onClear]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        className="mt-2 rounded-[14px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
+      >
+        {t("visual.clearArtOverrides", { count })}
+      </button>
+      <ConfirmDialog
+        open={confirmOpen}
+        title={t("visual.clearArtOverrides", { count })}
+        message={t("visual.clearArtOverridesConfirm", { count })}
+        confirmLabel={t("visual.clearArtOverridesAction")}
+        onConfirm={onConfirm}
+        onCancel={() => setConfirmOpen(false)}
+        tone="danger"
+      />
+    </>
+  );
+}
+
 /** Discreet trailing footer with a single "Reset to defaults" action that
  *  wipes the entire preferences store back to factory defaults. Confirms
  *  before firing — this clears AI seats, board background, audio levels,
@@ -706,20 +774,32 @@ function ResetAllFooter({
   resetAllPreferences: () => void;
 }) {
   const { t } = useTranslation("settings");
-  const onClick = useCallback(() => {
-    if (window.confirm(t("resetAll.confirm"))) {
-      resetAllPreferences();
-    }
-  }, [resetAllPreferences, t]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const onConfirm = useCallback(() => {
+    resetAllPreferences();
+    setConfirmOpen(false);
+  }, [resetAllPreferences]);
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
-    >
-      {t("resetAll.button")}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
+      >
+        {t("resetAll.button")}
+      </button>
+      <ConfirmDialog
+        open={confirmOpen}
+        title={t("resetAll.button")}
+        message={t("resetAll.confirm")}
+        confirmLabel={t("resetAll.confirmAction")}
+        onConfirm={onConfirm}
+        onCancel={() => setConfirmOpen(false)}
+        tone="danger"
+      />
+    </>
   );
 }
 
@@ -908,6 +988,7 @@ function DataSection() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
 
   const onExport = useCallback(() => {
     setError(null);
@@ -945,6 +1026,19 @@ function DataSection() {
     [t],
   );
 
+  const dismissImportDialog = useCallback(() => {
+    setPendingImportFile(null);
+  }, []);
+
+  const confirmImport = useCallback(
+    (mode: ImportMode) => {
+      if (!pendingImportFile) return;
+      void onImport(pendingImportFile, mode);
+      setPendingImportFile(null);
+    },
+    [onImport, pendingImportFile],
+  );
+
   return (
     <SettingsSection title={t("data.title")}>
       <p className="text-xs text-slate-400">
@@ -975,11 +1069,20 @@ function DataSection() {
           const file = e.target.files?.[0];
           e.target.value = "";
           if (!file) return;
-          const mode: ImportMode = window.confirm(t("data.importConfirm"))
-            ? "overwrite"
-            : "merge";
-          void onImport(file, mode);
+          setPendingImportFile(file);
         }}
+      />
+      <ConfirmDialog
+        open={pendingImportFile != null}
+        title={t("data.importModeTitle")}
+        message={t("data.importModeMessage")}
+        confirmLabel={t("data.importOverwrite")}
+        secondaryConfirmLabel={t("data.importMerge")}
+        onConfirm={() => confirmImport("overwrite")}
+        onSecondaryConfirm={() => confirmImport("merge")}
+        onCancel={dismissImportDialog}
+        tone="danger"
+        secondaryTone="primary"
       />
       {status && <p className="text-xs text-emerald-400">{status}</p>}
       {error && <p className="text-xs text-rose-400">{error}</p>}

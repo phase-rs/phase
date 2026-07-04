@@ -410,8 +410,6 @@ pub fn resolve_set_life_total(
         Effect::SetLifeTotal { amount, target } => (amount, target),
         _ => return Err(EffectError::MissingParam("SetLifeTotal amount".to_string())),
     };
-    let amount = crate::game::quantity::resolve_quantity_with_targets(state, amount_expr, ability);
-
     // CR 119.5 + CR 608.2f: Resolve which players' life totals are set. The
     // common single-player forms ("your" → Controller, "target player's" →
     // the chosen target) preserve the original single-player behavior. The
@@ -438,12 +436,33 @@ pub fn resolve_set_life_total(
     // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
     // pipeline routing.
     for target_player_id in target_player_ids {
-        let current_life = state
-            .players
-            .iter()
-            .find(|p| p.id == target_player_id)
-            .map(|p| p.life)
-            .ok_or(EffectError::PlayerNotFound)?;
+        // CR 119.5 + CR 109.5: Resolve the new life total per player so a
+        // third-person "the number of [X] THEY control" count (Biorhythm,
+        // Shaman of Forgotten Ways) binds to each recipient. `scoped_player` is
+        // rebound to the player whose life total is being set; the count's
+        // `ScopedPlayer` controller reads it, while `original_controller` (and
+        // hence any `You`-scoped count) and the ability's targets / chosen_x
+        // stay fixed to the caster. Single-player and caster-scoped forms
+        // ("becomes 10", "your life total", Repay in Kind's cross-player
+        // extremum) are unaffected — they carry no `ScopedPlayer` ref to vary.
+        let mut scoped_ability = ability.clone();
+        scoped_ability.set_scoped_player_recursive(target_player_id);
+        let amount = crate::game::quantity::resolve_quantity_with_targets(
+            state,
+            amount_expr,
+            &scoped_ability,
+        );
+
+        // CR 810.9a: "If a cost or effect needs to know the value of an
+        // individual player's life total, that cost or effect uses the
+        // team's life total instead" — degenerates to `Player::life` outside
+        // team-based formats. CR 810.9c: the diff is still applied to only
+        // `target_player_id`'s own life, so the team total moves by exactly
+        // the gained/lost amount.
+        if !state.players.iter().any(|p| p.id == target_player_id) {
+            return Err(EffectError::PlayerNotFound);
+        }
+        let current_life = crate::game::players::team_life_total(state, target_player_id);
         let diff = amount - current_life;
 
         let deferred = match diff.signum() {

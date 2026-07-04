@@ -66,6 +66,33 @@ pub fn synthesize_embalm_eternalize(face: &mut CardFace) {
     face.abilities.extend(abilities);
 }
 
+/// CR 702.128a / CR 702.129a + CR 604.1: Synthesize the graveyard-activated
+/// token-copy ability for a single Embalm / Eternalize keyword **granted at
+/// runtime** (e.g. Cursecloth Wrappings' "target creature card in your graveyard
+/// gains embalm until end of turn. The embalm cost is equal to its mana cost.").
+/// Mirrors `database::synthesis::graveyard_activated_ability_for_keyword` for the
+/// Encore / Scavenge family: the `AddKeyword` continuous-effect seam installs
+/// only the keyword, so the activatable ability must be synthesized on demand.
+/// Returns `None` for any non-Embalm/Eternalize keyword.
+///
+/// The caller is responsible for resolving a `ManaCost::SelfManaCost` payload to
+/// the recipient card's concrete mana cost BEFORE calling — the activated-ability
+/// payment path treats `SelfManaCost` as a free cost, so a self-cost grant must
+/// arrive here already concretized.
+pub fn embalm_eternalize_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    match keyword {
+        Keyword::Embalm(cost) => Some(token_copy_ability(
+            embalm_cost_part(cost),
+            embalm_overrides(),
+        )),
+        Keyword::Eternalize(cost) => Some(token_copy_ability(
+            eternalize_cost_part(cost),
+            eternalize_overrides(),
+        )),
+        _ => None,
+    }
+}
+
 /// CR 702.128a: Embalm's copy exceptions — "it's white, it has no mana cost,
 /// and it's a Zombie in addition to its other types."
 fn embalm_overrides() -> Vec<ContinuousModification> {

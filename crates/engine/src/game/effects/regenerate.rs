@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ReplacementDefinition, ResolvedAbility, TargetFilter,
     TargetRef,
@@ -15,31 +16,38 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // If no explicit targets, regenerate the source itself.
-    // "Regenerate this creature" parses to Any with no targeting keyword,
-    // so when targets are empty we default to self.
-    let use_self = match &ability.effect {
+    let targets: Vec<_> = match &ability.effect {
         Effect::Regenerate { target } => {
-            matches!(target, TargetFilter::None | TargetFilter::SelfRef)
-                || (matches!(target, TargetFilter::Any) && ability.targets.is_empty())
-        }
-        _ => false,
-    };
+            let use_self = matches!(target, TargetFilter::None | TargetFilter::SelfRef)
+                || (matches!(target, TargetFilter::Any) && ability.targets.is_empty());
 
-    let targets: Vec<_> = if use_self {
-        vec![ability.source_id]
-    } else {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
+            if use_self {
+                vec![ability.source_id]
+            } else if !ability.targets.is_empty() {
+                ability
+                    .targets
+                    .iter()
+                    .filter_map(|t| {
+                        if let TargetRef::Object(id) = t {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                // CR 701.19a + CR 109.5: "{cost}: Regenerate [this card's name]"
+                // (e.g. Lotleth Troll) is self-targeting when activation does not
+                // submit explicit targets.
+                let ctx = FilterContext::from_ability(ability);
+                if matches_target_filter(state, ability.source_id, target, &ctx) {
+                    vec![ability.source_id]
                 } else {
-                    None
+                    vec![]
                 }
-            })
-            .collect()
+            }
+        }
+        _ => vec![],
     };
 
     // CR 614.8: Regeneration is a destruction-replacement effect. The word "instead"
@@ -209,6 +217,36 @@ mod tests {
     }
 
     #[test]
+    fn regenerate_named_self_with_empty_targets() {
+        // CR 701.19a: "{B}: Regenerate Lotleth Troll" is self-targeting on the
+        // card itself even though the parser lowers the name phrase to a filter.
+        use crate::parser::oracle_target::parse_target;
+
+        let (target, _) = parse_target("lotleth troll");
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lotleth Troll".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability =
+            ResolvedAbility::new(Effect::Regenerate { target }, vec![], obj_id, PlayerId(0));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(
+            obj.replacement_definitions.len(),
+            1,
+            "named self-regenerate must install a shield when targets are empty"
+        );
+    }
+
+    #[test]
     fn cant_regenerate_suppresses_shield_creation() {
         // CR 701.19: "Can't regenerate" suppresses the regeneration-shield
         // replacement. The effect itself still resolves (EffectResolved fires).
@@ -317,6 +355,7 @@ mod tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -554,6 +593,7 @@ mod tests {
             .add(ManaUnit {
                 color: ManaType::Black,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),

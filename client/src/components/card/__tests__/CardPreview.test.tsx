@@ -90,7 +90,7 @@ afterEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
   Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
-  useGameStore.setState({ gameState: null, spellCosts: {} });
+  useGameStore.setState({ gameState: null, spellCosts: {}, legalActionsByObject: {} });
   useUiStore.setState({ inspectedObjectId: null, altHeld: false });
 });
 
@@ -130,9 +130,44 @@ describe("CardPreview chosen attributes", () => {
     render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
 
     expect(screen.getByText("Flying")).toBeInTheDocument();
-    expect(screen.getByText("Ward {2}")).toHaveAttribute("aria-describedby");
+    expect(screen.getByText("Ward").closest("[aria-describedby]")).not.toBeNull();
+    expect(screen.getAllByAltText("2").length).toBeGreaterThan(0);
     expect(screen.getByText(/creatures with flying or reach/)).toBeInTheDocument();
     expect(screen.getByText(/ward cost/)).toBeInTheDocument();
+  });
+
+  it("renders mana symbols in battlefield preview ability text", () => {
+    const object = battlefieldObject({
+      abilities: [
+        {
+          description: "{G}, {T}: Add {G}.",
+          effects: [],
+          targets: [],
+          cost: { type: "Tap" },
+          timing: "AnyTime",
+          kind: "Activated",
+        },
+      ],
+    });
+    useGameStore.setState({
+      gameState: gameStateWithObject(object),
+      legalActionsByObject: {
+        [String(object.id)]: [
+          {
+            type: "ActivateAbility",
+            data: { source_id: object.id, ability_index: 0 },
+          },
+        ],
+      },
+      spellCosts: {},
+    });
+    useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
+
+    render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
+
+    expect(screen.getByText(/Activate/)).toBeInTheDocument();
+    expect(screen.getAllByAltText("T").length).toBeGreaterThan(0);
+    expect(screen.getAllByAltText("G").length).toBeGreaterThan(0);
   });
 
   it("passes token lookup metadata to the mobile preview image hook", () => {

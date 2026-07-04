@@ -116,6 +116,7 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
             constraint: None,
             duration: None,
             driver: CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
         },
         vec![TargetRef::Object(battle)],
         battle,

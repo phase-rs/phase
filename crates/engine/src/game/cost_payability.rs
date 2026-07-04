@@ -21,7 +21,8 @@
 
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
+    TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -71,12 +72,15 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -85,6 +89,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -140,12 +145,15 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -154,6 +162,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -206,8 +215,11 @@ impl AbilityCost {
             AbilityCost::Composite { costs } => {
                 let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
                 costs.iter().all(|c| match c {
-                    AbilityCost::TapCreatures { count, filter } if has_tap => {
-                        has_enough_tap_creatures(state, player, source, *count, filter, true)
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    } if has_tap => {
+                        has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
                     other => other.is_payable_for_mana_ability(state, player, source),
                 })
@@ -383,14 +395,34 @@ impl AbilityCost {
             AbilityCost::CollectEvidence { amount } => {
                 super::effects::collect_evidence::can_collect_evidence(state, player, *amount)
             }
+            // CR 118.3 + CR 601.2b: An "exile any number of [filter] with
+            // [aggregate] [cmp] N" cost is payable iff the aggregate over EVERY
+            // eligible object (the maximal chosen set) satisfies the comparator.
+            // For a `Sum`/`GE` threshold (Baron Helmut Zemo: ≥15 black symbols),
+            // "exile all" is the maximal value, so this is the correct ceiling.
+            AbilityCost::ExileWithAggregate {
+                filter,
+                function,
+                property,
+                comparator,
+                value,
+                zone,
+            } => {
+                let ids =
+                    eligible_exile_with_aggregate_objects(state, player, source, filter, *zone);
+                let total =
+                    super::quantity::aggregate_property_over(state, &ids, *function, *property);
+                comparator.evaluate(total, *value)
+            }
             // CR 601.2b: Tapping N creatures requires N untapped creatures
             // matching the filter. The source is excluded only when a {T} cost
             // is also present (handled by the Composite arm); otherwise the
             // source is a valid choice (e.g. Morcant's "Tap three untapped
             // Elves" has no {T}, so Morcant herself is eligible).
-            AbilityCost::TapCreatures { count, filter } => {
-                has_enough_tap_creatures(state, player, source, *count, filter, false)
-            }
+            AbilityCost::TapCreatures {
+                requirement,
+                filter,
+            } => has_enough_tap_creatures(state, player, source, requirement, filter, false),
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
@@ -522,10 +554,25 @@ impl AbilityCost {
                     }
                 }
             }
-            AbilityCost::Behold { count, filter, .. } => {
-                super::casting_costs::eligible_behold_choices(state, player, source, filter).len()
-                    >= *count as usize
-            }
+            AbilityCost::Behold {
+                count,
+                filter,
+                type_choice,
+                ..
+            } => match type_choice {
+                // Fixed-quality behold: >= count candidates of the fixed filter.
+                None => {
+                    super::casting_costs::eligible_behold_choices(state, player, source, filter)
+                        .len()
+                        >= *count as usize
+                }
+                // CR 601.2h: pre-choice behold — payable iff SOME creature type is
+                // feasible (∃ a type with >= count beholdable creatures of it).
+                Some(_) => !super::filter::feasible_behold_creature_types(
+                    state, player, source, filter, *count,
+                )
+                .is_empty(),
+            },
             // CR 601.2b: Every sub-cost must be payable. When the composite
             // includes {T}, the source is committed to the tap cost and must be
             // excluded from any TapCreatures eligibility count — it will be
@@ -533,8 +580,11 @@ impl AbilityCost {
             AbilityCost::Composite { costs } => {
                 let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
                 costs.iter().all(|c| match c {
-                    AbilityCost::TapCreatures { count, filter } if has_tap => {
-                        has_enough_tap_creatures(state, player, source, *count, filter, true)
+                    AbilityCost::TapCreatures {
+                        requirement,
+                        filter,
+                    } if has_tap => {
+                        has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
                     other => other.is_payable(state, player, source),
                 })
@@ -576,35 +626,53 @@ impl AbilityCost {
             // the activation-time 601.2b gate doesn't reject the wrapper
             // unseen — actual payability is decided post-expansion.
             AbilityCost::PerCounter { .. } => true,
+            // CR 118.9 + CR 601.2g: a borrowed keyword cost resolves to a concrete
+            // `ManaCost` at cast time; like `Mana`/`ManaDynamic`, mana
+            // affordability is decided by the separate mana-payment step, not this
+            // choice-of-object gate.
+            AbilityCost::KeywordCostOfCastSpell { .. } => true,
         }
     }
 }
 
+/// CR 601.2b: A `TapCreatures` cost is payable iff the untapped, filter-matching
+/// creatures the player controls satisfy its `requirement`: at least `count` of
+/// them for `Count`, or aggregate total positive power meeting the comparator
+/// for `Aggregate` (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). CR 208.1:
+/// power is the aggregate axis; negative powers contribute 0 (mirrors the
+/// sacrifice-aggregate payability check).
 fn has_enough_tap_creatures(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
-    count: u32,
+    requirement: &TapCreaturesRequirement,
     filter: &TargetFilter,
     exclude_source: bool,
 ) -> bool {
     let ctx = FilterContext::from_source(state, source);
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&id| {
-            if exclude_source && id == source {
-                return false;
-            }
-            state.objects.get(&id).is_some_and(|o| {
-                o.controller == player
-                    && !o.tapped
-                    && matches_target_filter(state, id, filter, &ctx)
-            })
+    let eligible = state.battlefield.iter().copied().filter(|&id| {
+        if exclude_source && id == source {
+            return false;
+        }
+        state.objects.get(&id).is_some_and(|o| {
+            o.controller == player && !o.tapped && matches_target_filter(state, id, filter, &ctx)
         })
-        .count()
-        >= count as usize
+    });
+    match requirement {
+        TapCreaturesRequirement::Count { count } => eligible.count() >= *count as usize,
+        TapCreaturesRequirement::Aggregate {
+            stat: TapCreaturesAggregateStat::TotalPower,
+            comparator,
+            value,
+        } => {
+            let total_positive_power: i32 = eligible
+                .filter_map(|id| state.objects.get(&id))
+                .map(|obj| obj.power.unwrap_or(0))
+                .filter(|&p| p > 0)
+                .sum();
+            comparator.evaluate(total_positive_power, *value)
+        }
+    }
 }
 
 /// CR 117.1 + CR 118.3: Infer the source zone for a non-self
@@ -677,6 +745,39 @@ pub(super) fn eligible_exile_cost_objects(
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
+}
+
+/// CR 117.1 + CR 601.2b: Objects eligible to be exiled for an
+/// `AbilityCost::ExileWithAggregate` — cards in `zone` matching `filter`,
+/// excluding the ability source. Single source of truth for both the payability
+/// ceiling (aggregate over ALL eligible) and the interactive payment prompt's
+/// `choices`. Uses the owner-zone matcher so `controller: You` / `InZone` /
+/// `Owned` predicates resolve against non-battlefield cards (CR 400.3: a card in
+/// a graveyard is owned by, and controlled relative to, its owner). The filter's
+/// `controller: You` binds to `player` via the source-controller override.
+pub(crate) fn eligible_exile_with_aggregate_objects(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: &TargetFilter,
+    zone: Zone,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source_with_controller(source, player);
+    let zone_ids: Vec<ObjectId> = match (zone, state.players.get(player.0 as usize)) {
+        (Zone::Graveyard, Some(p)) => p.graveyard.iter().copied().collect(),
+        (Zone::Hand, Some(p)) => p.hand.iter().copied().collect(),
+        // Other zones (battlefield/exile) — scan the object table by zone.
+        _ => state
+            .objects
+            .values()
+            .filter(|o| o.zone == zone)
+            .map(|o| o.id)
+            .collect(),
+    };
+    zone_ids
+        .into_iter()
+        .filter(|&id| id != source && matches_target_filter_in_owner_zone(state, id, filter, &ctx))
+        .collect()
 }
 
 /// CR 702.167a/b: Objects eligible to be exiled as the materials of a craft
@@ -907,7 +1008,7 @@ mod tests {
     fn tap_creatures_standalone_includes_source() {
         let mut scenario = GameScenario::new();
         let cost = AbilityCost::TapCreatures {
-            count: 3,
+            requirement: TapCreaturesRequirement::count(3),
             filter: elf_filter(),
         };
         // Place exactly 3 Elves controlled by P0 — including the source.
@@ -941,7 +1042,7 @@ mod tests {
             costs: vec![
                 AbilityCost::Tap,
                 AbilityCost::TapCreatures {
-                    count: 2,
+                    requirement: TapCreaturesRequirement::count(2),
                     filter: elf_filter(),
                 },
             ],
@@ -1271,5 +1372,70 @@ mod tests {
             !eligible.contains(&shoal),
             "cast source must be excluded from pitch eligibility"
         );
+    }
+
+    /// CR 702.138a (#3281): Uro's escape additional cost uses a typed graveyard
+    /// filter (`card` + `you` + `another` + `in graveyard`). Payability must
+    /// match the simpler `filter: None` escape cards (Phlage class).
+    #[test]
+    fn escape_exile_five_other_graveyard_cards_with_typed_filter() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::ControllerRef;
+
+        let mut scenario = GameScenario::new();
+        let uro = scenario
+            .add_creature_to_graveyard(P0, "Uro, Titan of Nature's Wrath", 6, 6)
+            .id();
+        let cost = AbilityCost::Exile {
+            count: 5,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            )),
+        };
+
+        for idx in 0..4 {
+            scenario.add_creature_to_graveyard(P0, &format!("Filler {idx}"), 1, 1);
+        }
+        assert!(
+            !cost.is_payable(&scenario.state, P0, uro),
+            "four other graveyard cards is not enough to escape"
+        );
+
+        scenario.add_creature_to_graveyard(P0, "Filler 4", 1, 1);
+        assert!(
+            cost.is_payable(&scenario.state, P0, uro),
+            "five other graveyard cards must satisfy Uro's escape exile cost"
+        );
+
+        let eligible = super::eligible_exile_cost_objects(
+            &scenario.state,
+            P0,
+            uro,
+            Zone::Graveyard,
+            Some(&TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            )),
+            5,
+        );
+        assert!(
+            !eligible.contains(&uro),
+            "the escape card itself must not be eligible exile material"
+        );
+        assert_eq!(eligible.len(), 5, "exactly five other cards are eligible");
     }
 }

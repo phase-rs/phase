@@ -16,9 +16,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let limit = match &ability.effect {
-        Effect::Discover { mana_value_limit } => {
-            quantity::resolve_quantity_with_targets(state, mana_value_limit, ability).max(0) as u32
+    let (limit, discovering_player) = match &ability.effect {
+        Effect::Discover {
+            mana_value_limit,
+            player,
+        } => {
+            let limit = quantity::resolve_quantity_with_targets(state, mana_value_limit, ability)
+                .max(0) as u32;
+            // CR 701.57a: the discovering player exiles from *their* library.
+            // Default `TargetFilter::Controller` keeps "you discover"; Zoyowa's
+            // Justice redirects to the parent target's owner ("that player
+            // discovers X").
+            let discovering_player =
+                crate::game::effects::resolve_player_for_context_ref(state, ability, player);
+            (limit, discovering_player)
         }
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
@@ -26,7 +37,7 @@ pub fn resolve(
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == discovering_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Collect library IDs (top to bottom)
@@ -75,9 +86,10 @@ pub fn resolve(
 
     match hit_card {
         Some(hit) => {
-            // Player chooses: cast without paying or put to hand
+            // CR 701.57a: the discovering player chooses to cast without paying
+            // or put the hit card into their hand.
             state.waiting_for = WaitingFor::CastOffer {
-                player: ability.controller,
+                player: discovering_player,
                 kind: CastOfferKind::Discover {
                     hit_card: hit,
                     exiled_misses,
@@ -87,7 +99,7 @@ pub fn resolve(
         }
         None => {
             // CR 701.57a: No hit — put all exiled misses on bottom in random order
-            shuffle_to_bottom(state, &exiled_misses, ability.controller, events);
+            shuffle_to_bottom(state, &exiled_misses, discovering_player, events);
         }
     }
 
@@ -115,7 +127,7 @@ fn shuffle_to_bottom(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TargetFilter};
     use crate::types::events::GameEvent;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -174,6 +186,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Discover {
                 mana_value_limit: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -239,6 +252,7 @@ mod tests {
                         scope: ObjectScope::EventSource,
                     },
                 },
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -255,5 +269,147 @@ mod tests {
                 ..
             } if hit_card == hit
         ));
+    }
+
+    /// CR 701.57a (player-redirect): "Then that player discovers X" (Zoyowa's
+    /// Justice) makes a *redirected* player — not the controller — exile from
+    /// their own library. The discover scans the opponent's library and the
+    /// cast/keep offer is addressed to the opponent. Reverting the `player`
+    /// plumbing (back to `ability.controller`) flips this: the controller's
+    /// empty library would yield no hit and no `CastOffer` at all.
+    #[test]
+    fn discover_redirects_to_other_player_library() {
+        use crate::types::ability::{ControllerRef, TargetRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // The hit lives in the OPPONENT's library; the controller's library is
+        // empty, so a non-redirected discover would find nothing.
+        let hit = create_object(
+            &mut state,
+            CardId(7),
+            opponent,
+            "Opponent Two Drop".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+
+        // Mirror the parser output for a redirected discover: a player filter in
+        // `player` with the chosen player declared in `targets`. (Zoyowa uses
+        // `ParentTargetOwner`; an explicit `Opponent` Player target exercises the
+        // same resolver redirect through a directly assertable seam.)
+        let ability = ResolvedAbility::new(
+            Effect::Discover {
+                mana_value_limit: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![TargetRef::Player(opponent)],
+            ObjectId(100),
+            controller,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Discover { hit_card, .. },
+                ..
+            } => {
+                assert_eq!(
+                    *player, opponent,
+                    "the redirected player (not the controller) is offered the discover"
+                );
+                assert_eq!(
+                    *hit_card, hit,
+                    "discover scans the redirected player's library, not the controller's"
+                );
+            }
+            other => panic!("expected CastOffer addressed to the opponent, got {other:?}"),
+        }
+    }
+
+    /// CR 701.57a + CR 608.2c: Zoyowa's Justice-style "that player discovers X"
+    /// binds the discovering player through the parent object target's owner. A
+    /// direct `target opponent` filter takes the declared player-target branch;
+    /// this regression exercises the context-ref branch used by the actual
+    /// "that player" parser output.
+    #[test]
+    fn discover_parent_target_owner_uses_parent_object_owner_library() {
+        use crate::types::ability::TargetRef;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let parent_target = create_object(
+            &mut state,
+            CardId(8),
+            opponent,
+            "Opponent-Owned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&parent_target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let hit = create_object(
+            &mut state,
+            CardId(9),
+            opponent,
+            "Opponent Two Drop".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Discover {
+                mana_value_limit: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::ParentTargetOwner,
+            },
+            vec![TargetRef::Object(parent_target)],
+            ObjectId(100),
+            controller,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Discover { hit_card, .. },
+                ..
+            } => {
+                assert_eq!(
+                    *player, opponent,
+                    "the parent target's owner, not the controller, is offered the discover"
+                );
+                assert_eq!(
+                    *hit_card, hit,
+                    "ParentTargetOwner discover scans the parent target owner's library"
+                );
+            }
+            other => {
+                panic!("expected CastOffer addressed to the parent target owner, got {other:?}")
+            }
+        }
     }
 }

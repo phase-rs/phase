@@ -48,6 +48,25 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Identify applicable skills, such as `$add-engine-effect`, `$oracle-parser`, `$add-keyword`, `$add-trigger`, `$add-static-ability`, `$add-replacement-effect`, `$add-interactive-effect`, or `$casting-stack-conditions`.
    - Reject plans that omit required checklist steps from applicable skills.
 
+9. **Verification matrix**
+   - Reject plans without a claim-to-test map for every behavioral claim.
+   - Each map entry must name the changed seam/function, production entry point, runtime test, revert-failing assertion, sibling/negative cases, and coverage status impact.
+   - Reject helper-only tests for changes whose production path goes through `apply()`, `WaitingFor`/`GameAction`, casting/stack, combat declaration, replacement handling, or the scenario runner.
+   - Parser shape tests do not satisfy runtime semantics or coverage-support claims. Parser-only shape tests are acceptable only when unsupported semantics remain honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged red coverage.
+   - Reject parser plans that accept full Oracle text while dropping semantics unless the plan explicitly preserves an `Unimplemented`/coverage gap.
+   - Reject negative-only test plans without a paired positive reach-guard: a planned assertion like `!detector(...)` or "X is NOT applied" must also prove the input got past upstream short-circuits (parse succeeded, zero `Effect::Unimplemented`), or an early-return makes it pass vacuously.
+   - Cast-pipeline runtime tests must be planned via the `/card-test` recipe with the card's verbatim Oracle text, not a paraphrase.
+   - If the plan adds a field to an existing enum variant or struct, require an enumeration of every construction/consumption site of that variant and how each threads the new field (resume/continuation paths, single-vs-multi-pick branches, and adapter payload constructors are the recurring drop points).
+
+10. **Identity / provenance contract**
+   - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.
+   - Reject plans that rely on rescanning matching permissions, sources, costs, replacements, tracked sets, controllers, owners, or choices at consumption time unless they prove the rescan is equivalent for a multi-authority fixture.
+
+11. **Scope matrix**
+   - For target, player, combat, controller, owner, protector, or defender changes, require the plan to enumerate the variants/scopes reachable at the touched production boundary.
+   - Include permissions, costs, choice provenance, tracked sets, duration snapshots, source/controller/owner shifts, and serialization/protocol/card-data boundaries when those are touched.
+   - Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
+
 ## Review Loop
 
 Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.

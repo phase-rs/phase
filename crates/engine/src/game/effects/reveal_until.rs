@@ -3,13 +3,14 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, RevealUntilDisposition,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 701.20a: Reveal cards from the top of the controller's library one at a
 /// time until a card matching the filter is found. The matching card goes to
@@ -26,31 +27,50 @@ pub fn resolve(
     let (
         player_filter,
         filter,
+        count_expr,
+        matched_disposition,
         kept_destination,
         rest_destination,
         enter_tapped,
         enters_attacking,
         kept_optional_to,
+        enters_under,
     ) = match &ability.effect {
         Effect::RevealUntil {
             player,
             filter,
+            count,
+            matched_disposition,
             kept_destination,
             rest_destination,
             enter_tapped,
             enters_attacking,
             kept_optional_to,
+            enters_under,
         } => (
             player,
             filter,
+            count,
+            *matched_disposition,
             *kept_destination,
             *rest_destination,
             *enter_tapped,
             *enters_attacking,
             *kept_optional_to,
+            enters_under.as_ref(),
         ),
         _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
     };
+
+    // CR 701.20a + CR 608.2c: How many matching cards to reveal before the
+    // until-loop terminates. The dominant `Fixed(1)` yields the historical
+    // single-hit behavior; a dynamic count (e.g.
+    // `DistinctColorsAmongPermanents` for Aurora Awakener / Sanar) resolves
+    // against the live board with the ability in scope. CR 107.1b: a negative
+    // computed count clamps to 0 (reveal nothing).
+    let target_match_count =
+        crate::game::quantity::resolve_quantity_with_targets(state, count_expr, ability).max(0)
+            as usize;
 
     // CR 109.5 + CR 701.20a: Resolve which player's library is revealed.
     // `Controller` → activator (Jalira-style "you reveal..."); `ParentTargetController`
@@ -68,30 +88,56 @@ pub fn resolve(
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
     let library: Vec<ObjectId> = player.library.iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
-    let mut hit_card: Option<ObjectId> = None;
+    let mut hit_cards: Vec<ObjectId> = Vec::new();
 
     // CR 107.3a + CR 601.2b: Evaluate the filter with the ability in scope so
     // dynamic thresholds (e.g. `Variable("X")`) resolve correctly.
     let ctx = FilterContext::from_ability(ability);
 
-    // CR 701.20a: Reveal cards one at a time.
-    for &card_id in &library {
-        // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
-        state.revealed_cards.insert(card_id);
+    // CR 701.20a + CR 608.2c: "reveal until you reveal X [filter] cards. Put any
+    // number of those [filter] cards onto [kept_destination], then put the rest
+    // of the revealed cards [in rest_destination]" (Aurora Awakener). Reveal
+    // until `target_match_count` matches are found (or the library is exhausted),
+    // then offer a `WaitingFor::DigChoice` over the matched set. Handled before
+    // the single-hit loop below so the `KeepEach` path is untouched.
+    if matches!(matched_disposition, RevealUntilDisposition::ChooseAnyNumber) {
+        return resolve_choose_any_number(
+            state,
+            ability,
+            revealing_player,
+            &library,
+            filter,
+            &ctx,
+            target_match_count,
+            kept_destination,
+            rest_destination,
+            enter_tapped,
+            events,
+        );
+    }
 
-        if matches_target_filter(state, card_id, filter, &ctx) {
-            hit_card = Some(card_id);
-            break;
-        } else {
-            revealed_misses.push(card_id);
+    // CR 701.20a: Reveal cards one at a time until `target_match_count` matches
+    // are found (or the library is exhausted). `target_match_count == 0` reveals
+    // nothing (CR 701.20a — the until-condition is already satisfied).
+    if target_match_count > 0 {
+        for &card_id in &library {
+            // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
+            state.revealed_cards.insert(card_id);
+
+            if matches_target_filter(state, card_id, filter, &ctx) {
+                hit_cards.push(card_id);
+                if hit_cards.len() >= target_match_count {
+                    break;
+                }
+            } else {
+                revealed_misses.push(card_id);
+            }
         }
     }
 
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    if let Some(hit) = hit_card {
-        all_revealed.push(hit);
-    }
+    all_revealed.extend(&hit_cards);
 
     // Emit CardsRevealed for all revealed cards.
     let card_names: Vec<String> = all_revealed
@@ -107,19 +153,29 @@ pub fn resolve(
     // Store revealed IDs for downstream reference.
     state.last_revealed_ids = all_revealed;
 
+    // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
+    // Vivid draws nothing to hand before per-color exile from the library).
+    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — when
     // the kept destination is a controller choice and a hit was found, pause for
     // `WaitingFor::RevealUntilKeptChoice`. The choice handler routes the hit card,
     // moves the misses, and drains `pending_continuation`. `EffectResolved` is
     // emitted here (before the pause) mirroring `discover::resolve`.
-    if let (Some(accept_zone), Some(hit)) = (kept_optional_to, hit_card) {
+    if let (Some(accept_zone), [hit]) = (kept_optional_to, hit_cards.as_slice()) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
-            hit_card: hit,
+            hit_card: *hit,
             source_id: ability.source_id,
             accept_zone,
             decline_zone: kept_destination,
@@ -131,119 +187,139 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Move the matching card to its destination.
-    if let Some(hit) = hit_card {
-        match kept_destination {
-            Zone::Battlefield => {
-                // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
-                // through the zone-change pipeline so the full delivery tail runs
-                // — intrinsic enters-with counters (a revealed planeswalker /
-                // battle must enter with its loyalty / defense or it dies to
-                // CR 704.5i), enters-with-counters statics, and the CR 614.1
-                // tap-state. The pipeline applies `enter_tapped` from the seeded
-                // `EntryMods`, so the previous manual `obj.tapped = true` is
-                // dropped (it would double the work the tail already does).
-                let mut req = ZoneMoveRequest::effect(hit, Zone::Battlefield, ability.source_id);
-                req.mods.enter_tapped = enter_tapped;
-                match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {}
-                    // CR 303.4f / CR 616.1: the kept card's battlefield entry
-                    // paused on an as-enters choice (aura host pick / replacement
-                    // ordering). The pause is parked centrally by `move_object`;
-                    // defer the rest-pile move + reveal-marker cleanup onto the
-                    // batch tail so the drain runs it once the entry resolves —
-                    // otherwise the misses strand in their zone (the early-`return`
-                    // bug). `EffectResolved` is emitted by the completion's
-                    // continuation drain, not here, so the prompt is not clobbered.
-                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
-                        zone_pipeline::defer_completion_on_pause(
+    // Move each matching card to its destination.
+    if !hit_cards.is_empty() {
+        let controller_override = super::change_zone::resolve_enters_under_player(
+            state,
+            ability,
+            "RevealUntil",
+            enters_under,
+        )?;
+        for hit in &hit_cards {
+            match kept_destination {
+                Zone::Battlefield => {
+                    // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
+                    // through the zone-change pipeline so the full delivery tail runs
+                    // — intrinsic enters-with counters (a revealed planeswalker /
+                    // battle must enter with its loyalty / defense or it dies to
+                    // CR 704.5i), enters-with-counters statics, and the CR 614.1
+                    // tap-state. The pipeline applies `enter_tapped` from the seeded
+                    // `EntryMods`, so the previous manual `obj.tapped = true` is
+                    // dropped (it would double the work the tail already does).
+                    let mut req =
+                        ZoneMoveRequest::effect(*hit, Zone::Battlefield, ability.source_id);
+                    req.mods.enter_tapped = enter_tapped;
+                    if let Some(controller) = controller_override {
+                        req = req.under_control_of(controller);
+                    }
+                    match zone_pipeline::move_object(state, req, events) {
+                        ZoneMoveResult::Done => {}
+                        // CR 303.4f / CR 616.1: the kept card's battlefield entry
+                        // paused on an as-enters choice (aura host pick / replacement
+                        // ordering). The pause is parked centrally by `move_object`;
+                        // defer the rest-pile move + reveal-marker cleanup onto the
+                        // batch tail so the drain runs it once the entry resolves —
+                        // otherwise the misses strand in their zone (the early-`return`
+                        // bug). `EffectResolved` is emitted by the completion's
+                        // continuation drain, not here, so the prompt is not clobbered.
+                        ZoneMoveResult::NeedsChoice(_)
+                        | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            let mut clear_markers = revealed_misses.clone();
+                            clear_markers.extend(&hit_cards);
+                            zone_pipeline::defer_completion_on_pause(
+                                state,
+                                BatchCompletion::RevealRestPile {
+                                    player: revealing_player,
+                                    rest_cards: revealed_misses,
+                                    rest_destination,
+                                    clear_markers,
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: Some(ability.source_id),
+                                },
+                            );
+                            return Ok(());
+                        }
+                    }
+                    // CR 508.4: "put that card onto the battlefield tapped and
+                    // attacking" — place it in combat alongside the trigger source
+                    // (Raph & Mikey, Fireflux Squad). `enter_attacking` derives the
+                    // defending player from the source attacker.
+                    if enters_attacking {
+                        let controller = state
+                            .objects
+                            .get(hit)
+                            .map(|obj| obj.controller)
+                            .unwrap_or(ability.controller);
+                        crate::game::combat::enter_attacking(
                             state,
-                            BatchCompletion::RevealRestPile {
-                                player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
-                                clear_markers,
-                                publish_tracked_set: None,
-                                emit_reveal_until_resolved: Some(ability.source_id),
-                            },
+                            *hit,
+                            ability.source_id,
+                            controller,
                         );
-                        return Ok(());
                     }
                 }
-                // CR 508.4: "put that card onto the battlefield tapped and
-                // attacking" — place it in combat alongside the trigger source
-                // (Raph & Mikey, Fireflux Squad). `enter_attacking` derives the
-                // defending player from the source attacker.
-                if enters_attacking {
-                    let controller = state
-                        .objects
-                        .get(&hit)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(ability.controller);
-                    crate::game::combat::enter_attacking(state, hit, ability.source_id, controller);
-                }
-            }
-            Zone::Library => {
-                // CR 614.6 + CR 701.24a: a kept card sent back to the library
-                // keeps the effect's historical bottom placement; this is a
-                // placement, not a shuffle. Route through the placement-aware
-                // pipeline arm so a future Library-destination `Moved` replacement
-                // can still fire.
-                match zone_pipeline::move_object(
-                    state,
-                    ZoneMoveRequest::effect(hit, Zone::Library, ability.source_id)
-                        .at_library_position(LibraryPosition::Bottom),
-                    events,
-                ) {
-                    ZoneMoveResult::Done => {}
-                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
-                        zone_pipeline::defer_completion_on_pause(
-                            state,
-                            BatchCompletion::RevealRestPile {
-                                player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
-                                clear_markers,
-                                publish_tracked_set: None,
-                                emit_reveal_until_resolved: Some(ability.source_id),
-                            },
-                        );
-                        return Ok(());
+                Zone::Library => {
+                    // CR 614.6 + CR 701.24a: a kept card sent back to the library
+                    // keeps the effect's historical bottom placement; this is a
+                    // placement, not a shuffle. Route through the placement-aware
+                    // pipeline arm so a future Library-destination `Moved` replacement
+                    // can still fire.
+                    match zone_pipeline::move_object(
+                        state,
+                        ZoneMoveRequest::effect(*hit, Zone::Library, ability.source_id)
+                            .at_library_position(LibraryPosition::Bottom),
+                        events,
+                    ) {
+                        ZoneMoveResult::Done => {}
+                        ZoneMoveResult::NeedsChoice(_)
+                        | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            let mut clear_markers = revealed_misses.clone();
+                            clear_markers.extend(&hit_cards);
+                            zone_pipeline::defer_completion_on_pause(
+                                state,
+                                BatchCompletion::RevealRestPile {
+                                    player: revealing_player,
+                                    rest_cards: revealed_misses,
+                                    rest_destination,
+                                    clear_markers,
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: Some(ability.source_id),
+                                },
+                            );
+                            return Ok(());
+                        }
                     }
                 }
-            }
-            other => {
-                // CR 614.6: a kept card sent to another zone routes through the
-                // pipeline so a matching `Moved` redirect can fire. On a CR 616.1
-                // ordering pause, defer the rest-pile move + marker clear +
-                // `EffectResolved` onto a `RevealRestPile` completion (the same
-                // deferral the battlefield branch uses) so the misses don't strand
-                // and `EffectResolved` doesn't land over the parked prompt.
-                match zone_pipeline::move_object(
-                    state,
-                    ZoneMoveRequest::effect(hit, other, ability.source_id),
-                    events,
-                ) {
-                    ZoneMoveResult::Done => {}
-                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
-                        zone_pipeline::defer_completion_on_pause(
-                            state,
-                            BatchCompletion::RevealRestPile {
-                                player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
-                                clear_markers,
-                                publish_tracked_set: None,
-                                emit_reveal_until_resolved: Some(ability.source_id),
-                            },
-                        );
-                        return Ok(());
+                other => {
+                    // CR 614.6: a kept card sent to another zone routes through the
+                    // pipeline so a matching `Moved` redirect can fire. On a CR 616.1
+                    // ordering pause, defer the rest-pile move + marker clear +
+                    // `EffectResolved` onto a `RevealRestPile` completion (the same
+                    // deferral the battlefield branch uses) so the misses don't strand
+                    // and `EffectResolved` doesn't land over the parked prompt.
+                    match zone_pipeline::move_object(
+                        state,
+                        ZoneMoveRequest::effect(*hit, other, ability.source_id),
+                        events,
+                    ) {
+                        ZoneMoveResult::Done => {}
+                        ZoneMoveResult::NeedsChoice(_)
+                        | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            let mut clear_markers = revealed_misses.clone();
+                            clear_markers.extend(&hit_cards);
+                            zone_pipeline::defer_completion_on_pause(
+                                state,
+                                BatchCompletion::RevealRestPile {
+                                    player: revealing_player,
+                                    rest_cards: revealed_misses,
+                                    rest_destination,
+                                    clear_markers,
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: Some(ability.source_id),
+                                },
+                            );
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -266,9 +342,7 @@ pub fn resolve(
     // pile lands, and bail before the inline tail so `EffectResolved` never lands
     // over the parked prompt.
     let mut clear_markers = revealed_misses.clone();
-    if let Some(hit) = hit_card {
-        clear_markers.push(hit);
-    }
+    clear_markers.extend(&hit_cards);
     match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
         zone_pipeline::BatchMoveResult::Done => {}
         zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -291,6 +365,106 @@ pub fn resolve(
     for &card_id in &clear_markers {
         state.revealed_cards.remove(&card_id);
     }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::RevealUntil,
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 701.20a + CR 608.2c: Resolve the Aurora Awakener-class disposition —
+/// "reveal until you reveal X [filter] cards. Put any number of those [filter]
+/// cards onto [kept_destination], then put the rest of the revealed cards [in
+/// rest_destination] (in a random order when bottoming a library)."
+///
+/// Reveals cards one at a time (CR 701.20a/701.20b — the card stays in the
+/// library while revealed) until `target_match_count` cards match `filter` or
+/// the library is exhausted, emits `CardsRevealed` for every revealed card, then
+/// surfaces a `WaitingFor::DigChoice` over the matched set: the controller may
+/// select any subset (`up_to`) for `kept_destination`; every other revealed card
+/// (non-selected matches AND interleaved misses) flows to `rest_destination`.
+/// This reuses the `Effect::Dig` "put any number onto the battlefield, rest on
+/// the bottom" interaction machinery (the DigChoice handler routes the kept
+/// cards through the CR 614.1c delivery tail and the rest through the partition
+/// mover).
+///
+/// When `target_match_count == 0` (e.g. Aurora with zero colors among
+/// permanents), nothing is revealed and the effect resolves with no choice
+/// (CR 701.20a — the until-condition is already satisfied).
+#[allow(clippy::too_many_arguments)]
+fn resolve_choose_any_number(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    revealing_player: PlayerId,
+    library: &[ObjectId],
+    filter: &TargetFilter,
+    ctx: &FilterContext,
+    target_match_count: usize,
+    kept_destination: Zone,
+    rest_destination: Zone,
+    enter_tapped: EtbTapState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut revealed: Vec<ObjectId> = Vec::new();
+    let mut matched: Vec<ObjectId> = Vec::new();
+
+    // CR 701.20a: reveal one at a time until `target_match_count` matches are
+    // found (or the library runs out). `target_match_count == 0` reveals nothing.
+    if target_match_count > 0 {
+        for &card_id in library {
+            // CR 701.20b: the card stays in its library zone while revealed.
+            state.revealed_cards.insert(card_id);
+            revealed.push(card_id);
+            if matches_target_filter(state, card_id, filter, ctx) {
+                matched.push(card_id);
+                if matched.len() >= target_match_count {
+                    break;
+                }
+            }
+        }
+    }
+
+    // CR 701.20a: emit a single CardsRevealed for the whole revealed pile.
+    let card_names: Vec<String> = revealed
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+        .collect();
+    events.push(GameEvent::CardsRevealed {
+        player: revealing_player,
+        card_ids: revealed.clone(),
+        card_names,
+    });
+    state.last_revealed_ids = revealed.clone();
+
+    // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
+    // disposition has no cards to act on; resolve cleanly with no interaction.
+    if revealed.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // CR 701.20a + CR 608.2c: offer the controller a DigChoice over the matched
+    // set — any number go to `kept_destination`, the rest to `rest_destination`.
+    // `up_to` lets the controller keep zero. The reveal markers on every card are
+    // cleared automatically when each card changes zone during the choice's
+    // resolution (CR 400.7, `zones::move_*` clears `revealed_cards`).
+    state.waiting_for = WaitingFor::DigChoice {
+        player: ability.controller,
+        library_owner: revealing_player,
+        cards: revealed,
+        keep_count: matched.len(),
+        up_to: true,
+        selectable_cards: matched,
+        kept_destination: Some(kept_destination),
+        rest_destination: Some(rest_destination),
+        source_id: Some(ability.source_id),
+        enter_tapped: enter_tapped.is_tapped(),
+    };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
@@ -441,7 +615,9 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .destination_zone(destination),
@@ -467,11 +643,14 @@ mod tests {
             Effect::RevealUntil {
                 player: TargetFilter::Controller,
                 filter,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination,
                 rest_destination,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -491,16 +670,97 @@ mod tests {
             Effect::RevealUntil {
                 player,
                 filter,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination,
                 rest_destination,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
+                enters_under: None,
             },
             targets,
             ObjectId(100),
             controller,
         )
+    }
+
+    #[test]
+    fn reveal_until_keep_each_collects_multiple_matches() {
+        let mut state = GameState::new_two_player(42);
+
+        let instant = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let forest = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mountain = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&mountain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::land()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Battlefield,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&forest));
+        assert!(state.battlefield.contains(&mountain));
+        assert!(state.objects[&forest].tapped);
+        assert!(state.objects[&mountain].tapped);
+        assert!(state.players[0].library.contains(&instant));
+        assert!(!state.players[0].library.contains(&forest));
+        assert!(!state.players[0].library.contains(&mountain));
     }
 
     #[test]
@@ -874,7 +1134,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
         state.objects.get_mut(&rip).unwrap().replacement_definitions = vec![redirect].into();
@@ -1046,11 +1308,14 @@ mod tests {
                 Effect::RevealUntil {
                     player: TargetFilter::Controller,
                     filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    matched_disposition: RevealUntilDisposition::KeepEach,
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
+                    enters_under: None,
                 },
                 vec![],
                 ObjectId(100),
@@ -1163,11 +1428,14 @@ mod tests {
             Effect::RevealUntil {
                 player: TargetFilter::Controller,
                 filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Library),
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -1234,11 +1502,14 @@ mod tests {
                 filter: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                     crate::types::ability::TypeFilter::Planeswalker,
                 )),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Battlefield),
+                enters_under: None,
             },
             vec![],
             ObjectId(100),

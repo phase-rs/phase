@@ -3,10 +3,11 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
-    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, DoorLockOp,
+    Duration, Effect, FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -187,6 +188,12 @@ pub(crate) enum PredicateAst {
     Restriction {
         effect: Effect,
         duration: Option<Duration>,
+        /// CR 509.1b + CR 611.2c: A conjoined-subject evasion grant ("<source>
+        /// and up to N other target creature(s) can't be blocked this turn",
+        /// Martha Jones) carries the SECOND conjunct's grant as a sub_ability
+        /// continuation, mirroring `Become`/`Continuous`. `None` for the common
+        /// single-subject restriction.
+        sub_ability: Option<Box<AbilityDefinition>>,
     },
     ImperativeFallback {
         text: String,
@@ -199,6 +206,8 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
+        enters_under: Option<ControllerRef>,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
         /// When true, the found card enters "attached to" the search source.
@@ -225,20 +234,40 @@ pub(crate) enum ContinuationAst {
     /// permanent." — patches `source_rider = Some(CounterSourceRider::Destroy)`
     /// on the preceding `Effect::Counter` (Teferi's Response, Green Slime).
     CounterSourceRiderDestroy,
+    /// CR 701.6a + CR 614.1a: "If that spell is countered this way, put it
+    /// <zone> instead of into that player's graveyard." — patches
+    /// `countered_spell_zone = Some(destination)` on the preceding
+    /// `Effect::Counter` (Memory Lapse, Remand, Spell Crumple).
+    CounterSpellZoneRedirect {
+        destination: SpellStackToGraveyardReplacement,
+    },
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
-    CopyMayRetarget,
+    /// `all_copies` is the plural "the copies" form: it patches every copy the
+    /// source ability makes (Increasing Vengeance's primary + conditional
+    /// second copy), where the singular "the copy" form binds only the nearest.
+    CopyMayRetarget { all_copies: bool },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
-    /// "The flashback cost is equal to its mana cost." after a flashback grant.
-    FlashbackCostEqualsManaCost,
+    /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
+    /// cost is equal to its/that card's mana cost." after a self-cost graveyard
+    /// keyword grant. Redundant reminder text — the grant already carries
+    /// `ManaCost::SelfManaCost`, so this continuation is absorbed as a no-op
+    /// rather than lowering to `Effect::Unimplemented`.
+    SelfCostKeywordCostClarification,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
+    /// CR 120.4a: "Excess damage is dealt to that creature's controller instead."
+    /// — sets `excess = Some(ExcessRecipient::TargetController)` on the preceding
+    /// `Effect::DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous
+    /// Tyrannosaurus). The conditional / trample-gated form (Ram Through) is NOT
+    /// recognized and lowers to `Effect::Unimplemented` instead.
+    ExcessDamageToController,
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
     /// to exile → ChooseFromZone { count, zone: Exile, chooser }.
     ChooseFromExile {
@@ -269,6 +298,8 @@ pub(crate) enum ContinuationAst {
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
+    /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
+    BecomesForetold,
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -323,7 +354,15 @@ pub(crate) enum ContinuationAst {
     /// CR 508.4 / CR 614.1: "It/The token enters tapped and attacking [that player]"
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
-    EntersTappedAttacking,
+    ///
+    /// CR 614.12: `moved_filter` carries an optional leading moved-object
+    /// type condition ("If that card is an enchantment card, it enters
+    /// tapped and attacking" — Summoner's Grimoire). When `Some`, the
+    /// absorbed ChangeZone gates the riders on the moved object via
+    /// `Effect::ChangeZone.enters_modified_if`. `None` = unconditional
+    /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
+    /// CopyTokenOf / Token always enter unconditionally.
+    EntersTappedAttacking { moved_filter: Option<TargetFilter> },
     /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
@@ -342,7 +381,15 @@ pub(crate) enum ContinuationAst {
         /// CR 508.4: the kept card enters the battlefield attacking
         /// ("tapped and attacking"). Absorbs into `enters_attacking`.
         enters_attacking: bool,
+        /// CR 701.20a + CR 608.2c: `true` when the disposition is "put any number
+        /// of those [filter] cards onto [destination]" over the *set* of matched
+        /// cards (Aurora Awakener), absorbing into
+        /// `RevealUntilDisposition::ChooseAnyNumber`. `false` is the single-hit
+        /// "put that card …" form (`KeepEach`).
+        any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 110.2a: "under your control" on the kept-card clause.
+        enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`
         /// is then the accept zone and `decline_zone` is where the kept card
@@ -490,6 +537,23 @@ pub(crate) enum ImperativeFamilyAst {
     TurnFaceUp {
         target: TargetFilter,
     },
+    /// CR 708.2a: "Turn target [permanent] face down" — turns the targeted
+    /// face-up permanent(s) face down via a resolving effect (Cyber Conversion).
+    /// `profile` is seeded with `Some(vanilla_2_2())` at the verb arm so a
+    /// trailing "It's a 2/2 Cyberman artifact creature." `FaceDownProfileSpec`
+    /// continuation can refine the face-down body (CR 205.1a).
+    ///
+    /// CR 115.1d: `multi_target` carries the target-count quantifier when the
+    /// subject is plural ("turn any number of target tapped nontoken creatures
+    /// face down" — Illithid Harvester; "turn N target … face down"). It is
+    /// stamped onto the lowered `ParsedEffectClause` so the cast surfaces the
+    /// correct number of target slots rather than collapsing to one. `None` for
+    /// the single-subject form (Cyber Conversion, Backslide).
+    TurnFaceDown {
+        target: TargetFilter,
+        profile: Option<FaceDownProfile>,
+        multi_target: Option<MultiTargetSpec>,
+    },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"
     VentureIntoDungeon,
@@ -507,6 +571,20 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 701.52: "roll to visit your Attractions"
     RollToVisitAttractions,
+    /// Unstable Contraptions: assemble one or more Contraptions from the top of
+    /// your Contraption deck.
+    AssembleContraptions {
+        count: crate::types::ability::QuantityExpr,
+    },
+    /// Unstable Contraptions: assemble a number of Contraptions equal to the
+    /// difference between the two most recent die-roll results.
+    AssembleContraptionsFromRollDifference,
+    /// Unstable Contraptions: move a Contraption onto a sprocket, optionally
+    /// gaining control of it first.
+    ReassembleContraption {
+        target: crate::types::ability::TargetFilter,
+        control_mode: crate::types::ability::ReassembleControlMode,
+    },
     Proliferate,
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,
@@ -708,9 +786,18 @@ impl TargetedImperativeAst {
 pub(crate) enum TargetedImperativeAst {
     Tap {
         target: TargetFilter,
+        /// CR 115.1d + CR 701.26a: Variable target count for "tap up to N target
+        /// creatures" (Nyssa of Traken's "tap up to that many target creatures",
+        /// N = `EventContextAmount`). `None` for the common single-target
+        /// "tap target creature". Carried onto `ParsedEffectClause.multi_target`
+        /// at lowering so the targeting system surfaces the right number of slots.
+        multi_target: Option<MultiTargetSpec>,
     },
     Untap {
         target: TargetFilter,
+        /// CR 115.1d + CR 701.26b: Variable target count for "untap up to N target
+        /// creatures", mirroring [`TargetedImperativeAst::Tap`].
+        multi_target: Option<MultiTargetSpec>,
     },
     TapAll {
         target: TargetFilter,
@@ -722,6 +809,14 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
     },
     GoadAll {
+        target: TargetFilter,
+    },
+    /// CR 709.5f-g + CR 709.5j: "lock"/"unlock"/"lock or unlock" a door of a
+    /// target Room permanent. The eligible half is chosen at resolution from the
+    /// Room's runtime unlock state, so only the operation and the target Room
+    /// filter are captured here. Lowers to `Effect::SetRoomDoorLock`.
+    SetRoomDoorLock {
+        op: DoorLockOp,
         target: TargetFilter,
     },
     Sacrifice {
@@ -950,10 +1045,11 @@ pub(crate) enum SearchCreationImperativeAst {
         extra_filters: Vec<TargetFilter>,
     },
     /// CR 400.7 + CR 701.23 + CR 701.24: "Search [possessive] graveyard, hand,
-    /// and library for any number of cards with that name and exile them."
+    /// and library for all cards with that name and exile them."
     /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
     /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the player named by the possessive zone phrase.
+    /// scoped to the player named by the possessive zone phrase. "Any number of
+    /// cards" / "a card" variants are excluded — they require SearchChoice.
     MultiZoneSameNameExile {
         owner: ControllerRef,
     },
@@ -978,6 +1074,10 @@ pub(crate) enum UtilityImperativeAst {
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,
+        /// CR 115.1d: "attach up to N target ..." / "attach any number of
+        /// target ..." cardinality belongs to the ability's target selection,
+        /// not the `Effect::Attach` payload.
+        multi_target: Option<MultiTargetSpec>,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1009,10 +1109,21 @@ pub(crate) enum HandRevealImperativeAst {
     /// effect's affected IDs (e.g. "look at top → reveal it" patterns).
     /// Lowers to `Effect::Reveal { target: ParentTarget }`.
     RevealBackRef,
+    /// CR 701.20: Reveal a specific object selected by a target phrase —
+    /// "Reveal target face-down permanent" (Hauntwoods Shrieker). Lowers to
+    /// `Effect::Reveal { target }`. Distinct from `RevealBackRef` (anaphoric
+    /// "it"/"that card") and `RevealAll`/`RevealPartial` (hand reveals): this
+    /// reveals a battlefield/zone object chosen via the targeting pipeline.
+    RevealObject { target: TargetFilter },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ChooseImperativeAst {
+    /// CR 609.7a: "choose a source [you control|...]" — interactive damage-source
+    /// selection, distinct from permanent targeting (`TargetOnly`).
+    DamageSource {
+        source_filter: TargetFilter,
+    },
     TargetOnly {
         target: TargetFilter,
     },
@@ -1056,6 +1167,9 @@ pub(crate) enum ChooseImperativeAst {
         chooser_scope: crate::types::ability::CategoryChooserScope,
         choose_filter: crate::types::ability::TargetFilter,
         sacrifice_filter: crate::types::ability::TargetFilter,
+        /// Slaughter the Strong: keep ANY number of `choose_filter` permanents
+        /// whose combined power is at most this cap, instead of one per category.
+        total_power_cap: Option<crate::types::ability::QuantityExpr>,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).
@@ -1135,6 +1249,14 @@ pub(crate) enum PutImperativeAst {
     NthFromTop {
         n: u32,
     },
+    /// CR 401.7 (Unexpectedly Absent class): "into its owner's library just
+    /// beneath the top N cards of that library." The placed object ends with
+    /// exactly `depth` cards above it (0-based insertion index = resolved
+    /// `depth`). `depth` is a `QuantityExpr` so the count can be the spell's
+    /// announced `{X}` resolved at resolution time.
+    BeneathTop {
+        depth: QuantityExpr,
+    },
     /// CR 121.5: "put that many cards from the top of your library into your
     /// hand" moves library cards without drawing them (Scroll Rack).
     PutTopCardsIntoHandMatchingExileCount,
@@ -1187,9 +1309,24 @@ pub(crate) enum ShuffleImperativeAst {
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.
+    ///
+    /// `all` distinguishes a single-target move ("shuffle target card from your
+    /// graveyard into your library", `false`) from a filtered mass move
+    /// ("shuffle all nonland cards from your graveyard into your library",
+    /// `true`). When `true`, the lowering emits `Effect::ChangeZoneAll` so every
+    /// eligible object moves with no interactive choice (CR 400.6) and the move
+    /// stamps `last_effect_count`; when `false` it emits a single
+    /// `Effect::ChangeZone`.
+    ///
+    /// CR 115.1d: `multi_target` carries an "up to N target" count ("shuffle up
+    /// to three target cards from your graveyard into your library" — Memory's
+    /// Journey) so the lowering surfaces N target slots instead of one. `None`
+    /// for the single-target form; only meaningful when `all` is `false`.
     TargetedChangeZoneToLibrary {
         target: TargetFilter,
         origin: Option<Zone>,
+        all: bool,
+        multi_target: Option<MultiTargetSpec>,
     },
     Unimplemented {
         text: String,
@@ -1372,7 +1509,7 @@ pub(crate) fn with_clause_duration(
                 },
             ..
         } => {
-            *perm_dur = duration;
+            *perm_dur = normalize_play_from_exile_duration(duration);
         }
         Effect::CastFromZone {
             duration: ref mut effect_duration,
@@ -1389,6 +1526,27 @@ pub(crate) fn with_clause_duration(
         _ => {}
     }
     clause
+}
+
+fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+    match duration {
+        Duration::ForAsLongAs {
+            condition: StaticCondition::Unrecognized { text },
+        } if matches!(
+            text.as_str(),
+            "it remains exiled"
+                | "that card remains exiled"
+                | "those cards remain exiled"
+                | "they remain exiled"
+        ) =>
+        {
+            // CR 400.7i + CR 611.2a: exile-play permissions persist until the
+            // referenced object leaves exile; zone-exit cleanup removes the
+            // object-tagged permission.
+            Duration::Permanent
+        }
+        other => other,
+    }
 }
 
 // --- Modal types (moved from oracle_modal.rs) ---
@@ -1447,6 +1605,8 @@ pub(crate) struct ModeAst {
     pub(crate) body: String,
     /// Per-mode additional cost (Spree). None for standard `\u{2022}` modes.
     pub(crate) mode_cost: Option<crate::types::mana::ManaCost>,
+    /// CR 700.2i: pawprint weight for this mode ("{P}" runs). None for bullet/Spree modes.
+    pub(crate) mode_pawprint: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1463,6 +1623,9 @@ pub(crate) struct ModalHeaderAst {
     /// random" headers (Cult of Skaro) — the game selects the mode(s), not the
     /// chooser. `Chosen` for all standard modal headers.
     pub(crate) selection: crate::types::ability::TargetSelectionMode,
+    /// CR 700.2 + CR 107.3m: Dynamic max ("choose up to X —") — `Some` carries
+    /// the cost {X} reference resolved live at runtime; `None` for fixed caps.
+    pub(crate) dynamic_max_choices: Option<crate::types::ability::QuantityExpr>,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

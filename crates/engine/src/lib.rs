@@ -1,4 +1,5 @@
 pub mod ai_support;
+pub mod analysis;
 pub mod database;
 pub mod game;
 pub mod parser;
@@ -6,6 +7,9 @@ pub mod starter_decks;
 pub mod testing;
 pub mod types;
 pub mod util;
+
+#[cfg(test)]
+mod test_support;
 
 // Re-export `im` so downstream crates can construct persistent containers
 // without declaring their own dependency. Keeps the backing-container choice

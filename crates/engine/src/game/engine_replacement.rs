@@ -64,11 +64,40 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
     })
 }
 
+/// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
+/// Draw link parked a replacement-ordering choice. Runs only when the dedicated
+/// `pending_connive_reentry` slot is set (the connive applier's parked-draw
+/// path). `propose_connive` re-enters with the already-applied rids excluded
+/// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements.
+/// Called from BOTH the Execute arm (the leading draw delivered) and the
+/// Prevented arm (the inner draw was prevented, but CR 701.50a's "draw a card,
+/// THEN that creature connives" still runs the connive step — the prevention
+/// replaced only the draw). Returns the parked `WaitingFor` (ConniveDiscard /
+/// fresh ReplacementChoice) if `propose_connive` parked one, else `None`.
+fn drain_pending_connive_reentry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let reentry = state.pending_connive_reentry.take()?;
+    let _ = crate::game::effects::connive::propose_connive(
+        state,
+        reentry.conniver,
+        reentry.count,
+        reentry.applied,
+        events,
+    );
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => None,
+        wf => Some(wf.clone()),
+    }
+}
+
 pub(super) fn handle_replacement_choice(
     state: &mut GameState,
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let replacement_action_event_start = events.len();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -82,6 +111,19 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
+    // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
+    // the Damage resume arm can restore them onto the ctx it rebuilds from the
+    // source (which cannot re-derive either).
+    let parked_excess_recipient = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.excess_recipient);
+    let parked_lifelink_bonus = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.lifelink_bonus)
+        .unwrap_or(0);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -187,14 +229,21 @@ pub(super) fn handle_replacement_choice(
                     is_combat,
                     ..
                 } => {
-                    let ctx = DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                        let controller = state
-                            .objects
-                            .get(&source_id)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(state.active_player);
-                        DamageContext::fallback(source_id, controller)
-                    });
+                    let mut ctx =
+                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                            let controller = state
+                                .objects
+                                .get(&source_id)
+                                .map(|obj| obj.controller)
+                                .unwrap_or(state.active_player);
+                            DamageContext::fallback(source_id, controller)
+                        });
+                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                    // the deferred lifelink bonus dropped by the source-derived ctx
+                    // rebuild, so the resumed hit still redirects and a resumed redirect
+                    // leg still gains the combined lifelink total.
+                    ctx.excess_recipient = parked_excess_recipient;
+                    ctx.lifelink_bonus = parked_lifelink_bonus;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -270,6 +319,11 @@ pub(super) fn handle_replacement_choice(
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
+                // CR 614.1e + CR 708.11: TurnFaceUp is performed inline in
+                // `morph::turn_face_up` (the replacement only adds its actions and
+                // does not prevent the turn-up), so there is nothing to apply on
+                // the post-replacement Execute path here.
+                ProposedEvent::TurnFaceUp { .. } => {}
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -277,8 +331,22 @@ pub(super) fn handle_replacement_choice(
                 // (`execute` is a non-Draw chain), `draw_applier` has zeroed
                 // the count and the central `post_replacement_continuation`
                 // drain below runs the chain (Choose → RevealUntil).
-                draw @ ProposedEvent::Draw { .. } => {
+                draw @ ProposedEvent::Draw { player_id, .. } => {
                     apply_draw_after_replacement(state, draw, events);
+                    // CR 805.4b: if this resumed draw IS the front of the
+                    // team draw-step queue (the active player's mandatory
+                    // draw, parked here by a CR 616.1 competing-replacement
+                    // choice), it has now actually completed — pop it so the
+                    // drain below advances to any remaining queued teammate
+                    // instead of re-entering `execute_draw_for` for the same
+                    // player and drawing them a second card. A Draw choice
+                    // unrelated to the team draw-step queue (a spell's "draw
+                    // two cards" hitting a competing replacement, e.g.) finds
+                    // a front that doesn't match `player_id` and is correctly
+                    // left untouched.
+                    if state.pending_team_draw_step.first() == Some(&player_id) {
+                        state.pending_team_draw_step.remove(0);
+                    }
                 }
                 // CR 701.22a: Scry accepted after replacement choice.
                 scry @ ProposedEvent::Scry { .. } => {
@@ -287,6 +355,23 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
                 ProposedEvent::Explore { .. } => {}
+                // CR 701.50a + CR 616.1: Connive surviving as an `Execute`
+                // payload after a replacement-ordering choice (the count-modifier
+                // case — a full-substitution connive replacement returns
+                // `Prevented` and never reaches here). The connive keyword action
+                // still has to run with the surviving count; resolve its internals
+                // directly so it does not re-enter the propose pipeline (CR 614.5).
+                // CR 616.1f: this is the TERMINAL survivor — `pipeline_loop`
+                // already repeated over and exhausted every applicable connive
+                // replacement, so no connive replacement remains to apply here and
+                // a direct `resolve_connive_effect` is correct.
+                ProposedEvent::Connive {
+                    object_id, count, ..
+                } => {
+                    let _ = crate::game::effects::connive::resolve_connive_effect(
+                        state, object_id, count, events,
+                    );
+                }
                 // CR 701.34a: Proliferate accepted after replacement choice.
                 proliferate @ ProposedEvent::Proliferate { .. } => {
                     crate::game::effects::proliferate::apply_proliferate_after_replacement(
@@ -365,18 +450,26 @@ pub(super) fn handle_replacement_choice(
                     tapped_for_mana,
                     ..
                 } => {
-                    if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                    // CR 106.4: produced mana goes into the named player's pool. If
+                    // that player isn't present, add nothing AND emit no `ManaAdded`
+                    // (the event must mirror an actual pool addition — `add_mana_to_pool`
+                    // already no-ops on a missing player, so emitting unconditionally
+                    // would report mana that was never added).
+                    if state.players.iter().any(|p| p.id == player_id) {
                         for _ in 0..count {
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
+                                pip_id: crate::types::mana::ManaPipId(0),
                                 supertype: None,
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
                                 expiry: None,
                             };
-                            player.mana_pool.add(unit);
+                            // CR 118.3a: stamp a stable pip id on pool entry so the unit
+                            // can be pinned to direct payment.
+                            state.add_mana_to_pool(player_id, unit);
                             events.push(GameEvent::ManaAdded {
                                 player_id,
                                 mana_type,
@@ -504,6 +597,39 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 805.4b: a draw-step draw that paused on the choice just
+            // resolved above may have queued teammate(s) still owed their
+            // own draw this step (`turns::execute_draw` seeds the queue; the
+            // `ProposedEvent::Draw` arm above already popped the
+            // just-completed player off the FRONT so this drain doesn't
+            // redraw them; `drain_pending_team_draw_step` is the single
+            // authority that empties the rest). Drain before falling through
+            // to the generic Priority reset so a 2HG teammate's mandatory
+            // draw is never silently dropped when the active player's own
+            // draw needed a CR 616.1 competing-replacement choice.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && !state.pending_team_draw_step.is_empty()
+            {
+                if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
+                    waiting_for = wf;
+                }
+            }
+
+            // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
+            // leading Draw link parked this just-resolved ReplacementChoice. The
+            // draw fully delivered above (Draw arm), so "draw a card, THEN that
+            // creature connives" (CR 701.50a) order is honored. `propose_connive`
+            // re-enters with the already-applied rids excluded (CR 614.5) so the
+            // CR 616.1f repeat covers the remaining connive replacements; it sets a
+            // parked ConniveDiscard / fresh ReplacementChoice on state.waiting_for,
+            // which we surface instead of the Priority reset. Drained from the
+            // DEDICATED slot so the leading draw's DeliveryTail could not consume it.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = drain_pending_connive_reentry(state, events) {
+                    waiting_for = wf;
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_counter_moves.is_some()
             {
@@ -599,7 +725,15 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
             {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+                let resume_cost_event_start = state
+                    .pending_discard_for_cost
+                    .is_some()
+                    .then_some(replacement_action_event_start);
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    resume_cost_event_start,
+                )?;
             }
 
             Ok(waiting_for)
@@ -616,12 +750,78 @@ pub(super) fn handle_replacement_choice(
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
                 }
+                // CR 120.4a: a SECOND material replacement ordering choice on the
+                // same damage event re-parked a fresh record with
+                // `excess_recipient: None`. Reapply the rider captured before
+                // `continue_replacement` consumed the prior record so the eventual
+                // delivery still redirects the excess to the creature's controller.
+                if pending.excess_recipient.is_none() {
+                    pending.excess_recipient = parked_excess_recipient;
+                }
+                // CR 702.15b: likewise carry the deferred lifelink bonus onto the
+                // re-parked record so a second ordering choice cannot drop it.
+                if pending.lifelink_bonus == 0 {
+                    pending.lifelink_bonus = parked_lifelink_bonus;
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
+            // Super-Genius connive replacement) can park its OWN interactive
+            // choice while running the replacing action. Two shapes occur:
+            //  - a `ConniveDiscard` prompt — the surviving plain connive pauses
+            //    when the controller must choose which card to discard, or
+            //  - a FRESH `ReplacementChoice` — the nested "then that creature
+            //    connives" re-entry found two or more OTHER still-applicable
+            //    connive replacements, so CR 616.1f repeats over them and the
+            //    controller must order the next one (the 3+ co-applicable case).
+            // `continue_replacement` returned `Prevented` (the original event was
+            // fully replaced), but the applier already set `state.waiting_for` to
+            // that live prompt. Surface it instead of clobbering it with
+            // `Priority`; the prompt's own resolution finishes the parked work.
+            //
+            // A bare `ReplacementChoice` whitelist is insufficient: it cannot
+            // tell the JUST-RESOLVED ordering prompt (already consumed) from a
+            // freshly-parked nested one. `continue_replacement` `.take()`-consumed
+            // the prior pending record at its start, so a `pending_replacement`
+            // that is still `Some` here is necessarily the applier's freshly-
+            // parked nested ordering choice — surface it so the next
+            // `ChooseReplacement` resumes the CR 616.1f repeat instead of orphaning
+            // the record and dropping replacements C onward.
+            if state.pending_replacement.is_some()
+                || !matches!(
+                    state.waiting_for,
+                    WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
+                )
+            {
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 701.50a + CR 614.5 + CR 616.1f: the leading Draw of a connive
+            // replacement was PREVENTED (a draw-Prevent replacement ordered
+            // first). The prevention replaced only the draw — CR 701.50a's
+            // "instead you draw a card, THEN that creature connives" still runs
+            // the connive step. Drain the deferred connive from the dedicated
+            // slot (the Execute arm above did not run because the draw was
+            // prevented). Reset the stale leading-draw `ReplacementChoice`
+            // waiting_for to Priority first (mirrors the Execute arm and every
+            // other Prevented-arm drain below) so the connive's own draw
+            // re-enters from a clean state instead of seeing the parked prompt.
+            // `propose_connive` may park a ConniveDiscard / fresh
+            // ReplacementChoice — surface it. If the slot is None (every
+            // non-connive Prevented resolution) skip entirely so control falls
+            // through to the existing pending-* blocks unchanged.
+            if state.pending_connive_reentry.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                if let Some(wf) = drain_pending_connive_reentry(state, events) {
+                    return Ok(wf);
+                }
+                return Ok(state.waiting_for.clone());
+            }
             if state.pending_counter_additions.is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
@@ -781,6 +981,15 @@ pub(super) fn handle_copy_target_choice(
     // phantom entry trigger.
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
         return Ok(waiting_for);
+    }
+    // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
+    // while paused on `CopyTargetChoice` must run combat placement after the copy
+    // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
+    if state.pending_batch_deliveries.is_some() {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
     }
     Ok(WaitingFor::Priority {
         player: state.active_player,
@@ -1415,6 +1624,102 @@ mod tests {
         id
     }
 
+    /// CR 805.4b + CR 616.1: regression for a review-flagged bug where the
+    /// active player's draw-step draw, after pausing on a CR 616.1
+    /// competing-replacement choice and being resumed via the REAL
+    /// `GameAction::ChooseReplacement` path, was drawn for a SECOND time
+    /// instead of the queue advancing to the teammate. Drives the actual
+    /// production path end to end: `turns::execute_draw` seeds
+    /// `pending_team_draw_step` with `[P0, P1]` and pauses on P0's own draw;
+    /// `apply_as_current(ChooseReplacement)` resolves that choice through
+    /// `handle_replacement_choice`, which must pop P0 off the queue's front
+    /// (not redraw them) and then drain through to P1.
+    #[test]
+    fn two_headed_giant_draw_step_resume_draws_active_player_once_then_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.active_player = PlayerId(0);
+
+        // A CR 616.1 optional replacement on P0's own draw — accepting or
+        // declining is the choice that pauses the draw (mirrors
+        // `install_optional_replacement` above, but controlled by P0 so it
+        // matches P0's draw under the default "source player only" scope —
+        // `ReplacementDefinition::valid_player: None` — rather than P1's).
+        let shield = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut shield_obj = GameObject::new(
+            shield,
+            CardId(1),
+            PlayerId(0),
+            "Draw Shield".to_string(),
+            Zone::Battlefield,
+        );
+        shield_obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Draw Shield".to_string()),
+        );
+        state.objects.insert(shield, shield_obj);
+        state.battlefield.push_back(shield);
+
+        let p0_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "P0 Card".to_string(),
+            Zone::Library,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "P1 Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let paused = super::super::turns::execute_draw(&mut state, &mut events);
+        assert!(
+            paused.is_some(),
+            "P0's draw must pause on the competing-replacement choice"
+        );
+        assert_eq!(
+            state.pending_team_draw_step,
+            vec![PlayerId(0), PlayerId(1)],
+            "both active-team players must still be queued while P0's choice is pending"
+        );
+
+        // Resolve P0's choice through the REAL action-dispatch path.
+        let choosing_player = match &state.waiting_for {
+            WaitingFor::ReplacementChoice { player, .. } => *player,
+            other => panic!("expected ReplacementChoice, got {other:?}"),
+        };
+        state.priority_player = choosing_player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        // P0 drew exactly once (the queue's front was popped on resume, not
+        // re-entered) and the queue advanced to P1, who also drew their own
+        // single card — neither dropped nor double-drawn.
+        assert!(
+            state.players[0].hand.contains(&p0_card),
+            "P0 must have drawn their card"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "P0 must draw exactly once, not twice, after the resume"
+        );
+        assert!(
+            state.players[1].hand.contains(&p1_card),
+            "P1's queued draw-step draw must still happen after P0's resume"
+        );
+        assert_eq!(state.players[1].hand.len(), 1, "P1 must draw exactly once");
+        assert!(
+            state.pending_team_draw_step.is_empty(),
+            "the draw-step queue must be fully drained after resume"
+        );
+    }
+
     /// CR 122.1: When a player accepts an AddCounter replacement choice, the
     /// (possibly modified) counter event must be applied. Previously
     /// `handle_replacement_choice` silently dropped non-ZoneChange events.
@@ -1621,6 +1926,229 @@ mod tests {
         );
     }
 
+    /// Install Displaced Dinosaurs on the battlefield under `controller`, carrying
+    /// the parsed "As a historic permanent you control enters, it becomes a 7/7
+    /// Dinosaur creature in addition to its other types" replacement. Returns the
+    /// host's ObjectId.
+    fn install_displaced_dinosaurs(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let host = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Displaced Dinosaurs".to_string(),
+            Zone::Battlefield,
+        );
+        let repl = parse_replacement_line(
+            "As a historic permanent you control enters, it becomes a 7/7 Dinosaur \
+             creature in addition to its other types.",
+            "Displaced Dinosaurs",
+        )
+        .expect("Displaced Dinosaurs replacement must parse");
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .replacement_definitions = vec![repl].into();
+        host
+    }
+
+    /// CR 614.1c + CR 614.12 + CR 700.6 + CR 205.1b + CR 208.2b: end-to-end
+    /// runtime proof for Displaced Dinosaurs' non-self "becomes-in-addition"
+    /// replacement. A historic ENTRANT (here a plain artifact — historic via its
+    /// artifact card type, CR 700.6) entering under the host's controller is
+    /// animated into a 7/7 Dinosaur creature that RETAINS its prior artifact type
+    /// (CR 205.1b), and the animation persists after the host leaves (CR 208.2b /
+    /// 707.2).
+    ///
+    /// This is the gate confirming the "no runtime edits" hypothesis: a non-self
+    /// `Moved` replacement whose execute is a `GenericEffect` post-replacement
+    /// continuation binds its `SelfRef` "becomes" to the separate entrant (CR
+    /// 614.12a) and the layer system applies it. Mirrors
+    /// `resumed_entry_receives_enters_with_additional_counters_static`.
+    #[test]
+    fn displaced_dinosaurs_animates_historic_entrant_and_persists() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let host = install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a plain artifact (historic via its artifact card type),
+        // P0-owned, entering from hand.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mishra's Bauble".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entrant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "a single Mandatory becomes replacement must deliver the entry without parking"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "entrant must be on the battlefield"
+        );
+        // CR 613.4b: base power/toughness set to 7/7.
+        assert_eq!(obj.power, Some(7), "entrant power must be set to 7");
+        assert_eq!(obj.toughness, Some(7), "entrant toughness must be set to 7");
+        // CR 613.1d: Creature type added.
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "entrant must become a creature"
+        );
+        // CR 205.1b: prior artifact type retained (additive).
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Artifact),
+            "CR 205.1b: entrant must retain its artifact type"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "entrant must gain the Dinosaur subtype"
+        );
+
+        // CR 208.2b + CR 707.2: the characteristics are locked in at entry and
+        // persist after the host (Displaced Dinosaurs) leaves the battlefield —
+        // the becomes continuous is sourced on the entrant, not the host.
+        state.battlefield.retain(|id| *id != host);
+        state.objects.remove(&host);
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(7),
+            "CR 208.2b: 7/7 must persist after the host leaves"
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "CR 208.2b: Dinosaur subtype must persist after the host leaves"
+        );
+    }
+
+    /// CR 700.6: a non-historic entrant (a vanilla creature — no artifact,
+    /// legendary, or Saga) is NOT animated by Displaced Dinosaurs' historic-only
+    /// replacement. Discriminates the `FilterProp::Historic` subject guard.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_nonhistoric_entrant() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // Entrant: a vanilla 2/2 creature (non-historic), P0-owned.
+        let entrant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entrant).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::Done),
+            "entry must complete"
+        );
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&entrant];
+        assert_eq!(
+            obj.power,
+            Some(2),
+            "non-historic creature power must be unchanged"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "non-historic creature toughness must be unchanged"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "non-historic creature must not gain the Dinosaur subtype"
+        );
+    }
+
+    /// CR 603.6d: the replacement applies only as a permanent ENTERS. An artifact
+    /// already on the battlefield when Displaced Dinosaurs is present is never
+    /// animated — there is no entry event for it.
+    #[test]
+    fn displaced_dinosaurs_does_not_animate_preexisting_artifact() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        install_displaced_dinosaurs(&mut state, PlayerId(0));
+
+        // A historic artifact already on the battlefield (no entry event fires).
+        let preexisting = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&preexisting)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        evaluate_layers(&mut state);
+        let obj = &state.objects[&preexisting];
+        assert_ne!(
+            obj.power,
+            Some(7),
+            "a pre-existing artifact must not be animated into a 7/7"
+        );
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "a pre-existing artifact must not become a creature"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "a pre-existing artifact must not gain the Dinosaur subtype"
+        );
+    }
+
     /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
     /// spell's ETB is fully prevented after a replacement choice
     /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
@@ -1675,7 +2203,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))]
             .into();
@@ -1721,6 +2251,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -1974,7 +2506,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -2299,6 +2833,71 @@ mod tests {
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
         );
+    }
+
+    /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
+    /// creature card in exile with a takeover counter on it". `find_copy_targets`
+    /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
+    /// `FilterProp::Counters` predicate, returning only the marked exile card and
+    /// excluding an unmarked exile creature (and the battlefield entirely). This
+    /// is the runtime proof that the parsed source filter selects correctly.
+    #[test]
+    fn find_copy_targets_honors_exile_zone_and_takeover_counter_predicate() {
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_creature = |state: &mut GameState, card: u64, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Bear {card}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let marked_exile = make_creature(&mut state, 1, Zone::Exile);
+        state
+            .objects
+            .get_mut(&marked_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("takeover".to_string()), 1);
+        let unmarked_exile = make_creature(&mut state, 2, Zone::Exile);
+        let bf_creature = make_creature(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The Master".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "a creature card in exile with a takeover counter on it"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone { zone: Zone::Exile },
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("takeover".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert_eq!(
+            targets,
+            vec![marked_exile],
+            "only the takeover-marked exile creature is a legal copy source"
+        );
+        assert!(!targets.contains(&unmarked_exile));
+        assert!(!targets.contains(&bf_creature));
     }
 
     /// 2026-05-09 audit M4 regression: the unified

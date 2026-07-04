@@ -7,13 +7,14 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
-    flatten_targets_in_chain, validate_selected_targets_for_ability, TargetSelectionAdvance,
+    distribution_targets, flatten_targets_in_chain, validate_selected_targets_for_ability,
+    TargetSelectionAdvance,
 };
 use super::casting_targets::extract_distribution_total;
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
-use super::{casting, triggers};
+use super::{casting, priority, triggers};
 
 pub(super) fn finalize_trigger_target_selection(
     state: &mut GameState,
@@ -30,6 +31,9 @@ pub(super) fn finalize_trigger_target_selection(
         events,
     );
 
+    // CR 601.2d: Division is announced only among the distributing effect's own targets, not sibling-effect targets (which still become targets above).
+    let dist_targets = distribution_targets(&ability);
+
     let mut trigger = trigger;
     let controller = trigger.controller;
     let distribute = trigger.distribute.clone();
@@ -42,8 +46,8 @@ pub(super) fn finalize_trigger_target_selection(
         if let Some(total) =
             extract_distribution_total(state, &trigger.ability, &trigger.ability.effect)
         {
-            if assigned_targets.len() == 1 {
-                trigger.ability.distribution = Some(vec![(assigned_targets[0].clone(), total)]);
+            if dist_targets.len() == 1 {
+                trigger.ability.distribution = Some(vec![(dist_targets[0].clone(), total)]);
             } else {
                 // CR 601.2d: Distribution still outstanding. Entry is already
                 // on the stack with empty `distribution`; mutate the on-stack
@@ -51,12 +55,11 @@ pub(super) fn finalize_trigger_target_selection(
                 // keep `pending_trigger_entry` set until division completes.
                 triggers::mutate_pending_trigger_entry(state, &trigger.ability);
                 state.pending_trigger = Some(trigger);
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 return WaitingFor::DistributeAmong {
                     player: controller,
                     total,
-                    targets: assigned_targets,
+                    targets: dist_targets,
                     unit,
                 };
             }
@@ -69,8 +72,7 @@ pub(super) fn finalize_trigger_target_selection(
     // `pending_trigger_entry` so the resolver may now fire this entry.
     triggers::finalize_pending_trigger_entry(state, &trigger.ability);
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
     // stack, drain any siblings that were deferred because this one needed
     // input (e.g., the second Boggart Prankster's "you attack" trigger waiting
@@ -161,31 +163,47 @@ pub(super) fn handle_trigger_target_selection_choose_target(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (player, target_slots, mode_labels, target_constraints, selection, source_id, description) =
-        match waiting_for {
-            WaitingFor::TriggerTargetSelection {
-                player,
-                target_slots,
-                mode_labels,
-                target_constraints,
-                selection,
-                source_id,
-                description,
-            } => (
-                player,
-                target_slots,
-                mode_labels,
-                target_constraints,
-                selection,
-                source_id,
-                description,
-            ),
-            _ => {
-                return Err(EngineError::InvalidAction(
-                    "Not waiting for trigger target selection".to_string(),
-                ));
-            }
-        };
+    let (
+        player,
+        trigger_controller,
+        trigger_event,
+        trigger_events,
+        target_slots,
+        mode_labels,
+        target_constraints,
+        selection,
+        source_id,
+        description,
+    ) = match waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            player,
+            trigger_controller,
+            trigger_event,
+            trigger_events,
+            target_slots,
+            mode_labels,
+            target_constraints,
+            selection,
+            source_id,
+            description,
+        } => (
+            player,
+            trigger_controller,
+            trigger_event,
+            trigger_events,
+            target_slots,
+            mode_labels,
+            target_constraints,
+            selection,
+            source_id,
+            description,
+        ),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "Not waiting for trigger target selection".to_string(),
+            ));
+        }
+    };
 
     restamp_pending_die_result(state);
 
@@ -195,6 +213,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
     // Clone the ability and read the firing batch's subject count before mutating
     // `current_trigger_match_count`, ending the shared borrow of `pending_trigger`.
     let walk_ability = pending_trigger.ability.clone();
+    let pending_trigger_event = pending_trigger.trigger_event.clone();
+    let pending_trigger_events = if state.pending_trigger_event_batch.is_empty() {
+        pending_trigger_event.iter().cloned().collect::<Vec<_>>()
+    } else {
+        state.pending_trigger_event_batch.clone()
+    };
     let pending_match_count = pending_trigger.subject_match_count;
 
     // CR 601.2c + CR 603.2c: Re-stamp the firing batch's subject count into
@@ -209,8 +233,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
     // because `current_trigger_match_count` is not cleared at `apply()` start.
     // Mirrors the Complete branch below and the auto-target path's
     // push/restore_trigger_event_context in triggers.rs.
-    let prev_match_count = state.current_trigger_match_count;
-    state.current_trigger_match_count = pending_match_count;
+    let context_snapshot = super::triggers::push_trigger_event_context(
+        state,
+        pending_trigger_event.as_ref(),
+        &pending_trigger_events,
+        pending_match_count,
+    );
     let advance = choose_target_for_ability(
         state,
         &walk_ability,
@@ -219,13 +247,16 @@ pub(super) fn handle_trigger_target_selection_choose_target(
         &selection,
         target,
     );
-    state.current_trigger_match_count = prev_match_count;
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
 
     match advance? {
         // CR 700.2b: preserve the inbound mode labels unchanged across the
         // step-by-step walk — the slot→mode mapping does not change.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TriggerTargetSelection {
             player,
+            trigger_controller,
+            trigger_event,
+            trigger_events,
             target_slots,
             mode_labels,
             target_constraints,
@@ -241,6 +272,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             // Read the firing batch's subject count out of `pending` before any
             // mutation of `state`, so the shared borrow of `state.pending_trigger`
             // ends here.
+            let pending_trigger_event = pending.trigger_event.clone();
+            let pending_trigger_events = if state.pending_trigger_event_batch.is_empty() {
+                pending_trigger_event.iter().cloned().collect::<Vec<_>>()
+            } else {
+                state.pending_trigger_event_batch.clone()
+            };
             let pending_match_count = pending.subject_match_count;
             // CR 601.2c + CR 603.2c: A variable target count ("up to X target
             // creatures, where X is the number milled this way") is fixed when the
@@ -251,14 +288,15 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             // `current_trigger_match_count` is not cleared at `apply()` start, so a
             // bare stamp would leak into the next resolution. Mirrors the
             // auto-target path's push/restore_trigger_event_context in triggers.rs.
-            // Partial re-stamp (only `current_trigger_match_count`, not the full
-            // event-context snapshot) is intentional and sufficient: the
-            // demonstrated bound (`EventContextAmount`) reads only this field.
-            let prev_match_count = state.current_trigger_match_count;
-            state.current_trigger_match_count = pending_match_count;
+            let context_snapshot = super::triggers::push_trigger_event_context(
+                state,
+                pending_trigger_event.as_ref(),
+                &pending_trigger_events,
+                pending_match_count,
+            );
             let assign_result =
                 assign_selected_slots_in_chain(state, &mut ability, &selected_slots);
-            state.current_trigger_match_count = prev_match_count;
+            super::triggers::restore_trigger_event_context(state, context_snapshot);
             assign_result?;
             // CR 603.3d: Consume the pending trigger only after the fallible
             // assignment succeeds. `apply()` does not roll back on Err and

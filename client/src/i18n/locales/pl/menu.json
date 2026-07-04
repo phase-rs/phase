@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
     "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
     "errorGeneric": "Nie udało się zaimportować talii.",
+    "errorNoCards": "Nie znaleziono kart. Wklej talię w formacie MTGA lub .dck.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
     "chooseFile": "Wybierz plik",
     "importedSuccessTitle": "Talia zaimportowana",
@@ -173,7 +174,9 @@
     "totalCount": "· {{count}} łącznie",
     "searchPlaceholder": "Szukaj według nazwy, kodu dodatku lub typu…",
     "allTypes": "Wszystkie ({{count}})",
+    "typeFilter": "Typ talii",
     "loadingCatalog": "Wczytywanie katalogu talii…",
+    "loadFailed": "Nie udało się wczytać katalogu gotowych talii. Sprawdź połączenie i spróbuj ponownie.",
     "noMatch": "Brak pasujących talii.",
     "selectDeck": "Wybierz {{name}}",
     "cardCount_one": "{{count}} karta",
@@ -197,7 +200,13 @@
     "unknown": "Nieznane {{count}}",
     "unknownCardsTitle": "Nieznane karty:\n{{cards}}",
     "unsupportedTitle": "Nieobsługiwane ({{unique}} unikalnych, {{copies}} kopii):\n{{cards}}",
-    "setIconAlt": "Ikona dodatku {{code}}"
+    "setIconAlt": "Ikona dodatku {{code}}",
+    "actionsMenu": "Opcje talii",
+    "star": "Oznacz gwiazdką",
+    "unstar": "Usuń gwiazdkę",
+    "moveToFolder": "Przenieś do folderu",
+    "unfiled": "Bez folderu",
+    "newFolder": "Nowy folder…"
   },
   "myDecks": {
     "headingManage": "Moje talie",
@@ -252,7 +261,11 @@
     "loadMore": "Wczytaj więcej",
     "selectedDeck": "Wybrana talia",
     "chooseDeckToContinue": "Wybierz talię, aby kontynuować",
-    "filterAll": "Wszystkie"
+    "filterAll": "Wszystkie",
+    "sectionStarred": "Ulubione",
+    "sectionUnfiled": "Bez folderu",
+    "collapseAll": "Zwiń wszystko",
+    "expandAll": "Rozwiń wszystko"
   },
   "subscriptions": {
     "emptyTitle": "Brak subskrypcji kanałów",
@@ -278,6 +291,44 @@
     "decks": "Talie",
     "alpha": "Alfa",
     "profile": "Profil",
-    "settings": "Ustawienia"
+    "settings": "Ustawienia",
+    "whatsNew": "Nowości"
+  },
+  "folder": {
+    "actionsMenu": "Opcje folderu",
+    "rename": "Zmień nazwę",
+    "delete": "Usuń",
+    "newFolder": "Nowy folder",
+    "newFolderPrompt": "Nazwa folderu:",
+    "createButton": "Utwórz",
+    "renamePrompt": "Zmień nazwę folderu:",
+    "deleteConfirm": "Usunąć folder „{{name}}”? Talie zostaną przeniesione do „Bez folderu”.",
+    "emptyHint": "Ten folder jest pusty.",
+    "unfiledEmptyHint": "Brak talii bez folderu."
+  },
+  "whatsNew": {
+    "title": "Co nowego",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::types::card::CardFace;
+use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
 use crate::types::player::PlayerId;
@@ -30,6 +31,20 @@ pub struct PlayerDeckPayload {
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
+    /// CR 901.15a: Optional shared Planechase planar deck. Only
+    /// `DeckPayload::player.planar_deck` is loaded as the communal deck.
+    #[serde(default)]
+    pub planar_deck: Vec<DeckEntry>,
+    /// CR 904.3: Optional shared Archenemy scheme deck. Only the configured
+    /// archenemy seat's payload is loaded as the scheme deck.
+    #[serde(default)]
+    pub scheme_deck: Vec<DeckEntry>,
+    /// Unstable Contraptions: optional supplementary Contraption deck.
+    #[serde(default)]
+    pub contraption_deck: Vec<DeckEntry>,
+    /// CR 123.2c: The revealed sticker sheets this player uses this game.
+    #[serde(default)]
+    pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell (instant/sorcery within the
     /// Oathbreaker's color identity) placed in the command zone alongside
     /// the Oathbreaker. Empty for all non-Oathbreaker formats.
@@ -67,6 +82,14 @@ pub struct PlayerDeckList {
     pub commander: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    #[serde(default)]
+    pub planar_deck: Vec<String>,
+    #[serde(default)]
+    pub scheme_deck: Vec<String>,
+    #[serde(default)]
+    pub contraption_deck: Vec<String>,
+    #[serde(default)]
+    pub sticker_sheets: Vec<String>,
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,
@@ -123,6 +146,10 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
         attraction_deck: resolve_names(db, &list.attraction_deck),
+        planar_deck: resolve_names(db, &list.planar_deck),
+        scheme_deck: resolve_names(db, &list.scheme_deck),
+        contraption_deck: resolve_names(db, &list.contraption_deck),
+        sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
     }
@@ -142,6 +169,10 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
+            planar_deck: resolve_names(db, &list.player.planar_deck),
+            scheme_deck: resolve_names(db, &list.player.scheme_deck),
+            contraption_deck: resolve_names(db, &list.player.contraption_deck),
+            sticker_sheets: list.player.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.player.signature_spell),
             bracket_tier: list.player.bracket_tier,
         },
@@ -150,6 +181,10 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
+            planar_deck: resolve_names(db, &list.opponent.planar_deck),
+            scheme_deck: resolve_names(db, &list.opponent.scheme_deck),
+            contraption_deck: resolve_names(db, &list.opponent.contraption_deck),
+            sticker_sheets: list.opponent.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.opponent.signature_spell),
             bracket_tier: list.opponent.bracket_tier,
         },
@@ -161,6 +196,10 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
+                planar_deck: resolve_names(db, &deck.planar_deck),
+                scheme_deck: resolve_names(db, &deck.scheme_deck),
+                contraption_deck: resolve_names(db, &deck.contraption_deck),
+                sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
             })
@@ -224,6 +263,90 @@ pub fn momir_fixed_deck_names() -> Vec<String> {
     names
 }
 
+pub const DEFAULT_PLANAR_DECK_NAMES: [&str; 40] = [
+    "Academy at Tolaria West",
+    "Agyrem",
+    "Akoum",
+    "Antarctic Research Base",
+    "Aplan Mortarium",
+    "Aretopolis",
+    "Bant",
+    "Bloodhill Bastion",
+    "Celestine Reef",
+    "Cliffside Market",
+    "Edge of Malacol",
+    "Eloren Wilds",
+    "Enigma Ridges",
+    "Esper",
+    "Feeding Grounds",
+    "Fields of Summer",
+    "Gavony",
+    "Ghirapur",
+    "Glen Elendra",
+    "Glimmervoid Basin",
+    "Goldmeadow",
+    "Grand Ossuary",
+    "Grixis",
+    "Grove of the Dreampods",
+    "Hedron Fields of Agadeem",
+    "Horizon Boughs",
+    "Immersturm",
+    "Inys Haen",
+    "Isle of Vesuva",
+    "Izzet Steam Maze",
+    "Jund",
+    "Kessig",
+    "Ketria",
+    "Kharasha Foothills",
+    "Kilnspire District",
+    "Krosa",
+    "Lair of the Ashen Idol",
+    "Lethe Lake",
+    "Littjara",
+    "Llanowar",
+];
+
+pub fn default_planar_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
+    DEFAULT_PLANAR_DECK_NAMES
+        .iter()
+        .map(|name| {
+            let card = db
+                .get_face_by_name(name)
+                .unwrap_or_else(|| panic!("default Planechase card {name} must resolve"))
+                .clone();
+            assert!(
+                card.card_type.core_types.contains(&CoreType::Plane),
+                "default Planechase card {name} must be a Plane"
+            );
+            DeckEntry { card, count: 1 }
+        })
+        .collect()
+}
+
+pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
+    let mut schemes: Vec<CardFace> = db
+        .face_iter()
+        .map(|(_, face)| face)
+        .filter(|face| face.card_type.core_types.contains(&CoreType::Scheme))
+        .filter(|face| crate::game::coverage::card_face_gaps(face).is_empty())
+        .cloned()
+        .collect();
+    schemes.sort_by(|a, b| a.name.cmp(&b.name));
+    assert!(
+        schemes.len() >= 20,
+        "default Archenemy scheme deck requires at least 20 supported Scheme cards; found {}",
+        schemes.len()
+    );
+    // CR 904.3: A scheme deck has at least twenty scheme cards and at most two
+    // copies of each card by English name. One copy of the first twenty
+    // supported schemes satisfies the same construction rule as user decks.
+    schemes
+        .into_iter()
+        .take(20)
+        .map(|card| DeckEntry { card, count: 1 })
+        .collect()
+}
+
 /// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
 /// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
 /// deck. Momir admits exactly one legal deck, so the submitted payload's deck
@@ -235,6 +358,10 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sideboard: Vec::new(),
         commander: Vec::new(),
         attraction_deck: Vec::new(),
+        planar_deck: Vec::new(),
+        scheme_deck: Vec::new(),
+        contraption_deck: Vec::new(),
+        sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
     };
@@ -357,6 +484,120 @@ fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], own
     }
 }
 
+/// CR 901.15a / CR 901.15b: Create a card in the single communal planar deck.
+/// Cards start face down in the command zone bookkeeping area; `state.planar_deck`
+/// is the deck order authority, with front = top.
+pub fn create_planar_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.face_down = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state.planar_deck.push_back(obj_id);
+    obj_id
+}
+
+fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    state.planar_deck.clear();
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_planar_deck_card(state, &entry.card, owner);
+        }
+    }
+    state.planar_controller = Some(owner);
+    crate::game::planechase::restamp_planar_objects_to_controller(state);
+}
+
+/// CR 904.3 / CR 904.4: Create a scheme card in the archenemy's scheme deck.
+/// Cards start face down in command-zone bookkeeping; `state.scheme_deck` is
+/// the deck order authority, with front = top.
+pub fn create_scheme_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.face_down = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state.scheme_deck.push_back(obj_id);
+    obj_id
+}
+
+fn load_shared_scheme_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    state.scheme_deck.clear();
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_scheme_deck_card(state, &entry.card, owner);
+        }
+    }
+    state.archenemy = Some(owner);
+}
+
+/// Unstable Contraptions: create a Contraption in the supplementary deck
+/// (command zone).
+pub fn create_contraption_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.in_contraption_deck = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == owner)
+        .expect("owner exists")
+        .contraption_deck
+        .push_back(obj_id);
+    obj_id
+}
+
+fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_contraption_deck_card(state, &entry.card, owner);
+        }
+    }
+}
+
+fn payload_for_player(payload: &DeckPayload, player: PlayerId) -> &PlayerDeckPayload {
+    match player.0 {
+        0 => &payload.player,
+        1 => &payload.opponent,
+        seat => payload
+            .ai_decks
+            .get(usize::from(seat.saturating_sub(2)))
+            .unwrap_or(&payload.player),
+    }
+}
+
+fn payload_for_player_mut(payload: &mut DeckPayload, player: PlayerId) -> &mut PlayerDeckPayload {
+    match player.0 {
+        0 => &mut payload.player,
+        1 => &mut payload.opponent,
+        seat => {
+            let idx = usize::from(seat.saturating_sub(2));
+            if idx < payload.ai_decks.len() {
+                &mut payload.ai_decks[idx]
+            } else {
+                &mut payload.player
+            }
+        }
+    }
+}
+
 /// Oathbreaker RC: Place a signature spell in the command zone.
 /// The `signature_spell` marker drives zone-return, the Oathbreaker-present
 /// casting gate, and commander-tax tracking via `commander_cast_count`.
@@ -407,6 +648,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
     let p0_sig = std::sync::Arc::new(payload.player.signature_spell.clone());
+    let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
+    let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
@@ -419,12 +662,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_commander: p0_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p0_sig),
             current_signature_spell: p0_sig,
+            registered_planar_deck: p0_planar,
+            registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
+            current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
     let p1_sig = std::sync::Arc::new(payload.opponent.signature_spell.clone());
+    let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
@@ -437,6 +684,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_commander: p1_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p1_sig),
             current_signature_spell: p1_sig,
+            registered_planar_deck: std::sync::Arc::new(Vec::new()),
+            registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
+            current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
@@ -445,6 +695,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
         let sig = std::sync::Arc::new(ai_deck.signature_spell.clone());
+        let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state
             .deck_pools
             .push(crate::types::game_state::PlayerDeckPool {
@@ -457,6 +708,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 current_commander: cmdr,
                 registered_signature_spell: std::sync::Arc::clone(&sig),
                 current_signature_spell: sig,
+                registered_planar_deck: std::sync::Arc::new(Vec::new()),
+                registered_scheme_deck: std::sync::Arc::clone(&scheme),
+                current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
             });
     }
@@ -511,6 +765,28 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
     }
+    load_player_contraption_deck(state, &payload.player.contraption_deck, PlayerId(0));
+    load_player_contraption_deck(state, &payload.opponent.contraption_deck, PlayerId(1));
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        load_player_contraption_deck(state, &ai_deck.contraption_deck, PlayerId((2 + i) as u8));
+    }
+    crate::game::stickers::set_player_sticker_sheets(
+        state,
+        PlayerId(0),
+        &payload.player.sticker_sheets,
+    );
+    crate::game::stickers::set_player_sticker_sheets(
+        state,
+        PlayerId(1),
+        &payload.opponent.sticker_sheets,
+    );
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        crate::game::stickers::set_player_sticker_sheets(
+            state,
+            PlayerId((2 + i) as u8),
+            &ai_deck.sticker_sheets,
+        );
+    }
 
     // Oathbreaker RC: Place signature spells in the command zone at game start.
     let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
@@ -533,6 +809,15 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 create_signature_spell_from_card_face(state, &entry.card, owner);
             }
         }
+    }
+
+    if state.format_config.format == crate::types::format::GameFormat::Planechase {
+        load_shared_planar_deck(state, &payload.player.planar_deck, PlayerId(0));
+    }
+    if state.format_config.format == crate::types::format::GameFormat::Archenemy {
+        let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
+        let entries = &payload_for_player(payload, archenemy).scheme_deck;
+        load_shared_scheme_deck(state, entries, archenemy);
     }
 
     // Momir Basic: grant each player a game-start command-zone emblem carrying
@@ -607,11 +892,19 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     sorted.sort();
     state.all_creature_types = sorted;
 
-    // Shuffle each player's library and Attraction deck (CR 103.3a / CR 717.2).
+    if !state.planar_deck.is_empty() {
+        crate::util::im_ext::shuffle_vector(&mut state.planar_deck, &mut state.rng);
+    }
+    if !state.scheme_deck.is_empty() {
+        crate::util::im_ext::shuffle_vector(&mut state.scheme_deck, &mut state.rng);
+    }
+
+    // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
         crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
     }
 }
 
@@ -648,6 +941,49 @@ pub fn load_and_hydrate_decks(
                 &momir_payload
             }
             None => payload,
+        }
+    } else {
+        payload
+    };
+    let planechase_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Planechase
+        && payload.player.planar_deck.is_empty()
+    {
+        match db {
+            Some(card_db) => {
+                planechase_payload = {
+                    let mut payload = payload.clone();
+                    payload.player.planar_deck = default_planar_deck_entries(card_db);
+                    payload
+                };
+                &planechase_payload
+            }
+            None => payload,
+        }
+    } else {
+        payload
+    };
+    let archenemy_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Archenemy {
+        let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
+        if payload_for_player(payload, archenemy)
+            .scheme_deck
+            .is_empty()
+        {
+            match db {
+                Some(card_db) => {
+                    archenemy_payload = {
+                        let mut payload = payload.clone();
+                        payload_for_player_mut(&mut payload, archenemy).scheme_deck =
+                            default_scheme_deck_entries(card_db);
+                        payload
+                    };
+                    &archenemy_payload
+                }
+                None => payload,
+            }
+        } else {
+            payload
         }
     } else {
         payload
@@ -781,6 +1117,7 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
             )],
             triggers: vec![],
@@ -940,6 +1277,32 @@ mod tests {
         CardDatabase::from_json_str(&json).expect("snow-basics fixture parses")
     }
 
+    fn archenemy_scheme_db() -> CardDatabase {
+        let mut map = serde_json::Map::new();
+        for index in 1..=20 {
+            let name = format!("Scheme {index}");
+            map.insert(
+                name.to_lowercase(),
+                serde_json::json!({
+                    "name": name,
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": {
+                        "supertypes": [],
+                        "core_types": ["Scheme"],
+                        "subtypes": []
+                    },
+                    "power": null, "toughness": null, "loyalty": null, "defense": null,
+                    "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                    "keywords": [], "abilities": [], "triggers": [],
+                    "static_abilities": [], "replacements": [],
+                    "color_override": null, "scryfall_oracle_id": null
+                }),
+            );
+        }
+        let json = serde_json::Value::Object(map).to_string();
+        CardDatabase::from_json_str(&json).expect("scheme fixture parses")
+    }
+
     #[test]
     fn momir_fixed_deck_names_is_sixty_snow_basics() {
         let names = momir_fixed_deck_names();
@@ -951,6 +1314,29 @@ mod tests {
                 "exactly 12 copies of {basic}"
             );
         }
+    }
+
+    #[test]
+    fn archenemy_empty_scheme_deck_injects_valid_default_face_down() {
+        let db = archenemy_scheme_db();
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 2, 42);
+        let payload = DeckPayload::default();
+
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+
+        assert_eq!(state.archenemy, Some(PlayerId(0)));
+        assert_eq!(state.scheme_deck.len(), 20);
+        assert_eq!(state.deck_pools[0].registered_scheme_deck.len(), 20);
+        assert!(state
+            .scheme_deck
+            .iter()
+            .all(|id| state.objects[id].face_down));
+        assert!(state.scheme_deck.iter().all(|id| {
+            state.objects[id]
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Scheme)
+        }));
     }
 
     #[test]

@@ -128,6 +128,28 @@ pub(crate) struct ParseContext {
     /// Set when the meld gate is recognized; consumed by the meld effect
     /// combinator. `None` for non-meld faces.
     pub pending_meld_partner: Option<String>,
+    /// CR 107.4 + CR 202.1 + CR 603.4: The named color from a cast-trigger's
+    /// "with one or more `<color>` mana symbol(s) in its mana cost" spell
+    /// qualifier (Namor the Sub-Mariner). The qualifier is parsed into the
+    /// trigger's `valid_card` (a `FilterProp::ManaSymbolCount`), but the EFFECT
+    /// clause "create that many tokens" must back-reference the cast spell's
+    /// colored-symbol count rather than the generic `EventContextAmount` (which
+    /// has no SpellCast amount and resolves to 0). Set from the finalized
+    /// condition/qualifier text before the effect body parses; consumed by the
+    /// token-count override in `oracle_effect::token`. `None` for triggers
+    /// without a colored-pip qualifier.
+    pub pending_mana_symbol_count_color: Option<crate::types::mana::ManaColor>,
+    /// CR 116.2b + CR 708.7: True while parsing the body of an explicit granted
+    /// activated ability (a quoted `"{cost}: ..."` granted to another object).
+    /// In that context, a head clause of "turn this/~ creature face up" is the
+    /// printed resolving effect of the granted ability (Etrata, Deadly
+    /// Fugitive's "{2}{U}{B}: Turn this creature face up. ..."), NOT the
+    /// rule-based morph/disguise special action. The imperative parser uses this
+    /// flag to lower such a clause to `Effect::TurnFaceUp { SelfRef }` instead of
+    /// rejecting the self-referential subject (which it must keep rejecting for
+    /// top-level morph reminder/special-action text). Set by
+    /// `parse_quoted_ability`; defaults to `false` everywhere else.
+    pub in_granted_activated_ability: bool,
 }
 
 impl ParseContext {

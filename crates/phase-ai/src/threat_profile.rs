@@ -421,6 +421,7 @@ mod tests {
             abilities: vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             })],
             ..Default::default()
         };
@@ -456,6 +457,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             })],
             ..Default::default()
         };

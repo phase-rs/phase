@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use engine::game::engine::apply;
+use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -47,22 +48,19 @@ pub fn run_ai_actions(
     let mut results = Vec::new();
 
     for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
-        // CR 103.5: For simultaneous mulligan states, `acting_player()` returns
-        // None when multiple players are pending. Fall back to the first
-        // AI-controlled pending player so AI-vs-AI auto-play can advance
-        // through the mulligan phase one decision at a time.
-        let actor = match state.waiting_for.acting_player() {
-            Some(p) if ai_players.contains(&p) => p,
-            Some(_) => break, // Single human's turn
-            None => match state
-                .waiting_for
-                .acting_players()
-                .into_iter()
-                .find(|p| ai_players.contains(p))
-            {
-                Some(p) => p,
-                None => break, // No AI player is pending
-            },
+        // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
+        // submitter is the controller — not the active player. Only run AI when
+        // that submitter is an AI seat; otherwise wait for the human controller
+        // (issue #1189).
+        let actor = state
+            .waiting_for
+            .acting_players()
+            .into_iter()
+            .map(|player| turn_control::authorized_submitter_for_player(state, player))
+            .find(|player| ai_players.contains(player));
+
+        let Some(actor) = actor else {
+            break;
         };
 
         let config = match ai_configs.get(&actor) {

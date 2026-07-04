@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Inserisci un URL di mazzo Moxfield o Archidekt valido.",
     "errorNetworkFailure": "Impossibile raggiungere il servizio di importazione. Controlla la connessione e riprova.",
     "errorGeneric": "Importazione del mazzo non riuscita.",
+    "errorNoCards": "Nessuna carta trovata. Incolla un mazzo in formato MTGA o .dck.",
     "fileSupports": "Supporta .dck, .dec, .txt e il formato MTGA",
     "chooseFile": "Scegli file",
     "importedSuccessTitle": "Mazzo importato",
@@ -173,7 +174,9 @@
     "totalCount": "· {{count}} totali",
     "searchPlaceholder": "Cerca per nome, codice set o tipo…",
     "allTypes": "Tutti ({{count}})",
+    "typeFilter": "Tipo di mazzo",
     "loadingCatalog": "Caricamento catalogo mazzi…",
+    "loadFailed": "Impossibile caricare il catalogo dei mazzi precostruiti. Controlla la connessione e riprova.",
     "noMatch": "Nessun mazzo corrisponde.",
     "selectDeck": "Seleziona {{name}}",
     "cardCount_one": "{{count}} carta",
@@ -197,7 +200,13 @@
     "unknown": "Sconosciute {{count}}",
     "unknownCardsTitle": "Carte sconosciute:\n{{cards}}",
     "unsupportedTitle": "Non supportate ({{unique}} uniche, {{copies}} copie):\n{{cards}}",
-    "setIconAlt": "Icona set {{code}}"
+    "setIconAlt": "Icona set {{code}}",
+    "actionsMenu": "Opzioni mazzo",
+    "star": "Aggiungi ai preferiti",
+    "unstar": "Rimuovi dai preferiti",
+    "moveToFolder": "Sposta nella cartella",
+    "unfiled": "Senza cartella",
+    "newFolder": "Nuova cartella…"
   },
   "myDecks": {
     "headingManage": "I miei mazzi",
@@ -252,7 +261,11 @@
     "loadMore": "Carica altri",
     "selectedDeck": "Mazzo selezionato",
     "chooseDeckToContinue": "Scegli un mazzo per continuare",
-    "filterAll": "Tutti"
+    "filterAll": "Tutti",
+    "sectionStarred": "Preferiti",
+    "sectionUnfiled": "Senza cartella",
+    "collapseAll": "Comprimi tutto",
+    "expandAll": "Espandi tutto"
   },
   "subscriptions": {
     "emptyTitle": "Nessuna iscrizione ai feed",
@@ -278,6 +291,44 @@
     "decks": "Mazzi",
     "alpha": "Alpha",
     "profile": "Profilo",
-    "settings": "Impostazioni"
+    "settings": "Impostazioni",
+    "whatsNew": "Novità"
+  },
+  "folder": {
+    "actionsMenu": "Opzioni cartella",
+    "rename": "Rinomina",
+    "delete": "Elimina",
+    "newFolder": "Nuova cartella",
+    "newFolderPrompt": "Nome della cartella:",
+    "createButton": "Crea",
+    "renamePrompt": "Rinomina cartella:",
+    "deleteConfirm": "Eliminare la cartella «{{name}}»? I mazzi verranno spostati in Senza cartella.",
+    "emptyHint": "Questa cartella è vuota.",
+    "unfiledEmptyHint": "Nessun mazzo senza cartella."
+  },
+  "whatsNew": {
+    "title": "Novità",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import type { BracketEstimate, CommanderBracket } from "../../types/bracket";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
@@ -15,7 +15,7 @@ const LEGALITY_STYLES: Record<string, string> = {
   not_legal: "bg-gray-600/40 text-gray-500",
 };
 
-const FORMAT_BADGE_METADATA = FORMAT_REGISTRY
+const FORMAT_BADGE_METADATA = DECK_CONSTRUCTION_FORMATS
   .map((metadata) => {
     const legalityKey = scryfallLegalityKey(metadata.format);
     return legalityKey

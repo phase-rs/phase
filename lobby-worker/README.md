@@ -1,17 +1,20 @@
 # phase-lobby (Cloudflare Worker + Durable Object)
 
 The official phase.rs lobby broker, running as a single global Cloudflare
-Durable Object. **This is currently a stub** whose only purpose is to validate
-the Cloudflare plumbing end-to-end before the real broker lands. See
+Durable Object. The DO body (`src/lobby-do.ts`) is a thin imperative shell
+around the compiled Rust `lobby-broker` core (`broker-wasm` →
+`src/broker-wasm-pkg`) — the SAME code `phase-server` runs natively, so the two
+deployments behave identically by construction. See
 `.planning/lobby-failover-federation-plan.md`.
 
 - **Single global lobby:** every connection routes to one DO instance
   (`idFromName("global")`) — no regional fragmentation.
 - **P2P-broker-only:** the DO never runs game logic; it brokers matchmaking +
   WebRTC signaling handoff. The engine still owns all MTG rules.
-- **Stub scope:** handshake, lobby list, player count, P2P host/join happy-path.
-  **No** rate limiting, entry cap, seat reservations, or expiry reaper yet —
-  those arrive when the compiled Rust `lobby-broker` crate replaces the DO body.
+- **Rust core, thin TS shell:** protocol parsing, dispatch, seat reservations,
+  capacity caps, build-commit gating, and the staleness reaper all live in the
+  Rust `lobby-broker` crate (compiled to WASM). The TS shell owns only the
+  WebSocket lifecycle, DO storage snapshots, and edge name/lobby moderation.
 
 ## Prerequisites
 
@@ -80,11 +83,13 @@ custom-server field, so there is zero risk to live multiplayer:
 
 ```bash
 curl https://phase-lobby.<your-subdomain>.workers.dev/
-# → {"mode":"LobbyOnly","protocol_version":6,"server_version":"lobby-stub"}
+# → {"mode":"LobbyOnly","protocol_version":11,"server_version":"lobby-rs"}
 ```
 
-This `/version` response is also what a future release-time protocol-version
-gate would assert against (plan §4c).
+This `/version` response is also what a release-time protocol-version gate
+asserts against (plan §4c). `protocol_version` is exported from the Rust core
+(`broker-wasm` → `protocol_version()`), so there is no TS constant to keep in
+sync.
 
 ### Live logs
 
@@ -92,17 +97,9 @@ gate would assert against (plan §4c).
 npm run tail        # wrangler tail — streams DO logs
 ```
 
-## Cutover (later, NOT now)
+## Cutover (when validated)
 
-When the real Rust broker is in and validated, switch the default by changing
-`DEFAULT_SERVER` / `SERVER_PRESETS[0].url` in
+The Rust broker is deployed here now. Once it's validated in production, switch
+the default by changing `DEFAULT_SERVER` / `SERVER_PRESETS[0].url` in
 `client/src/services/serverDetection.ts` to the DO URL. Until then, keep the
 existing `phase-server` as the default.
-
-## ⚠️ The TS protocol mirror is throwaway
-
-`src/protocol.ts` + `src/lobby-do.ts` hand-mirror the Rust wire protocol. That
-duplication is the exact drift hazard the WASM-shared-crate plan eliminates:
-`PROTOCOL_VERSION` here (currently **6**) must track
-`crates/server-core/src/protocol.rs`. When the `lobby-broker` crate is compiled
-to WASM and loaded into the DO, delete this mirror.

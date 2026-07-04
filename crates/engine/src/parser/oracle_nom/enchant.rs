@@ -15,6 +15,7 @@ use nom::combinator::value;
 use nom::Parser;
 
 use super::error::OracleResult;
+use crate::parser::oracle_target::parse_without_keyword_suffix;
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AttachmentKind, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
@@ -189,6 +190,7 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
     let (input, type_legs) = parse_enchant_type_list(input)?;
     let (input, controller) = opt(parse_enchant_controller_suffix).parse(input)?;
     let (input, attachment) = opt(parse_enchant_attachment_qualifier).parse(input)?;
+    let (input, without_keyword) = parse_enchant_without_keyword_suffix(input)?;
 
     let mut typed = TypedFilter {
         type_filters: type_legs,
@@ -200,5 +202,41 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
     if let Some(prop) = attachment {
         typed.properties.push(prop);
     }
+    typed.properties.extend(without_keyword);
     Ok((input, TargetFilter::Typed(typed)))
+}
+
+/// CR 702.5a + CR 702.9: Optional trailing "without [keyword]" qualifier on an
+/// enchant line (Trapped in the Tower, Roots). Delegates to the shared target
+/// suffix authority so Aura legal-target sets match `parse_type_phrase`.
+fn parse_enchant_without_keyword_suffix(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
+    match parse_without_keyword_suffix(input) {
+        Some((props, consumed)) => Ok((&input[consumed..], props)),
+        None => Ok((input, Vec::new())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::keywords::Keyword;
+
+    /// CR 702.5a + CR 702.9: Trapped in the Tower — "Enchant creature without flying".
+    #[test]
+    fn parse_enchant_target_creature_without_flying() {
+        let (rest, filter) =
+            parse_enchant_target_full("creature without flying").expect("must parse");
+        assert!(rest.is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.iter().any(
+                |p| matches!(p, FilterProp::WithoutKeyword { value } if *value == Keyword::Flying)
+            ),
+            "expected WithoutKeyword(Flying), got {:?}",
+            tf.properties
+        );
+    }
 }

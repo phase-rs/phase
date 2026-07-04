@@ -10,6 +10,8 @@ import type {
   PendingSpellCostReduction,
   PlayerConditionKind,
   PlayerStatusView,
+  ResourceAxis,
+  ResourceAxisTag,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
@@ -356,6 +358,111 @@ export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.85)_0_9%,transparent_11%),linear-gradient(135deg,#fee2e2_0%,#ef4444_42%,#7f1d1d_100%)]"
         />
         <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">{CONDITION_GLYPH[kind]}</span>
+      </span>
+    </BadgeTip>
+  );
+}
+
+// CR 732.2a: the display families an unbounded `ResourceAxis` maps to. Pure
+// presentation grouping — the engine owns axis identity and attribution; the FE
+// only collapses the per-axis rows into one badge per family.
+export type ResourceAxisFamily =
+  | "mana"
+  | "life"
+  | "damage"
+  | "mill"
+  | "counters"
+  | "tokens"
+  | "cards"
+  | "casts"
+  | "combats"
+  | "turns"
+  | "triggers";
+
+// Externally-tagged `ResourceAxis`: unit variants are bare strings, data/tuple
+// variants are single-key objects. The tag is the string itself or its only key.
+const axisTag = (axis: ResourceAxis): ResourceAxisTag =>
+  typeof axis === "string" ? axis : (Object.keys(axis)[0] as ResourceAxisTag);
+
+// Exhaustive `Record<ResourceAxisTag, …>` so a new engine axis tag forces a
+// compile-time update here (the TS drift guard).
+const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
+  Mana: "mana",
+  Life: "life",
+  DamageDealt: "damage",
+  LibraryDelta: "mill",
+  Counter: "counters",
+  Trigger: "triggers",
+  TokensCreated: "tokens",
+  CardsDrawn: "cards",
+  Casts: "casts",
+  LandfallTriggers: "triggers",
+  CombatPhases: "combats",
+  ExtraTurns: "turns",
+  DeathTriggers: "triggers",
+  EtbTriggers: "triggers",
+  LtbTriggers: "triggers",
+  SacTriggers: "triggers",
+};
+
+/** Map an engine-provided `ResourceAxis` to its display family. Presentation
+ *  formatting only — never decides attribution or which axes are unbounded. */
+export const familyOf = (axis: ResourceAxis): ResourceAxisFamily =>
+  UNBOUNDED_FAMILY[axisTag(axis)];
+
+const UNBOUNDED_FAMILY_GLYPH: Record<ResourceAxisFamily, string> = {
+  mana: "💎",
+  life: "❤",
+  damage: "🔥",
+  mill: "📚",
+  counters: "🔢",
+  tokens: "🪙",
+  cards: "🃏",
+  casts: "✦",
+  combats: "⚔",
+  turns: "⏳",
+  triggers: "✴",
+};
+
+const UNBOUNDED_FAMILY_LABEL_KEY: Record<ResourceAxisFamily, string> = {
+  mana: "badges.unboundedMana",
+  life: "badges.unboundedLife",
+  damage: "badges.unboundedDamage",
+  mill: "badges.unboundedMill",
+  counters: "badges.unboundedCounters",
+  tokens: "badges.unboundedTokens",
+  cards: "badges.unboundedCards",
+  casts: "badges.unboundedCasts",
+  combats: "badges.unboundedCombats",
+  turns: "badges.unboundedTurns",
+  triggers: "badges.unboundedTriggers",
+};
+
+/**
+ * CR 732.2a: an `∞` badge for one unbounded-resource display family. Rendered
+ * once per distinct family per player (the caller de-dups via a `Set`). The
+ * engine decides which families are present and on which HUD; this badge only
+ * formats the family to a glyph + label.
+ */
+export function UnboundedBadge({ family }: { family: ResourceAxisFamily }) {
+  const { t } = useTranslation("game");
+  const resource = t(UNBOUNDED_FAMILY_LABEL_KEY[family]);
+  const title = t("badges.unboundedTooltip", { resource });
+  return (
+    <BadgeTip text={title}>
+      <span
+        role="img"
+        aria-label={title}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 overflow-hidden rounded-full px-1 text-[11px] font-black leading-none text-fuchsia-50 ring-1 bg-fuchsia-600/85 ring-fuchsia-300/70 shadow-[0_0_12px_rgba(217,70,239,0.5)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.85)_0_9%,transparent_11%),linear-gradient(135deg,#fae8ff_0%,#d946ef_42%,#701a75_100%)]"
+        />
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">∞</span>
+        <span aria-hidden className="relative text-[10px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
+          {UNBOUNDED_FAMILY_GLYPH[family]}
+        </span>
       </span>
     </BadgeTip>
   );

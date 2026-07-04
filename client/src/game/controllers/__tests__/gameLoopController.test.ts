@@ -19,11 +19,18 @@ let storeState: {
   gameState: GameState | null;
   autoPassRecommended: boolean;
 };
+let waitingForSubscriber: (() => void) | null = null;
 
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: {
     getState: () => storeState,
-    subscribe: () => () => {},
+    setState: vi.fn(),
+    subscribe: (_selector: unknown, callback: () => void) => {
+      waitingForSubscriber = callback;
+      return () => {
+        if (waitingForSubscriber === callback) waitingForSubscriber = null;
+      };
+    },
   },
 }));
 
@@ -61,6 +68,7 @@ describe("gameLoopController auto-pass authorization", () => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
     dispatchResolveAll.mockReset();
+    waitingForSubscriber = null;
   });
 
   afterEach(() => {
@@ -94,6 +102,67 @@ describe("gameLoopController auto-pass authorization", () => {
 
     const controller = createGameLoopController({ mode: "local" });
     controller.start();
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("cancels a scheduled local auto-pass when priority moves away from the local player", async () => {
+    const humanPriority = priority(0);
+    storeState = {
+      waitingFor: humanPriority,
+      gameState: {
+        ...stateFor(humanPriority, 0),
+        phase: "PostCombatMain",
+      },
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "local" });
+    controller.start();
+
+    const aiPriority = priority(1);
+    storeState = {
+      waitingFor: aiPriority,
+      gameState: {
+        ...stateFor(aiPriority, 1),
+        phase: "End",
+      },
+      autoPassRecommended: true,
+    };
+    waitingForSubscriber?.();
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("re-checks phase stops before firing a delayed auto-pass", async () => {
+    const waitingFor = priority(0);
+    storeState = {
+      waitingFor,
+      gameState: {
+        ...stateFor(waitingFor, 0),
+        phase: "Upkeep",
+      },
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "local" });
+    controller.start();
+
+    storeState = {
+      waitingFor,
+      gameState: {
+        ...stateFor(waitingFor, 0),
+        phase: "PreCombatMain",
+        phase_stops: { 0: ["PreCombatMain"] },
+      },
+      autoPassRecommended: true,
+    };
 
     await vi.advanceTimersByTimeAsync(200);
 

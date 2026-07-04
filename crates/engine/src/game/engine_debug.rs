@@ -98,6 +98,8 @@ pub fn apply_debug_action(
             {
                 super::sacrifice::SacrificeOutcome::Complete => {
                     super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
+                    let delayed = super::triggers::check_delayed_triggers(state, events);
+                    events.extend(delayed);
                     super::sba::check_state_based_actions(state, events); // CR 704
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
@@ -112,13 +114,29 @@ pub fn apply_debug_action(
             // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
             // helper so post-replacement continuations (Jace WinTheGame,
             // Abundance reveal-until) drain in the same step as the draw.
-            let _ = super::effects::draw::draw_through_replacement(
+            let event_start = events.len();
+            let result = super::effects::draw::draw_through_replacement(
                 state,
                 player_id,
                 count,
                 events,
                 super::effects::draw::apply_draw_after_replacement,
             );
+            // CR 603.2: Mirror the normal draw pipeline — `PassPriority` /
+            // `run_post_action_pipeline` scans CardDrawn events after the draw
+            // step's turn-based action. Debug draw previously returned without
+            // that scan, so draw triggers (Sheoldred, Rhystic Study, etc.) never
+            // fired unless a replacement-choice round-trip happened to run the
+            // pipeline. Defer trigger/SBA processing while a replacement choice
+            // is open; the choice handler owns the post-draw scan.
+            if !matches!(
+                result,
+                super::replacement::ReplacementResult::NeedsChoice(_)
+            ) {
+                let draw_events: Vec<_> = events[event_start..].to_vec();
+                super::triggers::process_triggers(state, &draw_events);
+                super::sba::check_state_based_actions(state, events);
+            }
         }
 
         DebugAction::Mill { player_id, count } => {
@@ -371,26 +389,28 @@ pub fn apply_debug_action(
 
         DebugAction::AddMana { player_id, mana } => {
             validate_player(state, player_id)?;
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                for mana_type in mana {
-                    player.mana_pool.add(crate::types::mana::ManaUnit::new(
-                        mana_type,
-                        ObjectId(0),
-                        false,
-                        vec![],
-                    ));
-                }
+            for mana_type in mana {
+                // CR 118.3a: route through the stamping authority so each
+                // debug-added unit gets a distinct `pip_id`, exactly like
+                // produced mana. A bare `mana_pool.add` leaves the unstamped
+                // sentinel (`ManaPipId(0)`) on every unit, which makes all of
+                // them pin/unpin together in the manual-payment UI.
+                state.add_mana_to_pool(
+                    player_id,
+                    crate::types::mana::ManaUnit::new(mana_type, ObjectId(0), false, vec![]),
+                );
             }
         }
 
         DebugAction::SetInfiniteMana { player_id, enabled } => {
             validate_player(state, player_id)?;
             if enabled {
-                state.debug_infinite_mana.insert(player_id);
+                // Delegate to the single write authority; record the six Mana axes.
+                state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
                 // Seed immediately so the pool reads full before the next probe.
                 super::mana_payment::refill_infinite_mana(state);
             } else {
-                state.debug_infinite_mana.remove(&player_id);
+                state.clear_unbounded_loop(player_id);
             }
         }
 
@@ -468,17 +488,25 @@ pub fn apply_debug_action(
                 count: 1,
                 applied: HashSet::new(),
             };
-            let first_created_id = state.next_object_id;
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     super::effects::token::apply_create_token_after_replacement(
                         state, event, events,
                     );
+                    // CR 111.4 + CR 707.2a: Preset spawns must install catalog
+                    // `rules_text` abilities (SOS Pest attack-life trigger, etc.)
+                    // after linking the preset image ref. The apply path runs
+                    // `inject_catalog_token_abilities` during creation when
+                    // `token_image_ref` is already set; debug preset creation
+                    // deferred the ref until here, so inject + reindex now.
                     if let Some(image_ref) = preset_image_ref {
-                        for (id, obj) in state.objects.iter_mut() {
-                            if id.0 >= first_created_id {
+                        let created_ids = state.last_created_token_ids.clone();
+                        for token_id in created_ids {
+                            if let Some(obj) = state.objects.get_mut(&token_id) {
                                 obj.token_image_ref = Some(image_ref.clone());
                             }
+                            super::effects::token::inject_catalog_token_abilities(state, token_id);
+                            super::trigger_index::reindex_object_triggers(state, token_id);
                         }
                     }
                     // "Run ETB effects" unchecked: the token is still created
@@ -743,6 +771,50 @@ mod tests {
         state
     }
 
+    /// CR 118.3a regression: debug-added mana must route through the stamping
+    /// authority so each unit gets a DISTINCT, nonzero `pip_id`. A bare
+    /// `mana_pool.add` leaves every unit at the unstamped sentinel (0), which
+    /// makes all same-color pips in the manual-payment UI pin/unpin together.
+    #[test]
+    fn debug_add_mana_stamps_distinct_pip_ids() {
+        let mut state = sandbox_state();
+        let mut events = Vec::new();
+        apply_debug_action(
+            &mut state,
+            PlayerId(0),
+            DebugAction::AddMana {
+                player_id: PlayerId(0),
+                mana: vec![
+                    crate::types::mana::ManaType::Green,
+                    crate::types::mana::ManaType::Green,
+                    crate::types::mana::ManaType::Green,
+                ],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three AddMana entries → three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "debug-added units must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "debug-added pip ids must be distinct, got {ids:?}"
+        );
+    }
+
     fn zero_zero_creature() -> TokenCharacteristics {
         TokenCharacteristics {
             display_name: "Test Token".to_string(),
@@ -793,6 +865,56 @@ mod tests {
     /// `+1/+1` counters in `enter_with_counters` enters as a 2/2 because
     /// the counters apply during the same ETB replacement window that
     /// engine-driven token creation uses. CR 704.5f does not kill it.
+    /// CR 111.4 + CR 603.6a: Debug preset spawns must install catalog
+    /// `rules_text` triggers and register them in the trigger index — same as
+    /// engine-driven token creation (issue #853).
+    #[test]
+    fn debug_create_preset_token_installs_catalog_triggers() {
+        let mut state = sandbox_state();
+        let sos_pest_preset_id = "00a0801d-0212-5890-8957-3cde30f382f9";
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: sos_pest_preset_id.to_string(),
+                owner: PlayerId(0),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("debug CreateToken preset should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+
+        let obj = state
+            .objects
+            .get(&token_id)
+            .expect("pest token should exist on battlefield");
+        assert_eq!(
+            obj.trigger_definitions.len(),
+            1,
+            "SOS Pest preset must install its attack-life trigger"
+        );
+        assert_eq!(
+            obj.trigger_definitions[0].mode,
+            crate::types::triggers::TriggerMode::Attacks
+        );
+        assert!(
+            state
+                .trigger_index
+                .by_key
+                .values()
+                .any(|bucket| bucket.contains(&token_id)),
+            "catalog trigger must be registered in the trigger index"
+        );
+    }
+
     #[test]
     fn debug_create_token_enters_with_counters_survives_sba() {
         let mut state = sandbox_state();
@@ -1402,6 +1524,56 @@ mod tests {
         assert!(
             !state.objects.contains_key(&token_id),
             "0/0 token with no counters should be removed by SBA + CR 704.5d",
+        );
+    }
+
+    /// CR 603.2 + CR 121.1: Debug draw must scan CardDrawn events for triggers,
+    /// matching the post-priority pipeline that natural draw-step draws use.
+    #[test]
+    fn debug_draw_cards_processes_draw_triggers() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        use crate::types::triggers::TriggerMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Lib A", "Lib B"]);
+        scenario.add_creature_from_oracle(
+            P0,
+            "Watcher",
+            2,
+            2,
+            "Whenever you draw a card, you gain 2 life.",
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().debug_mode = true;
+
+        let life_before = runner.state().players[0].life;
+        runner
+            .act(GameAction::Debug(DebugAction::DrawCards {
+                player_id: P0,
+                count: 1,
+            }))
+            .expect("debug draw");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.state().players[0].life,
+            life_before + 2,
+            "draw trigger must fire after DebugAction::DrawCards"
+        );
+        let watcher = runner
+            .state()
+            .battlefield
+            .iter()
+            .find_map(|id| runner.state().objects.get(id))
+            .expect("watcher on battlefield");
+        assert!(
+            watcher
+                .trigger_definitions
+                .iter_all()
+                .any(|t| t.mode == TriggerMode::Drawn),
+            "sanity: watcher carries a Drawn trigger"
         );
     }
 }

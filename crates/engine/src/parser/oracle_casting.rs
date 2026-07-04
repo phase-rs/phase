@@ -47,6 +47,35 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let body_lower = tp.lower;
     let body_raw = tp.original;
 
+    // CR 701.4a: A spelled-out "choose … you control or reveal … from your hand"
+    // behold cost (Monstrous Emergence) is a single cohesive cost whose internal
+    // " or " separates the two legs of ONE behold action — not two independent
+    // alternative costs. It must be recognized as a whole BEFORE the general
+    // "X or Y" split below would fragment it into a spurious `Choice`.
+    let behold = super::oracle_cost::parse_single_cost(body_raw);
+    if matches!(behold, AbilityCost::Behold { .. }) {
+        return Some(AdditionalCost::Required(behold));
+    }
+
+    // CR 701.4a + CR 601.2b/f: A line that unambiguously opens the spelled-out
+    // choose-behold cost ("choose a/an <type> you control or ...") but whose
+    // alternative leg is NOT a recognized behold-reveal alternative is NOT a real
+    // `Behold` (the behold check above declined it) and must not be allowed to
+    // misparse. Without this guard the general "X or Y" split below — or the
+    // single-cost effect fallback — silently swallows only the "choose ... you
+    // control" leg as a `TargetOnly` cost and drops the alternative entirely
+    // (Close Encounter's "or a warped creature card you own in exile":
+    // exile-zone selection plus the "warped" property are unsupported by
+    // `eligible_behold_choices`). That leaves the card falsely green while the
+    // damage clause references a chosen object no cost ever produces. Surface an
+    // honest unimplemented cost so coverage stays red. Scoped to exactly this
+    // prefix shape so ordinary "X or Y" alternative costs are unaffected.
+    if is_choose_behold_prefix(body_lower) {
+        return Some(AdditionalCost::Required(AbilityCost::Unimplemented {
+            description: body_raw.to_string(),
+        }));
+    }
+
     // "you may [cost]" → Optional wrapping
     if let Ok((opt_lower, _)) = tag::<_, _, OracleError<'_>>("you may ").parse(body_lower) {
         let opt_raw = &body_raw[body_raw.len() - opt_lower.len()..];
@@ -97,6 +126,29 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     None
 }
 
+/// CR 701.4a: Detect the *opening* of a spelled-out choose-behold cost —
+/// "choose a/an <type> you control or " — on an already-lowercase body slice.
+///
+/// `parse_choose_or_reveal_behold_cost` (oracle_cost.rs) recognizes the FULL
+/// shape "choose a/an <type> you control or reveal a/an <type> card from your
+/// hand" and yields a `Behold`. When only this prefix matches but the full
+/// behold parse declined (an unrecognized alternative leg such as Close
+/// Encounter's "a warped creature card you own in exile"), the line is
+/// unambiguously a choose-behold cost the engine cannot model. This guard lets
+/// the caller surface an honest unimplemented cost instead of misparsing the
+/// fragment. The bare `take_until` for the type phrase keeps the prefix as
+/// narrow as possible — any line lacking " you control or " falls through.
+fn is_choose_behold_prefix(body_lower: &str) -> bool {
+    fn parse(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        let (i, _) = tag("choose ").parse(i)?;
+        let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
+        let (i, _) = take_until(" you control or ").parse(i)?;
+        let (i, _) = tag(" you control or ").parse(i)?;
+        Ok((i, ()))
+    }
+    parse(body_lower).is_ok()
+}
+
 pub(crate) fn parse_spell_casting_option_line(
     text: &str,
     card_name: &str,
@@ -107,6 +159,7 @@ pub(crate) fn parse_spell_casting_option_line(
     let body_lower = primary_body.to_lowercase();
 
     parse_self_flash_option(primary_body, &body_lower, card_name)
+        .or_else(|| parse_self_has_flash_option(&body_lower))
         .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
         .and_then(|mut option| {
             if option.condition.is_none() {
@@ -190,18 +243,57 @@ fn parse_self_flash_option(
     }
 
     if let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(rest) {
-        // CR 601.3d: A target-dependent flash permission ("if it targets a commander")
+        // CR 702.8a (Flash) + CR 601.3d: a conditional flash permission ("if it
+        // targets a commander"; "if it's cast using teamwork" — Quantum Reduction)
         // must NOT degrade to an unconditional permission when the predicate is not
         // recognized — that would let the spell be cast at instant speed against any
-        // target, strictly more permissive than the printed text. Refuse to emit the
-        // option entirely so the spell stays sorcery-speed; the SwallowedClause /
-        // Condition_If swallow detector then flags the dropped clause for the parser
-        // gap-finder rather than fail-silently authorizing an over-permissive cast.
+        // target, strictly more permissive than the printed text. CR 601.3d only
+        // grants flash "if those conditions are met", so an unrecognized predicate
+        // must refuse to emit the option entirely (the spell stays sorcery-speed);
+        // the SwallowedClause / Condition_If swallow detector then flags the dropped
+        // clause for the parser gap-finder rather than fail-silently authorizing an
+        // over-permissive cast.
         let parsed = parse_restriction_condition(condition_text.trim())?;
         option = option.condition(parsed);
         return Some(option);
     }
 
+    Some(option)
+}
+
+/// CR 702.8a + CR 601.3d: Parse a self-referential conditional flash grant of the
+/// form "~ has flash as long as <condition>" (Take for a Ride: "Take for a Ride
+/// has flash as long as you've committed a crime this turn"). The spell grants
+/// ITSELF flash — a conditional casting permission — rather than the
+/// "you may cast ~ as though it had flash" framing handled by
+/// `parse_self_flash_option`. Self-references are normalized to `~` upstream
+/// (CR 201.4b), so the subject is matched as the `~` token.
+///
+/// As with the sibling conditional-flash arm, an unrecognized predicate refuses
+/// to emit the option entirely (the `?` on `parse_restriction_condition`): CR
+/// 601.3d only grants flash "if those conditions are met", so degrading to an
+/// unconditional permission would be strictly more permissive than the printed
+/// text. The bare "~ has flash" form (no condition) emits an unconditional
+/// permission.
+fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
+    // `body_lower` is already lowercase, so parse it directly with combinators
+    // (no `nom_on_lower` case-bridge needed — the condition text is delegated to
+    // `parse_restriction_condition`, which lowercases internally).
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>("~ has flash"),
+        opt(tag(" as long as ")),
+    )
+    .parse(body_lower)
+    .ok()?;
+    let mut option = SpellCastingOption::as_though_had_flash();
+    // Strip trailing sentence punctuation so a bare "~ has flash." parses as an
+    // unconditional grant (condition empty) and a trailing period on a condition
+    // clause does not reach `parse_restriction_condition`.
+    let condition_text = rest.trim().trim_end_matches(['.', ',']).trim();
+    if condition_text.is_empty() {
+        return Some(option);
+    }
+    option = option.condition(parse_restriction_condition(condition_text)?);
     Some(option)
 }
 
@@ -650,7 +742,8 @@ mod tests {
         ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
         TargetFilter, TypeFilter,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
 
     #[test]
@@ -890,6 +983,7 @@ mod tests {
                         count: 1,
                         filter: TargetFilter::Typed(filter),
                         action: BeholdCostAction::ChooseOrReveal,
+                        ..
                     },
                 repeatability: AdditionalCostRepeatability::Once,
             }) => {
@@ -915,6 +1009,7 @@ mod tests {
                     count: 1,
                     filter: TargetFilter::Typed(filter),
                     action: BeholdCostAction::ChooseOrReveal,
+                    ..
                 },
                 AbilityCost::Mana { cost },
             )) => {
@@ -940,6 +1035,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ExileChosen,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -947,6 +1043,61 @@ mod tests {
                     .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elemental")));
             }
             other => panic!("Expected Required(Behold Elemental exile), got {other:?}"),
+        }
+    }
+
+    /// CR 701.4a + CR 601.2b/f: the SPELLED-OUT choose-or-reveal behold cost
+    /// printed without the "behold" keyword (Monstrous Emergence) parses to the
+    /// same `Behold { ChooseOrReveal }` shape as the keyword form.
+    #[test]
+    fn parse_additional_cost_spelled_out_choose_or_reveal_behold() {
+        let lower =
+            "as an additional cost to cast this spell, choose a creature you control or reveal a creature card from your hand.";
+        let raw =
+            "As an additional cost to cast this spell, choose a creature you control or reveal a creature card from your hand.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Behold {
+                count: 1,
+                filter: TargetFilter::Typed(filter),
+                action: BeholdCostAction::ChooseOrReveal,
+                ..
+            })) => {
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|tf| matches!(tf, TypeFilter::Creature)),
+                    "spelled-out behold must carry the bare creature type filter: {filter:?}"
+                );
+            }
+            other => panic!("Expected Required(Behold creature ChooseOrReveal), got {other:?}"),
+        }
+    }
+
+    /// CR 701.4a + CR 601.2b/f (coverage honesty): a choose-behold cost whose
+    /// alternative leg is NOT a recognized behold-reveal alternative (Close
+    /// Encounter: "or a warped creature card you own in exile") must surface an
+    /// honest unimplemented cost — NOT silently drop the alternative leg and
+    /// misparse only "choose a creature you control" as a `TargetOnly` cost.
+    /// Reverting the prefix guard regresses this assertion: the line would parse
+    /// to `Required(EffectCost { TargetOnly { .. } })` (false green).
+    #[test]
+    fn parse_additional_cost_choose_behold_unrecognized_alternative_is_unimplemented() {
+        let lower =
+            "as an additional cost to cast this spell, choose a creature you control or a warped creature card you own in exile.";
+        let raw =
+            "As an additional cost to cast this spell, choose a creature you control or a warped creature card you own in exile.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Unimplemented { description })) => {
+                assert_eq!(
+                    description,
+                    "choose a creature you control or a warped creature card you own in exile",
+                    "unimplemented cost must preserve the full unrecognized line"
+                );
+            }
+            other => panic!("Close Encounter must surface Required(Unimplemented), got {other:?}"),
         }
     }
 
@@ -960,6 +1111,7 @@ mod tests {
                 count: 3,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1256,11 +1408,10 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 1,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition: None,
-            } => {}
+            } if requirement.fixed_count() == Some(1) => {}
             other => panic!("expected TapCreatures alt-cost, got {other:?}"),
         }
     }
@@ -1278,11 +1429,10 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 3,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition: None,
-            } => {}
+            } if requirement.fixed_count() == Some(3) => {}
             other => panic!("expected TapCreatures(count=3) alt-cost, got {other:?}"),
         }
     }
@@ -1323,6 +1473,47 @@ mod tests {
         }
     }
 
+    /// Issue #3677: Flare of Denial — "sacrifice a nontoken blue creature" must
+    /// keep BOTH the `NonToken` negation and the `blue creature` type/color
+    /// filter. Before the fix to `parse_type_phrase`'s color-prefix scan (which
+    /// only ran before the `non-` negation loop), the color and creature type
+    /// were silently dropped, leaving a filter that matched any nontoken
+    /// permanent — including a land — as a valid alternative-cost payment.
+    #[test]
+    fn alt_cost_sacrifice_nontoken_colored_creature_arm() {
+        let option = parse_spell_casting_option_line(
+            "You may sacrifice a nontoken blue creature rather than pay this spell's mana cost.",
+            "Flare of Denial",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost: Some(AbilityCost::Sacrifice(ref sac)),
+                condition: None,
+            } if sac.requirement.fixed_count() == Some(1) => match &sac.target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected Creature type filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::NonToken),
+                        "expected NonToken property, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::HasColor {
+                            color: ManaColor::Blue
+                        }),
+                        "expected blue HasColor property, got {tf:?}"
+                    );
+                }
+                other => panic!("expected Typed sacrifice target, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice(count=1) alt-cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn alt_cost_tap_with_leading_if_condition_binds() {
         // Ramosian Rally — leading "If you control a Plains, " binds via the outer
@@ -1337,15 +1528,14 @@ mod tests {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
                 cost:
                     Some(AbilityCost::TapCreatures {
-                        count: 1,
-                        filter: _,
+                        ref requirement, ..
                     }),
                 condition:
                     Some(ParsedCondition::YouControlSubtypeCountAtLeast {
                         ref subtype,
                         count: 1,
                     }),
-            } if subtype == "plains" => {}
+            } if subtype == "plains" && requirement.fixed_count() == Some(1) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
     }
@@ -1513,6 +1703,153 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — leading "If three or more creatures
+    /// are attacking, " gates the {U} alternative casting cost.
+    #[test]
+    fn alt_cost_leading_if_attacking_creatures_count_ge_binds() {
+        let option = parse_spell_casting_option_line(
+            "If three or more creatures are attacking, you may pay {U} rather than pay this spell's mana cost.",
+            "Lethargy Trap",
+        )
+        .expect("alt-cost should parse with leading-if attacking-creatures gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
+    /// creature is attacking, " gates the {B}{B} alternative casting cost on a
+    /// color-filtered attacker presence check (not a bare/count one).
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
+            "Nemesis Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::White
+                            }
+                        )),
+                        "expected HasColor(White) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => {
+                panic!("expected QuantityComparison GE 1 white attacking creature, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 508.1 + CR 702.9 + CR 118.9: Slingbow Trap — leading "If a black
+    /// creature with flying is attacking, " stacks a color filter and a
+    /// keyword filter onto the {G} alternative casting cost's gate.
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_and_keyword_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a black creature with flying is attacking, you may pay {G} rather than pay this spell's mana cost.",
+            "Slingbow Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::Black
+                            }
+                        )),
+                        "expected HasColor(Black) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying
+                            }
+                        )),
+                        "expected WithKeyword(Flying) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison GE 1 black flying attacking creature, got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     fn alt_cost_leading_if_unrecognized_predicate_drops_option() {
         // CR 118.9 + CR 601.3d: when the leading-if predicate cannot decompose
@@ -1527,6 +1864,53 @@ mod tests {
         assert!(
             option.is_none(),
             "unrecognized leading-if predicate must drop the alt-cost option, got: {option:?}"
+        );
+    }
+
+    /// Take for a Ride (std long-tail): "~ has flash as long as you've committed
+    /// a crime this turn" — a self-referential conditional flash grant. The line
+    /// (self-ref normalized to `~` upstream) must emit an `AsThoughHadFlash`
+    /// casting option gated on the crime condition, not `Effect::Unimplemented`.
+    /// Revert-discriminating: removing `parse_self_has_flash_option` makes
+    /// `parse_spell_casting_option_line` return `None`.
+    /// CR 702.8a (Flash); CR 601.3d (conditional flash); CR 700.13 (crime).
+    #[test]
+    fn spell_self_has_flash_conditional_on_crime() {
+        let option = parse_spell_casting_option_line(
+            "~ has flash as long as you've committed a crime this turn.",
+            "Take for a Ride",
+        )
+        .expect("self conditional-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        match option.condition {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CrimesCommittedThisTurn,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {}
+            other => panic!("expected CrimesCommittedThisTurn GE 1 condition, got {other:?}"),
+        }
+    }
+
+    /// Bare "~ has flash" (no condition) emits an unconditional flash option.
+    #[test]
+    fn spell_self_has_flash_unconditional() {
+        let option = parse_spell_casting_option_line("~ has flash.", "Some Spell")
+            .expect("bare self-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        assert!(
+            option.condition.is_none(),
+            "bare '~ has flash' must be unconditional, got {:?}",
+            option.condition
         );
     }
 
@@ -1570,6 +1954,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             }) => {
                 assert!(filter
                     .type_filters

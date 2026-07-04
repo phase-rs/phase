@@ -28,8 +28,10 @@ interface DisconnectChoiceDialogProps {
 
 /**
  * Host-only modal shown when a guest disconnects mid-game in a 3-4p P2P
- * session. Counts down the grace window; on expiry, auto-triggers the
- * "Continue without them" path. The parent unmounts (sets `isOpen=false`)
+ * session. Counts down the grace window as an advisory timer; on expiry it
+ * defaults to WAITING — it dismisses WITHOUT conceding, never auto-eliminating
+ * a dropped player. The host can still explicitly choose "Continue without
+ * them" while the dialog is up. The parent unmounts (sets `isOpen=false`)
  * when the player reconnects, dismissing the dialog naturally.
  */
 export function DisconnectChoiceDialog({
@@ -51,17 +53,18 @@ export function DisconnectChoiceDialog({
     setSecondsRemaining(Math.ceil(gracePeriodMs / 1000));
   }, [isOpen, gracePeriodMs, playerLabel]);
 
-  // Tick the countdown. Auto-triggers continue-without when it hits zero.
+  // Tick the countdown. On expiry, default to WAITING — dismiss without
+  // conceding. A dropped player is never auto-conceded; the host keeps the
+  // explicit "Continue without them" button while the dialog is up.
   useEffect(() => {
     if (!isOpen) return;
     if (secondsRemaining <= 0) {
-      onContinueWithout();
       onDismiss();
       return;
     }
     const id = setTimeout(() => setSecondsRemaining((n) => n - 1), 1000);
     return () => clearTimeout(id);
-  }, [isOpen, secondsRemaining, onContinueWithout, onDismiss]);
+  }, [isOpen, secondsRemaining, onDismiss]);
 
   return (
     <AnimatePresence>

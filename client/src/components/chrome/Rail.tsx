@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router";
 
 import { BuildBadge } from "./BuildBadge";
 import { activeNavKey, NAV_ITEMS } from "./navItems";
+import { SparkleIcon } from "./SparkleIcon";
 
 /**
  * Desktop navigation rail (≥820px). Logo → the five primary destinations, and a
@@ -12,9 +13,12 @@ import { activeNavKey, NAV_ITEMS } from "./navItems";
  */
 interface RailProps {
   onSettings: () => void;
+  onWhatsNew: () => void;
+  /** When true, an unread dot rides the "What's New" button. */
+  hasUnread: boolean;
 }
 
-export function Rail({ onSettings }: RailProps) {
+export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
   const active = activeNavKey(useLocation().pathname);
@@ -84,6 +88,21 @@ export function Rail({ onSettings }: RailProps) {
       </div>
 
       <div className="mt-auto flex w-full flex-col items-center gap-2 border-t border-hairline-strong pt-2.5 [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:pt-1.5">
+        <button
+          onClick={onWhatsNew}
+          className="relative flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300 [@media(max-height:540px)]:py-1"
+        >
+          <span className="relative">
+            <SparkleIcon className="h-6 w-6 opacity-50" />
+            {hasUnread && (
+              <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-[rgba(6,10,22,0.9)]">
+                <span className="sr-only">{t("whatsNew.unread")}</span>
+              </span>
+            )}
+          </span>
+          <span className="text-[10.5px] font-semibold tracking-[0.02em]">{t("nav.whatsNew")}</span>
+        </button>
+
         <button
           onClick={onSettings}
           className="flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300 [@media(max-height:540px)]:py-1"

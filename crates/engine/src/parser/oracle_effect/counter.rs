@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -16,7 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
@@ -350,6 +352,16 @@ pub(super) fn try_parse_put_counter<'a>(
             (qty, rest, false, false)
         };
 
+    // CR 122.1: "an additional <type> counter" — the count article was already
+    // read by `parse_count_expr` ("an"/"a" → 1; "two additional ..." keeps its
+    // numeral). "additional" is a flavor qualifier that does not change the
+    // placement count (the counter is added on top of any already present), so
+    // strip it before the counter-type parse. Toph, Hardheaded Teacher:
+    // "put an additional +1/+1 counter on that land".
+    let rest = nom_on_lower(rest, rest, |i| value((), tag("additional ")).parse(i))
+        .map(|((), r)| r)
+        .unwrap_or(rest);
+
     // Counter type (e.g. "+1/+1", "loyalty", "charge", "double strike").
     // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
     // combinator so multi-word keyword counter names ("first strike", "double
@@ -498,16 +510,42 @@ fn parse_counter_equal_to(
         return Ok((rest, qty));
     }
 
-    // CR 706.2: event-context back-reference fallback ("equal to the result").
+    // CR 107.1b: Composed dynamic quantities ("equal to twice …", "equal to
+    // the greatest … among …") live in the CDA grammar, not the nom leaf ref
+    // table. Isolate the phrase up to the first clause boundary so trailing
+    // ", then …" clauses stay in the remainder.
     let (after_equal, _) = tag("equal to ").parse(input)?;
-    // Isolate the quantity phrase from any trailing clause via a nom combinator
-    // (take everything up to the first clause separator). Event-context phrases
-    // are short and clause-final in the counter templates that reach this
-    // fallback; the tail after the separator is preserved as the remainder so a
-    // following clause (", then …") is never swallowed.
-    let (_, phrase) =
+    let (rest, phrase_raw) =
         take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
-    let phrase = phrase.trim_end();
+
+    // CR 122.1 + CR 603.4 + CR 603.10a: bare anaphoric "the difference" — the
+    // count is the difference established by the enclosing trigger's
+    // intervening-if comparison ("if it had power greater than ~'s power, put a
+    // number of +1/+1 counters on ~ equal to the difference" — Drizzt
+    // Do'Urden). The two operands live on the hoisted trigger condition, not in
+    // this clause, so emit the deferred placeholder that the trigger-level
+    // difference binding in `lower_trigger_ir` (oracle_trigger.rs) resolves
+    // against the `QuantityComparison` operands. Distinct from the
+    // `parse_cda_quantity` "the difference between A and B" form below, which
+    // carries its own operands. Match on the fully-trimmed phrase (both ends) so
+    // stray leading whitespace ("equal to  the difference") still binds, and
+    // return `take_till`'s own remainder to preserve any trailing ", …" clause.
+    if all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+        .parse(phrase_raw.trim())
+        .is_ok()
+    {
+        return Ok((
+            rest,
+            crate::parser::oracle_effect::difference_anaphor_placeholder(),
+        ));
+    }
+
+    let phrase = phrase_raw.trim_end();
+    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+        return Ok((&after_equal[phrase.len()..], expr));
+    }
+
+    // CR 706.2: event-context back-reference fallback ("equal to the result").
     match crate::parser::oracle_quantity::parse_event_context_quantity(phrase) {
         // Remainder starts immediately after the consumed phrase (before any
         // trailing whitespace), preserving the original clause boundary.
@@ -598,6 +636,12 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
             inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
         },
         QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| rebind_counter_quantity_scope(expr, scope))
+                .collect(),
+        },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
             exprs: exprs
                 .into_iter()
                 .map(|expr| rebind_counter_quantity_scope(expr, scope))
@@ -723,17 +767,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         value((), tag("from ")).parse(i)
     })?;
     let target_text = target_text.trim();
-    let target = if is_self_ref(target_text) {
-        TargetFilter::SelfRef
-    } else if is_it_pronoun(target_text) {
-        // CR 608.2k: Bare pronoun — context-dependent
-        resolve_it_pronoun(ctx)
-    } else {
-        let (t, _rem) = parse_target(target_text);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, target_text);
-        t
-    };
+    let target = resolve_remove_counter_from_target(target_text, ctx);
 
     Some(Effect::RemoveCounter {
         counter_type,
@@ -752,6 +786,42 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
 ///   on the runtime `parse_counter_type` lowercase fallback.
 pub(crate) fn normalize_counter_type(raw: &str) -> CounterType {
     parse_counter_type(raw)
+}
+
+/// CR 115.1d + CR 122.1: Strip the distribution prefix "each of any number of "
+/// from a remove-counter "from <objects>" clause. Returns the remainder for
+/// `parse_type_phrase` when the prefix was present (Garnet class — player
+/// chooses any number of matching permanents, not a "target" phrase).
+fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
+    let after_each_of = nom_on_lower(input, input, |i| value((), opt(tag("each of "))).parse(i))
+        .map(|((), rest)| rest)
+        .unwrap_or(input);
+    nom_on_lower(after_each_of, after_each_of, |i| {
+        value((), tag("any number of ")).parse(i)
+    })
+    .map(|((), rest)| rest.trim_start())
+}
+
+/// CR 122.1 + CR 115.1d: Resolve the "from <objects>" clause of a remove-counter
+/// effect. The optional "each of any number of" prefix denotes a variable-count
+/// non-target distribution — strip it and parse the remainder as a type phrase
+/// instead of routing through `parse_target` (whose bare "each " arm would leave
+/// "of any number of …" for `parse_type_phrase` and collapse to `Any`).
+fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    if is_self_ref(text) {
+        return TargetFilter::SelfRef;
+    }
+    if is_it_pronoun(text) {
+        // CR 608.2k: Bare pronoun — context-dependent
+        return resolve_it_pronoun(ctx);
+    }
+    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text) {
+        let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, filter_text);
+        return t;
+    }
+    resolve_counter_target(text, ctx)
 }
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
@@ -819,34 +889,50 @@ pub(super) fn try_parse_move_counters<'a>(
 ) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    // Detect "its counters" / "~'s counters" / "this creature's counters" /
-    // "those counters".
-    let (source, after_possessive) = if let Some(((), rest)) =
-        nom_on_lower(after_put, after_put, |i| {
-            value((), tag("~'s counter")).parse(i)
-        }) {
+    // Detect the possessive source: "~'s " / "its " / "this creature's " /
+    // "those ". The possessive may be followed by a typed counter name
+    // ("its +1/+1 counters", Selfless Police Captain) or the bare noun
+    // ("its counters", "those counters"). Strip the possessive marker, then
+    // parse an optional counter type before the "counter(s)" noun.
+    let (source, after_possessive_marker) = if let Some(((), rest)) =
+        nom_on_lower(after_put, after_put, |i| value((), tag("~'s ")).parse(i))
+    {
         (TargetFilter::SelfRef, rest)
     } else {
         let ((), rest) = nom_on_lower(after_put, after_put, |i| {
             value(
                 (),
-                alt((
-                    tag("its counter"),
-                    tag("this creature's counter"),
-                    tag("those counter"),
-                )),
+                alt((tag("its "), tag("this creature's "), tag("those "))),
             )
             .parse(i)
         })?;
         (resolve_it_pronoun(ctx), rest)
     };
-    // Skip past optional "s" (counter vs counters) then expect " on "
-    let after_counters = nom_on_lower(after_possessive, after_possessive, |i| {
-        value((), tag("s")).parse(i)
+
+    // CR 122.5 + CR 122.8: optional typed counter. "its +1/+1 counters" moves
+    // only that kind; "its counters" / "those counters" moves all kinds. When the
+    // bare "counter(s)" noun follows the possessive directly, there is no typed
+    // qualifier — must check that first, because `parse_counter_type_typed`'s
+    // open-ended Generic arm would otherwise consume the noun "counters" itself
+    // and leave nothing for the noun match below.
+    let bare_counter_noun = nom_on_lower(after_possessive_marker, after_possessive_marker, |i| {
+        value((), alt((tag("counters"), tag("counter")))).parse(i)
     })
-    .map(|((), r)| r)
-    .unwrap_or(after_possessive);
-    let ((), after_on) = nom_on_lower(after_counters, after_counters, |i| {
+    .is_some();
+    let (counter_type, after_type) = if bare_counter_noun {
+        (None, after_possessive_marker)
+    } else {
+        match nom_primitives::parse_counter_type_typed(after_possessive_marker) {
+            Ok((rest, ct)) => (Some(ct), rest.trim_start()),
+            Err(_) => (None, after_possessive_marker),
+        }
+    };
+
+    // Expect the "counter(s)" noun.
+    let ((), after_counter_word) = nom_on_lower(after_type, after_type, |i| {
+        value((), alt((tag("counters"), tag("counter")))).parse(i)
+    })?;
+    let ((), after_on) = nom_on_lower(after_counter_word, after_counter_word, |i| {
         value((), tag(" on ")).parse(i)
     })?;
 
@@ -862,7 +948,7 @@ pub(super) fn try_parse_move_counters<'a>(
             // object's last-known information (CR 400.7), so the source must be
             // the triggering object, not the ability source.
             source,
-            counter_type: None,
+            counter_type,
             count: None,
             mode: CounterTransferMode::Put,
             selection: CounterMoveSelection::StackTarget,
@@ -1069,18 +1155,42 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         }
     }
 
-    // CR 701.10b: "double <target>'s power [and toughness]" — possessive form covering
+    // CR 701.10a + CR 613.4c: P/T multiply forms ("double"/"triple" a creature's
+    // power/toughness). Delegated so the same three structural arms serve every
+    // multiplier word — the `factor` axis (not a Double/Triple effect sibling)
+    // distinguishes them.
+    try_parse_multiply_pt_effect(lower, ctx)
+}
+
+/// CR 701.10a + CR 613.4c: P/T multiplier word → factor. "double" multiplies P/T
+/// by 2 (CR 701.10a), "triple" by 3 (Tifa's Limit Break — Final Heaven). The word
+/// is the only axis that differs between the forms, so it is parsed once and
+/// threaded into the shared P/T arms below as `factor`.
+fn parse_pt_multiplier_word(input: &str) -> OracleResult<'_, u32> {
+    alt((value(2u32, tag("double ")), value(3u32, tag("triple ")))).parse(input)
+}
+
+/// CR 701.10a + CR 613.4c: Parse the three "{multiplier} … power/toughness …"
+/// shapes into `Effect::DoublePT`/`DoublePTAll` carrying the parsed `factor`,
+/// where `{mult}` is `double` (factor 2) or `triple` (factor 3). The multiplier
+/// word is the only varying axis, so the same arms cover both words:
+///
+/// 1. "{mult} <target>'s power [and toughness]" (possessive, Bulk Up / Tifa).
+/// 2. "{mult} its power [and toughness]" (anaphoric "it").
+/// 3. "{mult} the power/toughness of <target|each filter>".
+pub(super) fn try_parse_multiply_pt_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let (factor, after_word) = nom_on_lower(lower, lower, parse_pt_multiplier_word)?;
+
+    // CR 701.10b: "{mult} <target>'s power [and toughness]" — possessive form covering
     // "double target creature's power" (Bulk Up class) and "double ~'s power" (Devilish
     // Valet / Okaun class, where ~ is the self-reference normalization). Composes with
     // existing `parse_target` building block to cover any target phrase, then matches the
-    // possessive P/T tail. Sibling of the `tag("double its ")` and `tag("double the ")`
-    // arms below; placed first so the `parse_target`-driven possessive form takes
-    // precedence and the more specific "its" / "the X of Y" patterns fall through.
-    if let Some(((), after_double)) =
-        nom_on_lower(lower, lower, |i| value((), tag("double ")).parse(i))
+    // possessive P/T tail. Sibling of the "its " and "the " arms below; placed first so
+    // the `parse_target`-driven possessive form takes precedence and the more specific
+    // "its" / "the X of Y" patterns fall through.
     {
         // Skip patterns owned by sibling arms below.
-        let owned_by_sibling = nom_on_lower(after_double, after_double, |i| {
+        let owned_by_sibling = nom_on_lower(after_word, after_word, |i| {
             value(
                 (),
                 alt((
@@ -1096,7 +1206,7 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         })
         .is_some();
         if !owned_by_sibling {
-            let (target, rem) = parse_target(after_double);
+            let (target, rem) = parse_target(after_word);
             if !matches!(target, TargetFilter::Any) {
                 let rem_lower = rem.to_lowercase();
                 let mode: Option<DoublePTMode> = nom_on_lower(&rem_lower, &rem_lower, |i| {
@@ -1112,14 +1222,19 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
                 })
                 .map(|(m, _)| m);
                 if let Some(mode) = mode {
-                    return Some(Effect::DoublePT { mode, target });
+                    return Some(Effect::DoublePT {
+                        mode,
+                        target,
+                        factor,
+                    });
                 }
             }
         }
     }
 
-    // CR 608.2k: "double its power [and toughness]" — possessive "its" is context-dependent
-    if let Some(((), rest)) = nom_on_lower(lower, lower, |i| value((), tag("double its ")).parse(i))
+    // CR 608.2k: "{mult} its power [and toughness]" — possessive "its" is context-dependent
+    if let Some(((), rest)) =
+        nom_on_lower(after_word, after_word, |i| value((), tag("its ")).parse(i))
     {
         let mode: Option<DoublePTMode> = nom_on_lower(rest, rest, |i| {
             alt((
@@ -1134,13 +1249,14 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
             return Some(Effect::DoublePT {
                 mode,
                 target: resolve_it_pronoun(ctx),
+                factor,
             });
         }
         return None;
     }
 
-    // P/T doubling: "double the power/toughness [and toughness/power] of ..."
-    let ((), rest) = nom_on_lower(lower, lower, |i| value((), tag("double the ")).parse(i))?;
+    // P/T multiply: "{mult} the power/toughness [and toughness/power] of ..."
+    let ((), rest) = nom_on_lower(after_word, after_word, |i| value((), tag("the ")).parse(i))?;
 
     let (mode, after_mode) = nom_on_lower(rest, rest, |i| {
         alt((
@@ -1161,7 +1277,11 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
     .is_some()
     {
         let (target, _) = parse_target(after_mode);
-        return Some(Effect::DoublePT { mode, target });
+        return Some(Effect::DoublePT {
+            mode,
+            target,
+            factor,
+        });
     }
 
     // "each creature you control" / "each other creature" / "each Dragon" → DoublePTAll
@@ -1169,7 +1289,11 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         value((), alt((tag("each "), tag("all ")))).parse(i)
     })?;
     let (target, _) = parse_type_phrase(filter_text);
-    Some(Effect::DoublePTAll { mode, target })
+    Some(Effect::DoublePTAll {
+        mode,
+        target,
+        factor,
+    })
 }
 
 /// Parse a mana color name from text like "red mana in your mana pool".
@@ -1202,6 +1326,57 @@ mod tests {
                 target: TargetFilter::ParentTargetController,
             })
         ));
+    }
+
+    /// CR 701.10a: "double target creature's power and toughness" → factor 2.
+    /// Building-block test for the multiplier-word axis (Tifa's Limit Break —
+    /// Meteor Strikes; the historical doubling forms must keep factor 2).
+    #[test]
+    fn multiply_pt_double_target_pt_factor_two() {
+        let result = try_parse_multiply_pt_effect(
+            "double target creature's power and toughness",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(Effect::DoublePT {
+                    mode: DoublePTMode::PowerAndToughness,
+                    factor: 2,
+                    ..
+                })
+            ),
+            "got {result:?}"
+        );
+    }
+
+    /// CR 613.4c: "triple target creature's power and toughness" → factor 3
+    /// (Tifa's Limit Break — Final Heaven). The multiplier word is the only
+    /// varying axis, so the same arm emits a factor-3 `DoublePT`.
+    #[test]
+    fn multiply_pt_triple_target_pt_factor_three() {
+        let result = try_parse_multiply_pt_effect(
+            "triple target creature's power and toughness",
+            &mut default_ctx(),
+        );
+        let Some(Effect::DoublePT { mode, factor, .. }) = result else {
+            panic!("expected DoublePT, got {result:?}");
+        };
+        assert_eq!(mode, DoublePTMode::PowerAndToughness);
+        assert_eq!(factor, 3, "triple must parse factor 3");
+    }
+
+    /// CR 613.4c: "triple target creature's power" — power-only triple keeps the
+    /// `Power` mode (The Skullspore Nexus is the power-only double sibling).
+    #[test]
+    fn multiply_pt_triple_target_power_only() {
+        let result =
+            try_parse_multiply_pt_effect("triple target creature's power", &mut default_ctx());
+        let Some(Effect::DoublePT { mode, factor, .. }) = result else {
+            panic!("expected DoublePT, got {result:?}");
+        };
+        assert_eq!(mode, DoublePTMode::Power);
+        assert_eq!(factor, 3);
     }
 
     #[test]
@@ -1304,6 +1479,55 @@ mod tests {
                 "{input}: target SelfRef, got {target:?}"
             );
         }
+    }
+
+    /// CR 115.1d + CR 122.1: Garnet, Princess of Alexandria — "remove a lore
+    /// counter from each of any number of Sagas you control" must parse to a
+    /// Saga + you-control filter, not `TargetFilter::Any` (which incorrectly
+    /// prompts for player targets).
+    #[test]
+    fn remove_counter_each_of_any_number_sagas_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let result = try_parse_remove_counter(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(counter_type, Some(CounterType::Lore));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed Saga filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Saga")),
+            "expected Saga subtype, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 115.1d: Post-parse fixup must attach `MultiTargetSpec::unlimited(0)` for
+    /// the Garnet distribution prefix.
+    #[test]
+    fn remove_counter_each_of_any_number_carries_multi_target() {
+        let clause = super::super::parse_effect_clause(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        let Effect::RemoveCounter { target, .. } = clause.effect else {
+            panic!("expected RemoveCounter, got {:?}", clause.effect);
+        };
+        assert!(matches!(target, TargetFilter::Typed(_)));
     }
 
     #[test]

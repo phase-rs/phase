@@ -4,7 +4,7 @@ use crate::game::targeting;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind};
@@ -38,6 +38,18 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let source_rider = match &ability.effect {
         Effect::Counter { source_rider, .. } => source_rider.clone(),
+        _ => None,
+    };
+
+    // CR 701.6a + CR 614.1a: "if that spell is countered this way, put it
+    // <zone> instead of into that player's graveyard" — a destination redirect
+    // on the countered *spell* (Memory Lapse, Remand, Spell Crumple). `None`
+    // keeps the default CR 701.6a graveyard rule.
+    let countered_spell_zone = match &ability.effect {
+        Effect::Counter {
+            countered_spell_zone,
+            ..
+        } => countered_spell_zone.clone(),
         _ => None,
     };
 
@@ -141,14 +153,44 @@ pub fn resolve(
                 if is_spell {
                     // CR 701.6a: A countered spell is put into its owner's
                     // graveyard — unless cast via an alt-cost keyword that
-                    // exiles on leaving the stack (Flashback, Harmonize).
+                    // exiles on leaving the stack (Flashback, Harmonize), or
+                    // the counter ability carries a CR 614.1a "exile it instead
+                    // of putting it into its owner's graveyard" rider (Force
+                    // of Negation, No More Lies, Defabricate).
                     // CR 702.34a / CR 702.127a / CR 702.180a: the exile destination
                     // is a static destination rule (not a replacement), so it is
                     // selected here, before the pipeline consult.
-                    let dest = if exiles_on_counter {
+                    let exile_instead_of_graveyard_on_counter = ability
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(super::cast_from_zone::is_graveyard_exile_rider_subability);
+                    // CR 701.6a + CR 614.1a: choose the countered spell's
+                    // destination. Exile precedence (alt-cost keyword exile-on-
+                    // stack-exit, or the graveyard-exile sub-ability rider) wins
+                    // over the library/hand redirect, which itself wins over the
+                    // default graveyard rule. `library_position` carries the
+                    // top/bottom placement so the pipeline routes through
+                    // `move_to_library_at_index` (no auto-shuffle).
+                    let mut library_position = None;
+                    let dest = if exiles_on_counter || exile_instead_of_graveyard_on_counter {
                         Zone::Exile
                     } else {
-                        Zone::Graveyard
+                        match &countered_spell_zone {
+                            Some(SpellStackToGraveyardReplacement::Hand) => Zone::Hand,
+                            Some(SpellStackToGraveyardReplacement::Library { position }) => {
+                                library_position = Some(position.clone());
+                                Zone::Library
+                            }
+                            // CR 614.1a: `Exile` is a member of the shared
+                            // destination type (cast-this-way rider), but the
+                            // COUNTER parser never emits it — exile-on-counter is
+                            // handled by the `exile_instead_of_graveyard_on_counter`
+                            // branch above, so reaching here would mean a redundant
+                            // (not double) exile. Kept as an explicit arm to keep
+                            // the match exhaustive without a wildcard.
+                            Some(SpellStackToGraveyardReplacement::Exile) => Zone::Exile,
+                            None => Zone::Graveyard,
+                        }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
                         super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
@@ -165,7 +207,13 @@ pub fn resolve(
                     // `replace_event` NeedsChoice arm); the spell is already off
                     // the stack (countered), so bail before `EffectResolved` and
                     // let the replacement-choice resume path deliver it.
-                    let req = ZoneMoveRequest::effect(obj_id, dest, ability.source_id);
+                    let mut req = ZoneMoveRequest::effect(obj_id, dest, ability.source_id);
+                    if let Some(position) = library_position {
+                        // CR 701.6a + CR 614.1a: place at the named library
+                        // position (Memory Lapse top / Spell Crumple bottom)
+                        // rather than shuffling in.
+                        req = req.at_library_position(position);
+                    }
                     match zone_pipeline::move_object(state, req, events) {
                         ZoneMoveResult::Done => {}
                         ZoneMoveResult::NeedsChoice(_)
@@ -437,7 +485,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .description("If a card would be put into a graveyard, exile it instead.".to_string())
@@ -489,6 +539,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -544,6 +595,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -591,6 +643,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -602,6 +655,68 @@ mod tests {
 
         assert!(state.stack.is_empty());
         assert!(state.exile.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
+    }
+
+    #[test]
+    fn counter_exile_rider_exiles_countered_spell_without_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let exile_rider = ResolvedAbility::new(
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(exile_rider));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
         assert!(!state.players[1].graveyard.contains(&obj_id));
     }
 
@@ -638,6 +753,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -710,10 +826,12 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
                 }),
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(ability_on_stack)],
             tidebinder,
@@ -794,6 +912,7 @@ mod tests {
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
                 }),
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(spell_id)],
             tidebinder,
@@ -865,8 +984,10 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 source_rider: Some(CounterSourceRider::Destroy),
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(ability_on_stack)],
             counter_source,
@@ -950,6 +1071,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: Some(CounterSourceRider::Destroy),
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(spell_id)],
             counter_source,
@@ -1003,6 +1125,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1046,6 +1169,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1101,6 +1225,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1333,7 +1458,7 @@ mod tests {
 
     /// CR 113.3 + CR 405.1: "Counter all abilities" — the resolver matches
     /// every activated/triggered ability on the stack, including keyword actions, via
-    /// `TargetFilter::StackAbility { controller: None, tag: None }` and removes the entry without moving any
+    /// `TargetFilter::StackAbility { controller: None, tag: None, kind: None }` and removes the entry without moving any
     /// card to a graveyard (abilities aren't cards).
     #[test]
     fn test_counter_all_abilities_removes_ability_entries() {
@@ -1429,6 +1554,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
             },
             vec![],
@@ -1507,6 +1633,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(ControllerRef::Opponent),
                     tag: None,
+                    kind: None,
                 },
             },
             vec![],

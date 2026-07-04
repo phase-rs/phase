@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect } from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -7,7 +7,15 @@ import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 import { resolveCommander } from "../../../services/deckParser";
 import { useIsMobile } from "../../../hooks/useIsMobile";
-import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  STORAGE_KEY_PREFIX,
+  createFolder,
+  getDeckMeta,
+  setDeckFolder,
+  toggleDeckStar,
+} from "../../../constants/storage";
+import { useAppNotificationStore } from "../../../stores/appToastStore";
 
 const cacheCardsMock = vi.fn();
 
@@ -93,6 +101,10 @@ vi.mock("../CommanderPanel", () => ({
 }));
 
 describe("DeckBuilder", () => {
+  beforeEach(() => {
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+  });
+
   afterEach(() => {
     cleanup();
     cacheCardsMock.mockClear();
@@ -206,6 +218,115 @@ describe("DeckBuilder", () => {
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
     });
     expect(localStorage.getItem(ACTIVE_DECK_KEY)).toBe("Renamed Deck");
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Deck saved",
+      description: '"Renamed Deck" was saved to your decks.',
+    });
+  });
+
+  it("preserves a saved planar deck through editor load and save", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Planechase Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        planar_deck: ["The Aether Flues", "Spatial Merging"],
+        format: "Planechase",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Planechase"
+        onFormatChange={vi.fn()}
+        initialDeckName="Planechase Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("Planechase Deck"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        localStorage.getItem(STORAGE_KEY_PREFIX + "Planechase Deck") ?? "{}",
+      );
+      expect(persisted.planar_deck).toEqual(["The Aether Flues", "Spatial Merging"]);
+    });
+  });
+
+  it("does not restore Two-Headed Giant as a persisted deck-builder format", async () => {
+    const onFormatChange = vi.fn();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Team Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "TwoHeadedGiant",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={onFormatChange}
+        initialDeckName="Team Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Deck name" })).toHaveValue("Team Deck"),
+    );
+    expect(onFormatChange).not.toHaveBeenCalled();
+  });
+
+  it("preserves folder and star membership across a rename", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Old Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "Standard",
+      }),
+    );
+    localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+    const folder = createFolder("Aggro")!;
+    setDeckFolder("Old Deck", folder.id);
+    toggleDeckStar("Old Deck");
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="Old Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed Deck");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull(),
+    );
+    // Organization follows the deck to its new name; the old entry is gone.
+    const meta = getDeckMeta("Renamed Deck");
+    expect(meta?.folderId).toBe(folder.id);
+    expect(meta?.starred).toBe(true);
+    expect(getDeckMeta("Old Deck")).toBeNull();
   });
 
   it("warns about unsaved changes when leaving after an edit", async () => {
@@ -391,6 +512,50 @@ describe("DeckBuilder", () => {
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "My Deck copy")).not.toBeNull();
     });
     expect(nameInput).toHaveValue("My Deck copy");
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Deck cloned",
+      description: 'A copy was saved as "My Deck copy".',
+    });
+  });
+
+  it("clones into the source's folder but starts the copy unstarred", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "My Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "Standard",
+      }),
+    );
+    const folder = createFolder("Commander")!;
+    setDeckFolder("My Deck", folder.id);
+    toggleDeckStar("My Deck");
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="My Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("My Deck"));
+    await user.click(screen.getByRole("button", { name: "Clone" }));
+
+    await waitFor(() =>
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "My Deck copy")).not.toBeNull(),
+    );
+    // The clone inherits the folder, but the star is a deliberate per-deck pin.
+    const meta = getDeckMeta("My Deck copy");
+    expect(meta?.folderId).toBe(folder.id);
+    expect(meta?.starred).toBeUndefined();
+    // Source deck keeps its own star.
+    expect(getDeckMeta("My Deck")?.starred).toBe(true);
   });
 
   it("does not reactively auto-resolve a commander mid-edit", async () => {

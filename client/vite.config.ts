@@ -137,8 +137,44 @@ export default defineConfig(({ mode }) => ({
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
-        globIgnores: ["**/engine_wasm_bg-*.wasm", "**/draft_wasm_bg-*.wasm"],
+        // changelog{,-meta}.json are committed to public/ but stripped from the
+        // Pages bundle on deploy (manifest-driven rm in deploy.yml/release.yml)
+        // and served from R2. The precache manifest is generated BEFORE that
+        // strip, so without ignoring them Workbox would precache files that 404
+        // at SW-install time. They're fetched at runtime via the rules below.
+        globIgnores: [
+          "**/engine_wasm_bg-*.wasm",
+          "**/draft_wasm_bg-*.wasm",
+          "**/changelog.json",
+          "**/changelog-meta.json",
+        ],
         runtimeCaching: [
+          {
+            // Tiny constant-size "what's new" pointer fetched on every app load
+            // to drive the unread dot. StaleWhileRevalidate serves the cached
+            // copy instantly (and offline) while refreshing in the background,
+            // so the dot reflects the latest deploy on the NEXT load — never
+            // blocking startup on a network round-trip.
+            urlPattern: /changelog-meta\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "changelog-meta",
+              expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Full changelog, lazy-loaded only when the user opens the modal.
+            // NetworkFirst prefers fresh entries but falls back to the cached
+            // copy after a short timeout (slow network) or when offline, so the
+            // modal always renders the last-seen list rather than hanging.
+            urlPattern: /changelog\.json$/,
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "changelog-full",
+              networkTimeoutSeconds: 3,
+              expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
+            },
+          },
           {
             urlPattern: /engine_wasm_bg-.*\.wasm$/,
             handler: "CacheFirst",
@@ -185,11 +221,66 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /^https:\/\/pub-fc5b5c2c6e774356ae3e730bb0326394\.r2\.dev\/audio\//,
+            urlPattern: /^https:\/\/data\.phase-rs\.dev\/audio\//,
             handler: "CacheFirst",
             options: {
               cacheName: "audio-r2",
               expiration: { maxEntries: 50, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Remaining data-manifest JSONs (Scryfall lookup maps, precon
+            // decks, draft pools, coverage, set metadata) — served from R2 in
+            // production, site-root in dev/Tauri; the pattern matches both.
+            // R2 serves `max-age=60, must-revalidate` with ETags, so the
+            // StaleWhileRevalidate background refresh is a 304 revalidation,
+            // not a re-download — the cached copy serves instantly and
+            // offline, mirroring the card-locale-sidecars reasoning. This keeps
+            // the image-URL lookup layer (scryfall-data.json) available offline.
+            urlPattern:
+              /\/(scryfall-data|scryfall-printings|scryfall-token-images|scryfall-sets|card-names|card-data-meta|set-list|decks|draft-pools|coverage-data|coverage-summary)\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "data-json",
+              expiration: { maxEntries: 12, purgeOnQuotaError: true },
+            },
+          },
+          {
+            // Same-origin deck feeds fetched by the home dashboard
+            // (see src/data/feedRegistry.ts). Mutable — regenerated
+            // periodically — so StaleWhileRevalidate.
+            urlPattern: /\/feeds\/[^/]+\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "deck-feeds",
+              expiration: { maxEntries: 16 },
+            },
+          },
+          // NOTE: Scryfall card imagery (cards/backs/svgs.scryfall.io) is
+          // intentionally NOT runtime-cached here. A CacheFirst rule forces the
+          // SW to re-fetch <img> requests in CORS mode (needed to avoid opaque-
+          // response quota padding), and that broke every mana pip and card
+          // back in production: edge-cached Scryfall variants (svgs/backs are
+          // served from the Cloudflare edge with `vary: Origin`) get handed to
+          // the SW's cors fetch without an `access-control-allow-origin` header,
+          // failing the CORS check. Plain no-cors <img> loading (opaque, no CORS
+          // check) is the long-standing, working behavior. Re-introducing an
+          // offline image cache requires first giving EVERY Scryfall <img> a
+          // consistent crossOrigin="anonymous" so page and SW never create
+          // colliding cache variants. See the #4822 (introduced) / #4855
+          // (credentials patch) incident before re-adding.
+          {
+            // Same-origin static imagery from public/ (battlefield art, nav
+            // icons, logos). Not in the precache manifest — the default glob
+            // only covers js/css/html — and unhashed, so StaleWhileRevalidate
+            // keeps them offline-available without pinning stale copies past
+            // a deploy.
+            urlPattern: ({ sameOrigin, request }) =>
+              sameOrigin && request.destination === "image",
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "static-images",
+              expiration: { maxEntries: 300, purgeOnQuotaError: true },
             },
           },
         ],

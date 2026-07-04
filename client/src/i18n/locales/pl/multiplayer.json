@@ -4,6 +4,16 @@
     "message": "Twój przeciwnik zostanie ogłoszony zwycięzcą.",
     "concede": "Poddaj się"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} prosi o wycofanie ruchu",
+    "requestedMessage": "Przywrócić stan gry z chwili przed jego ostatnią akcją?",
+    "ownTitle": "Poproszono o wycofanie ruchu",
+    "ownMessage": "Czekanie na zgodę innych graczy na przywrócenie stanu z przed twojej ostatniej akcji.",
+    "approve": "Zatwierdź",
+    "decline": "Odmów",
+    "cancel": "Anuluj prośbę",
+    "declinedToast": "Prośba o wycofanie ruchu odrzucona"
+  },
   "connectionDot": {
     "connected": "Połączono",
     "connecting": "Łączenie...",

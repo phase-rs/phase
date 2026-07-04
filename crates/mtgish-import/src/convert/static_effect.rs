@@ -308,7 +308,16 @@ pub fn convert_permanent_rule(
         },
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
-        P::MustBeBlocked => StaticMode::MustBeBlocked,
+        // CR 509.1c: bare "must be blocked if able" — no filter, any assigned
+        // blocker satisfies the requirement.
+        P::MustBeBlocked => StaticMode::MustBeBlocked { by: None },
+        // CR 509.1c: filtered "must be blocked by a <Permanents> if able" —
+        // only an assigned blocker matching `filter` satisfies the requirement.
+        // Covers Ace's Baseball Bat ("must be blocked by a Dalek if able") and
+        // Slayer's Cleaver ("must be blocked by an Eldrazi if able").
+        P::MustBeBlockedByADefender(filter) => StaticMode::MustBeBlocked {
+            by: Some(filter::convert(filter)?),
+        },
         P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
             StaticMode::BlockRestriction {
                 filter: engine::types::statics::block_only_creatures_with_flying_filter(),
@@ -1005,8 +1014,49 @@ fn check_hasable_to_keyword(c: &CheckHasable) -> ConvResult<engine::types::keywo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{LandType, PermanentRule, Permanents, Player};
+    use crate::schema::types::{CreatureType, LandType, PermanentRule, Permanents, Player};
     use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+    /// CR 509.1c: `MustBeBlockedByADefender(filter)` converts to
+    /// `StaticMode::MustBeBlocked { by: Some(filter) }` — the filtered form
+    /// that the engine's combat validator enforces. Covers Ace's Baseball Bat
+    /// (Dalek) and Slayer's Cleaver (Eldrazi).
+    #[test]
+    fn must_be_blocked_by_a_defender_lowers_to_filtered_must_be_blocked() {
+        // Dalek case: "must be blocked by a Dalek if able"
+        let converted = convert_permanent_rule(
+            &PermanentRule::MustBeBlockedByADefender(Box::new(Permanents::IsCreatureType(
+                CreatureType::Dalek,
+            ))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(converted.mode, StaticMode::MustBeBlocked { by: Some(_) }),
+            "expected MustBeBlocked {{ by: Some(_) }}, got {:?}",
+            converted.mode
+        );
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+
+        // Eldrazi case: "must be blocked by an Eldrazi if able"
+        let converted_eldrazi = convert_permanent_rule(
+            &PermanentRule::MustBeBlockedByADefender(Box::new(Permanents::IsCreatureType(
+                CreatureType::Eldrazi,
+            ))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                converted_eldrazi.mode,
+                StaticMode::MustBeBlocked { by: Some(_) }
+            ),
+            "expected MustBeBlocked {{ by: Some(_) }} for Eldrazi, got {:?}",
+            converted_eldrazi.mode
+        );
+    }
 
     #[test]
     fn can_block_only_creatures_with_flying_lowers_to_block_restriction() {

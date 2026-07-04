@@ -366,6 +366,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -409,6 +410,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -455,6 +457,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
         );
         let (context, config) = make_context(0.8);
@@ -468,6 +472,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -510,6 +515,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
         ));
         let (context, config) = make_context(0.8);
@@ -523,6 +530,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -553,6 +561,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let (context, config) = make_context(0.8);
@@ -566,6 +575,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -608,6 +618,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {
@@ -643,6 +654,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict = SpellslingerCastingPolicy.verdict(&ctx);
         match verdict {

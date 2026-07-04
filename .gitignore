@@ -26,6 +26,7 @@ client/src/wasm/*.wasm.d.ts
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .claude/projects/
+.pr-review/
 
 # Build output
 client/dist/
@@ -44,6 +45,7 @@ client/public/coverage-summary.json
 client/public/scryfall-data.json
 client/public/scryfall-printings.json
 client/public/scryfall-sets.json
+client/public/scryfall-token-images.json
 client/public/set-list.json
 client/public/decks.json
 client/public/decks-skipped.json
@@ -60,9 +62,9 @@ client/coverage/
 data/*
 !data/standard-cards.txt
 !data/mtgjson/
-!data/engine-inventory.json
 !data/mtgish-cards.json
 data/mtgjson/AtomicCards.json
+data/mtgjson/CardTypes.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json
 data/mtgjson/decks/
@@ -122,3 +124,7 @@ triage/report-links.jsonl
 triage/triage-items.jsonl
 triage/sync-state.json
 triage/dashboard.md
+
+# Changelog backfill drafts — review staging only, never committed. The
+# canonical changelog lives at client/public/changelog.json.
+scripts/changelog/backfill-drafts.json

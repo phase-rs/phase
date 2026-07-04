@@ -2,11 +2,12 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
@@ -25,26 +26,17 @@ type ActionButtonMode =
 function getActionButtonMode(
   waitingFor: WaitingFor | null | undefined,
   stackLength: number,
-  currentPlayerId: number,
+  canAct: boolean,
 ): ActionButtonMode {
-  if (!waitingFor) return "hidden";
+  if (!waitingFor || !canAct) return "hidden";
 
-  if (
-    waitingFor.type === "DeclareAttackers" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "DeclareAttackers") {
     return "combat-attackers";
   }
-  if (
-    waitingFor.type === "DeclareBlockers" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "DeclareBlockers") {
     return "combat-blockers";
   }
-  if (
-    waitingFor.type === "Priority" &&
-    waitingFor.data.player === currentPlayerId
-  ) {
+  if (waitingFor.type === "Priority") {
     return stackLength > 0 ? "priority-stack" : "priority-empty";
   }
 
@@ -58,6 +50,7 @@ export function ActionButton() {
   const resolveAllTooltipId = useId();
   const passToEndTooltipId = useId();
   const playerId = usePlayerId();
+  const canActForWaitingState = useCanActForWaitingState();
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
@@ -94,7 +87,7 @@ export function ActionButton() {
 
   const { advanceLabel } = usePhaseInfo();
 
-  const mode = getActionButtonMode(waitingFor, stackLength, playerId);
+  const mode = getActionButtonMode(waitingFor, stackLength, canActForWaitingState);
 
   // Skip-confirm state for No Attacks / No Blocks
   const [skipArmed, setSkipArmed] = useState<"attackers" | "blockers" | null>(null);
@@ -258,23 +251,30 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  // Armed Arena-style "Resolve All" session (multiplayer): the engine is
+  // auto-passing this seat's priority windows until the stack empties or
+  // grows. Surfaced with the same pulsing cancel affordance as UntilEndOfTurn
+  // so the player can revoke it between opponents' windows.
+  const isResolvingStack = autoPass?.type === "UntilStackEmpty";
   const canActDuringAutoPass = mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
+  const isResolvingAll = useGameStore((s) => s.isResolvingAll);
+  const actionBlocked = actionPending || isResolvingAll;
   const idle = mode === "hidden" && !isEndingTurn;
-  const blocked = idle || actionPending;
+  const blocked = idle || actionBlocked;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
-  const primaryButtonClass = "min-w-[10.5rem] lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
-  const secondaryButtonClass = "min-w-[8rem] [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
+  const primaryButtonClass = "min-w-[10.5rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+  const secondaryButtonClass = "min-w-[8rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
   return (
     <>
-      <div className={panelClassName}>
+      <div className={panelClassName} data-action-button-panel>
         {mode === "combat-attackers" && !isEndingTurn && (
           <>
             <button
-              disabled={actionPending}
+              disabled={actionBlocked}
               onClick={() => {
                 if (selectedAttackers.length > 0) {
                   handleClearAttackers();
@@ -282,23 +282,23 @@ export function ActionButton() {
                   selectAllAttackers(validAttackerIds);
                 }
               }}
-              className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
+              className={gameButtonClass({ tone: "amber", size: "md", disabled: actionBlocked, className: secondaryButtonClass })}
             >
               {selectedAttackers.length > 0 ? t("actionButton.clearAttackers") : t("actionButton.attackWithAll")}
             </button>
             {selectedAttackers.length > 0 ? (
               <button
-                disabled={actionPending}
+                disabled={actionBlocked}
                 onClick={handleConfirmAttackers}
-                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {t("actionButton.confirmAttackers", { count: selectedAttackers.length })}
               </button>
             ) : (
               <button
-                disabled={actionPending}
+                disabled={actionBlocked}
                 onClick={() => handleSkipConfirm("attackers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {skipArmed === "attackers"
                   ? t("actionButton.attackWithNoneConfirm")
@@ -313,25 +313,25 @@ export function ActionButton() {
             {blockerAssignments.size > 0 ? (
               <>
                 <button
-                  disabled={actionPending || incompleteBlockCount > 0}
+                  disabled={actionBlocked || incompleteBlockCount > 0}
                   onClick={handleConfirmBlockers}
-                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending || incompleteBlockCount > 0, className: primaryButtonClass })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || incompleteBlockCount > 0, className: primaryButtonClass })}
                 >
                   {t("actionButton.confirmBlockers", { count: blockerAssignments.size })}
                 </button>
                 <button
-                  disabled={actionPending}
+                  disabled={actionBlocked}
                   onClick={handleClearBlockers}
-                  className={gameButtonClass({ tone: "neutral", size: "md", disabled: actionPending, className: secondaryButtonClass })}
+                  className={gameButtonClass({ tone: "neutral", size: "md", disabled: actionBlocked, className: secondaryButtonClass })}
                 >
                   {t("actionButton.resetBlocks")}
                 </button>
               </>
             ) : (
               <button
-                disabled={actionPending}
+                disabled={actionBlocked}
                 onClick={() => handleSkipConfirm("blockers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {skipArmed === "blockers"
                   ? t("actionButton.blockWithNoneConfirm")
@@ -355,18 +355,18 @@ export function ActionButton() {
           <>
             {canCompanionToHand && (
               <button
-                disabled={actionPending}
+                disabled={actionBlocked}
                 onClick={() => dispatchAction({ type: "CompanionToHand" })}
-                className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
+                className={gameButtonClass({ tone: "amber", size: "md", disabled: actionBlocked, className: secondaryButtonClass })}
               >
                 {t("actionButton.companionToHand")}
               </button>
             )}
             <button
-              disabled={actionPending}
+              disabled={actionBlocked}
               onClick={() => dispatchAction({ type: "PassPriority" })}
               aria-describedby={resolveTooltipId}
-              className={gameButtonClass({ tone: "blue", size: "md", disabled: actionPending, className: `${primaryButtonClass} group relative` })}
+              className={gameButtonClass({ tone: "blue", size: "md", disabled: actionBlocked, className: `${primaryButtonClass} group relative` })}
             >
               {t("actionButton.resolve")}
               <GameplayTooltip id={resolveTooltipId}>
@@ -374,18 +374,36 @@ export function ActionButton() {
               </GameplayTooltip>
             </button>
             <button
-              disabled={actionPending}
+              disabled={actionBlocked}
+              aria-busy={isResolvingAll}
               onClick={() => {
-                const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
-                const aiSeats = usePreferencesStore.getState().aiSeats;
-                const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-                  playerId: i + 1,
-                  difficulty: aiSeats[i]?.difficulty ?? "Medium",
-                }));
+                const { gameState: gs, gameMode } = useGameStore.getState();
+                // Only claim seats as AI-driven when an AI actually drives them,
+                // mirroring the controller each mode installs. "ai": every
+                // non-local seat (same prefs sourcing as scheduleBatchResolve).
+                // Draft matches: only a Bot pairing has an AI seat, and it uses
+                // the same binding installMatchRuntime gives the live controller.
+                // Everything else — "local" hotseat above all (#4978) — gets an
+                // empty list so dispatchResolveAll falls back to the per-seat
+                // engine auto-yield instead of handing human seats to the AI.
+                let seats: { playerId: number; difficulty: string }[] = [];
+                if (gameMode === "ai") {
+                  const playerCount = gs?.players?.length ?? 2;
+                  const aiSeats = usePreferencesStore.getState().aiSeats;
+                  seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+                    playerId: i + 1,
+                    difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                  }));
+                } else if (
+                  gameMode === "draft-match" &&
+                  useMultiplayerDraftStore.getState().matchPairing?.type === "Bot"
+                ) {
+                  seats = [DRAFT_BOT_AI_SEAT];
+                }
                 dispatchResolveAll(playerId, seats);
               }}
               aria-describedby={resolveAllTooltipId}
-              className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: `${secondaryButtonClass} group relative` })}
+              className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: `${secondaryButtonClass} group relative` })}
             >
               {t("actionButton.resolveAll")}
               <GameplayTooltip id={resolveAllTooltipId}>
@@ -395,33 +413,40 @@ export function ActionButton() {
           </>
         )}
 
-        {(mode === "priority-empty" || idle) && !isEndingTurn && (
+        {(mode === "priority-empty" || idle) && !isEndingTurn && !isResolvingStack && (
           <>
             {canCompanionToHand && !idle && (
               <button
-                disabled={actionPending}
+                disabled={actionBlocked}
                 onClick={() => dispatchAction({ type: "CompanionToHand" })}
-                className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
+                className={gameButtonClass({ tone: "amber", size: "md", disabled: actionBlocked, className: secondaryButtonClass })}
               >
                 {t("actionButton.companionToHand")}
               </button>
             )}
-            <button
-              disabled={blocked}
-              onClick={() => dispatchAction({ type: "PassPriority" })}
-              aria-describedby={priorityTooltipId}
-              className={gameButtonClass({
-                tone: "emerald",
-                size: "md",
-                disabled: blocked,
-                className: `${primaryButtonClass} group relative`,
-              })}
-            >
-              {idle ? t("actionButton.waiting") : advanceLabel}
-              <GameplayTooltip id={priorityTooltipId}>
-                {t("actionButton.priorityTooltip")}
-              </GameplayTooltip>
-            </button>
+            {/* In idle (no priority), the "who/why" narration lives in
+                TurnStatusLine — rendering a disabled "Waiting" button here too
+                would duplicate it (and an empty/relabeled disabled control is
+                worse for screen readers). So show the actionable button only
+                when the local player actually has the priority window. */}
+            {!idle && (
+              <button
+                disabled={blocked}
+                onClick={() => dispatchAction({ type: "PassPriority" })}
+                aria-describedby={priorityTooltipId}
+                className={gameButtonClass({
+                  tone: "emerald",
+                  size: "md",
+                  disabled: blocked,
+                  className: `${primaryButtonClass} group relative`,
+                })}
+              >
+                {advanceLabel}
+                <GameplayTooltip id={priorityTooltipId}>
+                  {t("actionButton.priorityTooltip")}
+                </GameplayTooltip>
+              </button>
+            )}
             <button
               disabled={blocked}
               onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } })}
@@ -441,17 +466,17 @@ export function ActionButton() {
           </>
         )}
 
-        {isEndingTurn && !canActDuringAutoPass && (
+        {(isEndingTurn || isResolvingStack) && !canActDuringAutoPass && (
           <button
-            disabled={actionPending}
+            disabled={actionBlocked}
             onClick={() => dispatchAction({ type: "CancelAutoPass" })}
-            className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: `${primaryButtonClass} animate-pulse` })}
+            className={gameButtonClass({ tone: "amber", size: "md", disabled: actionBlocked, className: `${primaryButtonClass} animate-pulse` })}
           >
             <span className="flex items-center gap-1.5">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">
                 <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.451a.75.75 0 0 0 0-1.5H4.5a.75.75 0 0 0-.75.75v3.75a.75.75 0 0 0 1.5 0v-2.033l.364.363a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.75a.75.75 0 0 0 0 1.5h3.75a.75.75 0 0 0 .75-.75V3.42a.75.75 0 0 0-1.5 0v2.033l-.364-.364A7 7 0 0 0 3.074 8.227a.75.75 0 0 0 1.449.39l.165-.044Z" clipRule="evenodd" />
               </svg>
-              {t("actionButton.autoPassing")}
+              {isEndingTurn ? t("actionButton.autoPassing") : t("actionButton.resolvingStack")}
             </span>
           </button>
         )}

@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { DeckEntry } from "../../services/deckParser";
 import type { UnsupportedCard } from "../../services/deckCompatibility";
+import type { GroupAccent } from "./deckGrouping";
 
 import { CardEntryRow } from "./CardEntryRow";
 
@@ -38,6 +39,9 @@ export interface MoveListProps {
   /** Forwarded to each row's move button as the destination label. See
    *  `CardEntryRowProps.moveTargetLabel`. */
   moveTargetLabel?: string;
+  /** Optional per-section header accent (leading bar + title tint). Omitted by
+   *  the flat sideboard/BO3-modal lists, which keep the plain gray header. */
+  accent?: GroupAccent;
 }
 
 export function MoveList({
@@ -57,6 +61,7 @@ export function MoveList({
   density = "compact",
   onOpenArtPicker,
   moveTargetLabel,
+  accent,
 }: MoveListProps) {
   const { t } = useTranslation("deck-builder");
   if (entries.length === 0 && !alwaysShow) return null;
@@ -64,8 +69,13 @@ export function MoveList({
 
   return (
     <div className="mb-2">
-      <div className="mb-1 flex justify-between text-xs font-semibold uppercase text-gray-500">
-        <span>{title}</span>
+      <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase text-gray-500">
+        <span className={`flex items-center gap-1.5 ${accent ? accent.text : ""}`}>
+          {accent && (
+            <span className={`h-3 w-1 shrink-0 rounded-full ${accent.bar}`} aria-hidden="true" />
+          )}
+          {title}
+        </span>
         <span>({count})</span>
       </div>
       {warning && (

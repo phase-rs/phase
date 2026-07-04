@@ -14,13 +14,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionPlayerScope, TargetRef,
+    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
 };
@@ -130,6 +133,42 @@ pub struct PlayerStatusView {
     pub source: Option<ObjectId>,
 }
 
+/// One rendered `∞` HUD row: a detected/forced unbounded loop pumps `axis`, and
+/// the engine attributes the badge to `player` (the HUD it attaches to). `axis`
+/// is the engine-provided identity the frontend formats to a family label — the
+/// display layer never decides attribution or which axes are unbounded.
+///
+/// `player` is computed by [`attribution_player`] (NOT the raw producing
+/// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
+/// routes to the player it names (the drain/mill victim or the lifegain/self-mill
+/// beneficiary), while aggregate axes route to the loop's controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundedResourceView {
+    pub player: PlayerId,
+    pub axis: ResourceAxis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanechaseView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_plane: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planar_controller: Option<PlayerId>,
+    pub planar_deck_count: usize,
+    pub current_roll_cost: ManaCost,
+    pub can_roll: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchenemyView {
+    pub archenemy: PlayerId,
+    pub scheme_deck_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_scheme_ids: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hero_player_ids: Vec<PlayerId>,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -186,6 +225,36 @@ pub struct DerivedViews {
     /// Empty (and omitted) in the dominant case where no player is afflicted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_status: Vec<PlayerStatusView>,
+
+    /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
+    /// spell, the portion of the locked cost still UNPAID by the pool units they
+    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
+    /// those pinned units. Lets the payment UI show the cost shrinking as the
+    /// player picks mana, and "covered" (`NoCost`) when their selection alone
+    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 901: Engine-authored Planechase presentation state. The frontend
+    /// renders this directly instead of deriving the active plane from command
+    /// zone objects or recomputing planar-die legality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planechase: Option<PlanechaseView>,
+
+    /// CR 904: Engine-authored Archenemy presentation state. The frontend
+    /// renders this directly instead of deriving active schemes from command
+    /// zone objects or recomputing side membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<ArchenemyView>,
+
+    /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
+    /// every unbounded-resource loop in `GameState::unbounded_resources`. The
+    /// engine decides both the axis identity and the player attribution
+    /// ([`attribution_player`]); the frontend only formats each axis to a display
+    /// family. Empty (and omitted) in the dominant case where no loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_resources: Vec<UnboundedResourceView>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -230,6 +299,70 @@ pub struct ClientGameState {
 /// unconditionally for every Commander-format game regardless of who is
 /// viewing. Partner commanders under the same controller each get their
 /// own `CommanderDamageView` entry, not a summed total.
+/// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
+/// during their own manual mana payment for a spell. Reduces the locked spell
+/// cost against a pool containing ONLY the pinned units (so the residual is
+/// exactly what the player has chosen to spend), under the same spend-restriction
+/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
+/// cast — activated-ability mana payment keeps its full-cost display, and
+/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+///
+/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
+/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
+/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
+/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
+/// This is deliberately consistent with the pin-eligibility gate
+/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
+/// reject such a pin — both layers agree on the stricter behavior, and the
+/// common cases (generic + plain colored costs) are exact. Threading the real
+/// permission bundle through both sites is the follow-up to lift this.
+fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{ManaPool, PaymentContext};
+
+    let WaitingFor::ManaPayment {
+        player,
+        convoke_mode,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    if *player != viewer || convoke_mode.is_some() {
+        return None;
+    }
+
+    let pending = state.pending_cast.as_ref()?;
+    // The mana portion the spend funnel reduces is `pending.cost` for both spells
+    // and activations; live-shrink is scoped to spell casts, where that cost is
+    // exactly what the payment panel displays (no activated-ability cost mismatch).
+    if pending.activation_ability_index.is_some() {
+        return None;
+    }
+    let cost = pending.cost.clone();
+
+    // Scratch pool of ONLY the pinned units = the player's current selection.
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let mut selected = ManaPool::default();
+    for unit in &player_obj.mana_pool.mana {
+        if pending.pinned_pool_units.contains(&unit.pip_id) {
+            selected.add(unit.clone());
+        }
+    }
+
+    // CR 106.6: reduce under the SAME spend-restriction context the finalize
+    // spend uses, so restricted mana the spell can't accept stays in the residual.
+    let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
+    let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    Some(crate::game::mana_payment::reduce_cost_by_pool(
+        &selected,
+        &cost,
+        ctx.as_ref(),
+        false,
+        None,
+    ))
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews::default();
 
@@ -288,11 +421,64 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
 
+    // CR 118.3a + CR 601.2g: viewer-scoped remaining cost after the caster's
+    // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
+    if let Some(viewer) = viewer {
+        views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+    }
+
+    if state.format_config.format == GameFormat::Planechase {
+        let roll_player = crate::game::turn_control::priority_seat(state);
+        let can_viewer_roll = viewer.is_some_and(|viewer| {
+            crate::game::turn_control::authorized_submitter_for_player(state, roll_player) == viewer
+                && crate::game::planechase::can_roll_planar_die(state, roll_player)
+        });
+        views.planechase = Some(PlanechaseView {
+            active_plane: crate::game::planechase::active_plane(state),
+            planar_controller: state.planar_controller,
+            planar_deck_count: state.planar_deck.len(),
+            current_roll_cost: crate::game::planechase::planar_die_roll_cost(state, roll_player),
+            can_roll: can_viewer_roll,
+        });
+    }
+
+    if state.format_config.format == GameFormat::Archenemy {
+        if let Some(archenemy) = crate::game::topology::archenemy(state) {
+            let hero_player_ids = state
+                .seat_order
+                .iter()
+                .copied()
+                .find(|&player| player != archenemy)
+                .map(|hero| crate::game::topology::team_members(state, hero))
+                .unwrap_or_default();
+            views.archenemy = Some(ArchenemyView {
+                archenemy,
+                scheme_deck_count: state.scheme_deck.len(),
+                active_scheme_ids: crate::game::archenemy::active_schemes(state),
+                hero_player_ids,
+            });
+        }
+    }
+
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
     // player-affecting conditions so the HUD can render status icons without
     // re-scanning static abilities. Runs in every format (not gated by the
     // Commander short-circuit below).
     views.player_status = player_status_views(state);
+
+    // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
+    // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
+    // short-circuit below) and stays empty (field omitted) when no loop is
+    // active — the dominant case. The engine owns attribution
+    // (`attribution_player`); the frontend only formats each axis to a family.
+    for (&controller, axes) in &state.unbounded_resources {
+        for &axis in axes {
+            views.unbounded_resources.push(UnboundedResourceView {
+                player: attribution_player(axis, controller),
+                axis,
+            });
+        }
+    }
 
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
@@ -315,6 +501,51 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
+/// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
+/// variant must make a deliberate attribution choice here, never silently inherit
+/// a default.
+///
+/// A payload-keyed axis names the player it acts on, so the badge follows the
+/// payload, NOT permanent control:
+/// - CR 704.5a: `Life(p)` — a drain drives an opponent's life down (the win
+///   condition is the afflicted player reaching 0 life) and lifegain raises the
+///   controller's own; either way the badge belongs on `p`'s HUD.
+/// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
+///   opponent-burn loop shows `∞` on the victim's HUD.
+/// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
+///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
+///
+/// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
+/// `controller` (the player generating the unbounded resource).
+//
+// CR 704.5c: a player with ten or more poison counters loses the game — so the
+// *afflicted* player owns the win condition, and a poison ∞ belongs on the VICTIM's
+// HUD. But `Counter(Poison, ObjectClass::Player)` is AGGREGATE-keyed in ResourceVector
+// (no victim PlayerId; loop_check.rs:239-246 reads the summed (Poison, Player) pair),
+// so it falls into the aggregate `=> controller` arm and is controller-attributed here.
+// This is correct ONLY because no live producer emits a poison axis in PR-6 (the mana
+// toggle is the sole producer). PR-7 MUST NOT wire a live poison loop until the analysis
+// poison axis is re-keyed by victim PlayerId, or ∞ would render on the wrong HUD.
+fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+    match axis {
+        ResourceAxis::Life(p) | ResourceAxis::DamageDealt(p) | ResourceAxis::LibraryDelta(p) => p,
+        ResourceAxis::Mana(_)
+        | ResourceAxis::Counter(_, _)
+        | ResourceAxis::Trigger(_)
+        | ResourceAxis::TokensCreated
+        | ResourceAxis::CardsDrawn
+        | ResourceAxis::Casts
+        | ResourceAxis::LandfallTriggers
+        | ResourceAxis::CombatPhases
+        | ResourceAxis::ExtraTurns
+        | ResourceAxis::DeathTriggers
+        | ResourceAxis::EtbTriggers
+        | ResourceAxis::LtbTriggers
+        | ResourceAxis::SacTriggers => controller,
+    }
 }
 
 /// Aggregate player-affecting conditions into render-ready rows.
@@ -381,12 +612,22 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             source,
             affected_players,
             activity,
-            ..
+            expiry,
         } = restriction
         else {
             // DamagePreventionDisabled has no per-player axis — see fn docs.
             continue;
         };
+        // CR 514.2 + CR 500.7: a `UntilEndOfNextTurnOf` prohibition (Kang's "during
+        // that [extra] turn, power-up abilities can't be activated") is created
+        // pre-armed and only takes force during the granted turn, after the untap
+        // step converts it to `EndOfTurn` (turns.rs). Suppress the HUD status badge
+        // while it is still dormant so this display seam agrees with the activation
+        // gate (`is_blocked_by_cant_activate_abilities`) — they share the expiry
+        // variant as the single source of truth.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            continue;
+        }
         let kind = match activity {
             ProhibitedActivity::CastSpells { .. } => PlayerConditionKind::CantCastSpells,
             ProhibitedActivity::ActivateAbilities { .. } => {
@@ -397,6 +638,10 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
                     allowed_zones: allowed_zones.clone(),
                 }
             }
+            // CR 508.1c: a "can't attack" prohibition is enforced only at the
+            // declare-attackers gate; it has no cast/activate HUD badge, so no
+            // player-status row is produced for it.
+            ProhibitedActivity::Attack { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {
@@ -443,9 +688,16 @@ fn restriction_affected_players(
                 None => Vec::new(),
             }
         }
-        RestrictionPlayerScope::TargetedPlayer | RestrictionPlayerScope::ParentTargetedPlayer => {
-            Vec::new()
-        }
+        // CR 109.5: `add_restriction` resolves the scoped player to
+        // `SpecificPlayer` when the restriction is created, so a stored
+        // restriction never carries an unresolved placeholder scope here.
+        RestrictionPlayerScope::TargetedPlayer
+        | RestrictionPlayerScope::ParentTargetedPlayer
+        | RestrictionPlayerScope::ScopedPlayer => Vec::new(),
+        // CR 508.5a: `add_restriction` resolves the defending player to
+        // `SpecificPlayer` when the restriction is created, so a stored
+        // restriction never carries an unresolved `DefendingPlayer` scope here.
+        RestrictionPlayerScope::DefendingPlayer => Vec::new(),
     }
 }
 
@@ -676,6 +928,7 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",
@@ -749,11 +1002,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
+    use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, ZoneChangeRecord,
+        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
 
@@ -843,6 +1100,57 @@ mod tests {
         assert_eq!(from_p1[0].commander, cmd_p1);
         assert_eq!(from_p2.len(), 1);
         assert_eq!(from_p2[0].damage, 11);
+    }
+
+    #[test]
+    fn planechase_can_roll_view_uses_controlled_priority_seat() {
+        let controller = PlayerId(0);
+        let controlled = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::planechase(), 2, 7);
+        state.active_player = controlled;
+        state.priority_player = controller;
+        state.turn_decision_controller = Some(controller);
+        state.waiting_for = WaitingFor::Priority { player: controlled };
+        state.phase = Phase::PreCombatMain;
+        state.planar_controller = Some(controlled);
+        state.planar_die_actions_this_turn.insert(controller, 2);
+
+        let plane = create_object(
+            &mut state,
+            CardId(9000),
+            controlled,
+            "Controlled Turn Plane".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&plane)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Plane);
+        state.command_zone.push_back(plane);
+
+        let controller_view = derive_views(&state, Some(controller))
+            .planechase
+            .expect("Planechase view should be present");
+        assert_eq!(
+            controller_view.current_roll_cost,
+            ManaCost::generic(0),
+            "roll cost must be derived from the controlled active seat, not the submitter"
+        );
+        assert!(
+            controller_view.can_roll,
+            "authorized turn controller should see the planar-die action"
+        );
+
+        let controlled_view = derive_views(&state, Some(controlled))
+            .planechase
+            .expect("Planechase view should be present");
+        assert!(
+            !controlled_view.can_roll,
+            "controlled seat is not the authorized human submitter during turn control"
+        );
     }
 
     /// Partner commanders (two commanders under the same controller) must
@@ -953,6 +1261,93 @@ mod tests {
         assert!(
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
+        );
+    }
+
+    /// SHAPE test (constructs `pending_cast`/pool directly, not via the cast
+    /// pipeline): `pending_payment_remaining` is the locked cost reduced by ONLY
+    /// the units the caster has pinned, so the payment UI's cost visibly shrinks
+    /// as mana is selected and reads covered (`NoCost`) once the selection alone
+    /// pays the whole cost. Also pins the viewer-scoping: an opponent never sees
+    /// the caster's in-progress private selection.
+    #[test]
+    fn pending_payment_remaining_reflects_pinned_selection() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{PendingCast, WaitingFor};
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let spell = create_object(&mut state, CardId(1), p0, "Test Spell".into(), Zone::Stack);
+
+        // Three colorless pool units, each stamped with a distinct pip id.
+        for _ in 0..3 {
+            state.add_mana_to_pool(
+                p0,
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            );
+        }
+        let pip_ids: Vec<_> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id)
+            .collect();
+
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".into(),
+                description: None,
+            },
+            vec![],
+            spell,
+            p0,
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            spell,
+            CardId(1),
+            ability,
+            ManaCost::generic(2),
+        )));
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: p0,
+            convoke_mode: None,
+        };
+
+        // No selection → the whole {2} still has to be paid.
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::generic(2)),
+        );
+
+        // Pin one unit → {1} remains.
+        state
+            .pending_cast
+            .as_mut()
+            .unwrap()
+            .pinned_pool_units
+            .push(pip_ids[0]);
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::generic(1)),
+        );
+
+        // Pin a second → the selection alone covers the cost (NoCost).
+        state
+            .pending_cast
+            .as_mut()
+            .unwrap()
+            .pinned_pool_units
+            .push(pip_ids[1]);
+        assert_eq!(
+            derive_views(&state, Some(p0)).pending_payment_remaining,
+            Some(ManaCost::NoCost),
+        );
+
+        // Viewer scoping: the opponent never sees the caster's private selection.
+        assert_eq!(
+            derive_views(&state, Some(PlayerId(1))).pending_payment_remaining,
+            None,
         );
     }
 
@@ -1067,6 +1462,10 @@ mod tests {
                 is_token: false,
                 combat_status: Default::default(),
                 co_departed: Vec::new(),
+                attached_to: None,
+                entered_incarnation: None,
+                turn_zone_change_index: 0,
+                is_suspected: false,
             }),
         };
         let ability = ResolvedAbility::new(
@@ -1250,6 +1649,7 @@ mod tests {
             expiry: RestrictionExpiry::EndOfTurn,
             activity: ProhibitedActivity::ActivateAbilities {
                 exemption: ActivationExemption::ManaAbilities,
+                only_tag: None,
             },
         });
         // CR 614.16: no per-player axis — must NOT produce a status row.
@@ -1417,6 +1817,240 @@ mod tests {
         assert!(
             none_views.web_slinging_costs.is_empty(),
             "derive_views(_, None) must not populate web-slinging costs"
+        );
+    }
+
+    /// PR-6 test 7: `attribution_player` is exhaustive and routes payload-keyed
+    /// axes both directions — a controller-self payload stays on the controller, a
+    /// victim payload routes to the named victim — while every aggregate axis stays
+    /// on the controller.
+    ///
+    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta => p` arm to
+    /// `=> controller` → the three victim assertions (`p1` expected) fail.
+    #[test]
+    fn attribution_player_routes_payload_axes_both_directions() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // Controller-self payload axes attribute to the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p0), p0), p0);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p0), p0), p0);
+
+        // Victim payload axes attribute to the NAMED victim, not the controller.
+        assert_eq!(attribution_player(ResourceAxis::Life(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::DamageDealt(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
+
+        // Aggregate axes (no victim PlayerId) attribute to the controller.
+        assert_eq!(
+            attribution_player(ResourceAxis::Mana(ManaType::Red), p0),
+            p0
+        );
+        assert_eq!(
+            attribution_player(
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+                p0
+            ),
+            p0
+        );
+        assert_eq!(
+            attribution_player(ResourceAxis::Trigger(TriggerKind::Proliferate), p0),
+            p0
+        );
+        assert_eq!(attribution_player(ResourceAxis::TokensCreated, p0), p0);
+    }
+
+    /// PR-6 test 1: a REAL opponent-burn certificate's axes project into victim-HUD
+    /// rows. The axis set is derived via the SAME authority `detect_loop` uses
+    /// (`ResourceVector::unbounded_axes_for`) from the delta a damage pinger loop
+    /// produces (positive damage to P1, P1's life driven negative), so it is the
+    /// genuine `{DamageDealt(P1), Life(P1)}` cert — both on the victim P1, never a
+    /// controller `Life(P0)`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_resources`
+    /// is empty → both `contains` assertions fail. Without the `mark_unbounded_loop`
+    /// call the projection is also empty.
+    #[test]
+    fn real_certificate_axes_project_to_victim_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+
+        // The delta an opponent-burn pinger loop pumps each cycle.
+        let mut delta = crate::analysis::ResourceVector::default();
+        delta.damage_dealt.insert(PlayerId(1), 1);
+        delta.life.insert(PlayerId(1), -1);
+        // Same single authority that fills LoopCertificate.unbounded (loop_check.rs).
+        let cert_axes = delta.unbounded_axes_for(PlayerId(0));
+        assert!(cert_axes.contains(&ResourceAxis::DamageDealt(PlayerId(1))));
+        assert!(cert_axes.contains(&ResourceAxis::Life(PlayerId(1))));
+        assert!(
+            !cert_axes.contains(&ResourceAxis::Life(PlayerId(0))),
+            "the controller has no Life axis — the drain is on the victim P1"
+        );
+
+        state.mark_unbounded_loop(PlayerId(0), &cert_axes);
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "opponent-burn ∞ damage must land on the victim P1's HUD"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "opponent-drain ∞ life must land on the victim P1's HUD"
+        );
+    }
+
+    /// PR-6 test 9 (hostile e2e): a hand-built `{DamageDealt(P1), Life(P1)}` cert
+    /// where the VICTIM P1 ALSO controls a permanent. Attribution must follow the
+    /// axis payload PlayerId, NOT permanent control — both rows land on P1's HUD,
+    /// none on the loop controller P0.
+    ///
+    /// REVERT-PROBE: make `attribution_player` return `controller` for
+    /// `DamageDealt`/`Life` → both rows move to P0 → the P1 assertions fail and the
+    /// "no controller rows" assertion fails.
+    #[test]
+    fn attribution_hostile_victim_controls_permanent() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // Hostile element: the victim P1 controls a battlefield permanent. If
+        // attribution keyed off permanent control rather than the axis payload, the
+        // routing could be fooled — it must not be.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Victim's Permanent".into(),
+            Zone::Battlefield,
+        );
+
+        // P0 is the loop controller; the cert names P1 (victim) on both axes.
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::DamageDealt(PlayerId(1)),
+                ResourceAxis::Life(PlayerId(1)),
+            ],
+        );
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::DamageDealt(PlayerId(1)),
+            }),
+            "damage ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(1),
+                axis: ResourceAxis::Life(PlayerId(1)),
+            }),
+            "drain ∞ belongs to the victim P1, not the controller"
+        );
+        assert!(
+            !views
+                .unbounded_resources
+                .iter()
+                .any(|v| v.player == PlayerId(0)),
+            "no ∞ row may attribute to the controller P0 for victim-keyed axes"
+        );
+    }
+
+    /// PR-6 test 3 (projection half): a NON-mana unbounded axis still projects an
+    /// `∞` row attributed to its controller; the empty map yields no rows (field
+    /// omitted). The mana-vs-non-mana refill gating half lives in
+    /// `mana_payment::refill_infinite_mana_gated_on_mana_axis_only`.
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → the `TokensCreated`
+    /// row is absent → the `contains` assertion fails.
+    #[test]
+    fn non_mana_axis_projects_to_controller_hud() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_resources.contains(&UnboundedResourceView {
+                player: PlayerId(0),
+                axis: ResourceAxis::TokensCreated,
+            }),
+            "a non-mana unbounded axis must still project an ∞ row on its controller"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_resources.is_empty(),
+            "no unbounded loop → no ∞ rows (field omitted)"
+        );
+    }
+
+    /// PR-6 tests 4+5 (serde wire shape + round-trip): the `unbounded_resources`
+    /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
+    /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
+    /// (unit → bare string, single-data → `{"Mana":"Red"}`, PlayerId transparent
+    /// `{"Life":1}`, tuple → `{"Counter":["Poison","Player"]}`), and the empty case
+    /// omits the key. Exercises the `Serialize`/`Deserialize` derives added to
+    /// `ResourceAxis`/`CounterClass`/`ObjectClass`/`TriggerKind`.
+    ///
+    /// REVERT-PROBE: remove `Deserialize` from `ResourceAxis` → this test fails to
+    /// compile (the wire round-trip can no longer deserialize the axis rows).
+    #[test]
+    fn unbounded_resources_round_trip_through_wire() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Red),
+                ResourceAxis::Life(PlayerId(1)),
+                ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player),
+                ResourceAxis::Trigger(TriggerKind::Proliferate),
+                ResourceAxis::TokensCreated,
+            ],
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        // The externally-tagged wire shapes the hand-maintained TS union mirrors.
+        assert!(json.contains(r#"{"Mana":"Red"}"#), "single-data axis shape");
+        assert!(json.contains(r#"{"Life":1}"#), "PlayerId transparent shape");
+        assert!(
+            json.contains(r#"{"Counter":["Poison","Player"]}"#),
+            "tuple axis shape"
+        );
+        assert!(
+            json.contains(r#""TokensCreated""#),
+            "unit axis bare-string shape"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        let rows = &round.derived.unbounded_resources;
+        assert_eq!(rows.len(), 5, "all five axis rows survive the round-trip");
+        // Aggregate poison axis attributes to the controller P0 (see attribution_player).
+        assert!(rows.iter().any(|r| r.player == PlayerId(0)
+            && r.axis == ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player)));
+        // Victim-keyed life axis attributes to P1.
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Life(PlayerId(1))));
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_resources"),
+            "empty unbounded resources must omit the wire key"
         );
     }
 }

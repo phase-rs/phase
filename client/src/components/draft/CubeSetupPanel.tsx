@@ -5,10 +5,10 @@
  * (DraftPodPage) flows can mount it.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 
 import type { CubeDraftSettings } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -79,7 +79,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       setCubeText(await fetchCubeList(cubeUrl));
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("cubeSetup.fetchError"));
+      setError(errorMessage(err, t("cubeSetup.fetchError")));
     } finally {
       setLoading(false);
     }
@@ -91,7 +91,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       await onStart({ cubeName, cubeListText: cubeText, settings });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("cubeSetup.startError"));
+      setError(errorMessage(err, t("cubeSetup.startError")));
     } finally {
       setLoading(false);
     }
@@ -100,8 +100,20 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
   const busy = loading || disabled === true;
   const canStart = cubeText.trim().length > 0 && !busy;
 
+  const addablesPolicyItems = useMemo(
+    () => [
+      { value: "StandardBasics", label: t("cubeSetup.addablesStandardBasics") },
+      { value: "StandardBasicsPlusCustom", label: t("cubeSetup.addablesBasicsPlusCustom") },
+      { value: "CustomOnly", label: t("cubeSetup.addablesCustomOnly") },
+    ],
+    [t],
+  );
+  const selectedAddablesLabel =
+    addablesPolicyItems.find((item) => item.value === settings.addable_cards.policy)?.label ??
+    t("cubeSetup.addablesStandardBasics");
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_220px]">
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.cubeName")}</span>
@@ -138,27 +150,28 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
       </div>
 
       <div className="grid gap-3 md:grid-cols-[260px_1fr]">
-        <label className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.deckAddables")}</span>
-          <SelectField
-            wrapperClassName="w-full"
-            value={settings.addable_cards.policy}
-            onChange={(e) =>
+          <MenuSelect
+            ariaLabel={t("cubeSetup.deckAddables")}
+            label={selectedAddablesLabel}
+            selectedValue={settings.addable_cards.policy}
+            items={addablesPolicyItems}
+            onSelect={(value) =>
               setSettings((prev) => ({
                 ...prev,
                 addable_cards: {
                   ...prev.addable_cards,
-                  policy: e.target.value as CubeDraftSettings["addable_cards"]["policy"],
+                  policy: value as CubeDraftSettings["addable_cards"]["policy"],
                 },
               }))
             }
-            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
-          >
-            <option value="StandardBasics">{t("cubeSetup.addablesStandardBasics")}</option>
-            <option value="StandardBasicsPlusCustom">{t("cubeSetup.addablesBasicsPlusCustom")}</option>
-            <option value="CustomOnly">{t("cubeSetup.addablesCustomOnly")}</option>
-          </SelectField>
-        </label>
+            menuLayout="dropdown"
+            fitContainer
+            wrapperClassName="w-full min-w-0"
+            className="min-h-[44px] rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50 sm:min-h-0"
+          />
+        </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.customAddableCards")}</span>
           <textarea
@@ -192,6 +205,20 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
       </div>
     </div>
   );
+}
+
+/**
+ * Surface the real failure text from a thrown value. WASM (wasm-bindgen) throws
+ * its `Err(JsValue)` payloads as raw strings, which are NOT `Error` instances —
+ * so a bare `err instanceof Error` check would discard the actual reason (e.g.
+ * "Failed to resolve cube cards: [...]") and show only a generic fallback. Match
+ * the repo-wide `String(err)` convention, keeping the localized fallback solely
+ * for genuinely empty/non-string throws.
+ */
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string" && err.trim().length > 0) return err;
+  return fallback;
 }
 
 function NumberField({

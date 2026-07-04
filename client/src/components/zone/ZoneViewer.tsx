@@ -15,10 +15,16 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import {
   getPlayerZoneIds,
   getWaitingForObjectChoiceIds,
+  isFaceDownExileCardVisibleToViewer,
   isLibraryCardRevealedToViewer,
 } from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
+import {
+  collectObjectActions,
+  isManaObjectAction,
+  playOrCastActionsForObject,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile" | "library";
@@ -84,6 +90,13 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   }, [objects, zoneIds, zone, gameState, viewerId, playerId]);
 
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
+
+  const canDelveFromGraveyard =
+    zone === "graveyard"
+    && playerId === viewerId
+    && canActForWaitingState
+    && waitingFor?.type === "ManaPayment"
+    && waitingFor.data.convoke_mode === "Delve";
 
   const currentLegalTargets = useMemo(() => {
     const targets = new Set<number>();
@@ -155,14 +168,41 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               const castActions = hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
+              const delveActions = canDelveFromGraveyard
+                ? collectObjectActions(legalActionsByObject, obj.id).filter((action) =>
+                    isManaObjectAction(action, obj),
+                  )
+                : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
+              // CR 406.3 + CR 702.75a + CR 702.143e: a face-down card sitting
+              // in the shared exile pile (Hideaway, Foretell) carries its real
+              // name/printed_ref in the raw single-player state regardless of
+              // viewer — `isFaceDownExileCardVisibleToViewer` is the client
+              // half of the engine's look-permission gate, so an opponent's
+              // hidden exile renders as a face-down placeholder instead of
+              // leaking its identity.
+              const isHiddenFromViewer =
+                zone === "exile" && obj.face_down && !isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
               return (
                 <ZoneCard
                   key={obj.id}
                   obj={obj}
                   isValidTarget={isValidTarget}
                   canCast={castActions.length > 0}
-                  castTitle={t("zone.castFromZone", { zone: zoneLabel, name: obj.name })}
+                  castTitle={t("zone.castFromZone", {
+                    zone: zoneLabel,
+                    name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
+                  })}
+                  hiddenFromViewer={isHiddenFromViewer}
+                  canDelve={delveActions.length > 0}
+                  onDelve={() => {
+                    const auto = resolveSingleActionDispatch(delveActions, obj);
+                    if (auto) {
+                      dispatchAction(auto);
+                    } else {
+                      setPendingAbilityChoice({ objectId: obj.id, actions: delveActions });
+                    }
+                  }}
                   onTarget={() => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })}
                   onCast={() => handleCast(obj, castActions)}
                 />
@@ -179,16 +219,22 @@ function ZoneCard({
   obj,
   isValidTarget,
   canCast,
+  canDelve,
   castTitle,
+  hiddenFromViewer,
   onTarget,
   onCast,
+  onDelve,
 }: {
   obj: GameObject;
   isValidTarget: boolean;
   canCast: boolean;
+  canDelve: boolean;
   castTitle: string;
+  hiddenFromViewer: boolean;
   onTarget: () => void;
   onCast: () => void;
+  onDelve: () => void;
 }) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -208,14 +254,17 @@ function ZoneCard({
       return;
     }
     if (isValidTarget) { onTarget(); return; }
+    if (canDelve) { onDelve(); return; }
     if (canCast) onCast();
-  }, [obj.id, isValidTarget, canCast, onTarget, onCast, longPressFired]);
+  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast, longPressFired]);
 
   return (
     <div
       className={`group relative inline-flex shrink-0 cursor-pointer rounded-lg transition-transform ${
         isValidTarget
           ? CASTABLE_AFFORDANCE_ACTIVE
+          : canDelve
+            ? "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]"
           : canCast
             ? "hover:scale-[1.03]"
             : "hover:ring-1 hover:ring-white/20"
@@ -230,8 +279,13 @@ function ZoneCard({
           DFC / transformed / back-face cards (e.g. a transformed planeswalker),
           which then falls back to the broken-image div. In the zone strip that
           fallback is sized up to ~560px, so a failed image rendered "huge" with
-          text instead of art. */}
-      <CardImage {...objectImageProps(obj)} size="normal" />
+          text instead of art. `faceDown` overrides all of that with the shared
+          card-back placeholder (CardImage.tsx) whenever this viewer has no
+          look-permission on a face-down exile (see `hiddenFromViewer` above) —
+          it must NOT be the raw `obj.face_down`, which is also true for the
+          legitimate Hideaway/Foretell controller who the engine intends to
+          let see the real card. */}
+      <CardImage {...objectImageProps(obj)} size="normal" faceDown={hiddenFromViewer} />
       {canCast && !isValidTarget && (
         <>
           {/* Arena-style purple "playable" affordance — same treatment as the

@@ -2,11 +2,13 @@ import { createContext, useContext } from "react";
 
 interface BoardInteractionState {
   activatableObjectIds: Set<number>;
+  boardChoiceObjectIds: Set<number>;
   committedAttackerIds: Set<number>;
   /** Per-permanent count of attackers targeting it (Planeswalker / Battle
    *  attack targets). Computed once in GameBoard; each card reads O(1). */
   incomingAttackerCounts: ReadonlyMap<number, number>;
   manaTappableObjectIds: Set<number>;
+  selectableSacrificeObjectIds: Set<number>;
   selectableManaCostCreatureIds: Set<number>;
   undoableTapObjectIds: Set<number>;
   validAttackerIds: Set<number>;
@@ -18,9 +20,11 @@ const EMPTY_MAP: ReadonlyMap<number, number> = new Map();
 
 const EMPTY_STATE: BoardInteractionState = {
   activatableObjectIds: EMPTY_SET,
+  boardChoiceObjectIds: EMPTY_SET,
   committedAttackerIds: EMPTY_SET,
   incomingAttackerCounts: EMPTY_MAP,
   manaTappableObjectIds: EMPTY_SET,
+  selectableSacrificeObjectIds: EMPTY_SET,
   selectableManaCostCreatureIds: EMPTY_SET,
   undoableTapObjectIds: EMPTY_SET,
   validAttackerIds: EMPTY_SET,

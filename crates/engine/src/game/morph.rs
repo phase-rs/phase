@@ -179,6 +179,29 @@ pub fn play_face_down(
     }
 }
 
+/// CR 116.2b + CR 708.7: True when an active `CantBeTurnedFaceUp` static
+/// prohibits turning `object_id` face up. Each such static's affected filter is
+/// resolved from its source controller, so Karlov Watchdog's "permanents your
+/// opponents control" (`controller: Opponent`) scopes to the watchdog
+/// controller's opponents. The timing window ("during your turn") rides on the
+/// static's `condition`, already applied by `battlefield_active_statics`.
+pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id: ObjectId) -> bool {
+    use crate::types::statics::StaticMode;
+    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if !matches!(def.mode, StaticMode::CantBeTurnedFaceUp) {
+            continue;
+        }
+        let Some(filter) = def.affected.as_ref() else {
+            continue;
+        };
+        let ctx = super::filter::FilterContext::from_source(state, source.id);
+        if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
 ///
 /// Validates that the player controls the permanent and that it has morph/disguise
@@ -213,6 +236,18 @@ pub fn turn_face_up(
         ));
     }
 
+    // CR 116.2b + CR 708.7: a `CantBeTurnedFaceUp` static prohibits turning the
+    // matched permanents face up (Karlov Watchdog: "Permanents your opponents
+    // control can't be turned face up during your turn"). The static's timing
+    // window rides on its `condition` (already gated by `battlefield_active_statics`)
+    // and the affected permanents on its `affected` filter, resolved from the
+    // static's source controller.
+    if is_blocked_by_cant_be_turned_face_up(state, object_id) {
+        return Err(EngineError::InvalidAction(
+            "This permanent can't be turned face up right now".to_string(),
+        ));
+    }
+
     let back_face = obj
         .back_face
         .clone()
@@ -241,13 +276,35 @@ pub fn turn_face_up(
         ));
     }
 
+    // CR 613.7f: a permanent receives a new timestamp when it turns face up.
+    // (Turning face DOWN in place is unreachable in the engine today — only
+    // archenemy scheme `turn_face_down` exists, which is not a permanent event —
+    // so stamping the turn-face-up path covers the reachable case.) All error
+    // early-returns above precede this, so a blocked turn-up draws no timestamp.
+    // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
+    let ts = state.next_timestamp();
+
     // Restore original characteristics
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.face_down = false;
     apply_back_face_to_object(obj, back_face);
     obj.back_face = None;
+    // Written after `apply_back_face_to_object` so the back-face application
+    // (which does not touch `timestamp`) cannot clobber the new stamp.
+    obj.timestamp = ts;
 
     crate::game::layers::mark_layers_full(state);
+
+    // CR 614.1e + CR 708.11: now that the permanent is face up
+    // (carrying its real abilities), apply any "As ~ is turned face up, [effect]"
+    // replacement effects as part of turning it up. The turn-up is not prevented
+    // — the applier returns the event unchanged and performs its actions (e.g.
+    // Hooded Hydra's +1/+1 counters) bound to this permanent.
+    let proposed = crate::types::proposed_event::ProposedEvent::TurnFaceUp {
+        object_id,
+        applied: std::collections::HashSet::new(),
+    };
+    let _ = crate::game::replacement::replace_event(state, proposed, events);
 
     events.push(GameEvent::TurnedFaceUp { object_id });
 
@@ -598,6 +655,236 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    /// F1: turning a permanent face up issues a new timestamp (CR 613.7f). The
+    /// error early-returns (wrong controller / not face down / off battlefield)
+    /// all precede the write, so a rejected turn-up draws no timestamp.
+    /// Reverting Step 3 leaves the timestamp unchanged across the successful
+    /// turn-up, so the strict-increase assert fails.
+    #[test]
+    fn turn_face_up_bumps_timestamp_only_on_success() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        let ts_before = state.objects[&id].timestamp;
+
+        // Wrong controller: error before the write -> no timestamp drawn.
+        assert!(turn_face_up(&mut state, PlayerId(1), id, &mut events).is_err());
+        assert_eq!(
+            state.objects[&id].timestamp, ts_before,
+            "a rejected turn-up (wrong controller) must not draw a timestamp"
+        );
+
+        // Successful turn-up: new timestamp (CR 613.7f).
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert!(
+            state.objects[&id].timestamp > ts_before,
+            "turning face up must issue a new timestamp (CR 613.7f)"
+        );
+
+        // Already face up: not-face-down error before the write -> no further bump.
+        let ts_after = state.objects[&id].timestamp;
+        assert!(turn_face_up(&mut state, player, id, &mut events).is_err());
+        assert_eq!(state.objects[&id].timestamp, ts_after);
+    }
+
+    /// CR 116.2b + CR 708.7: Karlov Watchdog — "Permanents your opponents
+    /// control can't be turned face up during your turn." A `CantBeTurnedFaceUp`
+    /// static controlled by P0 blocks P1 from turning their own face-down
+    /// creature up while it is P0's turn (the prohibition's `DuringYourTurn`
+    /// condition), but permits it on P1's own turn. Discriminating: the assert
+    /// `is_err()` on P0's turn flips to a successful turn-up if the prohibition
+    /// check in `turn_face_up` is removed.
+    #[test]
+    fn karlov_watchdog_blocks_opponent_turn_face_up_during_your_turn() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let watchdog_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // P1 controls a face-down morph creature.
+        let face_down = setup_morph_creature(&mut state, opponent);
+        let mut events = Vec::new();
+        play_face_down(&mut state, opponent, face_down, &mut events).unwrap();
+        assert!(state.objects[&face_down].face_down);
+
+        // P0 controls a Karlov-Watchdog-class permanent: "Permanents your
+        // opponents control can't be turned face up during your turn."
+        let watchdog = create_object(
+            &mut state,
+            CardId(0x4A12),
+            watchdog_controller,
+            "Karlov Watchdog".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watchdog).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeTurnedFaceUp)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .controller(ControllerRef::Opponent)
+                            .properties(vec![FilterProp::FaceDown]),
+                    ))
+                    .condition(crate::types::ability::StaticCondition::DuringYourTurn),
+            );
+        }
+
+        // On P0's turn, the opponent's face-down permanent can't be turned up.
+        state.active_player = watchdog_controller;
+        let blocked = turn_face_up(&mut state, opponent, face_down, &mut events);
+        assert!(
+            blocked.is_err(),
+            "during the watchdog controller's turn, the opponent must not be \
+             able to turn their face-down creature up"
+        );
+        assert!(
+            state.objects[&face_down].face_down,
+            "the face-down creature must remain face down while prohibited"
+        );
+
+        // On the opponent's own turn, the prohibition's DuringYourTurn condition
+        // (bound to the watchdog controller) no longer holds, so the turn-up is
+        // permitted.
+        state.active_player = opponent;
+        turn_face_up(&mut state, opponent, face_down, &mut events)
+            .expect("the opponent may turn their creature up on their own turn");
+        assert!(!state.objects[&face_down].face_down);
+    }
+
+    #[test]
+    fn turn_face_up_applies_as_turned_face_up_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // CR 614.1e + CR 708.11: give the real face a Hooded-Hydra-style
+        // "As ~ is turned face up, put five +1/+1 counters on it." replacement.
+        {
+            let def = crate::parser::oracle_replacement::parse_replacement_line(
+                "As this creature is turned face up, put five +1/+1 counters on it.",
+                "Secret Creature",
+            )
+            .expect("turn-face-up replacement should parse");
+            assert_eq!(def.event, crate::types::ReplacementEvent::TurnFaceUp);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        // The replacement applied AS the permanent was turned face up — it gains
+        // five +1/+1 counters (and there is no stack trigger / response window).
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            5,
+            "the As-turned-face-up replacement must put five +1/+1 counters on it"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_self_resolving_chain_applies_each_step_once() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+
+        // A two-step self-resolving "As ~ is turned face up" replacement: put two
+        // +1/+1 counters on it, then put one more on it (both steps `SelfRef`).
+        // `resolve_ability_chain` follows the typed `sub_ability` chain itself, so
+        // each step must run EXACTLY once — total 3 counters, not 4 from a
+        // double-resolved second step.
+        {
+            let inner = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            let mut outer = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            outer.sub_ability = Some(Box::new(inner));
+            let def = crate::types::ability::ReplacementDefinition::new(
+                crate::types::ReplacementEvent::TurnFaceUp,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .execute(outer);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "each self-resolving step must apply exactly once (2 + 1), not double the sub-ability"
+        );
+    }
+
+    #[test]
+    fn turn_face_up_gaps_attach_to_external_target() {
+        // CR 708.11: Gift of Doom's "As ~ is turned face up, you may attach it to
+        // a creature" needs an external host *choice* made during the turn-up,
+        // which the replacement-apply path does not model. It is gapped honestly
+        // (no TurnFaceUp replacement is produced) rather than silently attaching
+        // the Aura to the wrong object — only the self-resolving counter class is
+        // modeled here.
+        let attach = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this permanent is turned face up, you may attach it to a creature.",
+            "Secret Creature",
+        );
+        assert!(
+            !attach
+                .as_ref()
+                .is_some_and(|d| d.event == crate::types::ReplacementEvent::TurnFaceUp),
+            "attach-to-an-external-creature turn-face-up must not be modeled as a \
+             TurnFaceUp replacement (needs a turn-up-time choice)"
+        );
+
+        // The self-resolving counter class IS modeled.
+        let counters = crate::parser::oracle_replacement::parse_replacement_line(
+            "As this creature is turned face up, put five +1/+1 counters on it.",
+            "Secret Creature",
+        )
+        .expect("self-counter turn-face-up replacement should parse");
+        assert_eq!(counters.event, crate::types::ReplacementEvent::TurnFaceUp);
     }
 
     #[test]

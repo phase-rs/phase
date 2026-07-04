@@ -3,10 +3,11 @@ import { motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { WaitingFor } from "../../adapter/types.ts";
+import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
@@ -58,10 +59,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
 // cost kinds surface a modal in `CardChoiceModal` and must stay host-wrapped.
 export function isClickThroughWaitingFor(
   waitingFor: WaitingFor | null | undefined,
+  objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
-  return waitingFor.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
+  return getBoardChoiceView(waitingFor, objects) != null;
 }
 
 function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean {
@@ -69,24 +71,29 @@ function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean 
   return !NON_DIALOG_WAITING_FOR_TYPES.has(waitingFor.type);
 }
 
-function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolean {
+function isClickThroughDialog(
+  waitingFor: WaitingFor | null | undefined,
+  objects?: Record<ObjectId, GameObject | undefined>,
+): boolean {
   if (!waitingFor) return false;
-  if (isClickThroughWaitingFor(waitingFor)) return true;
-  // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
-  // these tap-payment modes let the caster tap creatures/artifacts on the
-  // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel
-  // is open. The host still anchors the panel at `fixed inset-0 z-40` (so it
-  // can't be trapped beneath the board), but click-through marks it
-  // `pointer-events: none` so those board taps reach the cards — the panel's
-  // own controls re-enable events. Plain/hybrid/Phyrexian payment needs no
-  // board interaction (the panel's Pay button passes priority), so it keeps
-  // pointer events — `convoke_mode` is the engine's signal that board taps are
-  // live.
-  return waitingFor.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
+  if (isClickThroughWaitingFor(waitingFor, objects)) return true;
+  // Any `ManaPayment` panel is click-through. The host still anchors the panel
+  // at `fixed inset-0 z-40` (so it can't be trapped beneath the board), but
+  // click-through marks it `pointer-events: none` so board taps reach the
+  // battlefield — the panel's own controls re-enable events.
+  //
+  // Manual payment of plain/hybrid mana DOES need board interaction: the player
+  // taps their own lands and clicks mana-pool pips behind the panel to pay. (In
+  // auto mode an unambiguous cast finalizes before any panel is shown, so a
+  // `ManaPayment` WaitingFor only ever reaches the UI when board taps are live.)
+  // Convoke/improvise (CR 702.51a / CR 702.126a), which additionally tap
+  // creatures/artifacts, are a subset of this same click-through behavior.
+  return waitingFor.type === "ManaPayment";
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
   // Only treat a `WaitingFor` as a host-anchored dialog when the local
   // player can actually act on it. Otherwise (opponent searching their
   // library, scrying, etc.) the engine's WaitingFor is on the opponent and
@@ -124,7 +131,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // `pointer-events: none`, so its buttons are dead and clicks fall through to the
   // board/hand behind it. While such a modal is up the player interacts with it,
   // not the board, so suppress click-through to restore pointer events.
-  const clickThrough = isClickThroughDialog(waitingFor) && !hasUiDialog;
+  const clickThrough = isClickThroughDialog(waitingFor, objects) && !hasUiDialog;
   // BASE INVARIANT: every visible prompt is anchored in this viewport-level
   // `fixed inset-0 z-40` stacking context, so no prompt can ever be trapped
   // beneath the board. The board grid is its own `relative z-10` stacking
@@ -136,15 +143,15 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // Click-through is achieved with `pointer-events: none` (below), NOT by
   // un-anchoring, so board taps still reach the battlefield.
   const anchored = dialogVisible;
-  // The convoke/improvise payment panel is bottom-anchored and can overlap the
-  // very creatures the player must tap to pay. Unlike the translucent full-screen
-  // target overlays, it benefits from the peek/slide affordance so the player can
-  // collapse it off an overlapped creature — so it stays peekable even while
-  // click-through. Other click-through overlays (target picking) are translucent
-  // and full-screen, so they stay put and pass taps straight through.
-  const isConvokePayment =
-    waitingFor?.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
-  const peekable = anchored && (!clickThrough || isConvokePayment);
+  // Any mana-payment panel is bottom-anchored and can overlap the very lands /
+  // creatures the player must tap to pay (manual mana, convoke, improvise). Unlike
+  // the translucent full-screen target overlays, it benefits from the peek/slide
+  // affordance so the player can collapse it off an overlapped permanent — so it
+  // stays peekable even while click-through. Other click-through overlays (target
+  // picking) are translucent and full-screen, so they stay put and pass taps
+  // straight through.
+  const isManaPayment = waitingFor?.type === "ManaPayment";
+  const peekable = anchored && (!clickThrough || isManaPayment);
   const showPeekTab = peeked && peekable;
 
   const ctxValue = useMemo<DialogPeekContext>(
@@ -221,7 +228,7 @@ export function PeekRestoreTab({
   const positionClass =
     direction === "right"
       ? "right-3 top-1/2 -translate-y-1/2 h-24 w-9 rounded-2xl"
-      : "bottom-3 left-1/2 -translate-x-1/2 h-9 w-24 rounded-2xl";
+      : "left-3 top-[63%] -translate-y-1/2 h-9 w-9 rounded-2xl";
 
   const iconRotate = direction === "right" ? "rotate-180" : "-rotate-90";
 

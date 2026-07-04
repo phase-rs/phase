@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
-    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
+    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
+    TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -11,12 +11,39 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::identifiers::ObjectId;
+
+/// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
+/// consulted by activation restrictions. A false gate is a sound skip because
+/// it is computed from currently-functioning statics; a true gate falls through
+/// to the exact per-ability scan so semantics stay unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationRestrictionStaticGates {
+    has_modify_activation_limit: bool,
+    has_activate_as_instant: bool,
+}
+
+impl ActivationRestrictionStaticGates {
+    pub fn compute(state: &crate::types::game_state::GameState) -> Self {
+        crate::game::perf_counters::record_restriction_static_mode_gate_scan();
+        // Read the two discriminants from the O(1) `StaticModePresence` index (Unit 1)
+        // instead of sweeping `game_functioning_statics`. A post-flush-precise superset:
+        // a spurious `true` falls through to the exact per-ability `check_static_ability`.
+        ActivationRestrictionStaticGates {
+            has_modify_activation_limit: static_kind_present(
+                state,
+                StaticModeKind::ModifyActivationLimit,
+            ),
+            has_activate_as_instant: static_kind_present(state, StaticModeKind::ActivateAsInstant),
+        }
+    }
+}
 
 /// CR 601.3: A player can begin to cast a spell only if a rule or effect allows that player
 /// to cast it and no rule or effect prohibits that player from casting it.
@@ -135,8 +162,14 @@ pub fn flash_timing_cost(
 
 pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
     match (base, extra) {
-        (ManaCost::NoCost, other) | (ManaCost::SelfManaCost, other) => other.clone(),
-        (other, ManaCost::NoCost) | (other, ManaCost::SelfManaCost) => other.clone(),
+        (ManaCost::NoCost, other)
+        | (ManaCost::SelfManaCost, other)
+        | (ManaCost::SelfManaValue, other)
+        | (ManaCost::SelfManaCostReduced { .. }, other) => other.clone(),
+        (other, ManaCost::NoCost)
+        | (other, ManaCost::SelfManaCost)
+        | (other, ManaCost::SelfManaValue)
+        | (other, ManaCost::SelfManaCostReduced { .. }) => other.clone(),
         (
             ManaCost::Cost {
                 shards: base_shards,
@@ -337,6 +370,10 @@ pub fn record_battlefield_entry(
         subtypes: obj.card_types.subtypes.clone(),
         supertypes: obj.card_types.supertypes.clone(),
         colors: obj.color.clone(),
+        // CR 403.3: snapshot the object's keywords at entry time. This is the
+        // printed/base + counter-granted keyword set (pre-layer; see the field doc
+        // on BattlefieldEntryRecord.keywords for the documented Layer-6 limitation).
+        keywords: obj.keywords.clone(),
         controller: obj.controller,
     };
     state.battlefield_entries_this_turn.push(record);
@@ -382,6 +419,8 @@ fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &Type
         TypeFilter::AnyOf(filters) => filters
             .iter()
             .any(|inner| entry_type_filter_matches(record, inner)),
+        // CR 308.1: Kindred type check.
+        TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
         _ => false,
     }
 }
@@ -390,10 +429,15 @@ fn entry_color_matches(record: &BattlefieldEntryRecord, color: &ManaColor) -> bo
     record.colors.iter().any(|entry_color| entry_color == color)
 }
 
-fn battlefield_entry_matches_filter(
+pub(crate) fn battlefield_entry_matches_filter(
     record: &BattlefieldEntryRecord,
     filter: &TargetFilter,
     player: PlayerId,
+    // CR 109.1: the ability source for the "another" exclusion. `None` on the
+    // player-attribute count paths that carry no ability source — there
+    // `FilterProp::Another` excludes nothing it could match (stays `false`),
+    // preserving the prior `_ => false` behavior.
+    source_id: Option<ObjectId>,
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -413,6 +457,17 @@ fn battlefield_entry_matches_filter(
             typed.properties.iter().all(|prop| match prop {
                 FilterProp::HasColor { color } => entry_color_matches(record, color),
                 FilterProp::InZone { zone } => *zone == Zone::Battlefield,
+                // CR 702.9b: keyword presence is read from the entry-time snapshot
+                // (record.keywords) — "a creature with flying entered this turn".
+                // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
+                FilterProp::WithKeyword { value } => record.keywords.contains(value),
+                // CR 109.1: "another [type]" is a same-object identity check —
+                // excludes the ability's own source object (e.g. Flying Drone's
+                // "another creature with flying entered this turn"). Mirrors the
+                // existing record-based Another check in game/filter.rs. With no
+                // source context the predicate cannot exclude self, so it stays
+                // false (the prior behavior for this prop on these paths).
+                FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
                 _ => false,
             })
         }
@@ -421,17 +476,22 @@ fn battlefield_entry_matches_filter(
 }
 
 /// CR 400.7: Record a zone-change snapshot for data-driven condition queries.
+/// Returns the per-turn zone-change index assigned to this record.
 pub fn record_zone_change(
     state: &mut crate::types::game_state::GameState,
-    record: crate::types::game_state::ZoneChangeRecord,
-) {
+    mut record: crate::types::game_state::ZoneChangeRecord,
+) -> usize {
     let object_id = record.object_id;
     let to_zone = record.to_zone;
+    let turn_zone_change_index = state.zone_changes_this_turn.len();
+    record.turn_zone_change_index = turn_zone_change_index;
     state.zone_changes_this_turn.push(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
     }
+
+    turn_zone_change_index
 }
 
 /// CR 601.3: Verify casting restrictions are satisfied before allowing a spell to be cast.
@@ -460,8 +520,34 @@ pub fn check_activation_restrictions(
     ability_index: usize,
     restrictions: &[ActivationRestriction],
 ) -> Result<(), EngineError> {
+    let gates = ActivationRestrictionStaticGates::compute(state);
+    check_activation_restrictions_with_static_gates(
+        state,
+        player,
+        source_id,
+        ability_index,
+        restrictions,
+        &gates,
+    )
+}
+
+pub fn check_activation_restrictions_with_static_gates(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restrictions: &[ActivationRestriction],
+    gates: &ActivationRestrictionStaticGates,
+) -> Result<(), EngineError> {
     for restriction in restrictions {
-        if !activation_restriction_applies(state, player, source_id, ability_index, restriction) {
+        if !activation_restriction_applies(
+            state,
+            player,
+            source_id,
+            ability_index,
+            restriction,
+            gates,
+        ) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Activation restriction not satisfied: {restriction:?}"
             )));
@@ -540,6 +626,9 @@ fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap | AbilityCost::Untap => true,
         AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap_or_untap),
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty() && costs.iter().all(cost_contains_tap_or_untap)
+        }
         _ => false,
     }
 }
@@ -564,6 +653,7 @@ fn effective_activation_limit(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
 ) -> u32 {
     // Check if the ability at this index has a keyword tag
     let ability_tag = state
@@ -574,21 +664,27 @@ fn effective_activation_limit(
     let Some(tag) = ability_tag else {
         return 1; // No tag → default once-per-turn
     };
-    let keyword = match tag {
-        AbilityTag::Boast => "boast",
-        AbilityTag::Evolve => "evolve",
-        AbilityTag::Exhaust => "exhaust",
-        AbilityTag::Outlast => "outlast",
-        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
-        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
-        // restriction, which the synthesized cycling ability never has.
-        AbilityTag::Cycling => "cycling",
-        // CR 702.165a: Backup is a triggered ability — it is never activated, so
-        // it carries no activation limit and this arm is unreachable here.
-        AbilityTag::Backup => "backup",
-    };
-    // Scan battlefield for ModifyActivationLimit statics that affect this keyword
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
+}
+
+/// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
+/// raise the activation cap for `keyword`-tagged abilities on `source_id`. The
+/// static is scope-agnostic (it reads no per-turn/per-game counter), so both the
+/// per-turn (`effective_activation_limit`) and per-game
+/// (`effective_activation_limit_per_game`) paths share this scan. Base limit 1.
+fn activation_limit_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    keyword: &str,
+    gates: &ActivationRestrictionStaticGates,
+) -> u32 {
+    if !gates.has_modify_activation_limit {
+        return 1;
+    }
+
     let mut limit: u32 = 1;
+    crate::game::perf_counters::record_restriction_static_exact_scan();
     for (bf_obj, static_def) in
         crate::game::functioning_abilities::battlefield_active_statics(state)
     {
@@ -621,11 +717,35 @@ fn effective_activation_limit(
     limit
 }
 
+/// CR 602.5b: Compute the effective per-game activation limit for
+/// an ability carrying `ActivationRestriction::OnlyOnce`. Base limit 1, raised by
+/// `ModifyActivationLimit` statics (Wonder Man / Hollywood Hero). Returns only
+/// the cap — the per-game counter comparison stays in the `OnlyOnce` consult arm,
+/// so the per-game and per-turn counters/scopes are never conflated.
+fn effective_activation_limit_per_game(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
+) -> u32 {
+    let ability_tag = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag);
+    let Some(tag) = ability_tag else {
+        return 1; // No tag → default once-per-game
+    };
+    activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
+}
+
 fn has_activate_as_instant_permission(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    gates: &ActivationRestrictionStaticGates,
 ) -> bool {
     let Some(ability) = state
         .objects
@@ -639,6 +759,11 @@ fn has_activate_as_instant_permission(
         return false;
     }
 
+    if !gates.has_activate_as_instant {
+        return false;
+    }
+
+    crate::game::perf_counters::record_restriction_static_exact_scan();
     crate::game::functioning_abilities::battlefield_active_statics(state).any(
         |(static_source, def)| {
             if static_source.controller != player {
@@ -674,6 +799,7 @@ fn activation_restriction_applies(
     source_id: ObjectId,
     ability_index: usize,
     restriction: &ActivationRestriction,
+    gates: &ActivationRestrictionStaticGates,
 ) -> bool {
     let key = (source_id, ability_index);
 
@@ -681,7 +807,13 @@ fn activation_restriction_applies(
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
         ActivationRestriction::AsSorcery => {
             is_sorcery_speed_window(state, player)
-                || has_activate_as_instant_permission(state, player, source_id, ability_index)
+                || has_activate_as_instant_permission(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    gates,
+                )
         }
         ActivationRestriction::AsInstant => true,
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
@@ -717,18 +849,27 @@ fn activation_restriction_applies(
                 .get(&key)
                 .copied()
                 .unwrap_or(0);
-            let limit = effective_activation_limit(state, player, source_id, ability_index);
+            let limit = effective_activation_limit(state, player, source_id, ability_index, gates);
             current_count < limit
         }
         // CR 602.5b: Per-object activation limit. `zones::move_to_zone` clears
         // this count when CR 400.7 makes the stored id represent a new object.
+        // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
+        // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            state
+            let count = state
                 .activated_abilities_this_game
                 .get(&key)
                 .copied()
-                .unwrap_or(0)
-                == 0
+                .unwrap_or(0);
+            count
+                < effective_activation_limit_per_game(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    gates,
+                )
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
@@ -748,6 +889,12 @@ fn activation_restriction_applies(
             .get(&source_id)
             .and_then(|obj| obj.case_state.as_ref())
             .is_some_and(|cs| cs.is_solved),
+        // CR 701.64b + CR 702.186b: ∞ activated ability is present (legal to
+        // activate) only while the source permanent is harnessed.
+        ActivationRestriction::SourceIsHarnessed => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.harnessed),
         // CR 716.4: Level N+1 ability can only activate when Class is at level N.
         ActivationRestriction::ClassLevelIs { level } => state
             .objects
@@ -1094,14 +1241,49 @@ pub(crate) fn evaluate_condition(
             }) == 0
         }
         ParsedCondition::YouAttackedThisTurn => state.players_attacked_this_turn.contains(&player),
-        ParsedCondition::YouAttackedWithAtLeast { count } => {
-            state
-                .attacking_creatures_this_turn
-                .get(&player)
-                .copied()
-                .unwrap_or(0)
-                >= *count
-        }
+        // CR 508.6 + CR 508.5 + CR 109.5: "you attacked [the source's controller]
+        // or a planeswalker they control this turn". `has_attacked` reads
+        // `attacked_defenders_this_turn`, whose entries are the CR-508.5-collapsed
+        // defending player (planeswalker/battle → controller), so both disjuncts
+        // resolve to one membership check. The defender is the SOURCE controller
+        // (CR 109.5 "you" on the static), resolved from `source_id` — never a
+        // hardcoded player. Sandswirl Wanderglyph.
+        ParsedCondition::YouAttackedSourceControllerThisTurn => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|src| state.has_attacked(player, src.controller)),
+        // CR 508.1a: "you attacked with N+ [filter] this turn". Unfiltered uses
+        // the fast per-player count; filtered scans declaration-time snapshots so
+        // attackers that have left the battlefield still count.
+        ParsedCondition::YouAttackedWithAtLeast { count, filter } => match filter {
+            None => {
+                state
+                    .attacking_creatures_this_turn
+                    .get(&player)
+                    .copied()
+                    .unwrap_or(0)
+                    >= *count
+            }
+            Some(filter) => {
+                let filter_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    source_id, player,
+                );
+                state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.lki.controller == player
+                            && crate::game::filter::matches_target_filter_on_attack_declaration_record(
+                                state,
+                                record,
+                                filter,
+                                &filter_ctx,
+                            )
+                    })
+                    .count() as u32
+                    >= *count
+            }
+        },
         ParsedCondition::YouPlayedLandThisTurn => state
             .players
             .get(usize::from(player.0))
@@ -1177,7 +1359,9 @@ pub(crate) fn evaluate_condition(
             state
                 .battlefield_entries_this_turn
                 .iter()
-                .filter(|record| battlefield_entry_matches_filter(record, filter, player))
+                .filter(|record| {
+                    battlefield_entry_matches_filter(record, filter, player, Some(source_id))
+                })
                 .count() as u32
                 >= *count
         }
@@ -1307,7 +1491,7 @@ fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) ->
 
 fn target_ref_matches_spell_targets_filter(
     state: &crate::types::game_state::GameState,
-    spell_id: crate::types::identifiers::ObjectId,
+    context_source_id: crate::types::identifiers::ObjectId,
     target: &crate::types::ability::TargetRef,
     filter: &crate::types::ability::TargetFilter,
 ) -> bool {
@@ -1315,7 +1499,7 @@ fn target_ref_matches_spell_targets_filter(
     match target {
         TargetRef::Player(_) => target_filter_accepts_player(filter),
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source(state, spell_id);
+            let ctx = super::filter::FilterContext::from_source(state, context_source_id);
             match filter {
                 TargetFilter::Player => false,
                 TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
@@ -1328,18 +1512,14 @@ fn target_ref_matches_spell_targets_filter(
     }
 }
 
-/// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
-/// triggering spell's committed targets at resolution time.
-pub(crate) fn triggering_spell_targets_filter(
+fn spell_cast_targets(
     state: &crate::types::game_state::GameState,
     spell_id: crate::types::identifiers::ObjectId,
-    filter: &crate::types::ability::TargetFilter,
-) -> bool {
-    use crate::types::ability::TargetRef;
+) -> Option<Vec<crate::types::ability::TargetRef>> {
     use crate::types::events::GameEvent;
     use crate::types::game_state::StackEntryKind;
 
-    let targets: Option<Vec<TargetRef>> = state
+    state
         .stack
         .iter()
         .rev()
@@ -1370,16 +1550,37 @@ pub(crate) fn triggering_spell_targets_filter(
                         }),
                     _ => None,
                 })
-        });
-    let Some(targets) = targets else {
+        })
+        .filter(|targets| !targets.is_empty())
+}
+
+/// CR 603.2c + CR 608.2c: Committed targets of a spell still on the stack (or
+/// re-read from the stack while a `SpellCast` trigger event is in scope).
+pub(crate) fn triggering_spell_targets(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+) -> Option<Vec<crate::types::ability::TargetRef>> {
+    spell_cast_targets(state, spell_id)
+}
+
+/// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
+/// triggering spell's committed targets at resolution time.
+///
+/// `context_source_id` scopes filter-relative terms like `FilterProp::Another`:
+/// use the triggering spell id for `AbilityCondition`, and the trigger source id
+/// for `TriggerCondition` (Orvar — "other permanents you control").
+pub(crate) fn triggering_spell_targets_filter(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+    filter: &crate::types::ability::TargetFilter,
+    context_source_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    let Some(targets) = spell_cast_targets(state, spell_id) else {
         return false;
     };
-    if targets.is_empty() {
-        return false;
-    }
-    targets
-        .iter()
-        .any(|target| target_ref_matches_spell_targets_filter(state, spell_id, target, filter))
+    targets.iter().any(|target| {
+        target_ref_matches_spell_targets_filter(state, context_source_id, target, filter)
+    })
 }
 
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
@@ -1554,14 +1755,18 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     })
 }
 
-/// CR 307.1: Sorcery-speed timing — main phase, stack empty, active player has priority.
+/// CR 307.1 + CR 805.5a: Sorcery-speed timing — main phase, stack empty,
+/// active player (or, under the shared team turns option, any player on the
+/// active team — CR 805.5a: "A player may cast a spell, activate an ability,
+/// or take a special action when their team has priority") has priority.
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && state.active_player == player
+        && (state.active_player == player
+            || super::players::teammates(state, state.active_player).contains(&player))
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
@@ -1791,7 +1996,10 @@ fn graveyard_has_subtype_card(
 }
 
 /// CR 508.1k: A chosen creature becomes an attacking creature until removed from combat.
-fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_attacking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state.combat.as_ref().is_some_and(|combat| {
         combat
             .attackers
@@ -1801,7 +2009,10 @@ fn is_source_attacking(state: &crate::types::game_state::GameState, source_id: O
 }
 
 /// CR 509.1g: A chosen creature becomes a blocking creature until removed from combat.
-fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocking(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()
@@ -1809,7 +2020,10 @@ fn is_source_blocking(state: &crate::types::game_state::GameState, source_id: Ob
 }
 
 /// CR 509.1h: An attacking creature with blockers declared for it becomes a blocked creature.
-fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: ObjectId) -> bool {
+pub(crate) fn is_source_blocked(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+) -> bool {
     state
         .combat
         .as_ref()
@@ -1856,6 +2070,22 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Player(p)) => *p == source_owner,
         (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_owner)
+        }
+        // CR 508.1c + CR 109.5: "can't attack you or permanents you control" — the
+        // "you" being defended is the static's/restriction's controller.
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Player(p)) => {
+            *p == source_controller
+        }
+        // CR 109.4 + CR 508.5: a defended planeswalker compares its controller
+        // against the protected player.
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        // CR 109.4 + CR 508.5 + CR 310.5: battles are attackable permanents, so
+        // "permanents you control" also defends a battle the protected player
+        // controls (the distinctive arm vs `PlayerOrPlaneswalker`, which has none).
+        (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Battle(b_id)) => {
+            permanent_controller(*b_id) == Some(source_controller)
         }
         _ => false,
     }
@@ -1968,6 +2198,136 @@ mod tests {
             player,
             source_id,
             &no_land_cards_in_hand
+        ));
+    }
+
+    /// MSH Wave 2 (Flying Drone): `BattlefieldEntriesThisTurn` with a filter
+    /// carrying `FilterProp::Another` + `FilterProp::WithKeyword { Flying }` must
+    /// evaluate against the entry-time keyword snapshot, excluding the source.
+    /// Drives the production `evaluate_condition` → `battlefield_entry_matches_filter`
+    /// seam used by `apply_cost_reduction`.
+    #[test]
+    fn another_flyer_entered_condition_uses_keyword_snapshot_and_excludes_source() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Flying Drone".to_string(),
+            Zone::Battlefield,
+        );
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Creature)
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::Another,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                ]),
+        );
+        let condition = ParsedCondition::BattlefieldEntriesThisTurn { filter, count: 1 };
+
+        // Helper: create a creature, give it the listed keywords, and record its entry.
+        let enter_creature = |state: &mut crate::types::game_state::GameState,
+                              card: u64,
+                              controller: PlayerId,
+                              keywords: &[Keyword]| {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                "Helper".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords = keywords.to_vec();
+            record_battlefield_entry(state, id);
+            id
+        };
+
+        // No entries yet ⇒ condition false.
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Another creature with flying enters under your control ⇒ true.
+        enter_creature(&mut state, 2, player, &[Keyword::Flying]);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: only the source itself "enters" (Another excludes it).
+        state.battlefield_entries_this_turn.clear();
+        state.objects.get_mut(&source_id).unwrap().keywords = vec![Keyword::Flying];
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        record_battlefield_entry(&mut state, source_id);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: another creature WITHOUT flying ⇒ WithKeyword fails.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 3, player, &[]);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // Negative: another flyer controlled by an opponent ⇒ controller fails.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 4, opponent, &[Keyword::Flying]);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// MSH Wave 2 (Fixer, Techno Terror): the elided "[type] entered under your
+    /// control this turn" templating (no "the battlefield") must parse and gate
+    /// the activation restriction. Drives the production
+    /// `parse_restriction_condition` → `evaluate_condition` path. Reverting the
+    /// `opt(" the battlefield")` leaves the condition unparsed (None), which
+    /// `parse_and_evaluate_condition` treats as permissive `true` — so the no-entry
+    /// assertion below flips and fails.
+    #[test]
+    fn fixer_artifact_entered_elided_battlefield_parses_and_gates() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let text = "an artifact entered under your control this turn";
+
+        // No artifact has entered ⇒ restriction must NOT hold (requires the
+        // elided form to parse; otherwise the helper returns permissive `true`).
+        assert!(!parse_and_evaluate_condition(
+            &state, player, source_id, text
+        ));
+
+        // An artifact enters under your control ⇒ restriction holds.
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        record_battlefield_entry(&mut state, artifact);
+        assert!(parse_and_evaluate_condition(
+            &state, player, source_id, text
+        ));
+
+        // The full "the battlefield" form still parses and gates identically.
+        let full = "an artifact entered the battlefield under your control this turn";
+        assert!(parse_and_evaluate_condition(
+            &state, player, source_id, full
         ));
     }
 
@@ -2178,6 +2538,7 @@ mod tests {
                 subtypes: vec![],
                 supertypes: vec![],
                 colors: vec![ManaColor::Green],
+                keywords: vec![],
                 controller: PlayerId(1),
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
@@ -3403,5 +3764,45 @@ mod tests {
             &state,
             &CastingVariant::Warp
         ));
+    }
+
+    /// CR 805.5a: "A player may cast a spell, activate an ability, or take a
+    /// special action when their team has priority." Under the shared team
+    /// turns option, the nonactive teammate must also have a legal
+    /// sorcery-speed timing window during the active team's main phase, not
+    /// just the literal active player.
+    #[test]
+    fn is_sorcery_speed_window_two_headed_giant_includes_nonactive_teammate() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        assert!(is_sorcery_speed_window(&state, PlayerId(0)));
+        // P1 is P0's teammate (CR 805.10 team pairing: seats 0+1, 2+3).
+        assert!(is_sorcery_speed_window(&state, PlayerId(1)));
+        // P2/P3 are the OPPOSING team and have no sorcery-speed window during
+        // the active team's main phase.
+        assert!(!is_sorcery_speed_window(&state, PlayerId(2)));
+        assert!(!is_sorcery_speed_window(&state, PlayerId(3)));
+    }
+
+    /// Outside team-based formats, only the literal active player has a
+    /// sorcery-speed window — no regression from the CR 805.5a widening.
+    #[test]
+    fn is_sorcery_speed_window_non_team_format_excludes_other_players() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::free_for_all(),
+            3,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        assert!(is_sorcery_speed_window(&state, state.active_player));
+        for opponent in crate::game::players::opponents(&state, state.active_player) {
+            assert!(!is_sorcery_speed_window(&state, opponent));
+        }
     }
 }

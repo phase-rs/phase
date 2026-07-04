@@ -1,19 +1,21 @@
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectKind, KeywordAction, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectKind, FilterProp, KeywordAction, ObjectScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, StackEntry,
-    StackEntryKind, StackPaidSnapshot,
+    AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, GameState, MayTriggerAutoChoiceKey,
+    MayTriggerOrigin, PendingCounterPostAction, StackEntry, StackEntryKind, StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
+use super::ability_utils::{
+    build_target_slots, flatten_targets_in_chain, validate_targets_in_chain,
+};
 use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
@@ -62,6 +64,70 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
+fn has_missing_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if !flatten_targets_in_chain(ability).is_empty() {
+        return false;
+    }
+
+    match build_target_slots(state, ability) {
+        Ok(slots) => slots.iter().any(|slot| !slot.optional),
+        Err(_) => true,
+    }
+}
+
+fn has_no_legal_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if !flatten_targets_in_chain(ability).is_empty() {
+        return false;
+    }
+
+    match build_target_slots(state, ability) {
+        Ok(slots) => slots
+            .iter()
+            .any(|slot| !slot.optional && slot.legal_targets.is_empty()),
+        Err(_) => true,
+    }
+}
+
+fn top_pending_trigger_has_no_legal_required_targets(
+    state: &mut GameState,
+    pending_id: ObjectId,
+) -> bool {
+    let Some((ability, trigger_event, trigger_events, subject_match_count)) = state
+        .stack
+        .back()
+        .filter(|entry| entry.id == pending_id)
+        .and_then(|entry| {
+            let ability = entry.ability()?.clone();
+            let (trigger_event, subject_match_count) = match &entry.kind {
+                StackEntryKind::TriggeredAbility {
+                    trigger_event,
+                    subject_match_count,
+                    ..
+                } => (trigger_event.clone(), *subject_match_count),
+                _ => (None, None),
+            };
+            let trigger_events = state
+                .stack_trigger_event_batches
+                .get(&entry.id)
+                .cloned()
+                .unwrap_or_else(|| trigger_event.iter().cloned().collect());
+            Some((ability, trigger_event, trigger_events, subject_match_count))
+        })
+    else {
+        return false;
+    };
+
+    let context_snapshot = super::triggers::push_trigger_event_context(
+        state,
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+    let missing_required_targets = has_no_legal_required_stack_targets(state, &ability);
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    missing_required_targets
+}
+
 /// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
 /// exile-instead marker for Rod of Absorption's resolving-spell rider.
 fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
@@ -102,7 +168,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // permitted.
     if let Some(pending_id) = state.pending_trigger_entry {
         if state.stack.back().map(|e| e.id) == Some(pending_id) {
-            return;
+            if !top_pending_trigger_has_no_legal_required_targets(state, pending_id) {
+                return;
+            }
+            // CR 603.3d: A stale construction cursor on a malformed trigger
+            // with no legal required targets cannot keep a triggered ability
+            // suspended forever.
+            state.pending_trigger_entry = None;
+            state.pending_trigger = None;
+            state.pending_trigger_event_batch.clear();
         }
     }
 
@@ -239,6 +313,39 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 ability.set_scoped_player_recursive(pid);
             }
         }
+    }
+
+    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
+    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
+    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
+    // be skipped on alternate dispatch paths; this guarantees the referent is
+    // bound before `execute_effect` when `trigger_event` is present on the entry.
+    if let (Some(ability), StackEntryKind::TriggeredAbility { trigger_event, .. }) =
+        (ability.as_mut(), &entry.kind)
+    {
+        let event_ref = trigger_event
+            .as_ref()
+            .or(state.current_trigger_event.as_ref());
+        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(ability, event_ref);
+    }
+
+    if ability
+        .as_ref()
+        .is_some_and(|ability| has_missing_required_stack_targets(state, ability))
+    {
+        // CR 603.3d: If a triggered ability needs a stack-time target choice and
+        // no legal choice was made, remove it from the stack.
+        // CR 608.2b: A resolving spell or ability with no legal targets does not
+        // resolve.
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        state.current_trigger_match_count = None;
+        state.die_result_this_resolution = None;
+        return;
     }
 
     // Capture targets for Aura attachment after resolution
@@ -728,6 +835,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     obj.additional_cost_payment_count =
                         ability.context.additional_cost_payment_count;
                     obj.additional_cost_payments = ability.context.additional_cost_payments.clone();
+                    // CR 400.7d: carry the object paid as a cost to cast this
+                    // spell (e.g. the emerge-sacrificed creature) onto the stack
+                    // object so the `CastLinkSnapshot` restores it onto the
+                    // resulting permanent (Adipose Offspring). `cost_paid_object`
+                    // is a field on the resolving `ResolvedAbility` itself, not
+                    // on its `context`.
+                    obj.cast_cost_paid_object = ability.cost_paid_object.clone();
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
@@ -870,11 +984,25 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 });
                             }
                         }
+                        // CR 709.5d: a Room permanent enters with the unlocked
+                        // designation for whichever half was cast as a spell — the
+                        // right door when its right half was cast, otherwise the
+                        // left. `modal_back_face` (still set on the battlefield, see
+                        // zones.rs) records that the right half was the cast face.
+                        let cast_door = if state
+                            .objects
+                            .get(&entry.id)
+                            .is_some_and(|obj| obj.modal_back_face)
+                        {
+                            crate::game::game_object::RoomDoor::Right
+                        } else {
+                            crate::game::game_object::RoomDoor::Left
+                        };
                         super::room::unlock_door_designation(
                             state,
                             entry.id,
                             entry.controller,
-                            crate::game::game_object::RoomDoor::Left,
+                            cast_door,
                             events,
                         );
                     }
@@ -1147,6 +1275,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if has_warp {
                     create_warp_delayed_trigger(state, entry.id, entry.controller);
                 }
+                // CR 702.185a + CR 400.7: stamp the per-object warp marker after
+                // `reset_for_battlefield_entry` cleared it, mirroring the Evoke /
+                // Impending / Suspend stamps below. Read by the target-scoped
+                // "if that creature was cast for its warp cost" rider (Full Bore)
+                // via `AbilityCondition::CastVariantPaid { subject: Target }`. The
+                // marker rides this incarnation only — a zone change makes a new
+                // object (CR 400.7) and re-casts from exile use
+                // `CastingVariant::Normal`, so the warp tag never persists past
+                // the cast turn's end-step exile.
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Warp,
+                        state.turn_number,
+                    ));
+                }
             }
 
             // CR 702.190b: Sneak-cast permanent enters tapped (already seeded on
@@ -1257,6 +1400,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.76a: Prowl-cast permanent is tagged so "if its prowl cost
+            // was paid" ETB triggers (Latchkey Faerie) can distinguish a prowl
+            // cast from a hard-cast. The intervening-if re-checks at resolution
+            // (CR 603.4) and the marker must be present.
+            if casting_variant == CastingVariant::Prowl {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Prowl,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
             // tag re-applied after `reset_for_battlefield_entry` cleared it.
             // The "not a creature" layer fixup and the end-step counter-removal
@@ -1313,6 +1469,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         }],
                         None,
                     );
+                }
+            }
+
+            // CR 702.119a-c: Emerge-cast permanent is tagged so "if its emerge
+            // cost was paid" ETB instead-clauses (Adipose Offspring) can
+            // distinguish an emerge cast from a hard-cast. CR 603.4 re-checks at
+            // resolution; the marker is read by
+            // `AbilityCondition::CastVariantPaid` / `CastVariantPaidInstead`.
+            if casting_variant == CastingVariant::Emerge {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Emerge,
+                        state.turn_number,
+                    ));
                 }
             }
 
@@ -1422,21 +1592,10 @@ fn resolve_keyword_action(
             mount_id,
             paid_creature_ids,
         } => {
-            if let Some(mount) = state.objects.get_mut(&mount_id) {
-                if mount.zone == Zone::Battlefield {
-                    mount.is_saddled = true;
-                    // CR 702.171c: record the creatures that saddled this permanent.
-                    for creature_id in &paid_creature_ids {
-                        if !mount.saddled_by.contains(creature_id) {
-                            mount.saddled_by.push(*creature_id);
-                        }
-                    }
-                }
-            }
-            events.push(GameEvent::Saddled {
-                mount_id,
-                creatures: paid_creature_ids,
-            });
+            // CR 702.171b + CR 702.171c: single authority shared with the
+            // effect-level `BecomeSaddled` path — set the designation, record the
+            // saddling creatures, and emit `GameEvent::Saddled`.
+            crate::game::effects::saddle::mark_saddled(state, mount_id, paid_creature_ids, events);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Saddle,
                 source_id: mount_id,
@@ -1511,13 +1670,31 @@ const PROBE_ID: ObjectId = ObjectId(u64::MAX);
 /// one begins at the top. Returns the number of stack entries consumed
 /// (≥ 1) so the caller can correct the auto-pass baseline (§7.2).
 pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
+    resolve_next_with_limit(state, events, None)
+}
+
+pub fn resolve_next_with_limit(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    max_consumed: Option<u32>,
+) -> u32 {
+    let max_consumed = max_consumed.unwrap_or(u32::MAX).max(1);
     // CR 603.3c/d: never collapse while the top entry is mid-construction.
     let pending_top = state
         .pending_trigger_entry
         .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
     if !pending_top {
+        if let Some(consumed) = inert_noop_run_len(state) {
+            let consumed = consumed.min(max_consumed);
+            if consumed >= 2 {
+                crate::game::perf_counters::record_stack_inert_noop_batch(consumed);
+                return resolve_inert_noop_batch(state, consumed, events);
+            }
+        }
         if let Some(run_len) = batch_run_len(state) {
+            let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
+                crate::game::perf_counters::record_stack_batch_candidate();
                 // Layer B FIRST: per-handler purity produces the resolved token
                 // spec(s) the Layer C probe needs (HIGH-1) and applies the
                 // §2.2a/§2.3a/§3.4 gates internally.
@@ -1536,20 +1713,24 @@ pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         .take(run_len as usize)
                         .map(|e| e.source_id)
                         .collect();
+                    // CR 603.6a + CR 611.2e: deserialize/imported states can
+                    // carry an empty derived trigger index. Refresh it before
+                    // Layer B so token handlers can cheaply detect broad
+                    // observers that would make Layer C refuse anyway.
+                    if state.trigger_index.by_key.is_empty()
+                        && state.trigger_index.unclassified.is_empty()
+                        && !state.battlefield.is_empty()
+                    {
+                        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+                    }
                     if let Some(plan) =
                         effects::try_resolve_batch(state, &ability, run_len, &run_source_ids)
                     {
-                        // Layer C: lazily refresh the index sentinel (mirrors the
-                        // consult site at triggers.rs:790) before the read-only probe.
-                        if state.trigger_index.by_key.is_empty()
-                            && state.trigger_index.unclassified.is_empty()
-                            && !state.battlefield.is_empty()
-                        {
-                            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
-                        }
+                        crate::game::perf_counters::record_stack_batch_plan();
                         if observers_are_batch_safe(state, &plan) {
                             return resolve_batched(state, &plan, &ability, events);
                         }
+                        crate::game::perf_counters::record_stack_batch_observer_refusal();
                     }
                 }
             }
@@ -1581,6 +1762,7 @@ fn resolve_batched(
     events: &mut Vec<GameEvent>,
 ) -> u32 {
     let consumed = plan.consumed();
+    crate::game::perf_counters::record_stack_batched_entries(consumed);
     state.resolving_stack_entry = None;
 
     // Pop the run's entries (resolution order is back-to-front), cleaning the
@@ -1654,9 +1836,13 @@ fn resolve_batched(
 /// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
 /// emits-exactly gate makes this two-event probe complete by construction for
 /// ALL observer axes.
-fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> bool {
-    for spec in plan.produced_token_specs() {
-        let record = zone_change_record_from_spec(spec);
+fn observers_are_batch_safe(state: &mut GameState, plan: &effects::BatchPlan) -> bool {
+    for (spec, mana_value) in plan
+        .produced_token_specs()
+        .into_iter()
+        .zip(plan.produced_token_mana_values())
+    {
+        let record = zone_change_record_from_spec(spec, mana_value);
         let zc = GameEvent::ZoneChanged {
             object_id: PROBE_ID,
             from: None,
@@ -1677,12 +1863,235 @@ fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> boo
             // CR 603.3: any registered observer (including the run's own source)
             // forces sequential resolution so priority interleaves per-token.
             let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
-            if !candidates.is_empty() {
+            if !candidates.is_empty() && !observer_candidates_are_inert(state, ev, &candidates) {
                 return false;
             }
         }
     }
     true
+}
+
+fn observer_candidates_are_inert(
+    state: &mut GameState,
+    event: &GameEvent,
+    candidates: &[ObjectId],
+) -> bool {
+    let event_keys = crate::game::trigger_index::keys_from_event(event, state);
+    for candidate in candidates.iter().copied() {
+        let Some((controller, triggers)) = state.objects.get(&candidate).map(|obj| {
+            (
+                obj.controller,
+                obj.trigger_definitions
+                    .iter_all()
+                    .cloned()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            continue;
+        };
+
+        for (trigger_index, trigger) in triggers {
+            let (trigger_keys, unclassified) =
+                crate::game::trigger_index::keys_from_trigger_def(&trigger);
+            if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
+                continue;
+            }
+            if trigger.condition.as_ref().is_some_and(|condition| {
+                !super::triggers::check_trigger_condition(
+                    state,
+                    condition,
+                    controller,
+                    Some(candidate),
+                    Some(event),
+                )
+            }) {
+                continue;
+            }
+
+            let mut ability =
+                super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
+            ability.ability_index = Some(trigger_index);
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index });
+            if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn optional_ability_is_inert_under_auto_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if !ability.optional {
+        return false;
+    }
+    let Some(origin) = ability.may_trigger_origin else {
+        return false;
+    };
+    let key = MayTriggerAutoChoiceKey {
+        player: ability.controller,
+        source_id: ability.source_id,
+        origin,
+    };
+    match state.may_trigger_auto_choice(&key) {
+        Some(AutoMayChoice::Decline) => ability.sub_ability.is_none(),
+        Some(AutoMayChoice::Accept) => {
+            ability_has_no_legal_resolution_targets(state, ability, trigger_event)
+        }
+        None => false,
+    }
+}
+
+fn ability_has_no_legal_resolution_targets(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if ability.sub_ability.is_some() {
+        return false;
+    }
+
+    let trigger_events = trigger_event.iter().cloned().cloned().collect::<Vec<_>>();
+    let context_snapshot =
+        super::triggers::push_trigger_event_context(state, trigger_event, &trigger_events, None);
+    let empty = build_target_slots(state, ability).is_ok_and(|slots| {
+        (ability.effect.target_filter().is_some() && slots.is_empty())
+            || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
+    });
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    empty
+}
+
+fn inert_noop_run_len(state: &mut GameState) -> Option<u32> {
+    let top = state.stack.back()?.clone();
+    if !stack_entry_is_inert_noop(state, &top) {
+        return None;
+    }
+    let mut count = 0u32;
+    let entries = state.stack.iter().rev().cloned().collect::<Vec<_>>();
+    for entry in &entries {
+        if count == 0 {
+            count += 1;
+            continue;
+        }
+        if !same_inert_noop_run_member(&top, entry) {
+            break;
+        }
+        count += 1;
+    }
+    Some(count)
+}
+
+fn stack_entry_is_inert_noop(state: &mut GameState, entry: &StackEntry) -> bool {
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        condition,
+        trigger_event,
+        ..
+    } = &entry.kind
+    else {
+        return false;
+    };
+
+    if condition.is_some() {
+        return false;
+    }
+
+    optional_ability_is_inert_under_auto_choice(state, ability, trigger_event.as_ref())
+}
+
+fn same_inert_noop_run_member(top: &StackEntry, entry: &StackEntry) -> bool {
+    let StackEntryKind::TriggeredAbility {
+        ability: top_ability,
+        condition: top_condition,
+        trigger_event: top_event,
+        ..
+    } = &top.kind
+    else {
+        return false;
+    };
+    let StackEntryKind::TriggeredAbility {
+        ability,
+        condition,
+        trigger_event,
+        ..
+    } = &entry.kind
+    else {
+        return false;
+    };
+
+    top.source_id == entry.source_id
+        && top.controller == entry.controller
+        && top_ability == ability
+        && top_condition == condition
+        && trigger_events_are_equivalent_for_inert_target(top_ability, top_event, trigger_event)
+}
+
+fn trigger_events_are_equivalent_for_inert_target(
+    ability: &ResolvedAbility,
+    a: &Option<GameEvent>,
+    b: &Option<GameEvent>,
+) -> bool {
+    if a == b {
+        return true;
+    }
+    if !change_zone_target_depends_only_on_cost_paid_mana_value(ability) {
+        return false;
+    }
+    zone_changed_mana_context(a.as_ref()) == zone_changed_mana_context(b.as_ref())
+}
+
+fn change_zone_target_depends_only_on_cost_paid_mana_value(ability: &ResolvedAbility) -> bool {
+    let Effect::ChangeZone { target, .. } = &ability.effect else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = target else {
+        return false;
+    };
+    typed.properties.iter().all(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone { .. }
+                | FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    },
+                    ..
+                }
+        )
+    })
+}
+
+fn zone_changed_mana_context(event: Option<&GameEvent>) -> Option<(u32, PlayerId)> {
+    match event {
+        Some(GameEvent::ZoneChanged { record, .. }) => Some((record.mana_value, record.controller)),
+        _ => None,
+    }
+}
+
+fn resolve_inert_noop_batch(
+    state: &mut GameState,
+    consumed: u32,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    state.resolving_stack_entry = None;
+    for _ in 0..consumed {
+        let Some(entry) = state.stack.pop_back() else {
+            break;
+        };
+        state.stack_paid_facts.remove(&entry.id);
+        state.stack_trigger_event_batches.remove(&entry.id);
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+    }
+    consumed
 }
 
 /// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
@@ -1691,6 +2100,7 @@ fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> boo
 /// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
 fn zone_change_record_from_spec(
     spec: &crate::types::proposed_event::TokenSpec,
+    mana_value: u32,
 ) -> crate::types::game_state::ZoneChangeRecord {
     let ch = &spec.characteristics;
     crate::types::game_state::ZoneChangeRecord {
@@ -1706,7 +2116,7 @@ fn zone_change_record_from_spec(
         base_power: ch.power,
         base_toughness: ch.toughness,
         colors: ch.colors.clone(),
-        mana_value: 0,
+        mana_value,
         controller: spec.controller,
         owner: spec.controller,
         from_zone: None,
@@ -1718,6 +2128,11 @@ fn zone_change_record_from_spec(
         is_token: true,
         combat_status: Default::default(),
         co_departed: Vec::new(),
+        attached_to: None,
+        entered_incarnation: None,
+        turn_zone_change_index: 0,
+        // A freshly created token is never suspected (CR 701.60b).
+        is_suspected: false,
     }
 }
 
@@ -2129,7 +2544,9 @@ pub(crate) fn create_warp_delayed_trigger(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -2175,13 +2592,14 @@ pub(crate) fn create_warp_delayed_trigger(
 mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
-    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CastingPermission, CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility,
-        TargetFilter, TargetRef, TypedFilter,
+        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{MayTriggerOrigin, WaitingFor};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -2264,6 +2682,129 @@ mod tests {
         });
 
         aura_id
+    }
+
+    #[test]
+    fn targetless_damage_trigger_with_stale_pending_entry_is_removed() {
+        let mut state = setup();
+        let predator = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Trygon Predator".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&predator)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let off_context_artifact = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Off-context Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&off_context_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Artifact)
+                        .controller(ControllerRef::TargetPlayer),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Enchantment)
+                        .controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target,
+                cant_regenerate: false,
+            },
+            vec![],
+            predator,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+            .set_source_incarnation_recursive(state.objects.get(&predator).map(|o| o.incarnation));
+
+        let trigger_event = GameEvent::DamageDealt {
+            source_id: predator,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let description =
+            "Whenever this creature deals combat damage to a player, you may destroy target artifact or enchantment that player controls."
+                .to_string();
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id: predator,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: predator,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(trigger_event.clone()),
+                description: Some(description.clone()),
+                source_name: "Trygon Predator".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        state.pending_trigger_entry = Some(entry_id);
+        state.pending_trigger_event_batch = vec![trigger_event.clone()];
+        state.pending_trigger = Some(PendingTrigger {
+            source_id: predator,
+            controller: PlayerId(0),
+            condition: None,
+            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            timestamp: state.turn_number,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(trigger_event),
+            modal: None,
+            mode_abilities: Vec::new(),
+            description: Some(description),
+            may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
+            subject_match_count: None,
+            die_result: None,
+        });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert!(state.stack.is_empty());
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger.is_none());
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == entry_id)));
     }
 
     #[test]
@@ -2781,6 +3322,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(first_target)],
             spell_id,
@@ -2791,6 +3333,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(second_target)],
             spell_id,
@@ -3138,6 +3681,195 @@ mod tests {
     }
 
     #[test]
+    fn warp_cast_stamps_cast_variant_paid_warp_marker() {
+        // CR 702.185a + CR 400.7: a permanent cast for its warp cost must carry
+        // the per-object `cast_variant_paid` marker keyed on the cast turn, so the
+        // target-scoped "if that creature was cast for its warp cost" rider
+        // (Full Bore) can read it. Reverting the stack stamp leaves the marker
+        // `None` and this assertion fails.
+        let mut state = setup();
+        state.turn_number = 5;
+        state.active_player = PlayerId(0);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quantum Riddler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords.push(Keyword::Warp(ManaCost::generic(3)));
+            obj.mana_cost = ManaCost::generic(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Warp,
+                actual_mana_spent: 0,
+            },
+        });
+        resolve_top(&mut state, &mut Vec::new());
+        assert_eq!(
+            state.objects[&obj_id].cast_variant_paid,
+            Some((crate::types::ability::CastVariantPaid::Warp, 5)),
+            "a warp cast must stamp the per-object Warp marker keyed on the cast turn"
+        );
+    }
+
+    #[test]
+    fn full_bore_grants_trample_haste_only_to_warp_cast_target() {
+        // CR 115.1 + CR 608.2c + CR 702.185a: end-to-end production-path test for
+        // the whole feature. Warp-cast a creature through the real stack pipeline
+        // (stamping its per-object marker), then resolve Full Bore (Pump +
+        // target-scoped conditional grant) against it via the real ability
+        // resolver. The grant fires because the TARGET was warp-cast even though
+        // Full Bore's own source spell was NOT warp-cast — so reverting the
+        // evaluator's Target branch to read the source makes the warp-cast
+        // creature miss the grant (the source spell has no marker) and the
+        // positive assertion fails. The hard-cast creature (no marker) gets the
+        // +3/+2 only, proving the condition is load-bearing.
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+
+        fn make_creature(state: &mut GameState, id: u64, name: &str) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords.push(Keyword::Warp(ManaCost::generic(3)));
+            obj.mana_cost = ManaCost::generic(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj_id
+        }
+
+        let mut state = setup();
+        state.turn_number = 6;
+        state.active_player = PlayerId(0);
+
+        // Creature A: warp-cast through the production pipeline → marker stamped.
+        let warp_creature = make_creature(&mut state, 1, "Warp Brute");
+        state.stack.push_back(StackEntry {
+            id: warp_creature,
+            source_id: warp_creature,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Warp,
+                actual_mana_spent: 0,
+            },
+        });
+        resolve_top(&mut state, &mut Vec::new());
+        assert_eq!(
+            state.objects[&warp_creature].cast_variant_paid,
+            Some((crate::types::ability::CastVariantPaid::Warp, 6)),
+            "precondition: warp cast stamped the per-object marker"
+        );
+
+        // Creature B: hard-cast (never warp-cast) → no marker.
+        let hard_creature = make_creature(&mut state, 2, "Hard Brute");
+        assert_eq!(state.objects[&hard_creature].cast_variant_paid, None);
+
+        // Full Bore source spell — itself NOT warp-cast (no marker).
+        let full_bore = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Full Bore".to_string(),
+            Zone::Stack,
+        );
+
+        let def = parse_effect_chain(
+            "Target creature you control gets +3/+2 until end of turn. If that creature was cast for its warp cost, it also gains trample and haste until end of turn.",
+            AbilityKind::Spell,
+        );
+
+        // Full Bore on the warp-cast creature → +3/+2 AND trample + haste.
+        let resolved_a = build_resolved_from_def_with_targets(
+            &def,
+            full_bore,
+            PlayerId(0),
+            vec![TargetRef::Object(warp_creature)],
+        );
+        resolve_ability_chain(&mut state, &resolved_a, &mut Vec::new(), 0).unwrap();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&warp_creature].has_keyword(&Keyword::Trample)
+                && state.objects[&warp_creature].has_keyword(&Keyword::Haste),
+            "warp-cast target must gain trample AND haste from the target-scoped rider \
+             even though the Full Bore source spell was not warp-cast"
+        );
+
+        // Full Bore on the hard-cast creature → +3/+2 only, NO trample/haste.
+        let resolved_b = build_resolved_from_def_with_targets(
+            &def,
+            full_bore,
+            PlayerId(0),
+            vec![TargetRef::Object(hard_creature)],
+        );
+        resolve_ability_chain(&mut state, &resolved_b, &mut Vec::new(), 0).unwrap();
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&hard_creature].has_keyword(&Keyword::Trample)
+                && !state.objects[&hard_creature].has_keyword(&Keyword::Haste),
+            "hard-cast target must NOT gain trample/haste — the warp condition is load-bearing"
+        );
+    }
+
+    #[test]
+    fn normal_cast_does_not_stamp_warp_marker() {
+        // CR 702.185a: re-casting an exiled warp card (or any non-warp cast) uses
+        // `CastingVariant::Normal` and carries NO warp marker, so the warp-scoped
+        // rider must NOT fire for it.
+        let mut state = setup();
+        state.turn_number = 5;
+        state.active_player = PlayerId(0);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quantum Riddler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords.push(Keyword::Warp(ManaCost::generic(3)));
+            obj.mana_cost = ManaCost::generic(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 4,
+            },
+        });
+        resolve_top(&mut state, &mut Vec::new());
+        assert_eq!(
+            state.objects[&obj_id].cast_variant_paid, None,
+            "a normal (non-warp) cast must not stamp the warp marker"
+        );
+    }
+
+    #[test]
     fn exile_with_alt_cost_still_works() {
         // Regression: ExileWithAltCost (Airbending, etc.) should still be immediately castable.
         use crate::game::casting::spell_objects_available_to_cast;
@@ -3165,7 +3897,9 @@ mod tests {
                     resolution_cleanup: None,
                     duration: None,
 
-                    exile_instead_of_graveyard_on_resolve: false,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    mana_spend_permission: None,
                 });
         }
 
@@ -3326,6 +4060,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target_id)],
             spell_id,
@@ -3811,7 +4546,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             spell_id,
@@ -3859,7 +4596,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(target_id)],
             spell_id,
@@ -3994,7 +4733,8 @@ mod tests {
     mod batch_resolve {
         // Driver internals under test (the stack module).
         use super::super::{
-            batch_run_len, effects, observers_are_batch_safe, resolve_next, resolve_top,
+            batch_run_len, effects, observers_are_batch_safe, resolve_next,
+            resolve_next_with_limit, resolve_top,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -4007,6 +4747,7 @@ mod tests {
         };
         use crate::types::card_type::CoreType;
         use crate::types::counter::CounterType;
+        use crate::types::events::GameEvent;
         use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
         use crate::types::identifiers::{CardId, ObjectId};
         use crate::types::mana::ManaColor;
@@ -4112,6 +4853,37 @@ mod tests {
                 obj.base_card_types = crate::types::card_type::CardType {
                     supertypes: vec![],
                     core_types: vec![CoreType::Creature],
+                    subtypes: vec![name.to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = name.to_string();
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Create a plain planeswalker permanent with printed loyalty. A copy
+        /// token of this source enters with loyalty counters (CR 306.5b), so it
+        /// must not pass the copy-token ETB-pair batch gate.
+        fn add_plain_planeswalker_source(
+            state: &mut GameState,
+            name: &str,
+            loyalty: u32,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(911),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_loyalty = Some(loyalty);
+                obj.loyalty = Some(loyalty);
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
                     subtypes: vec![name.to_string()],
                 };
                 obj.card_types = obj.base_card_types.clone();
@@ -4403,6 +5175,28 @@ mod tests {
             }
         }
 
+        #[test]
+        fn resolve_next_with_limit_caps_batch_consumption() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 10);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next_with_limit(&mut state, &mut events, Some(4));
+
+            assert_eq!(consumed, 4);
+            assert_eq!(state.stack.len(), 6);
+            assert_eq!(token_ids(&state).len(), 4);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                4
+            );
+        }
+
         // §9.2 — Layer C reports safe on an observer-free board.
         #[test]
         fn observers_are_batch_safe_true_without_observers() {
@@ -4414,7 +5208,7 @@ mod tests {
             assert_eq!(run_len, 5);
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
-            assert!(observers_are_batch_safe(&state, &plan));
+            assert!(observers_are_batch_safe(&mut state, &plan));
         }
 
         // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
@@ -4468,7 +5262,7 @@ mod tests {
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 let plan = try_batch(&state, &ability, run_len).unwrap();
                 assert!(
-                    !observers_are_batch_safe(&state, &plan),
+                    !observers_are_batch_safe(&mut state, &plan),
                     "creature-ETB observer must force refusal"
                 );
             }
@@ -5277,7 +6071,7 @@ mod tests {
             // exclusion dropped it and this assertion would FAIL (batch allowed);
             // post-fix it must hold (refuse to batch).
             assert!(
-                !observers_are_batch_safe(&state, &plan),
+                !observers_are_batch_safe(&mut state, &plan),
                 "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
             );
 
@@ -5343,15 +6137,13 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
-                !observers_are_batch_safe(&state, &plan),
+                !observers_are_batch_safe(&mut state, &plan),
                 "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
             );
         }
 
-        // §9.4a — Kodama-class broad-ETB observer (valid_card = Permanent) keyed
-        // under EnterBattlefield(None) must force Layer C to refuse. Documents
-        // that the motivating /tmp/gamestate.json board (with Kodama) does NOT
-        // batch (§2.4).
+        // §9.4a — a meaningful broad-ETB observer (valid_card = Permanent) keyed
+        // under EnterBattlefield(None) must still force Layer C to refuse.
         #[test]
         fn kodama_broad_permanent_etb_observer_forces_refusal() {
             let mut state = setup();
@@ -5395,8 +6187,8 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
-                !observers_are_batch_safe(&state, &plan),
-                "broad permanent-ETB observer must force refusal (None bucket)"
+                !observers_are_batch_safe(&mut state, &plan),
+                "meaningful broad permanent-ETB observer must force Layer C refusal"
             );
         }
 
@@ -5554,6 +6346,29 @@ mod tests {
                 token_ids(&batched).len(),
                 token_ids(&sequential).len(),
                 "batched copy count must equal sequential"
+            );
+        }
+
+        #[test]
+        fn copy_token_with_intrinsic_counters_refuses_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+
+            let src = add_plain_planeswalker_source(&mut state, "Jace", 3);
+            let sub = copy_instead_sub(src, 6);
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                3,
+            );
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            assert!(
+                try_batch(&state, &ability, run_len).is_none(),
+                "copy-token batch must refuse values that emit intrinsic CounterAdded events"
             );
         }
 
@@ -5770,7 +6585,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Optional { decline: None };
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 
@@ -5783,7 +6598,7 @@ mod tests {
             use crate::types::replacements::ReplacementEvent;
             let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
             def.mode = ReplacementMode::Mandatory;
-            def.quantity_modification = Some(QuantityModification::Double);
+            def.quantity_modification = Some(QuantityModification::DOUBLE);
             def
         }
 
@@ -7411,7 +8226,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
         state

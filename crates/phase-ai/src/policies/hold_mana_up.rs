@@ -278,6 +278,7 @@ mod tests {
             Effect::Counter {
                 target: engine::types::ability::TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
         ));
         oid
@@ -351,6 +352,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = HoldManaUpForInteractionPolicy.verdict(&ctx);
@@ -388,6 +390,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = HoldManaUpForInteractionPolicy.verdict(&ctx);
@@ -421,6 +424,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = HoldManaUpForInteractionPolicy.verdict(&ctx);

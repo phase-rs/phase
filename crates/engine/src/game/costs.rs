@@ -176,6 +176,11 @@ fn find_eligible_exile_targets(
 pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
+        /// CR 106.6: Keyword tag of the activated ability whose cost is being
+        /// paid. Threaded into `PaymentContext::Activation` so tag-scoped mana
+        /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
+        /// scope never carries a tag (resolution-time costs aren't activations).
+        ability_tag: Option<crate::types::ability::AbilityTag>,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -279,7 +284,7 @@ pub fn pay_ability_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_ability_cost_for_activation(state, player, source_id, cost, events).map(|_| ())
+    pay_ability_cost_for_activation(state, player, source_id, cost, None, events).map(|_| ())
 }
 
 pub(crate) fn pay_ability_cost_for_activation(
@@ -287,6 +292,7 @@ pub(crate) fn pay_ability_cost_for_activation(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -298,6 +304,7 @@ pub(crate) fn pay_ability_cost_for_activation(
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
+            ability_tag,
         },
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
@@ -405,17 +412,23 @@ fn pay_ability_cost_inner(
             // 106.6: restriction enforcement routes through `allows_activation`
             // (not `allows_spell`) via the activation context built from the
             // source permanent's types.
-            PaymentScope::Activation { excluded_sources } => {
+            PaymentScope::Activation {
+                excluded_sources,
+                ability_tag,
+            } => {
                 if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, cost, events)?;
+                    pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
                         player,
                         source_id,
                         cost,
+                        *ability_tag,
                         events,
                         excluded_sources,
+                        // Top-level ability cost payment: no outer cost on the stack.
+                        None,
                     )?;
                 }
             }
@@ -687,8 +700,12 @@ fn pay_ability_cost_inner(
                     owner_library: false,
                     track_exiled_by_source: true,
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
+                    library_position: None,
                     is_cost_payment: true,
+                    enters_modified_if: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
@@ -740,6 +757,18 @@ fn pay_ability_cost_inner(
             return Ok(payment_failed(format!(
                 "Cost not implemented: {description}"
             )));
+        }
+        // CR 118.9 + CR 702.62a: a borrowed keyword cost is an alternative cost on
+        // the *cast spell*, paid through the casting pipeline's
+        // `ExileWithAltCost` / `ExileWithAltAbilityCost` permissions
+        // (casting.rs / casting_costs.rs), never as an activation cost paid here.
+        // Reaching this arm means a misrouted cost — fail loudly rather than
+        // silently no-op.
+        AbilityCost::KeywordCostOfCastSpell { .. } => {
+            return Ok(payment_failed(
+                "Keyword-cost-of-cast-spell is paid by the casting pipeline, not as an \
+                 activation cost",
+            ));
         }
         // CR 107.14: A player can pay {E} only if they have enough energy.
         // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
@@ -970,8 +999,13 @@ fn pay_ability_cost_inner(
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
+        // CR 117.1 + CR 601.2b: `ExileWithAggregate` (Baron Helmut Zemo's Boast)
+        // is paid by the `WaitingFor::PayCost { kind: ExileAggregate }` detour
+        // before this resume runs; this arm is an idempotent no-op (mirrors the
+        // `CollectEvidence`/`ExileMaterials` interactive-cost arms).
         AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
@@ -1043,6 +1077,17 @@ pub(crate) fn can_pay(
             if !cost.is_payable(state, payer, source_id) {
                 return false;
             }
+            // CR 118.12a: disjunctive activation costs resolve via
+            // `ActivationCostOneOfChoice`, but each branch must still pass the
+            // same activation affordability authority (is_payable + dry-run) as a
+            // deterministic cost. `is_payable` alone does not catch tapped-source
+            // `{T}` legs — shard-style `OneOf([Composite([Mana, Tap]), …])` would
+            // otherwise surface as legal when every branch needs an untapped source.
+            if let AbilityCost::OneOf { costs } = cost {
+                return costs
+                    .iter()
+                    .any(|branch| can_pay(state, payer, source_id, branch, scope));
+            }
             // CR 701.67a: A bare Waterbend cost has no deterministic component
             // to dry-run — its affordability is fully answered by `is_payable`'s
             // auto-tap check above. Gate on the bare `Waterbend` *shape*, not the
@@ -1060,7 +1105,7 @@ pub(crate) fn can_pay(
             // CR 601.2h: dry-run the authority on a throwaway clone. A `Failed`
             // outcome (insufficient mana, life, …) or an engine error (e.g. a
             // tapped source for a `{T}` cost) means the cost can't be paid.
-            matches!(
+            let dry_run_ok = matches!(
                 pay_ability_cost_inner(
                     &mut simulated,
                     payer,
@@ -1070,7 +1115,20 @@ pub(crate) fn can_pay(
                     scope
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
-            )
+            );
+            if !dry_run_ok {
+                return false;
+            }
+            // CR 601.2g + CR 601.2f / CR 602.2b: an activated ability's activation
+            // cost is the analog of a spell's mana cost, so the CR 601.2g/601.2h
+            // ordering applies. The mana-leg detour in `handle_activate_ability`
+            // now pays the mana leg FIRST (opening the CR 601.2g mana-ability
+            // window on the INTACT board) and the non-mana battlefield-removal leg
+            // LAST. The dry-run above therefore matches the live path exactly —
+            // both pay mana on the intact board — so no supplemental
+            // remove-then-recheck witness is needed; the former over-approximation
+            // is now the correct verdict.
+            true
         }
         PaymentScope::Resolution { ability } => can_pay_resolution(state, payer, cost, ability),
     }
@@ -1122,6 +1180,10 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1 + CR 601.2b: `ExileWithAggregate` is an activation-only cost
+        // (paid by the interactive `PayCost { ExileAggregate }` detour); it has
+        // no resolution-time payment path.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -1135,6 +1197,9 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, never as
+        // a resolution-time activation cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1260,6 +1325,8 @@ fn can_pay_resolution(
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1: `ExileWithAggregate` is paid at activation, not resolution.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -1272,6 +1339,9 @@ fn can_pay_resolution(
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, not a
+        // direct resolution-time cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1282,7 +1352,7 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
-        NinjutsuVariant, QuantityExpr, SacrificeCost,
+        NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -1329,8 +1399,18 @@ mod tests {
                 count: CostObjectCount::default(),
             },
             AbilityCost::CollectEvidence { .. } => AbilityCost::CollectEvidence { amount: 1 },
+            AbilityCost::ExileWithAggregate { .. } => AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::Any,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaSymbolCount(
+                    crate::types::mana::ManaColor::Black,
+                ),
+                comparator: crate::types::ability::Comparator::GE,
+                value: 1,
+                zone: Zone::Graveyard,
+            },
             AbilityCost::TapCreatures { .. } => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: TapCreaturesRequirement::count(1),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter { .. } => AbilityCost::RemoveCounter {
@@ -1362,6 +1442,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { .. } => AbilityCost::Composite {
                 costs: vec![AbilityCost::Tap, AbilityCost::PayLife { amount: life }],
@@ -1389,6 +1470,9 @@ mod tests {
                 base: Box::new(AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 }),
+            },
+            AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
             },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
@@ -1430,8 +1514,18 @@ mod tests {
                 count: CostObjectCount::default(),
             },
             AbilityCost::CollectEvidence { amount: 0 },
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::Any,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaSymbolCount(
+                    crate::types::mana::ManaColor::Black,
+                ),
+                comparator: crate::types::ability::Comparator::GE,
+                value: 0,
+                zone: Zone::Graveyard,
+            },
             AbilityCost::TapCreatures {
-                count: 0,
+                requirement: TapCreaturesRequirement::count(0),
                 filter: TargetFilter::Any,
             },
             AbilityCost::RemoveCounter {
@@ -1463,6 +1557,7 @@ mod tests {
                 count: 0,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { costs: vec![] },
             AbilityCost::OneOf { costs: vec![] },
@@ -1484,6 +1579,9 @@ mod tests {
                 counter: CounterType::Age,
                 target: TargetFilter::SelfRef,
                 base: Box::new(AbilityCost::Tap),
+            },
+            AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
             },
             AbilityCost::Unimplemented {
                 description: String::new(),
@@ -1548,6 +1646,7 @@ mod tests {
             let excluded = ability_mana_payment_excluded_sources(&cost, src);
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
+                ability_tag: None,
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -1575,6 +1674,7 @@ mod tests {
         let excluded = ability_mana_payment_excluded_sources(&cost, src);
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
+            ability_tag: None,
         };
         let mut events = Vec::new();
         let outcome =
@@ -1613,6 +1713,7 @@ mod tests {
             P0,
             src,
             &graveyard_cost,
+            None,
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -1628,6 +1729,7 @@ mod tests {
             P0,
             src,
             &battlefield_cost,
+            None,
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -1644,6 +1746,7 @@ mod tests {
             cost,
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
+                ability_tag: None,
             },
         )
     }
@@ -1705,7 +1808,7 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Lord", 2, 2).id();
         let cost = AbilityCost::TapCreatures {
-            count: 2,
+            requirement: TapCreaturesRequirement::count(2),
             filter: TargetFilter::Typed(TypedFilter::creature()),
         };
         // Only the source creature is present (1 < 2).
@@ -1720,6 +1823,41 @@ mod tests {
         );
     }
 
+    /// HIGH-1 regression (CR 118.12a + CR 118.3): shard-style
+    /// `OneOf([Composite([Mana, Tap]), …])` must route each branch through the
+    /// activation dry-run, not `is_payable` alone. The Tap arm is unconditionally
+    /// true in `is_payable`, so a tapped source must be `can_pay == false`.
+    #[test]
+    fn one_of_tap_branches_respects_tapped_source() {
+        use crate::parser::oracle_cost::parse_oracle_cost;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Granite Shard", 0, 0)
+            .as_artifact()
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Red, src, false, vec![]),
+            ],
+        );
+        let cost = parse_oracle_cost("{3}, {T} or {R}, {T}");
+
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "untapped source with mana → OneOf tap branches payable"
+        );
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+        assert!(
+            !can_pay_activation(&scenario.state, src, &cost),
+            "tapped source → OneOf tap branches must be unpayable"
+        );
+    }
     /// HIGH-1 regression (CR 701.67a + CR 118.3): a `Composite[Waterbend, {T}]`
     /// (Avatar TLA "Waterbend [cost], {T}: …") must NOT skip the dry run just
     /// because the `payment_class` fold reports `InteractiveMana` for the
@@ -1752,6 +1890,412 @@ mod tests {
         assert!(
             !can_pay_activation(&scenario.state, src, &cost),
             "tapped source → Composite[Waterbend, {{T}}] must be unpayable"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Composite "{N}, <battlefield-removal>" mana-first affordability (CR 601.2g
+    // / CR 601.2h ordering: the mana-leg detour pays mana FIRST on the intact
+    // board, the removal LAST). The helpers below build the Claws-of-Gix /
+    // Mox-Opal-Metalcraft minimal board.
+    // -----------------------------------------------------------------------
+
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ActivationRestriction, Comparator, ContinuousModification,
+        ControllerRef, ParsedCondition, QuantityRef, StaticCondition, StaticDefinition, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::statics::StaticMode;
+    use crate::types::ManaProduction;
+
+    /// `QuantityExpr::Ref(ObjectCount(artifacts you control))`.
+    fn artifacts_you_control() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                ),
+            },
+        }
+    }
+
+    /// A `{T}: Add {1}` mana ability gated by Metalcraft-style *live-eval*
+    /// "control 3+ artifacts" via an `ActivationRestriction::RequiresCondition`
+    /// (`ParsedCondition::QuantityComparison`). This is the Mox-Opal model: the
+    /// gate reads the live battlefield, NOT the layer system.
+    fn metalcraft_mox(scenario: &mut GameScenario) -> ObjectId {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        def.activation_restrictions
+            .push(ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: artifacts_you_control(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+            });
+        let mut b = scenario.add_creature(P0, "Mox Opal", 0, 0);
+        b.as_artifact();
+        b.with_ability_definition(def);
+        b.id()
+    }
+
+    /// Add a plain artifact (sacrifice fodder / artifact-count filler) with no
+    /// mana ability.
+    fn plain_artifact(scenario: &mut GameScenario, name: &str) -> ObjectId {
+        let mut b = scenario.add_creature(P0, name, 0, 1);
+        b.as_artifact();
+        b.id()
+    }
+
+    /// The Claws-of-Gix cost: `{1}, Sacrifice a permanent`.
+    fn claws_cost() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    1,
+                )),
+            ],
+        }
+    }
+
+    /// V1 (mana-first → payable): Metalcraft-only board — exactly 3 artifacts
+    /// including Mox Opal (the only {1} source) + Claws. CR 601.2g / CR 601.2h:
+    /// the mana-leg detour pays {1} FIRST while all 3 artifacts are intact
+    /// (Metalcraft holds → Mox produces {1}); the sacrifice is paid LAST. So the
+    /// composite IS payable even though sacrificing afterwards drops below
+    /// Metalcraft — the mana was already in the pool. Reverting the mana-first
+    /// detour restores the sacrifice-first ordering, which dead-ends here.
+    #[test]
+    fn claws_metalcraft_only_board_is_payable_mana_first() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Artifact A");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        // 3 artifacts on board; Mox makes {1} while Metalcraft holds, and the
+        // mana-first window pays {1} before the sacrifice shrinks the board.
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "mana paid first on the intact 3-artifact board → payable"
+        );
+    }
+
+    /// V2 (no over-reject): Claws plus an untapped basic land (a non-conditional
+    /// `{1}` source) plus the Metalcraft Mox plus fodder. A sacrifice can leave
+    /// the `{1}` payable from the land, so `can_pay` is `true`. The full live
+    /// activation and life+1 assertion is covered through the real pipeline by
+    /// the phase-ai `choose_action` scenario
+    /// `scenario_claws_of_gix_witness_board_does_not_dead_end`; this layer asserts
+    /// only the affordability oracle's verdict.
+    #[test]
+    fn claws_with_unconditional_land_is_payable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Artifact A");
+        // A Forest produces one mana usable for the generic {1} — a
+        // non-conditional source that survives any sacrifice.
+        scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "land provides a non-conditional {{1}} → payable regardless of sacrifice"
+        );
+    }
+
+    /// V5 (mana-first → payable): even though EVERY eligible sacrifice would break
+    /// the sole {1} producer, CR 601.2g pays {1} from the Mox on the intact
+    /// 3-artifact board BEFORE the sacrifice, so the composite is payable. The
+    /// post-sacrifice board state is irrelevant once the mana is in the pool.
+    #[test]
+    fn claws_every_sacrifice_breaks_producer_is_payable_mana_first() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "{{1}} paid from the Mox before the sacrifice → payable"
+        );
+    }
+
+    /// V6 (payable, redundant mana): with FOUR artifacts (Mox + 3 fodder), any
+    /// single sacrifice leaves 3 → Metalcraft still holds → `{1}` payable from
+    /// the Mox itself → `true`.
+    #[test]
+    fn claws_redundant_artifact_count_keeps_metalcraft_payable() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        plain_artifact(&mut scenario, "Filler 2");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        // 4 artifacts: sacrificing any one leaves 3 → Metalcraft holds.
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "4 artifacts → a witness leaves Metalcraft on → payable"
+        );
+    }
+
+    /// V7 (payable, disjoint producer): dedicated NON-artifact fodder distinct
+    /// from the producer. Sacrificing the fodder doesn't change artifact count,
+    /// so Metalcraft holds. With 3 artifacts (Mox + 2 fillers) + a creature
+    /// fodder, sacrificing the creature keeps 3 artifacts → payable.
+    #[test]
+    fn claws_disjoint_fodder_preserves_producer() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        plain_artifact(&mut scenario, "Filler 2");
+        // Non-artifact creature fodder — sacrificing it leaves artifact count = 3.
+        scenario.add_creature(P0, "Bear", 2, 2);
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "sacrificing non-artifact fodder preserves Metalcraft → payable"
+        );
+    }
+
+    /// V10 (count>1 still payable): a `Composite[{1}, Sacrifice TWO permanents]`
+    /// is payable on a board where sacrificing would break the conditional mana
+    /// source, because CR 601.2g pays {1} on the intact board before either
+    /// sacrifice. The mana-first detour is count-agnostic — it pays the mana leg
+    /// regardless of how many permanents the removal leg sacrifices.
+    #[test]
+    fn claws_sacrifice_two_count_gt_one_not_rejected() {
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+        let cost_two = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    2,
+                )),
+            ],
+        };
+        assert!(
+            can_pay_activation(&scenario.state, claws, &cost_two),
+            "count > 1 sacrifice composite falls through to today's over-approximation (true)"
+        );
+    }
+
+    /// B1 (layer-granted mana source, mana-first → payable): the Mox grants its
+    /// own `{T}: Add {1}` mana ability via a continuous `StaticDefinition`
+    /// (`ContinuousModification::GrantAbility`) gated by
+    /// `StaticCondition::QuantityComparison(artifacts >= 3)`. Unlike
+    /// `metalcraft_mox` (live-eval `activation_restrictions`), the granted ability
+    /// only appears in `obj.abilities` after `flush_layers` re-derives layer 6.
+    ///
+    /// CR 601.2g / CR 601.2h: the mana-leg detour pays {1} from the granted
+    /// ability while all 3 artifacts are intact (the grant is live), and the
+    /// sacrifice is paid LAST. So the composite is payable even though sacrificing
+    /// afterwards would drop below Metalcraft and the layer reflush would remove
+    /// the grant — that post-removal board is irrelevant once the mana is paid.
+    /// Reverting the mana-first detour restores sacrifice-first ordering, which
+    /// dead-ends here (the granted {1} is gone before mana payment).
+    #[test]
+    fn claws_layer_granted_mana_requires_layer_reflush() {
+        let mut scenario = GameScenario::new();
+        // The mana ability the Mox GRANTS to itself while controlling 3+ artifacts.
+        let granted = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let mut grant_static = StaticDefinition::new(StaticMode::Continuous);
+        grant_static.affected = Some(TargetFilter::SelfRef);
+        grant_static.modifications = vec![ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        }];
+        grant_static.condition = Some(StaticCondition::QuantityComparison {
+            lhs: artifacts_you_control(),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        });
+
+        let mox = {
+            let mut b = scenario.add_creature(P0, "Layer Mox", 0, 0);
+            b.as_artifact();
+            b.with_static_definition(grant_static);
+            b.id()
+        };
+        plain_artifact(&mut scenario, "Filler 1");
+        let claws = plain_artifact(&mut scenario, "Claws of Gix");
+
+        // Flush layers so the grant is live on the base 3-artifact board, proving
+        // the granted ability really is the sole {1} source before any sacrifice.
+        crate::game::layers::flush_layers(&mut scenario.state);
+        assert!(
+            scenario.state.objects[&mox]
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Mana { .. })),
+            "precondition: Mox has the granted mana ability at 3 artifacts"
+        );
+
+        assert!(
+            can_pay_activation(&scenario.state, claws, &claws_cost()),
+            "granted {{1}} paid on the intact 3-artifact board before the sacrifice → payable"
+        );
+    }
+
+    /// BLOCKER-1 regression (CR 117.1 + CR 701.13a): a `Composite[{N}, Exile a
+    /// CARD]` whose exile leg has `zone: None` and a NON-permanent filter must
+    /// classify to `Zone::Hand`, so the battlefield-removal walker returns `None`
+    /// and the mana-leg detour is NOT triggered — the composite keeps its
+    /// payable dry-run verdict. This pins the walker's hand-vs-battlefield
+    /// classification: if `find_battlefield_exile_cost` wrongly routed a
+    /// hand-exile here, the detour would mis-fire on a non-battlefield cost.
+    #[test]
+    fn hand_exile_composite_not_routed_to_battlefield_removal() {
+        use crate::types::ability::TypeFilter;
+        let card_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Card));
+        // Classifier: a `zone: None` + non-permanent (Card) filter is Hand, not
+        // Battlefield — the exact false-reject guard documented at the walker.
+        assert_eq!(
+            crate::game::cost_payability::exile_cost_effective_zone(None, Some(&card_filter)),
+            Zone::Hand,
+            "zone:None + Card filter must classify to Hand"
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::NoCost,
+                },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
+                    filter: Some(card_filter),
+                },
+            ],
+        };
+        // The battlefield-removal walker must NOT match a hand-exile leg.
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "hand-exile leg must not be treated as a battlefield removal"
+        );
+        // can_pay keeps the dry-run verdict: NoCost mana + no-op activation-scope
+        // exile → payable; the hand-exile leg never triggers the mana-leg detour.
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Jhoira", 0, 1).id();
+        scenario.add_card_to_hand(P0, "Some Card");
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// Row 4 (count > 1 exile still payable): a `Composite[{1}, Exile TWO
+    /// artifacts from the battlefield]` on a board where the only `{1}` source is
+    /// Metalcraft-gated is payable, because CR 601.2g pays {1} on the intact board
+    /// before either exile. The mana-first detour is count-agnostic. Mirrors the
+    /// count==2 sacrifice case (`claws_sacrifice_two_count_gt_one_not_rejected`).
+    #[test]
+    fn exile_two_count_gt_one_not_rejected() {
+        use crate::types::ability::TypeFilter;
+        let mut scenario = GameScenario::new();
+        metalcraft_mox(&mut scenario);
+        plain_artifact(&mut scenario, "Filler 1");
+        let src = plain_artifact(&mut scenario, "Exiler");
+        let cost_two = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Exile {
+                    count: 2,
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+                },
+            ],
+        };
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost_two),
+            "{{1}} paid on the intact board before the exiles → payable"
+        );
+    }
+
+    /// Row 5 (Discard excluded): a `Composite[{1}, Discard a card]` is NOT a
+    /// battlefield removal — discard shrinks the hand, never the board, so it can
+    /// never change board-derived mana. The walker must return `None` (proven
+    /// no-op, deliberately out of scope).
+    #[test]
+    fn discard_leg_is_not_battlefield_removal() {
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&cost).is_none(),
+            "Discard must not be treated as a battlefield removal"
+        );
+    }
+
+    /// Row 6 (self-ref excluded): a self-referential Exile or Sacrifice leg
+    /// (Scavenge/Suspend-style self-exile, "Sacrifice this") is the source's own
+    /// removal, not a board-shrinking non-mana leg in the CR 601.2h ordering
+    /// sense — the walker must return `None` for both. The SelfRef-first arm in
+    /// `find_battlefield_exile_cost` exists precisely because a SelfRef filter can
+    /// be permanent-implying and would otherwise pass the battlefield gate.
+    #[test]
+    fn self_ref_removal_legs_are_out_of_scope() {
+        let self_exile = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_exile).is_none(),
+            "self-exile leg must not be treated as a battlefield removal"
+        );
+        let self_sacrifice = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_sacrifice).is_none(),
+            "self-sacrifice leg must not be treated as a battlefield removal"
+        );
+        let self_return = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
+        };
+        assert!(
+            crate::game::casting::find_non_self_battlefield_removal_cost(&self_return).is_none(),
+            "self-bounce leg must not be treated as a battlefield removal"
         );
     }
 

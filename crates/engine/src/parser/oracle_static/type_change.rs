@@ -69,6 +69,12 @@ pub(crate) enum ChosenCreatureTypeStaticScope {
     VehicleCreatures,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChosenCreatureTypeApplication {
+    Additive,
+    Replacing,
+}
+
 impl ChosenCreatureTypeStaticScope {
     fn target_filter(self) -> TargetFilter {
         match self {
@@ -89,27 +95,63 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let (scope, _) = nom_on_lower(
+    let ((scope, application), _) = nom_on_lower(
         tp.original,
         tp.lower,
         parse_chosen_creature_type_static_sentence_with_scope,
     )?;
 
+    // CR 205.1b (in-addition retain) vs CR 205.1a (SET replace) + CR 613.1d
+    // (Layer 4) + CR 607.2d (chosen-link). The additive forms (Arcane Adaptation,
+    // Lifecraft Engine, Xenograft) add the chosen creature type while retaining
+    // existing subtypes. The SET form (Conspiracy: "Creatures you control are the
+    // chosen type") REPLACES the existing creature subtypes, modeled by composing
+    // RemoveAllSubtypes{Creature} (wipe) then AddChosenSubtype (re-add the chosen
+    // type) — the IDENTICAL pattern parse_enchanted_is_type uses (Frogify/Lignify).
+    // RemoveAllSubtypes{Creature} retains against state.all_creature_types, so the
+    // added chosen subtype SURVIVES the wipe (CR 613.7a intra-static written order)
+    // and an artifact creature keeps its artifact subtypes (CR 205.1a).
+    let modifications = match application {
+        ChosenCreatureTypeApplication::Additive => vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        ChosenCreatureTypeApplication::Replacing => match scope {
+            ChosenCreatureTypeStaticScope::Creatures
+            | ChosenCreatureTypeStaticScope::EachCreature => {
+                vec![
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: crate::types::card_type::SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::CreatureType,
+                    },
+                ]
+            }
+            // CR 301.7: a Vehicle-subtype grant has no known SET printing
+            // (Lifecraft Engine is always additive). Fall back to additive so a
+            // hypothetical non-additive vehicle line is never silently wiped of
+            // its non-creature subtypes.
+            ChosenCreatureTypeStaticScope::VehicleCreatures => {
+                vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }]
+            }
+        },
+    };
+
     Some(
         StaticDefinition::continuous()
             .affected(scope.target_filter())
-            .modifications(vec![ContinuousModification::AddChosenSubtype {
-                kind: ChosenSubtypeKind::CreatureType,
-            }])
+            .modifications(modifications)
             .description(description.to_string()),
     )
 }
 
 fn parse_chosen_creature_type_static_sentence_with_scope(
     input: &str,
-) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
-    let (input, scope) = parse_chosen_creature_type_static_scope_body(input)?;
-    Ok((input, scope))
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
+    let (input, (scope, application)) = parse_chosen_creature_type_static_scope_body(input)?;
+    Ok((input, (scope, application)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
@@ -117,19 +159,27 @@ pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleRes
     Ok((input, ()))
 }
 
+/// CR 205.1a / CR 205.1b + CR 607.2d: Parse the "<scope> are the chosen [creature]
+/// type [in addition to their other types]" body, returning the affected scope and
+/// whether the effect is additive (CR 205.1b "in addition") or replacing (CR 205.1a
+/// SET — Conspiracy's bare "are the chosen type"). The "in addition to ..." suffix is
+/// OPTIONAL: Arcane Adaptation / Lifecraft Engine / Xenograft are additive; Conspiracy
+/// omits it and replaces the creature types.
 fn parse_chosen_creature_type_static_scope_body(
     input: &str,
-) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
+) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
     let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
-    let (input, _) = alt((
-        tag(" the chosen type in addition to "),
-        tag(" the chosen creature type in addition to "),
-    ))
-    .parse(input)?;
-    let (input, _) = tag(pronoun).parse(input)?;
-    let (input, _) = tag(" other types").parse(input)?;
+    let (input, _) =
+        alt((tag(" the chosen type"), tag(" the chosen creature type"))).parse(input)?;
+    let (input, addition) =
+        opt((tag(" in addition to "), tag(pronoun), tag(" other types"))).parse(input)?;
+    let application = if addition.is_some() {
+        ChosenCreatureTypeApplication::Additive
+    } else {
+        ChosenCreatureTypeApplication::Replacing
+    };
     let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, scope))
+    Ok((input, (scope, application)))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_subject(
@@ -971,15 +1021,26 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    // STEP A.0 — peel an optional leading "during your turn, " timing clause.
+    // STEP A.0 — peel an optional leading turn-restriction timing clause.
     // Mirror of `parse_compound_turn_counter_animation` (anthem.rs): the
     // alternate printing convention writes the turn restriction as a leading
-    // timing prefix ("During your turn, ~ is a 4/4 ...") rather than a trailing
-    // "as long as it's your turn" clause. The peel is Option-returning, so when
-    // absent it falls through to `*tp` unchanged and no condition is attached.
-    let (tp, turn_condition) = match nom_tag_tp(tp, "during your turn, ") {
-        Some(rest) => (rest, Some(StaticCondition::DuringYourTurn)),
-        None => (*tp, None),
+    // timing prefix ("During your turn, ~ is a 4/4 ..." — Gideon-class; "During
+    // turns other than yours, ~ is an artifact creature" — Midnight Mangler)
+    // rather than a trailing "as long as it's your turn" clause. CR 611.3a: the
+    // negated form lowers to `Not(DuringYourTurn)`. The peel is Option-returning,
+    // so when absent it falls through to `*tp` unchanged and no condition is
+    // attached.
+    let (tp, turn_condition) = if let Some(rest) = nom_tag_tp(tp, "during your turn, ") {
+        (rest, Some(StaticCondition::DuringYourTurn))
+    } else if let Some(rest) = nom_tag_tp(tp, "during turns other than yours, ") {
+        (
+            rest,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            }),
+        )
+    } else {
+        (*tp, None)
     };
 
     // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical
@@ -1257,6 +1318,174 @@ pub(crate) fn parse_all_subject_are_color(
         StaticDefinition::continuous()
             .affected(affected)
             .modifications(vec![ContinuousModification::SetColor { colors }])
+            .description(description.to_string()),
+    )
+}
+
+/// CR 613.1e (Layer 5) + CR 105.2 / CR 105.3: Parse a color-defining static of
+/// the form "[subject] is/are [color expression]." for an ARBITRARY filter
+/// subject — generalizing [`parse_all_subject_are_color`] (which only accepts the
+/// `"All ..."` quantifier) to the full subject grammar via
+/// `parse_continuous_subject_filter` (handles "Each", "All", controller suffixes,
+/// "nonland permanent you control", etc.).
+///
+/// Two predicate families compose here:
+/// - Fixed colors / "all colors" / "colorless" via `parse_color_predicate`
+///   (Leyline of the Guildpact: "Each nonland permanent you control is all
+///   colors" → `SetColor(WUBRG)`).
+/// - "the chosen color" → `AddChosenColor`, reading the source's
+///   `ChosenAttribute::Color` (Shimmerwilds Growth: "Enchanted land is the chosen
+///   color" — a preceding `As ~ enters, choose a color` binds the attribute).
+///
+/// The copula is " is " (singular subject) or " are " (plural subject); both
+/// route to the same color modification. Dispatched AFTER the specialized
+/// `parse_all_subject_are_color` ("All ..." quantifier, with correct
+/// artifact/land subtype core-type routing) and `parse_self_subject_is_color_cda`
+/// (self-referential CDA color lines, all-zone + `characteristic_defining`), so
+/// those keep ownership of their cases and this branch only claims the residual
+/// general-filter subjects. A self-referential subject is declined here outright
+/// (it must be a CDA, never a plain Layer-5 static).
+pub(crate) fn parse_subject_is_color(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    // Split on the copula. " are " is tried first so a plural subject ending in
+    // "...s is..." cannot be mis-split (there is no such grammatical form for
+    // these statics; the copula is always a whole word with surrounding spaces).
+    let (subject_tp, predicate_tp) = tp
+        .split_around(" is ")
+        .or_else(|| tp.split_around(" are "))?;
+    let subject = subject_tp.original.trim();
+    let predicate = predicate_tp.original.trim().trim_end_matches('.');
+    let predicate_lower = predicate.to_lowercase();
+
+    // The subject must resolve to a concrete filter — otherwise this is not a
+    // color-defining static (a bare "It is ..." / "this is ..." anaphor falls
+    // through to other dispatch branches). Attached subjects ("Enchanted land",
+    // Shimmerwilds Growth) carry the `EnchantedBy` filter; the general subject
+    // grammar covers controller-scoped/quantified filters (Leyline of the
+    // Guildpact: "Each nonland permanent you control").
+    let subject_lower = subject.to_lowercase();
+    // `attached_subject_filter` matches "enchanted <type> " WITH a trailing
+    // space, so probe a space-suffixed copy and require the remainder to be empty.
+    let subject_with_space = format!("{subject} ");
+    let subject_space_lower = format!("{subject_lower} ");
+    let attached = attached_subject_filter(&TextPair::new(
+        subject_with_space.as_str(),
+        subject_space_lower.as_str(),
+    ));
+    let affected = match attached {
+        Some((filter, rest)) if rest.trim().is_empty() => filter,
+        _ => parse_continuous_subject_filter(subject)?,
+    };
+
+    // CR 604.3: a self-referential color line ("~ is colorless") is a
+    // characteristic-defining ability owned by `parse_self_subject_is_color_cda`
+    // (it sets `characteristic_defining` and functions in all zones). Decline so
+    // it is never emitted as a plain Layer-5 static.
+    if matches!(affected, TargetFilter::SelfRef) {
+        return None;
+    }
+
+    // CR 105.3: "the chosen color" reads the source's chosen color attribute.
+    if all_consuming(tag::<_, _, OracleError<'_>>("the chosen color"))
+        .parse(predicate_lower.as_str())
+        .is_ok()
+    {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddChosenColor])
+                .description(description.to_string()),
+        );
+    }
+
+    // Fixed colors / "all colors" / "colorless" (CR 105.1 / CR 105.2 / CR 105.2c).
+    let colors = parse_color_predicate(&predicate_lower)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .description(description.to_string()),
+    )
+}
+
+/// CR 205.4b + CR 613.1d (Layer 4): Parse a supertype-defining static of the form
+/// "[subject] is/are [no longer|not] [supertype]." — the supertype sibling of
+/// [`parse_subject_is_color`]. Adds a supertype (Leyline of Singularity: "All
+/// nonland permanents are legendary"; Sixth Stage of Magic Design: "All creatures
+/// are legendary") or removes one via a "no longer"/"not" negation (Melting: "All
+/// lands are no longer snow").
+///
+/// Reuses the shared subject grammar (`parse_continuous_subject_filter`, which
+/// handles "All"/"Each", "nonland permanents", controller suffixes), the shared
+/// `parse_supertype_word` token (the full CR 205.4a set: legendary/basic/snow/
+/// world/ongoing), and the existing
+/// `ContinuousModification::AddSupertype`/`RemoveSupertype` runtime (applied at
+/// Layer 4 in `game/layers.rs`) — no new variant or runtime. Dispatched after the
+/// color/land-type branches; the supertype predicate is disjoint from color and
+/// land-type words, so no branch is stolen. `all_consuming` on the supertype word
+/// keeps this to the BARE form ("… are legendary."): a trailing tail ("… in
+/// addition to their other types") or unrecognized predicate leaves the line
+/// unsupported (returns `None`) rather than being mis-claimed. A self-referential
+/// subject is declined — it would be a CDA, not a plain Layer-4 static.
+pub(crate) fn parse_subject_is_supertype(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp
+        .split_around(" is ")
+        .or_else(|| tp.split_around(" are "))?;
+    let subject = subject_tp.original.trim();
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+
+    let affected = parse_continuous_subject_filter(subject)?;
+    // CR 604.3: a self-referential line would be a CDA, not a Layer-4 static.
+    if matches!(affected, TargetFilter::SelfRef) {
+        return None;
+    }
+    // CR 613 dispatch ownership: the attached "Enchanted/Equipped [type] is
+    // [supertype]" Aura/Equipment form is owned by the predicate seam
+    // (`parse_supertype_grant` via `parse_continuous_gets_has` — Glittering Frost,
+    // In Bolas's Clutches). Decline an attached-subject filter here so this general
+    // "[subject] is/are [supertype]" static path owns only the standalone-subject
+    // form and never double-handles an attached-subject grant.
+    if let TargetFilter::Typed(ref tf) = affected {
+        if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::EnchantedBy | FilterProp::EquippedBy))
+        {
+            return None;
+        }
+    }
+
+    // CR 205.4b: an object can gain or lose a supertype ("When an object gains or
+    // loses a supertype…") — an optional "no longer"/"not" negation flips this
+    // parse to a supertype REMOVAL.
+    let predicate_lower = predicate.to_lowercase();
+    let (supertype_input, is_remove) = match opt(alt((
+        tag::<_, _, OracleError<'_>>("no longer "),
+        tag("not "),
+    )))
+    .parse(predicate_lower.as_str())
+    {
+        Ok((rest, negation)) => (rest, negation.is_some()),
+        Err(_) => (predicate_lower.as_str(), false),
+    };
+    let (_, supertype) = all_consuming(nom_target::parse_supertype_word)
+        .parse(supertype_input)
+        .ok()?;
+
+    let modification = if is_remove {
+        ContinuousModification::RemoveSupertype { supertype }
+    } else {
+        ContinuousModification::AddSupertype { supertype }
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![modification])
             .description(description.to_string()),
     )
 }

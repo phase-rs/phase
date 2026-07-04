@@ -180,6 +180,30 @@ test("Moxfield: projects v2 nested boards (boards.<key>.cards)", async () => {
   assert.match(text, /\[Main\]\n1 Sol Ring/);
 });
 
+test("Moxfield: maybeboard board is excluded from import", async () => {
+  mockUpstream({
+    name: "Testing",
+    boards: {
+      commanders: { cards: {} },
+      mainboard: {
+        cards: {
+          a: { quantity: 1, card: { name: "Sol Ring" } },
+        },
+      },
+      maybeboard: {
+        cards: {
+          b: { quantity: 1, card: { name: "Mana Crypt" } },
+        },
+      },
+      sideboard: { cards: {} },
+      companions: { cards: {} },
+    },
+  });
+  const text = await (await call("https://moxfield.com/decks/maybe")).text();
+  assert.match(text, /Sol Ring/);
+  assert.ok(!text.includes("Mana Crypt"));
+});
+
 test("Moxfield: sideboard-only deck is not rejected as empty", async () => {
   mockUpstream({
     name: "SB only",

@@ -24,6 +24,7 @@ pub mod seat_mutation_wire_guard;
 pub mod session;
 pub mod spectator_wire_guard;
 pub mod starter_decks;
+pub mod takeback;
 
 pub use ai_seats_wire_guard::guard_create_ai_seats;
 pub use client_hello_guard::guard_client_hello;
@@ -38,7 +39,7 @@ pub use draft_wire_guard::{
     guard_reconnect_draft,
 };
 pub use emote_guard::guard_emote;
-pub use filter::filter_state_for_player;
+pub use filter::{filter_events_for_player, filter_state_for_player};
 pub use game_reconnect_guard::guard_game_reconnect;
 pub use game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
@@ -59,9 +60,10 @@ pub use reconnect::ReconnectManager;
 pub use seat_mutation_wire_guard::guard_seat_mutation;
 pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
-    SessionManager,
+    BroadcastSnapshot, SessionManager,
 };
 pub use spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join, MAX_DRAFT_SPECTATORS_PER_DRAFT, MAX_GAME_SPECTATORS_PER_GAME,
 };
+pub use takeback::{PendingTakeback, TakebackOutcome, MAX_TAKEBACK_HISTORY};

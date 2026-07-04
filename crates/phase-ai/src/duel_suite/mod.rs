@@ -9,6 +9,7 @@
 pub mod attribution;
 pub mod compare;
 pub mod inline_decks;
+pub mod perf;
 pub mod run;
 pub mod snapshots;
 pub mod spec;
@@ -44,6 +45,8 @@ pub enum FeatureKind {
     Reanimator,
     Equipment,
     Blink,
+    Mill,
+    Energy,
 }
 
 impl FeatureKind {
@@ -64,6 +67,8 @@ impl FeatureKind {
         FeatureKind::Reanimator,
         FeatureKind::Equipment,
         FeatureKind::Blink,
+        FeatureKind::Mill,
+        FeatureKind::Energy,
     ];
 }
 

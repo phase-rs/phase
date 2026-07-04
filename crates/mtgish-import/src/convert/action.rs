@@ -8,11 +8,11 @@
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -35,9 +35,10 @@ use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
     CreatableToken, CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget,
-    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player,
-    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
-    SearchLibraryAction, Spell, Spells, Target, TokenCopyEffects, TokenFlag,
+    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent,
+    PhasedOutEffect, Player, Players, ReplacementActionWouldEnter,
+    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, Target,
+    TokenCopyEffects, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -269,7 +270,7 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
         | QuantityExpr::Power {
             exponent: inner, ..
         } => rewrite_bound_x_in_quantity_expr(inner, binding),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter_mut()
             .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))
             .sum(),
@@ -306,6 +307,7 @@ fn rewrite_bound_x_in_mana_production(
         ManaProduction::Colorless { count }
         | ManaProduction::AnyOneColor { count, .. }
         | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::ChosenColor { count, .. }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
@@ -380,6 +382,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         // CR 702.167a/b: Craft materials carry no X-bound quantity.
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1: `ExileWithAggregate`'s threshold is a fixed `i32` (like
+        // `CollectEvidence`'s amount) — no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -392,6 +397,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Behold { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        // CR 118.9: the borrowed keyword cost is read at runtime from the cast
+        // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
@@ -1309,6 +1317,7 @@ fn convert_targeted_distributed(
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }],
                 multi_target,
                 distribute: DistributionUnit::Damage,
@@ -2315,6 +2324,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::DiscardCard {
                     count: 1,
@@ -2344,6 +2354,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::ChangeZone {
                     origin: Some(Zone::Hand),
@@ -2356,7 +2367,9 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ])
         }
@@ -2386,7 +2399,9 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
             Ok(vec![
@@ -2401,8 +2416,56 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(return_ability),
+                    uses_tracked_set: false,
+                },
+            ])
+        }
+
+        // CR 702.26a + CR 603.7c: "Phase out target creature until [host]
+        // leaves the battlefield. Tap that creature as it phases in this way."
+        // (Oubliette). Immediate phase-out plus a host-scoped CantPhaseIn lock,
+        // then a delayed PhaseIn (+ optional tap-on-entry) when the host leaves.
+        Action::PhaseOutPermanentUntilWithEffects(perm, expiration, phased_out_effect) => {
+            let target = convert_permanent(perm)?;
+            let condition = expiration_to_delayed_trigger_condition(expiration)?;
+
+            let cant_phase_in = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }])],
+                duration: Some(Duration::UntilHostLeavesPlay),
+                target: Some(TargetFilter::ParentTarget),
+            };
+
+            let mut return_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                },
+            );
+            if matches!(phased_out_effect, PhasedOutEffect::TapAsPhasesIn) {
+                return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::ParentTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )));
+            }
+
+            Ok(vec![
+                Effect::PhaseOut { target },
+                cant_phase_in,
                 Effect::CreateDelayedTrigger {
                     condition,
                     effect: Box::new(return_ability),
@@ -2448,6 +2511,7 @@ fn spell_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2477,6 +2541,7 @@ fn graveyard_card_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2521,6 +2586,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         }),
         Permanent::Ref_TargetPermanent
         | Permanent::Ref_TargetPermanent1
@@ -2528,6 +2594,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::Target),
+            excess: None,
         }),
         Permanent::ThatEnteringPermanent
         | Permanent::Trigger_ThatArtifact
@@ -2539,6 +2606,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::TriggeringSource),
+            excess: None,
         }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "Effect::DealDamage.damage_source",
@@ -2667,6 +2735,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
         // CR 120.1 + CR 603.7c + CR 603.10a: "When this dies, [it] deals N
         // damage to <recipient>." The damage source is the dying permanent,
@@ -2677,6 +2746,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
 
         Action::DestroyPermanent(p) => Effect::Destroy {
@@ -2783,6 +2853,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -2839,7 +2910,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
             origin: Some(engine::types::zones::Zone::Battlefield),
@@ -2852,7 +2925,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13 + CR 400.7: Mass exile — "Exile each <filter>"
@@ -2871,7 +2946,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
@@ -2893,7 +2970,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -2933,6 +3012,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.
@@ -2998,7 +3078,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7: Mass return-from-graveyard-to-hand — "Return each <filter>
@@ -3018,7 +3100,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7 + CR 614.12: Mass reanimate from a specific player's
@@ -3047,7 +3131,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3072,7 +3158,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3256,7 +3344,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 122.1: Mass counter placement — "Put a [counter] on each
@@ -3472,7 +3562,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3492,7 +3584,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 111.1 + CR 111.5: Token creation with attached `TokenFlag`s.
@@ -3612,6 +3706,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
@@ -3702,7 +3797,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3881,13 +3978,28 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 608.2d: choose a creature type — the bounded creature-type
         // registry resolves the option set at runtime.
         Action::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 205.2: choose a card type from the bounded card-type set.
         Action::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // creature or land", Winding Way; "choose artifact, creature, or
+        // land", Turnabout) — the spell-action sibling of
+        // `ReplacementActionWouldEnter::ChooseACardtypeFromList` in
+        // `replacement.rs`. Shares `filter::restricted_card_type_choice` so
+        // both schema locations of this shape persist a real
+        // `ChoiceType::CardType { excluded }` (and therefore
+        // `ChosenAttribute::CardType`) instead of a free-form `Labeled`
+        // choice — required for downstream `IsCardtypeVariable` filters and
+        // `IsChosenCardType` prohibitions to bind.
+        Action::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: filter_mod::restricted_card_type_choice(opts)?,
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -4044,7 +4156,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 .map(static_effect::check_hasable_to_keyword_option)
                 .collect::<ConvResult<_>>()?;
             Effect::Choose {
-                choice_type: ChoiceType::Keyword { options },
+                // CR 608.2d: mtgish only models single-keyword choices, so count = 1.
+                choice_type: ChoiceType::Keyword { options, count: 1 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
@@ -4387,6 +4500,7 @@ fn convert_look_at_top(
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4405,6 +4519,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4422,6 +4537,7 @@ fn convert_look_at_top(
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4442,6 +4558,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4458,6 +4575,7 @@ fn convert_look_at_top(
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4517,6 +4635,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4530,6 +4649,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4543,6 +4663,7 @@ fn convert_reveal_top_dig(
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4557,6 +4678,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4571,6 +4693,7 @@ fn convert_reveal_top_dig(
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         _ => Err(prereq(format!(
@@ -5361,10 +5484,18 @@ fn players_to_scope_opt(players: &Players) -> ScopeOutcome {
             engine_type: "PlayerFilter",
             needed_variant: "OpponentOf(reference)".to_string(),
         }),
-        Ps::Other(_) => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "PlayerFilter",
-            needed_variant: "OtherThan(reference)".to_string(),
-        }),
+        // CR 102.1 + CR 603.2c: "each other player" relative to the trigger
+        // event's named player (the caster on spell-cast triggers). Zenith
+        // Chronicler, Hive Mind, Curse of Echoes class.
+        Ps::Other(inner) => match inner.as_ref() {
+            Player::Trigger_ThatPlayer => Ok(Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })),
+            other => Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "PlayerFilter",
+                needed_variant: format!("OtherThan({other:?})"),
+            }),
+        },
         Ps::Ref_TargetPlayers => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "PlayerFilter",
             needed_variant: "target-ref via Effect::*::target_player (Ref_TargetPlayers)"
@@ -5518,6 +5649,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
             ..
         } => Effect::RevealHand {
             target: target_filter,
@@ -5525,6 +5657,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
@@ -6170,7 +6303,9 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
         enter_with_counters: enter_repls.enter_with_counters,
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     });
     if shuffle {
         out.push(Effect::Shuffle {
@@ -6234,7 +6369,9 @@ fn convert_multi_filter_search_library(
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
             enter_with_counters: enter_repls.enter_with_counters.clone(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         });
     }
     if shuffle {
@@ -6693,16 +6830,66 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
-        CardInGraveyard, Cards, Color, ColorList, Comparison, Condition, Cost, CounterType,
-        CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources, ManaSymbol,
-        PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType, TokenCopyEffects,
-        TokenFlag, PT,
+        CardInGraveyard, Cards, CardtypeVariable, Color, ColorList, Comparison, Condition, Cost,
+        CounterType, CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources,
+        ManaSymbol, PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType,
+        TokenCopyEffects, TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, Comparator, ControllerRef, Effect, FilterProp, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityKind, ChoiceType, Comparator, ControllerRef, Effect, FilterProp, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
+    use engine::types::card_type::CoreType;
     use engine::types::mana::ManaColor;
+
+    // Issue #4201 follow-up — Turnabout's "choose artifact, creature, or
+    // land" spell action (`Action::ChooseACardtypeFromList`, the
+    // non-replacement sibling of `ReplacementActionWouldEnter::Choose*From
+    // List`) must persist a restricted `ChoiceType::CardType` the same way
+    // the ETB axis does, and the chosen type must feed the downstream
+    // `Permanents::IsCardtypeVariable(TheChosenCardtype)` filter that
+    // Turnabout's tap/untap modes read.
+    #[test]
+    fn choose_a_cardtype_from_list_action_lowers_to_restricted_card_type_choice() {
+        let effect = convert(&Action::ChooseACardtypeFromList(vec![
+            CardType::Artifact,
+            CardType::Creature,
+            CardType::Land,
+        ]))
+        .unwrap();
+
+        match effect {
+            Effect::Choose {
+                choice_type: ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(persist);
+                assert_eq!(
+                    excluded,
+                    vec![
+                        CoreType::Enchantment,
+                        CoreType::Instant,
+                        CoreType::Planeswalker,
+                        CoreType::Sorcery,
+                    ]
+                );
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
+
+        // The same persisted choice feeds `IsCardtypeVariable(TheChosenCardtype)`
+        // — Turnabout's tap/untap modes filter permanents by it.
+        let filter = crate::convert::filter::convert(&Permanents::IsCardtypeVariable(
+            CardtypeVariable::TheChosenCardtype,
+        ))
+        .unwrap();
+        assert!(matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::IsChosenCardType)
+        ));
+    }
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
@@ -6889,6 +7076,28 @@ mod tests {
             &PtValue::Quantity(QuantityExpr::Fixed { value: 5 })
         );
         assert_eq!(count, &QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn each_other_player_than_triggering_player_scopes_all_except() {
+        use crate::schema::types::{Action, Actions, Player, Players};
+        use engine::types::ability::{Effect, PlayerFilter};
+
+        let actions = Actions::ActionList(vec![Action::EachPlayerAction(
+            Box::new(Players::Other(Box::new(Player::Trigger_ThatPlayer))),
+            Box::new(Action::DrawACard),
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.player_scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })
+        );
+        assert!(matches!(*ability.effect, Effect::Draw { .. }));
     }
 
     #[test]
@@ -7426,6 +7635,7 @@ mod tests {
             amount,
             target,
             damage_source,
+            excess: _,
         } = effect
         else {
             panic!("expected DealDamage, got {effect:?}");
@@ -7574,5 +7784,33 @@ mod tests {
         };
         assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    #[test]
+    fn apply_player_target_preserves_private_reveal_hand_flag() {
+        let private_look = Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::None,
+            count: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: false,
+        };
+        let rebound = apply_player_target(private_look, TargetFilter::Player).unwrap();
+        let Effect::RevealHand {
+            target,
+            reveal,
+            card_filter,
+            ..
+        } = rebound
+        else {
+            panic!("expected RevealHand, got {rebound:?}");
+        };
+        assert_eq!(target, TargetFilter::Player);
+        assert_eq!(card_filter, TargetFilter::None);
+        assert!(
+            !reveal,
+            "apply_player_target must preserve reveal:false for private looks"
+        );
     }
 }

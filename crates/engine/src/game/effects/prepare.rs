@@ -166,6 +166,7 @@ pub(crate) fn open_copy_target_selection(
     state: &mut GameState,
     copy_id: ObjectId,
     controller: PlayerId,
+    paradigm_remaining_offers: Option<Vec<ObjectId>>,
 ) -> Result<bool, String> {
     // Snapshot the ability from the stack entry we just pushed so we can
     // compute slots without holding a mutable borrow across `build_target_slots`.
@@ -203,6 +204,7 @@ pub(crate) fn open_copy_target_selection(
         effect_kind: crate::types::ability::EffectKind::CopySpell,
         effect_source_id: Some(copy_id),
         current_slot: 0,
+        paradigm_remaining_offers,
     };
     Ok(true)
 }
@@ -258,6 +260,7 @@ fn synthesize_prepared_copy_object(
     // Do not re-enter alternative-face casting logic for this synthetic copy.
     copy_obj.back_face = None;
     apply_back_face_to_object(&mut copy_obj, back.clone());
+    copy_obj.casting_permissions.clear();
     copy_obj
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
@@ -267,7 +270,9 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
-            exile_instead_of_graveyard_on_resolve: false,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            mana_spend_permission: None,
         });
     state.objects.insert(copy_id, copy_obj);
 
@@ -388,7 +393,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_effect::parse_effect;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, CastingPermission, QuantityExpr, ReplacementDefinition,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -746,7 +752,7 @@ mod tests {
             },
         });
 
-        let armed = open_copy_target_selection(&mut state, copy_id, PlayerId(0)).unwrap();
+        let armed = open_copy_target_selection(&mut state, copy_id, PlayerId(0), None).unwrap();
         assert!(!armed, "no target slots → no CopyRetarget");
         // WaitingFor should remain unchanged (default Priority here).
         assert!(!matches!(
@@ -788,6 +794,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 amount: QuantityExpr::Fixed { value: 2 },
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             copy_id,
@@ -813,7 +820,7 @@ mod tests {
             Zone::Stack,
         );
 
-        let armed = open_copy_target_selection(&mut state, copy_id, PlayerId(0)).unwrap();
+        let armed = open_copy_target_selection(&mut state, copy_id, PlayerId(0), None).unwrap();
         assert!(armed, "target slot → arms CopyRetarget");
         match &state.waiting_for {
             WaitingFor::CopyRetarget {
@@ -994,6 +1001,22 @@ mod tests {
         {
             let source = state.objects.get_mut(&source_id).unwrap();
             source.prepared = Some(PreparedState);
+            // CR 722.3c + CR 118.9a: prepared-copy casting must use the
+            // prepare face's mana cost, not any stale free-cast permission that
+            // happened to be stored on the battlefield source before cloning.
+            source
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    mana_spend_permission: None,
+                });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 1,

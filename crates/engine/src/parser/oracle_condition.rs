@@ -3,7 +3,8 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, value};
+use nom::character::complete::{multispace0, one_of};
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -148,6 +149,7 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
     {
         return Some(ParsedCondition::YouAttackedWithAtLeast {
             count: count as u32,
+            filter: None,
         });
     }
     if let Some(count) =
@@ -155,7 +157,18 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
     {
         return Some(ParsedCondition::YouAttackedWithAtLeast {
             count: count as u32,
+            filter: None,
         });
+    }
+    // CR 508.1a: "you attacked with a/an <filter> this turn" — at least one
+    // attacker of the given kind. Distinct from the numeric "N creatures"
+    // thresholds above (which carry no type qualifier). The trailing "this turn"
+    // may already be stripped upstream (e.g. an activated-ability duration
+    // parser peels it before the cost-reduction condition is reparsed), so both
+    // the suffixed and bare forms are accepted. Thaumaton Torpedo: "...if you
+    // attacked with a Spacecraft this turn".
+    if let Some(condition) = parse_you_attacked_with_filter(text) {
+        return Some(condition);
     }
     if all_consuming(alt((
         value(
@@ -187,6 +200,47 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
         return Some(condition);
     }
     None
+}
+
+/// CR 508.1a: Parse "you attacked with a/an <filter>[ this turn]" into a
+/// `ParsedCondition::YouAttackedWithAtLeast { count: 1, filter }`. The `<filter>`
+/// is delegated to `parse_type_phrase` so the whole class of attacker qualifiers
+/// (Spacecraft, Vehicle, a specific creature type, …) is covered by the shared
+/// type-phrase combinator rather than a per-card literal. Returns `None` unless
+/// the entire phrase after the filter is consumed (modulo an optional " this
+/// turn"), keeping unrecognized qualifiers an honest gap.
+fn parse_you_attacked_with_filter(text: &str) -> Option<ParsedCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you attacked with ")
+        .parse(text)
+        .ok()?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    // Reject the bare/untyped case: `parse_type_phrase` returns `Any` when no
+    // type word matched, which would over-match "you attacked with three or more
+    // creatures this turn" (handled by the numeric thresholds above). Require a
+    // concrete typed filter here.
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    // Consume an optional trailing " this turn" and any trailing punctuation with
+    // combinators (no manual string trimming), then require the phrase to be fully
+    // consumed so unrecognized qualifiers stay an honest gap. The duration suffix
+    // may already be stripped upstream, so it is optional.
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    let (remainder, _) = opt(tag::<_, _, OracleError<'_>>("this turn"))
+        .parse(remainder)
+        .ok()?;
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    let (remainder, _) = opt(one_of::<_, _, OracleError<'_>>(".,;"))
+        .parse(remainder)
+        .ok()?;
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    if !remainder.is_empty() {
+        return None;
+    }
+    Some(ParsedCondition::YouAttackedWithAtLeast {
+        count: 1,
+        filter: Some(filter),
+    })
 }
 
 fn parse_quantity_restriction_condition(text: &str) -> Option<ParsedCondition> {
@@ -935,28 +989,47 @@ fn parse_you_event_this_turn(text: &str) -> nom::IResult<&str, ParsedCondition, 
     .parse(text)
 }
 
-/// "[type] enter(ed) the battlefield under your control this turn"
+/// CR 603.6a: modern enters templating is written "When [this object] enters"
+/// (the canonical form elides "the battlefield"), so "[type] entered under your
+/// control this turn" is equivalent to the full form "[type] entered the
+/// battlefield under your control this turn". Matches the optional
+/// " the battlefield" then the mandatory control/this-turn suffix.
+fn entered_under_your_control_suffix(text: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value(
+        (),
+        (
+            opt(tag(" the battlefield")),
+            tag(" under your control this turn"),
+        ),
+    )
+    .parse(text)
+}
+
+/// "[type] enter(ed) [the battlefield] under your control this turn"
 fn parse_etb_this_turn_condition(
     text: &str,
 ) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::YouHadCreatureEnterThisTurn,
-            alt((
-                tag("a creature entered the battlefield under your control this turn"),
-                tag("creature enter the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("a creature entered"), tag("creature enter"))),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn,
-            tag("angel or berserker enter the battlefield under your control this turn"),
+            (
+                tag("angel or berserker enter"),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadArtifactEnterThisTurn,
-            alt((
-                tag("an artifact entered the battlefield under your control this turn"),
-                tag("artifact entered the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("an artifact entered"), tag("artifact entered"))),
+                entered_under_your_control_suffix,
+            ),
         ),
     ))
     .parse(text)
@@ -1201,6 +1274,14 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
             },
         });
     }
+    // CR 115.9b: "one or more" is redundant with .any() semantics (Orvar — "if it
+    // targets one or more other permanents you control").
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("one or more "),
+        tag("one or more"),
+    )))
+    .parse(rest)
+    .ok()?;
     let (filter, remainder) = parse_type_phrase(rest);
     if !remainder.trim().is_empty() {
         return None;
@@ -1234,7 +1315,46 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter};
+    use crate::types::ability::{
+        ControllerRef, CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    };
+
+    /// CR 508.1a: "you attacked with a/an <filter>[ this turn]" parses to a
+    /// filtered `YouAttackedWithAtLeast { count: 1 }`, both with and without the
+    /// trailing "this turn" (the latter is the shape reaching the parser after an
+    /// upstream duration strip). The unfiltered numeric thresholds remain
+    /// `filter: None`, and the bare-creature numeric form must NOT be captured by
+    /// the typed arm.
+    #[test]
+    fn attacked_with_filter_condition_parses_typed_and_preserves_numeric() {
+        for text in [
+            "you attacked with a spacecraft this turn",
+            "you attacked with a spacecraft",
+        ] {
+            match parse_restriction_condition(text) {
+                Some(ParsedCondition::YouAttackedWithAtLeast {
+                    count: 1,
+                    filter: Some(TargetFilter::Typed(tf)),
+                }) => assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Spacecraft")),
+                    "expected Spacecraft subtype, got {:?} for {text}",
+                    tf.type_filters
+                ),
+                other => panic!("expected filtered attacked-with for {text}, got {other:?}"),
+            }
+        }
+        // Numeric thresholds stay unfiltered.
+        assert_eq!(
+            parse_restriction_condition("you attacked with 3 or more creatures this turn"),
+            Some(ParsedCondition::YouAttackedWithAtLeast {
+                count: 3,
+                filter: None,
+            }),
+            "numeric attacker threshold must stay filter: None"
+        );
+    }
 
     /// CR 508.1 + CR 601.3: a presence-style restriction condition ("Cast this
     /// spell only if a creature is attacking you" — Confront the Assault)
@@ -1258,6 +1378,29 @@ mod tests {
                 "filter should be a creature attacking you, got {filter:?}"
             ),
             other => panic!("expected QuantityComparison(ObjectCount >= 1), got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// bridges to ObjectCount(creature + Attacking) >= N.
+    #[test]
+    fn restriction_attacking_creatures_count_ge() {
+        match parse_restriction_condition("three or more creatures are attacking") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }) => assert!(
+                matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking { defender: None }
+                ))),
+                "filter should be attacking creatures, got {filter:?}"
+            ),
+            other => panic!("expected QuantityComparison(ObjectCount >= 3), got {other:?}"),
         }
     }
 
@@ -1750,6 +1893,23 @@ mod tests {
                 assert!(filter.type_filters.contains(&TypeFilter::Creature));
             }
             other => panic!("expected SpellTargetsFilter(Creature), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_one_or_more_other_permanents_you_control() {
+        let parsed =
+            parse_restriction_condition("it targets one or more other permanents you control")
+                .expect("Orvar intervening-if should parse");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected SpellTargetsFilter(Typed permanent), got {other:?}"),
         }
     }
 

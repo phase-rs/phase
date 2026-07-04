@@ -23,6 +23,11 @@ DECKS_OUTPUT="${OUTPUT_DIR}/decks.json"
 
 echo "=== Card Data Generation ==="
 
+# Pin the release-gate "as of" date to UTC today so `GATED_SETS` auto-unlocks
+# sets whose MTGJSON releaseDate has passed (issue #4365). Override in tests
+# with GATED_SETS_AS_OF=YYYY-MM-DD.
+export GATED_SETS_AS_OF="${GATED_SETS_AS_OF:-$(date -u +%Y-%m-%d)}"
+
 # Download MTGJSON AtomicCards if not present. mtgjson_download prefers the
 # gzipped artifact (~50 MB vs ~156 MB uncompressed) and retries the
 # mid-transfer connection resets mtgjson hands out on large anonymous reads.
@@ -40,6 +45,13 @@ if [ ! -f "$MTGJSON_META_FILE" ]; then
   echo "Downloading MTGJSON Meta..."
   mkdir -p "$DATA_DIR/mtgjson"
   mtgjson_download "Meta.json" "$MTGJSON_META_FILE"
+fi
+
+MTGJSON_CARD_TYPES_FILE="$DATA_DIR/mtgjson/CardTypes.json"
+if [ ! -f "$MTGJSON_CARD_TYPES_FILE" ]; then
+  echo "Downloading MTGJSON CardTypes..."
+  mkdir -p "$DATA_DIR/mtgjson"
+  mtgjson_download "CardTypes.json" "$MTGJSON_CARD_TYPES_FILE"
 fi
 
 MTGJSON_SET_LIST_FILE="$DATA_DIR/mtgjson/SetList.json"
@@ -140,7 +152,7 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      set of requested --bin targets; alternating shapes (e.g. tokens-gen
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
-TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate)
+TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
 TOOL_BIN="target/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 

@@ -16,6 +16,29 @@ import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstima
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
+import type { AiCardDataMode } from "./card-db-subset";
+import { DEFAULT_AI_CARD_DATA_MODE, loadAiPoolCardDb } from "./card-db-subset";
+
+/**
+ * True on handheld browsers whose per-tab memory ceiling cannot hold the main
+ * WASM engine instance plus the 2–4 pooled AI instances. Every iOS browser is
+ * WebKit and shares one per-tab budget, so N copies of the full ~48MB engine
+ * module silently OOM-reload the tab. Desktop browsers have GB-scale ceilings
+ * and return false. Used by `ensureAiPool` to skip the pool on these devices.
+ *
+ * iPadOS 13+ reports the desktop `MacIntel` platform, so it is distinguished by
+ * its touch support rather than the user-agent string.
+ */
+function isMemoryConstrainedDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  const isIOS =
+    /iP(hone|od|ad)/.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isAndroidPhone = /Android/.test(ua) && /Mobile/.test(ua);
+  return isIOS || isAndroidPhone;
+}
+
 /**
  * Flatten the `ClientGameState { state, derived }` wire envelope produced
  * by the engine's WASM getters into the store-side `GameState` shape with
@@ -109,6 +132,11 @@ export class WasmAdapter implements EngineAdapter {
   private aiPool: AiWorkerPool | null = null;
   private aiPoolFailed = false;
 
+  // How the AI worker pool loads its card database. `auto`/`subset` load an
+  // engine-built game-scoped subset (escalating to full for unbounded games
+  // like Momir); `full` loads the entire corpus into every pool worker.
+  private aiCardDataMode: AiCardDataMode = DEFAULT_AI_CARD_DATA_MODE;
+
   // Fallback: direct WASM on main thread (only used if Worker fails)
   private fallback: MainThreadFallback | null = null;
 
@@ -170,9 +198,11 @@ export class WasmAdapter implements EngineAdapter {
           console.log(`Card database loaded: ${count} cards`);
         }
         this.cardDbLoaded = true;
-        // Also load into AI pool if it's already initialized
-        if (this.aiPool && !this.aiPool.isCardDbLoaded) {
-          await this.aiPool.loadCardDb();
+        // Also load into AI pool if it's already initialized. AI-pool workers
+        // get the game-scoped subset (built on the main engine), not the full
+        // corpus, unless the mode is `full` or the universe is unbounded.
+        if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
+          await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
         }
       } catch (err) {
         console.warn("Failed to load card database:", err);
@@ -338,15 +368,29 @@ export class WasmAdapter implements EngineAdapter {
 
 /** Lazy AI pool init — only created on first VeryHard request. */
   private async ensureAiPool(): Promise<AiWorkerPool | null> {
-    if (this.aiPool) return this.aiPool;
+    if (this.aiPool) {
+      // The pool's subset is game-scoped: after `resetGameState` invalidated it,
+      // rebuild this game's subset (the pool instance is preserved across games).
+      if (this.cardDbLoaded && this.engine && !this.aiPool.isCardDbLoaded) {
+        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
+      }
+      return this.aiPool;
+    }
     if (this.aiPoolFailed) return null;
+    // Skip the AI worker pool on memory-constrained handhelds (iOS WebKit in
+    // particular): the main engine instance plus 2–4 pooled instances each hold
+    // a full ~48MB WASM module and exceed the per-tab memory ceiling, silently
+    // OOM-reloading the tab. VeryHard then falls through to the single-worker
+    // path below (getAiAction), which runs the same fixed-budget beam search;
+    // the pool only adds cross-seed rollout-variance averaging, not search depth.
+    if (isMemoryConstrainedDevice()) return null;
     try {
       const cores = navigator.hardwareConcurrency ?? 0;
       const count = Math.max(2, Math.min(cores - 1, 4));
       this.aiPool = new AiWorkerPool(count);
       await this.aiPool.initialize();
-      if (this.cardDbLoaded) {
-        await this.aiPool.loadCardDb();
+      if (this.cardDbLoaded && this.engine) {
+        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
       }
       return this.aiPool;
     } catch {
@@ -412,6 +456,14 @@ export class WasmAdapter implements EngineAdapter {
     return this.fallback!.applySeatMutation(stateJson, mutationJson);
   }
 
+  async projectSeatView(stateJson: string): Promise<unknown> {
+    this.assertInitialized();
+    if (this.engine) {
+      return this.engine.projectSeatView(stateJson);
+    }
+    return this.fallback!.projectSeatView(stateJson);
+  }
+
   /**
    * Resume a P2P host session from a persisted `GameState`. Stamps a fresh
    * RNG seed (so continued play diverges from the pre-save sequence) and
@@ -444,13 +496,20 @@ export class WasmAdapter implements EngineAdapter {
   /**
    * Clear the WASM game state without terminating the worker.
    *
-   * Preserves the WASM instance (with V8 TurboFan optimizations), card database,
-   * and AI worker pool. Any in-flight AI computation on the old state will
-   * short-circuit with an error rather than running a full search.
+   * Preserves the WASM instance (with V8 TurboFan optimizations), the main
+   * worker's full card database, and the AI worker pool INSTANCE. In
+   * subset/auto mode the pool's game-scoped subset is invalidated so the next
+   * `ensureAiPool`/`ensureCardDb` rebuilds it for the new game; in full mode the
+   * pool's full DB is preserved (it's game-independent). Any in-flight AI
+   * computation on the old state will short-circuit with an error rather than
+   * running a full search.
    */
   async resetGameState(): Promise<void> {
     if (this.engine) {
       await this.engine.resetGame();
+    }
+    if (this.aiCardDataMode !== "full") {
+      this.aiPool?.invalidateCardDb();
     }
   }
 
@@ -580,6 +639,7 @@ interface MainThreadFallback {
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
+  projectSeatView(stateJson: string): Promise<unknown>;
   ping(): string;
   initializeGame(
     deckData: unknown | null,
@@ -678,6 +738,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     applySeatMutation: (stateJson: string, mutationJson: string) =>
       enqueue(() => wasm.apply_seat_mutation(stateJson, mutationJson)),
+
+    projectSeatView: (stateJson: string) =>
+      enqueue(() => wasm.project_seat_view(stateJson)),
 
     ping: () => wasm.ping(),
 

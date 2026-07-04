@@ -1,25 +1,36 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::{Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::build_decision_context;
+use engine::types::ability::{
+    AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
+};
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
+use engine::types::game_state::{
+    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
-use crate::config::{AiConfig, ThreatAwareness};
+use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
+use crate::mana_colors::demand_aware_single_color;
 use crate::plan::PlanSnapshot;
 use crate::planner::{
-    apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
+    apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
+    RankedCandidate, SearchBudget,
 };
-use crate::policies::context::PolicyContext;
+use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
@@ -75,6 +86,7 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+const LARGE_BOARD_FAST_PRIORITY_OBJECTS: usize = 1000;
 
 fn pick_lowest_value_sacrifices(
     state: &GameState,
@@ -101,6 +113,10 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return Some(action);
+    }
+
     let session = AiSession::arc_from_game(state);
     choose_action_with_session(state, ai_player, config, rng, &session)
 }
@@ -162,6 +178,32 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 106.3 + CR 608.2d: Selecting which color a flexible mana source
+    // produces while paying for a spell is mechanical, not a policy judgment —
+    // the AI must produce the color the in-flight cost demands. `candidates.rs`
+    // enumerates *every* color option, so `score_candidates` is always non-empty
+    // and the old `fallback_action` SingleColor arm never fired on the normal
+    // path; the scorer then picked an arbitrary (first-enumerated) color,
+    // tapping a U/R dual for {R} when the spell needed {U} and stranding the pip
+    // (ManaPayment dead-end). This deterministic pre-emption — parallel to the
+    // TributeChoice and SearchChoice pre-emptions above — is the real fix.
+    if let WaitingFor::ChooseManaColor {
+        choice: ManaChoicePrompt::SingleColor { ref options },
+        ..
+    } = state.waiting_for
+    {
+        if let Some(color) = demand_aware_single_color(options, state) {
+            return Some(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(color),
+                count: 1,
+            });
+        }
+    }
+
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return Some(action);
+    }
+
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
@@ -180,6 +222,318 @@ pub fn choose_action_with_session(
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen
+}
+
+fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player {
+        return None;
+    }
+
+    if large_board_main_phase_has_no_development_sources(state, ai_player) {
+        return Some(GameAction::PassPriority);
+    }
+
+    let actions = engine::ai_support::flat_priority_actions(state);
+    low_value_priority_pass_from_actions(state, ai_player, &actions)
+        .or_else(|| large_board_main_phase_fast_action_from_actions(state, ai_player, &actions))
+}
+
+fn large_board_main_phase_has_no_development_sources(
+    state: &GameState,
+    ai_player: PlayerId,
+) -> bool {
+    if state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || state.active_player != ai_player
+        || !state.stack.is_empty()
+        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        return false;
+    }
+
+    let player = &state.players[ai_player.0 as usize];
+    if !player.hand.is_empty() || !player.graveyard.is_empty() {
+        return false;
+    }
+    if engine::game::planechase::can_roll_planar_die(state, ai_player) {
+        return false;
+    }
+
+    if state.exile.iter().any(|&object_id| {
+        state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.owner == ai_player || object.controller == ai_player)
+    }) {
+        return false;
+    }
+
+    let controlled_battlefield_is_inert = state.battlefield.iter().copied().all(|object_id| {
+        state.objects.get(&object_id).is_none_or(|object| {
+            object.controller != ai_player || object_has_no_development_source(object)
+        })
+    });
+    let controlled_command_zone_is_inert = state.command_zone.iter().copied().all(|object_id| {
+        state.objects.get(&object_id).is_none_or(|object| {
+            (object.owner != ai_player && object.controller != ai_player)
+                || object_has_no_development_source(object)
+        })
+    });
+
+    controlled_battlefield_is_inert && controlled_command_zone_is_inert
+}
+
+fn object_has_no_development_source(object: &engine::game::game_object::GameObject) -> bool {
+    object
+        .abilities
+        .iter()
+        .all(engine::game::mana_abilities::is_mana_ability)
+        && object.trigger_definitions.is_empty()
+        && object.replacement_definitions.is_empty()
+        && object.static_definitions.is_empty()
+        && object.prepared.is_none()
+        && object.room_unlocks.is_none()
+        && !object.keywords.iter().any(|keyword| {
+            matches!(
+                keyword,
+                engine::types::keywords::Keyword::Crew { .. }
+                    | engine::types::keywords::Keyword::Saddle(_)
+                    | engine::types::keywords::Keyword::Station
+            )
+        })
+}
+
+fn priority_action_is_safe_to_defer_on_own_stack(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => activated_ability_is_safe_to_defer(state, *source_id, *ability_index),
+        _ => false,
+    }
+}
+
+fn priority_action_is_safe_to_defer_empty_stack(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => empty_stack_activation_is_low_value(state, *source_id, *ability_index),
+        _ => false,
+    }
+}
+
+fn priority_action_is_pass_or_mana(state: &GameState, action: &GameAction) -> bool {
+    match action {
+        GameAction::PassPriority => true,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => activated_ability_definition(state, *source_id, *ability_index)
+            .is_some_and(engine::game::mana_abilities::is_mana_ability),
+        _ => false,
+    }
+}
+
+fn activated_ability_is_safe_to_defer(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    activated_ability_definition(state, source_id, ability_index)
+        .is_some_and(|ability| !ability_interacts_with_stack(ability))
+}
+
+fn empty_stack_activation_is_low_value(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    activated_ability_definition(state, source_id, ability_index).is_some_and(|ability| {
+        engine::game::mana_abilities::is_mana_ability(ability)
+            || ability_is_temporary_combat_modifier(ability)
+    })
+}
+
+fn activated_ability_definition(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<&AbilityDefinition> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|object| object.abilities.get(ability_index))
+}
+
+fn ability_interacts_with_stack(ability: &AbilityDefinition) -> bool {
+    effect_interacts_with_stack(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_interacts_with_stack)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_interacts_with_stack)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(ability_interacts_with_stack)
+}
+
+fn effect_interacts_with_stack(effect: &Effect) -> bool {
+    matches!(effect, Effect::CounterAll { .. })
+        || effect
+            .target_filter()
+            .is_some_and(target_filter_interacts_with_stack)
+}
+
+fn target_filter_interacts_with_stack(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. }
+    ) || filter.extract_zones().contains(&Zone::Stack)
+}
+
+fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    ability_effect_is_temporary_combat_modifier(ability)
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_is_temporary_combat_modifier)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_is_temporary_combat_modifier)
+}
+
+fn ability_effect_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+    match &*ability.effect {
+        Effect::Pump { .. } => matches!(ability.duration, Some(Duration::UntilEndOfTurn)),
+        effect => effect_is_temporary_combat_modifier(effect),
+    }
+}
+
+fn effect_is_temporary_combat_modifier(effect: &Effect) -> bool {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => static_abilities
+            .iter()
+            .all(static_definition_is_temporary_combat_modifier),
+        _ => false,
+    }
+}
+
+fn static_definition_is_temporary_combat_modifier(static_def: &StaticDefinition) -> bool {
+    matches!(static_def.mode, StaticMode::Continuous)
+        && static_def
+            .modifications
+            .iter()
+            .all(continuous_modification_is_temporary_combat_modifier)
+}
+
+fn continuous_modification_is_temporary_combat_modifier(
+    modification: &ContinuousModification,
+) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddKeyword { .. }
+    )
+}
+
+fn low_value_empty_stack_phase(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Upkeep | Phase::Draw | Phase::End | Phase::Cleanup
+    )
+}
+
+fn low_value_priority_pass_from_actions(
+    state: &GameState,
+    ai_player: PlayerId,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player
+        || !actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PassPriority))
+    {
+        return None;
+    }
+
+    let owns_entire_stack = !state.stack.is_empty()
+        && state
+            .stack
+            .iter()
+            .all(|entry| entry.controller == ai_player);
+    let own_stack_pass = owns_entire_stack
+        && actions
+            .iter()
+            .all(|action| priority_action_is_safe_to_defer_on_own_stack(state, action));
+    let empty_stack_pass = state.stack.is_empty()
+        && actions
+            .iter()
+            .all(|action| priority_action_is_safe_to_defer_empty_stack(state, action))
+        && (low_value_empty_stack_phase(state.phase)
+            || actions
+                .iter()
+                .all(|action| priority_action_is_pass_or_mana(state, action)));
+
+    if own_stack_pass || empty_stack_pass {
+        Some(GameAction::PassPriority)
+    } else {
+        None
+    }
+}
+
+fn large_board_main_phase_fast_action_from_actions(
+    state: &GameState,
+    ai_player: PlayerId,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        return None;
+    };
+    if player != ai_player
+        || state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || state.active_player != ai_player
+        || !state.stack.is_empty()
+        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        return None;
+    }
+
+    if let Some(action) = prefer_land_drop(state, ai_player, actions) {
+        return Some(action);
+    }
+
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::CastSpell { object_id, .. } => {
+                Some((evaluate_card_value(state, *object_id), action.clone()))
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
+        .map(|(_, action)| action)
 }
 
 /// Emit a structured decision-trace event for the chosen tactical action.
@@ -249,6 +603,8 @@ pub fn emit_trace_for_candidate(
         config,
         context,
         cast_facts,
+        // The decision trace reflects the committed (root) decision.
+        search_depth: SearchDepth::Root,
     };
     let verdicts = policies.verdicts(&policy_ctx);
 
@@ -312,16 +668,29 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
     if state.waiting_for.has_pending_cast() {
+        // The internal discriminant tag is niche-optimized (non-sequential), so
+        // print the variant *name* (the Debug prefix before its first field) and
+        // the in-flight spell's card name instead — an opaque discriminant alone
+        // is not enough to diagnose which cast/card exposed the gap.
+        let debug = format!("{:?}", state.waiting_for);
+        let variant = debug.split([' ', '{']).next().unwrap_or("<unknown>");
+        // ManaPayment externalizes its PendingCast into `GameState::pending_cast`
+        // rather than the WaitingFor variant, so check both sources.
+        let spell = state
+            .waiting_for
+            .pending_cast_ref()
+            .or(state.pending_cast.as_deref())
+            .and_then(|pc| state.objects.get(&pc.object_id))
+            .map_or("<none>", |obj| obj.name.as_str());
         debug_assert!(
             false,
-            "AI fallback reached during pending cast ({:?}) — \
-             can_cast_object_now has a gap that allowed an uncompletable \
-             cast through. Tighten the pre-cast check rather than relying \
-             on CancelCast recovery.",
-            std::mem::discriminant(&state.waiting_for)
+            "AI fallback reached during pending cast (variant {variant}, spell {spell}) — \
+             can_cast_object_now has a gap that allowed an uncompletable cast through. \
+             Tighten the pre-cast check rather than relying on CancelCast recovery."
         );
         tracing::error!(
-            waiting_for = ?std::mem::discriminant(&state.waiting_for),
+            variant,
+            spell,
             "AI fallback cancelled an uncompletable cast — can_cast_object_now gap"
         );
         return Some(GameAction::CancelCast);
@@ -571,6 +940,17 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&source| GameAction::ChooseDamageSource { source }),
 
+        // CR 709.5f-g: room-door choice — pick the first offered (op, door).
+        WaitingFor::ChooseRoomDoor {
+            object_id, options, ..
+        } => options
+            .first()
+            .map(|&(op, door)| GameAction::ChooseRoomDoor {
+                object_id: *object_id,
+                op,
+                door,
+            }),
+
         // Mode choice: select first mode.
         WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. } => {
             Some(GameAction::SelectModes { indices: vec![0] })
@@ -584,6 +964,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             kind: CastOfferKind::Discover { .. },
             ..
         } => Some(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
+        // CR 608.2g + CR 609.4b: paid graveyard cast — decline by default (parity
+        // with Discover/Cascade/Ripple); the candidate generator explores accept.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { .. },
+            ..
+        } => Some(GameAction::GraveyardPaidCastChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
@@ -739,8 +1127,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             player,
             actor,
             controller,
+            candidate_objects,
             ..
         } => {
+            // CR 701.38b: object-pool votes (Council's Judgment, Prime
+            // Minister's Cabinet Room) submit a ballot by candidate index, not
+            // by option word — the engine's `handle_resolution_choice` rejects
+            // `ChooseOption` whenever `candidate_objects` is non-empty. The
+            // deadlock-safety fallback must mirror that shape, so vote for the
+            // first candidate object rather than emitting an action the engine
+            // would reject.
+            if !candidate_objects.is_empty() {
+                return Some(GameAction::SubmitVoteCandidate { candidate_index: 0 });
+            }
             // The friend-or-foe heuristic only fires when the controller is
             // labeling other players (the delegated shape) — matching
             // `VoteActor::Delegated(actor)` where `actor == controller` is
@@ -959,12 +1358,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Mana-related states: picking a color or paying mana.
         WaitingFor::ChooseManaColor { choice, .. } => {
-            use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
             match choice {
                 ManaChoicePrompt::SingleColor { options } => {
-                    options.first().map(|&color| GameAction::ChooseManaColor {
-                        choice: ManaChoice::SingleColor(color),
-                        count: 1,
+                    // Defense-in-depth: the primary fix is the pre-emption in
+                    // `choose_action_with_session`; this honors the demanded
+                    // color too should this path ever be reached.
+                    demand_aware_single_color(options, state).map(|color| {
+                        GameAction::ChooseManaColor {
+                            choice: ManaChoice::SingleColor(color),
+                            count: 1,
+                        }
                     })
                 }
                 ManaChoicePrompt::Combination { options } => {
@@ -1018,6 +1421,27 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCategoryPermanents { choices })
         }
 
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): keep the most creatures
+        // whose running power total fits the cap (lowest power first) — a valid,
+        // non-trivial fallback that minimises self-sacrifice.
+        WaitingFor::KeepWithinTotalPowerChoice { eligible, cap, .. } => {
+            let power = |id: &engine::types::identifiers::ObjectId| {
+                state.objects.get(id).and_then(|o| o.power).unwrap_or(0)
+            };
+            let mut by_power = eligible.clone();
+            by_power.sort_by_key(power);
+            let mut kept = Vec::new();
+            let mut total = 0i32;
+            for id in by_power {
+                let p = power(&id);
+                if total + p <= *cap {
+                    total += p;
+                    kept.push(id);
+                }
+            }
+            Some(GameAction::ChooseKeptCreatures { kept })
+        }
+
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override
@@ -1044,6 +1468,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             ..
         }
         | WaitingFor::BlightChoice { .. }
+        | WaitingFor::CostTypeChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
@@ -1063,16 +1488,145 @@ pub fn score_candidates(
     ai_player: PlayerId,
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return vec![(action, 1.0)];
+    }
+
     let session = AiSession::arc_from_game(state);
     score_candidates_with_session(state, ai_player, config, &session)
 }
 
-fn score_candidates_with_session(
+/// Canonical serialization key for aggregating action scores across
+/// determinized samples. `GameAction` derives `Serialize` (but not `Eq`/`Hash`),
+/// so we key by `serde_json::to_string`, mirroring the frontend `mergeScores`
+/// `JSON.stringify(action)` contract exactly.
+type GameActionKey = String;
+
+fn game_action_key(action: &GameAction) -> GameActionKey {
+    serde_json::to_string(action).unwrap_or_default()
+}
+
+/// Sum each sample's per-action score into `acc` (first-seen order preserved).
+/// `positions` maps a key to its index in `acc`; `counts` records how many
+/// samples observed each action (the pin-invariant expects this to reach K for
+/// every action — see `finalize_mean`).
+fn merge_into(
+    acc: &mut Vec<(GameAction, f64)>,
+    positions: &mut std::collections::HashMap<GameActionKey, usize>,
+    counts: &mut std::collections::HashMap<GameActionKey, usize>,
+    scored: Vec<(GameAction, f64)>,
+) {
+    for (action, score) in scored {
+        let key = game_action_key(&action);
+        match positions.get(&key) {
+            Some(&pos) => {
+                acc[pos].1 += score;
+                *counts.get_mut(&key).expect("counted") += 1;
+            }
+            None => {
+                let pos = acc.len();
+                acc.push((action, score));
+                positions.insert(key.clone(), pos);
+                counts.insert(key, 1);
+            }
+        }
+    }
+}
+
+/// Divide each accumulated sum by the number of samples that observed it,
+/// yielding the ensemble mean (matches the frontend `mergeScores` averaging).
+/// The pin-invariant guarantees a constant candidate support across samples, so
+/// every action should be observed exactly `k` times; the `debug_assert` fires
+/// loudly if a future change lets the support drift (strategy fusion over a
+/// non-constant support). Release degrades to per-action-observed-count mean —
+/// `counts` is always >= 1 for any accumulated action, so never a divide-by-zero.
+fn finalize_mean(
+    mut acc: Vec<(GameAction, f64)>,
+    counts: std::collections::HashMap<GameActionKey, usize>,
+    k: usize,
+) -> Vec<(GameAction, f64)> {
+    for (action, score) in acc.iter_mut() {
+        let observed = counts
+            .get(&game_action_key(action))
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        debug_assert_eq!(
+            observed, k,
+            "determinization aggregation: action observed in {observed}/{k} samples (support drift)"
+        );
+        *score /= observed as f64;
+    }
+    acc
+}
+
+/// Ensemble entry point (native + WASM inherit it). With
+/// `determinization_samples == 0` this is byte-identical to the pre-feature
+/// single search. With `K > 0` it runs the untouched search against K
+/// determinized opponent-hidden-zone samples and means the per-action scores.
+pub fn score_candidates_with_session(
     state: &GameState,
     ai_player: PlayerId,
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    let k = config.search.determinization_samples;
+    if k == 0 {
+        // Unchanged path: no determinization, no shared-deadline override.
+        return score_candidates_core(state, ai_player, config, session, None);
+    }
+
+    // ONE shared wall-clock ceiling across all K sequential samples (bounds
+    // AGGREGATE latency ~time_budget_ms, not K x budget). Measurement mode is
+    // bounded by node cap only — mirrors `PlannerServices::with_deadline`, so
+    // `cargo ai-gate` stays deterministic and K-bounded solely by nodes.
+    let deadline = if config.execution_mode.is_measurement() {
+        engine::util::Deadline::none()
+    } else {
+        match config.search.time_budget_ms {
+            Some(ms) => engine::util::Deadline::after(ms),
+            None => engine::util::Deadline::none(),
+        }
+    };
+
+    // Seed: fixed across K for a given (position, game, worker); per-sample split
+    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
+    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
+    // via the per-worker `state.rng` re-seed.
+    let base_seed = crate::planner::quick_state_hash(state)
+        .wrapping_add(state.rng_seed)
+        .wrapping_add(state.rng.clone().next_u64());
+
+    let mut acc: Vec<(GameAction, f64)> = Vec::new();
+    let mut positions: std::collections::HashMap<GameActionKey, usize> =
+        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<GameActionKey, usize> =
+        std::collections::HashMap::new();
+    for i in 0..k {
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(state, ai_player, &mut rng);
+        let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
+        merge_into(&mut acc, &mut positions, &mut counts, scored);
+    }
+    finalize_mean(acc, counts, k as usize)
+}
+
+/// Core scoring for a single (possibly determinized) state. Byte-identical to
+/// the pre-feature `score_candidates_with_session` except it threads a shared
+/// `deadline_override` into `PlannerServices` — `None` reproduces the old
+/// behavior exactly.
+fn score_candidates_core(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+    deadline_override: Option<engine::util::Deadline>,
+) -> Vec<(GameAction, f64)> {
+    if let Some(action) = fast_priority_action(state, ai_player) {
+        return vec![(action, 1.0)];
+    }
+
     let ctx = build_decision_context(state);
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
@@ -1087,12 +1641,18 @@ fn score_candidates_with_session(
         WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
     ) {
         let effective_profile = config.profile.with_strategy(&context.strategy);
-        if let Some(action) = deterministic_combat_choice(state, ai_player, &effective_profile) {
+        if let Some(action) = deterministic_combat_choice(
+            state,
+            ai_player,
+            &effective_profile,
+            Some(session.as_ref()),
+        ) {
             return vec![(action, 1.0)];
         }
     }
 
-    let mut services = PlannerServices::new(ai_player, config, policies, context);
+    let mut services =
+        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let gated = gate_candidates(
         state,
@@ -1198,21 +1758,7 @@ fn score_candidates_with_session(
 
     // Score actions via search or heuristics
     if config.search.enabled {
-        // Measurement mode ignores the wall-clock time budget so search is
-        // bounded solely by max_nodes — integration tests and ai-duel regression
-        // runs rely on this to eliminate wall-clock flake.
-        let mut budget = match (
-            config.execution_mode.is_measurement(),
-            config.search.time_budget_ms,
-        ) {
-            (false, Some(ms)) => SearchBudget::with_time_limit(
-                config.search.max_nodes,
-                web_time::Duration::from_millis(ms as u64),
-            ),
-            _ => SearchBudget::new(config.search.max_nodes),
-        };
         let branching = config.search.max_branching as usize;
-        let mut planner = build_continuation_planner(config);
 
         // Target selection decisions are dominated by the tactical policy
         // (anti-self-harm) but benefit from limited search lookahead.
@@ -1251,7 +1797,13 @@ fn score_candidates_with_session(
         let mut ranked: Vec<RankedCandidate> = gated
             .iter()
             .map(|g| {
-                let tactical = services.tactical_score(state, &ctx, &g.candidate, ai_player);
+                let tactical = services.tactical_score(
+                    state,
+                    &ctx,
+                    &g.candidate,
+                    ai_player,
+                    SearchDepth::Root,
+                );
                 RankedCandidate {
                     candidate: g.candidate.clone(),
                     score: tactical + g.penalty,
@@ -1269,33 +1821,79 @@ fn score_candidates_with_session(
         });
         ranked.truncate(branching);
 
-        // Walk top-level candidates, but bail out of the full rollout phase
-        // once the deadline fires — remaining candidates keep their tactical
-        // score as the ranking signal instead of a full-search continuation.
-        // This caps wall-clock on the outer map the same way the deadline caps
-        // the inner rollout recursion.
-        let mut out: Vec<(GameAction, f64)> = Vec::with_capacity(ranked.len());
-        let mut deadline_hit = false;
-        for r in ranked {
-            let score = if deadline_hit || services.deadline.expired() {
-                deadline_hit = true;
-                // Skip the continuation search; keep the tactical signal.
-                r.score * tactical_weight
-            } else if let Some(sim) = apply_candidate(state, &r.candidate) {
-                let continuation_score =
-                    planner.evaluate_after_action(&sim, &mut services, &mut budget);
-                continuation_score + (r.score * tactical_weight)
-            } else {
-                // Action failed simulation — heavily penalize so the AI prefers
-                // any valid alternative (e.g., CancelCast over a failing PassPriority
-                // during ManaPayment when the cost is unaffordable).
-                // Preserve tactical score as tiebreaker among equally-failing actions
-                // (e.g., target selection where simulation lacks full engine context).
-                r.score - 1000.0
+        // Iterative deepening: rung 0 (quiesced eval per candidate) -> ceiling.
+        // Return the deepest *fully completed* rung. The deepest rung reproduces
+        // origin/main's fixed-depth pass; the TT (per-decision, on `services`)
+        // accelerates the re-search of transposing subtrees across rungs.
+        let ceiling: u32 = match config.search.planner_mode {
+            PlannerMode::BeamOnly => 0,
+            PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
+        };
+
+        // No-regression floor == origin/main's deadline collapse: tactical-only for
+        // every candidate. Overwritten by each completed rung; returned as-is only
+        // if not even rung 0 is entered (deadline pre-expired), which reproduces
+        // origin/main's zero-apply collapse exactly.
+        let mut best_scored: Vec<(GameAction, f64)> = ranked
+            .iter()
+            .map(|r| (r.candidate.action.clone(), r.score * tactical_weight))
+            .collect();
+
+        for iter_depth in 0..=ceiling {
+            // Guard EVERY rung (incl. rung 0) at entry. Interactive: a pre-expired
+            // deadline returns the tactical-only floor with zero applies (==
+            // origin/main). Measurement: services.deadline is none() => never
+            // expires => full fixed ceiling => deterministic.
+            if services.deadline.expired() {
+                break;
+            }
+            // Fresh node budget per rung sharing the one services.deadline (none()
+            // in measurement, so this single constructor is correct for both modes).
+            // The deepest rung thus gets the full max_nodes just like origin/main's
+            // single pass.
+            let mut budget =
+                SearchBudget::with_deadline(config.search.max_nodes, services.deadline);
+            let mut planner = BeamContinuationPlanner {
+                depth: iter_depth,
+                rollout_depth: config.search.rollout_depth,
             };
-            out.push((r.candidate.action, score));
+
+            let mut rung_scored = Vec::with_capacity(ranked.len());
+            let mut completed = true;
+            for r in &ranked {
+                // Rungs >= 1 may bail mid-rung (interior search is expensive) and
+                // discard the partial. Rung 0 is cheap (branching quiesced evals)
+                // and runs atomically once entered, so it is never left partial.
+                if iter_depth > 0 && services.deadline.expired() {
+                    completed = false;
+                    break;
+                }
+                let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
+                    let cont = planner.evaluate_after_action(&sim, &mut services, &mut budget);
+                    cont + (r.score * tactical_weight)
+                } else {
+                    // Action failed simulation — same penalty as origin/main so the
+                    // AI prefers any valid alternative.
+                    r.score - 1000.0
+                };
+                rung_scored.push((r.candidate.action.clone(), score));
+            }
+
+            // "Fully completed" also requires the deadline to be live after the
+            // LAST candidate: expiry mid-final-evaluation is invisible to the
+            // per-candidate entry check and would accept a rung whose tail score
+            // was truncated. Rung 0 stays exempt (atomic once entered — it is the
+            // no-regression floor, == origin/main's deadline collapse). Node-budget
+            // exhaustion deliberately does NOT discard: the deepest rung consuming
+            // its full `max_nodes` reproduces origin/main's single fixed-depth pass.
+            if completed && (iter_depth == 0 || !services.deadline.expired()) {
+                best_scored = rung_scored; // deepest fully-completed rung so far
+            } else {
+                break;
+            }
         }
-        let _ = deadline_hit;
+
+        let mut out = best_scored;
         if config.execution_mode.is_measurement() {
             out.sort_by_cached_key(|(action, _)| action_order_key(action));
         }
@@ -1305,8 +1903,13 @@ fn score_candidates_with_session(
         let mut out: Vec<_> = gated
             .into_iter()
             .map(|candidate| {
-                let score = services.tactical_score(state, &ctx, &candidate.candidate, ai_player)
-                    + candidate.penalty;
+                let score = services.tactical_score(
+                    state,
+                    &ctx,
+                    &candidate.candidate,
+                    ai_player,
+                    SearchDepth::Root,
+                ) + candidate.penalty;
                 (candidate.candidate.action, score)
             })
             .collect();
@@ -1817,6 +2420,7 @@ pub(crate) fn deterministic_choice(
             config.combat_lookahead,
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
+            context.map(|c| c.session.as_ref()),
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -1862,6 +2466,7 @@ fn deterministic_combat_choice(
     state: &GameState,
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
+    session: Option<&AiSession>,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
@@ -1876,6 +2481,7 @@ fn deterministic_combat_choice(
             false,
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
+            session,
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -1938,7 +2544,7 @@ fn validated_declare_attackers(
         bands: vec![],
     };
     let mut sim = state.clone();
-    if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
+    if engine::game::engine::apply_as_current_for_simulation(&mut sim, candidate.clone()).is_ok() {
         return candidate;
     }
     engine::ai_support::legal_actions(state)
@@ -2165,9 +2771,13 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        CategoryChooserScope, EffectKind, TargetFilter, TargetRef, TypedFilter,
+        AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
+        Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::{StackEntry, StackEntryKind};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
@@ -2177,6 +2787,7 @@ mod tests {
 
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
+    use crate::session::SessionCache;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -2211,12 +2822,35 @@ mod tests {
         id
     }
 
+    fn add_spell_to_hand(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        generic_cost: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: Vec::new(),
+            generic: generic_cost,
+        };
+        id
+    }
+
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let p = &mut state.players[player.0 as usize];
         for _ in 0..count {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: engine::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -2224,6 +2858,391 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn add_activated_ability(state: &mut GameState, source_id: ObjectId, effect: Effect) -> usize {
+        let object = state.objects.get_mut(&source_id).unwrap();
+        let abilities = Arc::make_mut(&mut object.abilities);
+        let index = abilities.len();
+        abilities.push(AbilityDefinition::new(AbilityKind::Activated, effect));
+        index
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
+    fn temporary_combat_modifier_effect() -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddKeyword {
+                    keyword: engine::types::keywords::Keyword::Haste,
+                },
+            ])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        }
+    }
+
+    fn set_opp_deck(state: &mut GameState, names: &[&str]) {
+        let entries = names
+            .iter()
+            .map(|n| engine::game::deck_loading::DeckEntry {
+                card: engine::types::card::CardFace {
+                    name: n.to_string(),
+                    mana_cost: engine::types::mana::ManaCost::zero(),
+                    ..Default::default()
+                },
+                count: 1,
+            })
+            .collect();
+        state
+            .deck_pools
+            .push(engine::types::game_state::PlayerDeckPool {
+                player: PlayerId(1),
+                current_main: Arc::new(entries),
+                ..Default::default()
+            });
+    }
+
+    fn add_opp_hidden(state: &mut GameState, name: &str, zone: Zone) -> ObjectId {
+        create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(1),
+            name.to_string(),
+            zone,
+        )
+    }
+
+    #[test]
+    fn determinization_k0_equals_core_baseline() {
+        // B1: `determinization_samples == 0` returns the core path unchanged.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        config.search.determinization_samples = 0;
+        let session = AiSession::arc_from_game(&state);
+        let via_wrapper = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let via_core = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert_eq!(via_wrapper, via_core);
+    }
+
+    /// Battlefield permanent carrying a single Helix-shape `{X}` activated
+    /// ability ("{X}: put X tower counters on ~" — scales with X, a no-op at
+    /// X=0). Returns the source ObjectId; the sole ability is index 0.
+    fn add_helix_x_ability(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = add_creature(state, owner, 1, 1);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("tower".to_string()),
+                count: QuantityExpr::Ref {
+                    qty: engine::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+        );
+        ability.cost = Some(engine::types::ability::AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+        });
+        *Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities) = vec![ability];
+        id
+    }
+
+    fn activate_score(scored: &[(GameAction, f64)], source: ObjectId) -> Option<f64> {
+        scored.iter().find_map(|(action, score)| match action {
+            GameAction::ActivateAbility { source_id, .. } if *source_id == source => Some(*score),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn xcast_zero_no_op_not_committed_at_root() {
+        // Claim C (end-to-end, discriminating): at the real committed-decision
+        // seam (`score_candidates_core`), a Helix-shape {X} activation whose only
+        // affordable X is 0 (zero mana) must NOT be the committed argmax. The root
+        // gate scores it `NEG_INFINITY`, so `Pass` (always a Priority candidate)
+        // outranks it. Reverting the Root gate lets the X=0 activation score finite
+        // and possibly win → the "not finite / not argmax" assertions flip.
+        let mut state = make_state();
+        let source = add_helix_x_ability(&mut state, PlayerId(0)); // zero mana → max X = 0
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        // Non-vacuous reach-guard: the activation candidate is actually present in
+        // the scored set (candidate generation produced the X=0 activation — the
+        // exact commitment the gate exists to stop), so the assertion below is not
+        // silently satisfied by an absent candidate.
+        let score = activate_score(&scored, source)
+            .expect("the {X}=0 activation must be an enumerated, scored candidate");
+        assert!(
+            !score.is_finite(),
+            "root gate must reject the X=0 no-op activation (got finite score {score})"
+        );
+
+        // It is therefore not the argmax — some other action (Pass) wins.
+        let best = scored
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
+            .map(|(action, _)| action.clone());
+        assert!(
+            !matches!(best, Some(GameAction::ActivateAbility { source_id, .. }) if source_id == source),
+            "the X=0 no-op activation must not be the committed decision"
+        );
+    }
+
+    #[test]
+    fn xcast_affordable_activation_committed_at_root() {
+        // Reach-guard sibling (non-vacuous): the IDENTICAL Helix fixture with
+        // enough mana for X >= 1 lets the gate stand down, so the activation scores
+        // FINITE and is a legitimate candidate. Proves the refusal above is
+        // affordability-driven, not a blanket suppression of the activation.
+        let mut state = make_state();
+        let source = add_helix_x_ability(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1); // max X = 1
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        let score = activate_score(&scored, source)
+            .expect("the {X} activation must be an enumerated, scored candidate");
+        assert!(
+            score.is_finite(),
+            "with X >= 1 affordable the gate stands down; activation must score finite"
+        );
+    }
+
+    #[test]
+    fn determinization_candidate_set_stable_over_resampled_opponent_hand() {
+        // B2 + N4(b): the AI's ObjectId-keyed candidate set is invariant to
+        // opponent hidden-hand resampling — the pin-invariant. To actually
+        // EXERCISE the pin, a candidate must key off an opponent object's id:
+        // the AI is choosing a target for a removal-style effect and the sole
+        // legal target is the opponent's PUBLIC creature. Determinization only
+        // resamples opponent HIDDEN-zone cards (hand/library), so the public
+        // creature's ObjectId is stable and the emitted `ChooseTarget` candidate
+        // set is identical across K=0 and K=3 even as the opponent's hidden hand
+        // resamples. (The pre-fix fixture used own-action-only candidates, so no
+        // candidate referenced an opponent object and the invariant was vacuous.)
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        // Opponent's public permanent — the object the AI's candidate targets.
+        let opp_creature = add_creature(&mut state, PlayerId(1), 2, 2);
+        // AI mid-resolution choosing a target; the single legal target is the
+        // opponent's public creature, so the `ChooseTarget` candidate keys off
+        // `opp_creature`'s ObjectId.
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(opp_creature)],
+                optional: false,
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: vec![TargetRef::Object(opp_creature)],
+            },
+            source_id: None,
+            description: None,
+        };
+        // Opponent decklist + hidden hand so determinization actually resamples.
+        set_opp_deck(&mut state, &["Alpha", "Beta", "Gamma", "Delta"]);
+        for i in 0..3 {
+            add_opp_hidden(&mut state, &format!("Hidden{i}"), Zone::Hand);
+        }
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        k0.search.determinization_samples = 0;
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        let base = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        let ensemble = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+
+        // Reach-guard A: a candidate genuinely keys off the opponent permanent's
+        // ObjectId (otherwise the pin-invariant is vacuously satisfied).
+        assert!(
+            base.iter().any(|(a, _)| matches!(
+                a,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                } if *id == opp_creature
+            )),
+            "reach-guard: a candidate keys off the opponent permanent's ObjectId"
+        );
+
+        // Reach-guard B: determinization is non-vacuous — reproduce the wrapper's
+        // sample-0 seed and confirm the opponent's hidden hand really resamples,
+        // while the targeted PUBLIC permanent's identity stays pinned.
+        let base_seed = crate::planner::quick_state_hash(&state)
+            .wrapping_add(state.rng_seed)
+            .wrapping_add(state.rng.clone().next_u64());
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);
+        assert!(
+            state.players[1]
+                .hand
+                .iter()
+                .any(|id| sampled.objects[id].name != state.objects[id].name),
+            "reach-guard: at least one opponent hidden-hand card must resample"
+        );
+        assert_eq!(
+            sampled.objects[&opp_creature].name, state.objects[&opp_creature].name,
+            "the targeted public permanent's identity is stable across resampling"
+        );
+
+        let base_keys: std::collections::BTreeSet<_> =
+            base.iter().map(|(a, _)| game_action_key(a)).collect();
+        let ensemble_keys: std::collections::BTreeSet<_> =
+            ensemble.iter().map(|(a, _)| game_action_key(a)).collect();
+        assert_eq!(
+            base_keys, ensemble_keys,
+            "candidate set must stay constant across determinized samples"
+        );
+    }
+
+    #[test]
+    fn determinization_aggregation_means_per_action_scores() {
+        // B3: `finalize_mean` divides each summed score by the observed count and
+        // preserves first-seen order.
+        let mut acc = Vec::new();
+        let mut pos = std::collections::HashMap::new();
+        let mut counts = std::collections::HashMap::new();
+        merge_into(
+            &mut acc,
+            &mut pos,
+            &mut counts,
+            vec![
+                (GameAction::PassPriority, 2.0),
+                (GameAction::CancelCast, 6.0),
+            ],
+        );
+        merge_into(
+            &mut acc,
+            &mut pos,
+            &mut counts,
+            vec![
+                (GameAction::PassPriority, 4.0),
+                (GameAction::CancelCast, 10.0),
+            ],
+        );
+        let out = finalize_mean(acc, counts, 2);
+        assert_eq!(out[0], (GameAction::PassPriority, 3.0)); // (2+4)/2
+        assert_eq!(out[1], (GameAction::CancelCast, 8.0)); // (6+10)/2
+    }
+
+    #[test]
+    fn determinization_tiny_shared_deadline_returns_nonempty_floor() {
+        // B4: an already-expired shared deadline (interactive, budget 0) returns
+        // the tactical floor across K samples — never empty, never a panic.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        set_opp_deck(&mut state, &["Alpha", "Beta"]);
+        add_opp_hidden(&mut state, "Hidden", Zone::Hand);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.time_budget_ms = Some(0); // pre-expired shared deadline
+        config.search.determinization_samples = 3;
+        let session = AiSession::arc_from_game(&state);
+        let out = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        assert!(
+            !out.is_empty(),
+            "K-sample ensemble must return a floor, never empty"
+        );
+    }
+
+    #[test]
+    fn determinized_search_ignores_real_opponent_hand() {
+        // D (the crux): the opponent's REAL hand holds Negate — "Counter target
+        // noncreature spell." — whose castability the perfect-information eval
+        // reads through `zone_bonus` (opponent hand quality). Under
+        // determinization the AI scores a RESAMPLED opponent hand (all cheap,
+        // castable) instead, so the K>0 scores differ from the K=0 (real-hand)
+        // scores. Paired reach-guard: the real Negate is swapped out of the world
+        // the wrapper's search actually sees.
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        // Opponent decklist is all cheap (mana value 0, castable at 0 mana).
+        set_opp_deck(&mut state, &["Cheap", "Cheap", "Cheap", "Cheap", "Cheap"]);
+        // Real hand = Negate (mana value 2), uncastable because the opponent has
+        // no mana — so it contributes NO castable bonus in the real world.
+        let negate = add_opp_hidden(&mut state, "Negate", Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&negate).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = engine::types::mana::ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 2,
+            };
+        }
+
+        // Exercise the production wrapper at K=2: it must run the determinized
+        // ensemble without collapsing/crashing.
+        let session = AiSession::arc_from_game(&state);
+        let mut k2 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(3);
+        k2.search.determinization_samples = 2;
+        let determinized_scores = score_candidates_with_session(&state, PlayerId(0), &k2, &session);
+        assert!(!determinized_scores.is_empty());
+
+        // Reach-guard: reproduce the wrapper's sample-0 seed and confirm the real
+        // Negate is resampled OUT of the world the per-sample search evaluates.
+        let base_seed = crate::planner::quick_state_hash(&state)
+            .wrapping_add(state.rng_seed)
+            .wrapping_add(state.rng.clone().next_u64());
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(0));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sampled = crate::determinize::determinize_opponents(&state, PlayerId(0), &mut rng);
+        assert_ne!(
+            sampled.objects[&negate].name, "Negate",
+            "reach-guard: the real Negate must be resampled out of the search's world"
+        );
+
+        // Revert-failing crux assertion. `evaluate_state` is exactly the leaf
+        // evaluator the beam search runs at every node (via
+        // `evaluate_state_quiesced` -> `evaluate_with_strategy` -> `zone_bonus`,
+        // which reads the OPPONENT's hidden-hand card mana values — the perfect-
+        // information cheat channel). With the real hand the opponent holds
+        // uncastable Negate; in the determinized world it holds castable Cheap, so
+        // the leaf value the search sees differs. If `determinize_opponents` were
+        // reverted to a no-op, `sampled` would equal `state` and these two evals
+        // would be identical -> this assertion flips.
+        let policies = crate::policies::PolicyRegistry::shared();
+        let services = PlannerServices::new_default(PlayerId(0), &k2, policies);
+        let real_eval = services.evaluate_state(&state);
+        let determinized_eval = services.evaluate_state(&sampled);
+        assert_ne!(
+            real_eval, determinized_eval,
+            "the search's leaf eval must change once the real opponent hand is resampled away"
+        );
     }
 
     #[test]
@@ -2245,6 +3264,368 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(1);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         assert_eq!(action, Some(GameAction::PassPriority));
+    }
+
+    #[test]
+    fn low_value_priority_passes_over_board_activations_on_own_stack() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(&mut state, source_id, Effect::NoOp);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(0)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn low_value_priority_passes_empty_stack_upkeep_over_board_activations() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index =
+            add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn choose_action_passes_empty_stack_upkeep_before_search() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    #[test]
+    fn score_candidates_passes_empty_stack_upkeep_before_search() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        add_activated_ability(&mut state, source_id, temporary_combat_modifier_effect());
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+
+        assert_eq!(
+            score_candidates(&state, PlayerId(0), &config),
+            vec![(GameAction::PassPriority, 1.0)]
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_spell_responses() {
+        let mut state = make_state();
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(0)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: ObjectId(20),
+                card_id: CardId(20),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_stack_interactive_activation() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(
+            &mut state,
+            source_id,
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+        );
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_permanent_progress_activation() {
+        let mut state = make_state();
+        state.phase = Phase::Upkeep;
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(
+            &mut state,
+            source_id,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("tower".to_string()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        );
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn low_value_priority_does_not_skip_opponent_stack() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        let ability_index = add_activated_ability(&mut state, source_id, Effect::NoOp);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn large_board_main_phase_fast_action_picks_best_cast_spell() {
+        let mut state = make_state();
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        let cheap = add_spell_to_hand(&mut state, PlayerId(0), "Cheap Spell", 1);
+        let expensive = add_spell_to_hand(&mut state, PlayerId(0), "Expensive Spell", 6);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: cheap,
+                card_id: CardId(cheap.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            GameAction::CastSpell {
+                object_id: expensive,
+                card_id: CardId(expensive.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::CastSpell {
+                object_id: expensive,
+                card_id: CardId(expensive.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+        );
+    }
+
+    #[test]
+    fn large_board_main_phase_fast_action_does_not_fire_off_turn() {
+        let mut state = make_state();
+        state.active_player = PlayerId(1);
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        let spell = add_spell_to_hand(&mut state, PlayerId(0), "Spell", 1);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    fn pending_cast_with_cost(
+        shards: Vec<engine::types::mana::ManaCostShard>,
+        generic: u32,
+    ) -> Box<engine::types::game_state::PendingCast> {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+        use engine::types::game_state::PendingCast;
+        Box::new(PendingCast::new(
+            ObjectId(100),
+            CardId(100),
+            ResolvedAbility::new(
+                engine::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(100),
+                PlayerId(0),
+            ),
+            engine::types::mana::ManaCost::Cost { shards, generic },
+        ))
+    }
+
+    /// Minimal ChooseManaColor SingleColor state with the given option list and
+    /// pending cast. The `context` is a degenerate `ResolvingEffect` resume — the
+    /// pre-emption never inspects it, only `choice` and `state.pending_cast`.
+    /// Production Improvise/dual repro paths use `ManaChoiceContext::ManaAbility`,
+    /// but the context variant is irrelevant to the pre-emption (which reads only
+    /// `pending_cast` + `options`), so `ResolvingEffect` is used for fixture
+    /// simplicity.
+    fn choose_mana_color_state(
+        options: Vec<ManaType>,
+        pending: Option<Box<engine::types::game_state::PendingCast>>,
+    ) -> GameState {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetFilter};
+        use engine::types::game_state::{ManaChoiceContext, ManaChoicePrompt};
+        let mut state = make_state();
+        state.pending_cast = pending;
+        let resume = ResolvedAbility::new(
+            engine::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::SingleColor { options },
+            context: ManaChoiceContext::ResolvingEffect(Box::new(resume)),
+        };
+        state
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_selects_demanded_color() {
+        // Repro: {2}{U} spell, U/R source offered [Red, Blue]. The AI must
+        // produce Blue (demanded) — the old scorer picked the first-enumerated
+        // color (Red) and stranded the {U} pip into a ManaPayment dead-end.
+        // Drives the PUBLIC choose_action path, not fallback_action.
+        let state = choose_mana_color_state(
+            vec![ManaType::Red, ManaType::Blue],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Blue],
+                2,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_selects_demanded_red() {
+        // {1}{R} spell, source offered [Blue, Red] → must produce Red.
+        let state = choose_mana_color_state(
+            vec![ManaType::Blue, ManaType::Red],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Red],
+                1,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_demanded_color_first() {
+        // Demanded color is first here; paired with selects_demanded_color
+        // (demanded second) this proves demand-driven, not positional.
+        let state = choose_mana_color_state(
+            vec![ManaType::Blue, ManaType::Red],
+            Some(pending_cast_with_cost(
+                vec![engine::types::mana::ManaCostShard::Blue],
+                2,
+            )),
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_mana_color_preemption_no_pending_cast_uses_first() {
+        // No pending cast (e.g. a mana-ability color choice at priority) →
+        // first option, identical to the old behavior.
+        let state = choose_mana_color_state(vec![ManaType::Red, ManaType::Blue], None);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+        );
     }
 
     #[test]
@@ -2564,6 +3945,111 @@ mod tests {
         );
     }
 
+    /// Scoring is RNG-free, so a session pulled from `SessionCache` must produce
+    /// byte-identical scores to a freshly built session. Guards the WASM
+    /// session-cache reuse: if `get_or_build` ever returned a session that
+    /// differed from `arc_from_game`, `assert_eq` on the full score vector flips.
+    #[test]
+    fn score_candidates_with_session_matches_fresh_session() {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        let session_fresh = AiSession::arc_from_game(&state);
+        let mut cache = SessionCache::new_empty();
+        let session_cached = cache.get_or_build(&state);
+
+        let scored_fresh =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_fresh);
+        let scored_cached =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_cached);
+
+        // HARD reach-guard (no `|| is_empty()` escape): production input must
+        // reach the CastSpell enumeration arm, else the assert_eq is vacuous.
+        assert!(
+            scored_cached
+                .iter()
+                .any(|(a, _)| matches!(a, GameAction::CastSpell { .. })),
+            "castable creature + pool mana must enumerate a CastSpell candidate"
+        );
+        assert_eq!(
+            scored_cached, scored_fresh,
+            "cached and fresh sessions must produce identical scores (RNG-free scoring path)"
+        );
+    }
+
+    /// The pool-worker discriminator: a board-only mutation (hand + mana pool,
+    /// `deck_pools` untouched) must NOT invalidate the deck-keyed session, and
+    /// the reused session must still score the mutated board identically to a
+    /// fresh session. If board state leaked into the fingerprint, `ptr_eq`
+    /// flips; if a stale session mis-scored the new board, `assert_eq` flips.
+    #[test]
+    fn session_cache_reused_across_board_mutation_stays_correct() {
+        let mut state = make_state();
+        let mut cache = SessionCache::new_empty();
+        let s1 = cache.get_or_build(&state);
+
+        // Mutate the board only — hand object, mana pool, and state.objects.
+        state.lands_played_this_turn = 1;
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+
+        let s2 = cache.get_or_build(&state);
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "board-only mutation must NOT invalidate the deck-keyed session"
+        );
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let scored_reused = score_candidates_with_session(&state, PlayerId(0), &config, &s2);
+        assert!(
+            scored_reused
+                .iter()
+                .any(|(a, _)| matches!(a, GameAction::CastSpell { .. })),
+            "reused session must still enumerate the now-castable creature"
+        );
+
+        let session_fresh = AiSession::arc_from_game(&state);
+        let scored_fresh =
+            score_candidates_with_session(&state, PlayerId(0), &config, &session_fresh);
+        assert_eq!(
+            scored_reused, scored_fresh,
+            "reused (board-stale) session must score the mutated board identically to a fresh one"
+        );
+    }
+
     #[test]
     fn search_choice_picks_best_tutor_target() {
         let mut state = make_state();
@@ -2600,6 +4086,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
         };
@@ -2617,6 +4104,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: Vec::new(),
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -2654,6 +4144,7 @@ mod tests {
             config: &AiConfig::default(),
             context: &crate::context::AiContext::empty(&AiConfig::default().weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let opp_score = policies.score(&PolicyContext {
             state: &state,
@@ -2663,6 +4154,7 @@ mod tests {
             config: &AiConfig::default(),
             context: &crate::context::AiContext::empty(&AiConfig::default().weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         assert!(self_score < opp_score);
         assert!(self_score < -50.0);
@@ -2673,6 +4165,9 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
                     TargetRef::Player(PlayerId(0)),
@@ -2711,6 +4206,9 @@ mod tests {
         let mut state = make_state();
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
@@ -2904,6 +4402,7 @@ mod tests {
             count: 4,
             reveal: true,
             up_to: true,
+            allows_partial_find: false,
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
@@ -2965,6 +4464,10 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::Delegated(controller),
+            tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         }
     }
 
@@ -3013,6 +4516,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");
@@ -3041,6 +4545,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");
@@ -3069,6 +4574,7 @@ mod tests {
             effect_kind: EffectKind::CopySpell,
             effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
+            paradigm_remaining_offers: None,
         };
 
         let action = fallback_action(&state).expect("fallback returns an action");
@@ -3101,6 +4607,10 @@ mod tests {
             controller,
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::SubjectActs,
+            tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(
@@ -3596,5 +5106,178 @@ mod tests {
             }
             other => panic!("expected AssignCombatDamage, got {other:?}"),
         }
+    }
+
+    // ===== Iterative-deepening tests (pipeline 5) =====
+
+    /// A main-phase priority board with real branching: a castable creature in
+    /// hand (+ pool mana) plus an opponent threat, so depth-2 search evaluates a
+    /// different position than a depth-0 quiesced snapshot. Reaches the
+    /// `config.search.enabled` ID loop (verified by the CastSpell reach-guards).
+    fn searchable_state() -> GameState {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+        // Opponent threat on the battlefield so search sees a value gradient.
+        let _opp = add_creature(&mut state, PlayerId(1), 3, 3);
+        let creature_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+        state
+    }
+
+    fn has_cast(scored: &[(GameAction, f64)]) -> bool {
+        scored
+            .iter()
+            .any(|(a, _)| matches!(a, GameAction::CastSpell { .. }))
+    }
+
+    fn sorted_by_action(mut scored: Vec<(GameAction, f64)>) -> Vec<(GameAction, f64)> {
+        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
+        scored
+    }
+
+    // Row 7: the ID ceiling derivation respects planner_mode and the WASM depth
+    // cap. `create_config` caps `max_depth` at 2 on WASM, so a BeamPlusRollout
+    // config still deepens (ceiling 1) rather than collapsing to a single pass.
+    #[test]
+    fn id_ceiling_matches_planner_mode_and_platform() {
+        // Mirror of the production ceiling derivation in `score_candidates_with_session`.
+        let ceiling = |config: &AiConfig| -> u32 {
+            match config.search.planner_mode {
+                PlannerMode::BeamOnly => 0,
+                PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
+            }
+        };
+        let native = create_config(AiDifficulty::Hard, Platform::Native);
+        let wasm = create_config(AiDifficulty::Hard, Platform::Wasm);
+
+        assert_eq!(native.search.max_depth, 3, "native Hard depth precondition");
+        assert_eq!(wasm.search.max_depth, 2, "WASM caps depth at 2");
+        assert_eq!(ceiling(&native), 2, "native Hard -> ID ceiling 2");
+        assert_eq!(
+            ceiling(&wasm),
+            1,
+            "WASM Hard -> ID ceiling 1 (still deepens)"
+        );
+    }
+
+    // Row 6: measurement-mode scoring is within-process deterministic (the ID loop
+    // never consults the wall clock in measurement — deadline is none()).
+    #[test]
+    fn measurement_score_candidates_deterministic_in_process() {
+        let state = searchable_state();
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        let session = AiSession::arc_from_game(&state);
+
+        let first = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let second = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+
+        assert!(
+            has_cast(&first),
+            "reach-guard: board reaches the search-enabled ID loop"
+        );
+        assert_eq!(
+            first, second,
+            "measurement scoring must be byte-identical across same-process runs"
+        );
+    }
+
+    // Row 5b: ID's deepest rung deepens beyond the rung-0 quiesced baseline (no
+    // depth regression / floor leak). Measurement mode runs the full ceiling; a
+    // BeamOnly clone pins the planner to rung 0 only. If the ID loop ever returned
+    // rung 0 (or the tactical floor) instead of the deepest completed rung, the
+    // two outputs would coincide.
+    #[test]
+    fn iterative_deepening_deepens_beyond_rung_zero() {
+        let state = searchable_state();
+        let session = AiSession::arc_from_game(&state);
+
+        let full = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        assert_eq!(
+            full.search.max_depth.saturating_sub(1),
+            2,
+            "reach-guard: full ceiling must be >= 1 or the test is vacuous"
+        );
+        let mut shallow = full.clone();
+        shallow.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0 -> rung 0 only
+
+        let deep_scores = score_candidates_with_session(&state, PlayerId(0), &full, &session);
+        let rung0_scores = score_candidates_with_session(&state, PlayerId(0), &shallow, &session);
+
+        assert!(
+            has_cast(&deep_scores),
+            "reach-guard: search-enabled branch reached"
+        );
+        // Revert-failing: a broken ID accumulation returning rung 0 / the floor
+        // makes the deepest rung indistinguishable from the rung-0 baseline.
+        assert_ne!(
+            deep_scores, rung0_scores,
+            "the deepest ID rung must deepen beyond the rung-0 quiesced baseline"
+        );
+    }
+
+    // Row 5a: a pre-expired interactive deadline collapses to the tactical-only
+    // floor with ZERO applies (rung-guard option (a)). The distinguishing witness:
+    // under option (a) the pre-expired output carries NO quiesced continuation
+    // term, so it differs from the measurement rung-0 output (which DOES run rung 0
+    // = `quiesced(sim) + floor`). Under option (b) — running rung 0 even when
+    // pre-expired — the two would coincide, so this `assert_ne!` is revert-failing
+    // for the rung-0 entry guard.
+    #[test]
+    fn pre_expired_deadline_collapses_to_zero_apply_floor() {
+        let state = searchable_state();
+        let session = AiSession::arc_from_game(&state);
+
+        // Interactive (non-measurement) with a pre-expired deadline (0 ms budget).
+        let mut interactive = create_config(AiDifficulty::Hard, Platform::Native);
+        interactive.search.time_budget_ms = Some(0);
+        let floor = sorted_by_action(score_candidates_with_session(
+            &state,
+            PlayerId(0),
+            &interactive,
+            &session,
+        ));
+
+        // Measurement + BeamOnly => deadline none(), ceiling 0 => rung 0 runs fully:
+        // per-candidate `quiesced(sim) + r.score*tactical_weight`. This is exactly
+        // what option (b) would produce for the pre-expired interactive run.
+        let mut rung0_cfg = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        rung0_cfg.search.planner_mode = PlannerMode::BeamOnly;
+        let rung0 = sorted_by_action(score_candidates_with_session(
+            &state,
+            PlayerId(0),
+            &rung0_cfg,
+            &session,
+        ));
+
+        assert!(
+            has_cast(&floor),
+            "reach-guard: pre-expired run still reaches the ID loop"
+        );
+        assert_eq!(
+            floor.len(),
+            rung0.len(),
+            "same gated candidate set feeds both runs"
+        );
+        // Option (a): zero applies past the deadline -> pure tactical floor,
+        // distinct from rung-0's quiesced-augmented scores.
+        assert_ne!(
+            floor, rung0,
+            "pre-expired deadline must do ZERO continuation applies (option a), \
+             so its floor differs from the rung-0 quiesced baseline"
+        );
     }
 }

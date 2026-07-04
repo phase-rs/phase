@@ -228,4 +228,62 @@ describe("PlayerHud designations", () => {
       expect(screen.queryByLabelText(/venturing in/i)).toBeNull();
     });
   });
+
+  // CR 732.2a: the `∞` HUD badge is driven ONLY by the engine projection
+  // `derived.unbounded_resources` — the FE never derives which axes are unbounded.
+  describe("Unbounded resources (∞)", () => {
+    it("renders an ∞ badge for the local player's engine-attributed axis", () => {
+      act(() => {
+        useGameStore.setState({
+          gameState: createGameState({
+            derived: { unbounded_resources: [{ player: 0, axis: "TokensCreated" }] },
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // REVERT-PROBE: stop reading `derived.unbounded_resources` (or remove the
+      // PlayerHud map) → the badge is absent → this assertion fails.
+      expect(screen.getByLabelText("Unbounded tokens (∞)")).toBeInTheDocument();
+    });
+
+    it("does not render when there are no unbounded resources", () => {
+      act(() => {
+        useGameStore.setState({
+          gameState: createGameState({ derived: { unbounded_resources: [] } }),
+        });
+      });
+      render(<PlayerHud />);
+      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
+    });
+
+    it("does not render when only an opponent has an unbounded axis", () => {
+      act(() => {
+        useGameStore.setState({
+          gameState: createGameState({
+            derived: { unbounded_resources: [{ player: 1, axis: "TokensCreated" }] },
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
+    });
+
+    it("collapses multiple axes of the same family into one badge", () => {
+      act(() => {
+        useGameStore.setState({
+          gameState: createGameState({
+            derived: {
+              unbounded_resources: [
+                { player: 0, axis: { Mana: "Red" } },
+                { player: 0, axis: { Mana: "Blue" } },
+              ],
+            },
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // Six Mana(color) rows would collapse the same way: one mana family badge.
+      expect(screen.getAllByLabelText("Unbounded mana (∞)")).toHaveLength(1);
+    });
+  });
 });

@@ -73,8 +73,12 @@ pub fn kept_hand_size_after(mulligan_count: u8, free_first: bool) -> usize {
 /// each may submit `MulliganDecision { choice }` in any arrival order, with
 /// `MulliganChoice::Keep`, `Mulligan`, or `UseSerumPowder { object_id }`.
 ///
-/// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled — the
-/// engine has the format enum but no team/seating semantics yet.
+/// CR 805.3a (Two-Headed Giant mulligans, via CR 810.2's shared team turns
+/// option): the printed rule sequences decisions team-by-team, but since
+/// every player here decides independently and all decisions are applied
+/// simultaneously once `pending` empties, the team-by-team sequencing has no
+/// observable effect on the engine's simultaneous-decision model — submission
+/// order is already unconstrained for every multiplayer format.
 pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     events.push(GameEvent::MulliganStarted);
     state.prepaid_mulligan_bottoms.clear();
@@ -529,6 +533,13 @@ pub fn resume_begin_game_abilities(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     while let Some(pending) = state.pending_begin_game_abilities.pop() {
+        // CR 103.6: Beginning-game abilities resolve after mulligans and
+        // before the first turn receives priority. Seed a priority sentinel so
+        // skipped or noninteractive abilities cannot leave the stale
+        // MulliganDecision state as the apparent pause point.
+        state.waiting_for = WaitingFor::Priority {
+            player: pending.ability.controller,
+        };
         let _ = resolve_ability_chain(state, &pending.ability, events, 0);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return state.waiting_for.clone();
@@ -536,6 +547,7 @@ pub fn resume_begin_game_abilities(
     }
 
     state.resolving_begin_game_abilities = false;
+    crate::game::planechase::reveal_starting_plane(state);
     turns::auto_advance(state, events)
 }
 
@@ -1160,8 +1172,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
-            },
+             enters_modified_if: None },
         )
         .description("If this card is in your opening hand, you may begin the game with it on the battlefield.".to_string());
         begin_game.optional = true;

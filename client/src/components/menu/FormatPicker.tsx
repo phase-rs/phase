@@ -1,4 +1,6 @@
-import type { FormatGroup as EngineFormatGroup, GameFormat } from "../../adapter/types";
+import { useMemo } from "react";
+
+import type { FormatGroup as EngineFormatGroup, FormatMetadata, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
 interface FormatOption {
@@ -26,19 +28,6 @@ const GROUP_TONE: Record<EngineFormatGroup, string> = {
 // format hierarchy (sanctioned → Commander → Limited → casual).
 const GROUP_ORDER: EngineFormatGroup[] = ["Constructed", "Commander", "Limited", "Multiplayer"];
 
-// Groups derive from the engine-authored FORMAT_REGISTRY so a new format
-// added in `crates/engine/src/types/format.rs` automatically appears under
-// the right group with the engine's label and description.
-const FORMAT_GROUPS: FormatGroup[] = GROUP_ORDER.map((group) => ({
-  label: group,
-  tone: GROUP_TONE[group],
-  formats: FORMAT_REGISTRY.filter((m) => m.group === group).map((m) => ({
-    format: m.format,
-    label: m.label,
-    description: m.description,
-  })),
-})).filter((g) => g.formats.length > 0);
-
 const GROUP_TONES: Record<string, { kicker: string; accent: string; border: string; bg: string; hover: string }> = {
   indigo: {
     kicker: "text-indigo-300/60",
@@ -65,12 +54,27 @@ const GROUP_TONES: Record<string, { kicker: string; accent: string; border: stri
 
 interface FormatPickerProps {
   onFormatSelect: (format: GameFormat) => void;
+  formats?: readonly FormatMetadata[];
 }
 
-export function FormatPicker({ onFormatSelect }: FormatPickerProps) {
+export function FormatPicker({ onFormatSelect, formats = FORMAT_REGISTRY }: FormatPickerProps) {
+  const formatGroups: FormatGroup[] = useMemo(
+    () =>
+      GROUP_ORDER.map((group) => ({
+        label: group,
+        tone: GROUP_TONE[group],
+        formats: formats.filter((m) => m.group === group).map((m) => ({
+          format: m.format,
+          label: m.label,
+          description: m.description,
+        })),
+      })).filter((g) => g.formats.length > 0),
+    [formats],
+  );
+
   return (
     <div className="flex w-full max-w-3xl flex-col gap-6 sm:gap-8">
-      {FORMAT_GROUPS.map((group) => {
+      {formatGroups.map((group) => {
         const tone = GROUP_TONES[group.tone];
         return (
           <div key={group.label} className="flex flex-col gap-2.5 sm:gap-3">

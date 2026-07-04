@@ -5,11 +5,13 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
+use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
+use engine::database::removed_cards::is_removed_offensive_card;
+use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
-use engine::database::{BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -332,9 +334,34 @@ fn build_export_layout(
     }
 }
 
-/// Scan all set files in `data/mtgjson/sets/` to build a map of lowercased card name
-/// to the set of all rarities that card has been printed at. If the sets directory
-/// doesn't exist, returns an empty map (graceful degradation).
+/// Write parser-authoritative creature subtypes: CardTypes.json ∪ corroborated
+/// AtomicCards harvest (token-only + newer card-printed types).
+fn write_oracle_subtypes(
+    card_types: Option<&engine::database::mtgjson::CardTypesFile>,
+    atomic: &engine::database::mtgjson::AtomicCardsFile,
+) {
+    use engine::database::subtype_vocab::build_creature_subtype_vocabulary;
+
+    let list: Vec<String> = build_creature_subtype_vocabulary(card_types, atomic)
+        .into_iter()
+        .collect();
+    let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
+    // `serde_json::to_string_pretty` does not emit a trailing newline; append one
+    // so the committed generated file stays POSIX-compliant (no "\ No newline at
+    // end of file" diff churn on every regeneration).
+    match serde_json::to_string_pretty(&list)
+        .map_err(|e| e.to_string())
+        .and_then(|json| std::fs::write(&out_path, format!("{json}\n")).map_err(|e| e.to_string()))
+    {
+        Ok(()) => eprintln!(
+            "Wrote {} creature subtypes to {}",
+            list.len(),
+            out_path.display()
+        ),
+        Err(e) => eprintln!("warning: failed to write {}: {e}", out_path.display()),
+    }
+}
+
 fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<Rarity>> {
     let sets_dir = mtgjson_path
         .parent()
@@ -461,9 +488,7 @@ fn build_token_source_metadata(
                 .unwrap_or(&card.name)
                 .to_lowercase();
             let entry = map.entry(key).or_default();
-            entry
-                .related_token_ids
-                .extend(card.related_cards.tokens.into_iter());
+            entry.related_token_ids.extend(card.related_cards.tokens);
             // Alchemy spellbook: keep the first non-empty list seen for the face.
             if entry.spellbook.is_empty() && !card.related_cards.spellbook.is_empty() {
                 entry.spellbook = card.related_cards.spellbook;
@@ -625,9 +650,27 @@ fn main() {
         }
     };
 
+    let card_types_path = mtgjson_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("CardTypes.json");
+    let card_types = load_card_types(&card_types_path).ok();
+    if card_types.is_none() {
+        eprintln!(
+            "warning: CardTypes.json not found at {} — using AtomicCards harvest only",
+            card_types_path.display()
+        );
+    }
+    write_oracle_subtypes(card_types.as_ref(), &atomic);
+
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
     let token_source_metadata = build_token_source_metadata(&mtgjson_path);
+
+    let set_catalog = data_dir
+        .as_ref()
+        .map(|d| load_set_catalog(d))
+        .unwrap_or_default();
 
     // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
     // directly from MTGJSON `isGameChanger`; this file covers policy axes that
@@ -694,6 +737,15 @@ fn main() {
     atomic_keys.sort_unstable();
     for mtgjson_key in atomic_keys {
         let faces = &atomic.data[mtgjson_key];
+        // Drop officially-removed offensive cards before any other handling,
+        // so they never enter the card database (and not even an explicit
+        // --filter can resurrect them).
+        if faces
+            .first()
+            .is_some_and(|f| is_removed_offensive_card(&f.name))
+        {
+            continue;
+        }
         // --filter: skip cards not matching any filter name
         if !filter_names.is_empty() {
             let card_name = faces
@@ -734,6 +786,7 @@ fn main() {
                     .get(&face.name.to_lowercase())
                     .cloned()
                     .unwrap_or_default();
+
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 collect_localized(&mut sidecars, &key, source);
                 insert_face_with_priority(
@@ -837,6 +890,7 @@ fn main() {
                 .get(&face.name.to_lowercase())
                 .cloned()
                 .unwrap_or_default();
+
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             collect_localized(&mut sidecars, &key, &faces[0]);
             insert_face(
@@ -867,6 +921,35 @@ fn main() {
                 "warning: bracket_lists.json entry \"{list_entry}\" does not match any exported card"
             );
         }
+    }
+
+    // Release-gate (hybrid): keep cards available ONLY through gated sets in
+    // card-data so they stay browsable, but mark them Banned in every format so
+    // they are excluded from every format-scoped deck-builder pool. The gated
+    // sets are separately hidden from the draft/picker/deck-builder UIs below
+    // (the `is_set_gated` filter on the set list), so the sets remain
+    // un-draftable. Reprint-aware. Sets past their MTGJSON release date are
+    // auto-unlocked even when still listed in `GATED_SETS`. See
+    // `database::set_gating`.
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
+    if !gated_sets.is_empty() {
+        let banned = legalities_to_export_map(&set_gating::all_formats_banned());
+        let mut gated_count = 0usize;
+        for entry in face_index.values_mut() {
+            if set_gating::is_card_gated(&entry.printings, &gated_sets) {
+                entry.legalities = banned.clone();
+                gated_count += 1;
+            }
+        }
+        eprintln!(
+            "Set gating active ({}): marked {} card face(s) Banned in all formats (available only via gated sets)",
+            {
+                let mut codes: Vec<&str> = gated_sets.iter().map(String::as_str).collect();
+                codes.sort_unstable();
+                codes.join(",")
+            },
+            gated_count
+        );
     }
 
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
@@ -1112,9 +1195,14 @@ fn run_set_list(remaining_args: &[String]) {
     let raw: SetListFile = serde_json::from_str(&contents)
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", input.display()));
 
+    // Release-gate: hide gated sets from the picker / draft / deck-builder UIs.
+    // Sets past their release date are auto-unlocked. See `database::set_gating`.
+    let set_catalog = load_set_catalog(Path::new(data_dir));
+    let gated_sets = set_gating::resolve_gated_sets(&set_catalog);
     let projected: BTreeMap<String, SetListEntry> = raw
         .data
         .into_iter()
+        .filter(|s| !set_gating::is_set_gated(&s.code, &gated_sets))
         .map(|s| {
             (
                 s.code.clone(),
@@ -1384,7 +1472,13 @@ fn run_decks(remaining_args: &[String]) {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let raw = parsed.data;
+        let mut raw = parsed.data;
+        // Strip officially-removed cards from every section at ingestion, so
+        // they never reach decks.json, coverage, or the deck-size threshold.
+        // Single authority shared with the card-export path above.
+        for section in [&mut raw.main_board, &mut raw.side_board, &mut raw.commander] {
+            section.retain(|c| !is_removed_offensive_card(&c.name));
+        }
         if deck_card_total(&raw) < MIN_DECK_CARDS {
             too_small += 1;
             continue;

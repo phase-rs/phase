@@ -111,6 +111,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CastingVariantChoice { .. }
         | WaitingFor::ChoosePermanentTypeSlot { .. }
         | WaitingFor::ChooseRingBearer { .. }
+        | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
         | WaitingFor::SpecializeColor { .. }
@@ -155,6 +156,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
+        | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 510.1d + CR 702.22k: active player divides a banded blocker's
         // damage — a forced mid-combat choice, routed to the ability catch-all.
@@ -171,7 +173,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
-        | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::ActivationCostOneOfChoice { .. }
+        // CR 601.2b: choosing an additional cost's mode (e.g. behold a chosen
+        // creature type) is a casting-cost-phase step; route to the ability bucket.
+        | WaitingFor::CostTypeChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 

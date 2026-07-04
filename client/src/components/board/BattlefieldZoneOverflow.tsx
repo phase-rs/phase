@@ -9,10 +9,12 @@ import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import type { ZoneCollapseMode } from "../../stores/preferencesStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { SelectField } from "../ui/SelectField.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 import { ResizeHandle } from "../flexlayout/ResizeHandle.tsx";
@@ -26,7 +28,13 @@ interface BattlefieldZoneOverflowProps {
   side: DrawerSide;
   className?: string;
   dividerBeforeIndex?: number;
+  /** Show the per-row collapse control (auto/on/off) on the summary tile. Only
+   *  the local player's own lands/support rows opt in — the setting is a
+   *  viewer-wide preference, so a control per opponent box would be redundant. */
+  showCollapseControl?: boolean;
 }
+
+const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 
 const MOBILE_COLLAPSE_GROUPS = 4;
 const DESKTOP_COLLAPSE_GROUPS = 8;
@@ -60,6 +68,7 @@ export function BattlefieldZoneOverflow({
   side,
   className,
   dividerBeforeIndex,
+  showCollapseControl = false,
 }: BattlefieldZoneOverflowProps) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -71,10 +80,24 @@ export function BattlefieldZoneOverflow({
     ? (compact ? MOBILE_COLLAPSE_CREATURE_GROUPS : DESKTOP_COLLAPSE_CREATURE_GROUPS)
     : (compact ? MOBILE_COLLAPSE_GROUPS : DESKTOP_COLLAPSE_GROUPS);
   const objectIds = useMemo(() => groups.flatMap((group) => group.ids), [groups]);
-  // Creatures collapse by stack count (token swarms already group); lands and
-  // support collapse by body count, preserving their established behaviour.
-  const collapseMetric = isCreatures ? groups.length : objectIds.length;
-  const collapsed = collapseMetric > threshold;
+  // Collapse by DISTINCT stack count, never body count: identical permanents
+  // already render as one grouped tile, so 7 Forests + 2 duals reads as ~3
+  // visible stacks — the space a body count of 9 implies is never actually
+  // occupied. Creatures always worked this way (token swarms); lands/support
+  // now match, so the crowding metric tracks what the player actually sees.
+  const collapseMetric = groups.length;
+  // Per-row user override (lands/support). Creatures have no preference, so they
+  // always fall through to "auto" (the threshold compare below).
+  const collapseLands = usePreferencesStore((s) => s.collapseLands);
+  const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
+  const collapseMode: ZoneCollapseMode =
+    zone === "lands" ? collapseLands : zone === "support" ? collapseSupport : "auto";
+  const collapsed =
+    collapseMode === "on"
+      ? true
+      : collapseMode === "off"
+        ? false
+        : collapseMetric > threshold;
 
   useEffect(() => {
     if (!open) return;
@@ -128,6 +151,7 @@ export function BattlefieldZoneOverflow({
           groups={groups}
           objectIds={objectIds}
           zone={zone}
+          showCollapseControl={showCollapseControl}
           onOpen={() => setOpen(true)}
         />
       )}
@@ -279,10 +303,11 @@ interface ZoneSummaryTileProps {
   groups: GroupedPermanent[];
   objectIds: ObjectId[];
   zone: OverflowZone;
+  showCollapseControl: boolean;
   onOpen: () => void;
 }
 
-function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTileProps) {
+function ZoneSummaryTile({ groups, objectIds, zone, showCollapseControl, onOpen }: ZoneSummaryTileProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   // Aspect-preserving size multiplier for the collapsed overflow pill (absent ⇒
@@ -293,18 +318,24 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   const isMobile = useIsMobile();
   // The collapsed overflow pill is more compact on mobile so it claims less of
   // the cramped half-row; desktop keeps the roomier footprint.
-  const sizeClass = isMobile
+  const supportSizeClass = isMobile
+    ? "min-h-[2.85rem] min-w-[7.25rem] px-1.5 py-1"
+    : "min-h-[3.75rem] min-w-[9.25rem] px-2.5 py-1.5";
+  const defaultSizeClass = isMobile
     ? "min-h-[2.25rem] min-w-[4.75rem] px-1.5 py-0.5"
     : "min-h-[3.25rem] min-w-[7.5rem] px-2 py-1.5";
+  const sizeClass = zone === "support" ? supportSizeClass : defaultSizeClass;
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const combatMode = useUiStore((s) => s.combatMode);
   const {
     activatableObjectIds,
+    boardChoiceObjectIds,
     committedAttackerIds,
     incomingAttackerCounts,
     manaTappableObjectIds,
+    selectableSacrificeObjectIds,
     validAttackerIds,
     validTargetObjectIds,
   } = useBoardInteractionState();
@@ -321,6 +352,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     let attacking = 0;
     let incoming = 0;
     let mana = 0;
+    let boardChoice = 0;
+    let sacrifice = 0;
     let selected = 0;
     let validAttackers = 0;
     let validTargets = 0;
@@ -330,6 +363,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       if (committedAttackerIds.has(id)) attacking++;
       incoming += incomingAttackerCounts.get(id) ?? 0;
       if (manaTappableObjectIds.has(id)) mana++;
+      if (boardChoiceObjectIds.has(id)) boardChoice++;
+      if (selectableSacrificeObjectIds.has(id)) sacrifice++;
       if (validAttackerIds.has(id)) validAttackers++;
       if (validTargetObjectIds.has(id)) validTargets++;
       if (
@@ -346,18 +381,22 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       attacking,
       incoming,
       mana,
+      boardChoice,
+      sacrifice,
       selected,
       validAttackers: combatMode === "attackers" ? validAttackers : 0,
       validTargets,
     };
   }, [
     activatableObjectIds,
+    boardChoiceObjectIds,
     blockerAssignments,
     combatMode,
     committedAttackerIds,
     incomingAttackerCounts,
     manaTappableObjectIds,
     objectIds,
+    selectableSacrificeObjectIds,
     selectedAttackers,
     selectedCardIds,
     validAttackerIds,
@@ -401,6 +440,8 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     || interaction.attacking > 0
     || interaction.incoming > 0
     || interaction.mana > 0
+    || interaction.boardChoice > 0
+    || interaction.sacrifice > 0
     || interaction.selected > 0
     || interaction.validAttackers > 0
     || interaction.validTargets > 0;
@@ -410,7 +451,7 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     // button — scales and moves WITH the tile. (transform is visual-only, so a
     // handle outside the scaled node would stay at the unscaled corner.)
     <span
-      className="relative inline-flex"
+      className={`relative inline-flex flex-col gap-0.5 ${zone === "support" ? "items-end" : "items-start"}`}
       style={
         summaryScale !== 1
           ? {
@@ -420,67 +461,70 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
           : undefined
       }
     >
-    <button
-      type="button"
-      onClick={onOpen}
-      data-grouped-ids={objectIds.join(" ")}
-      className={`relative flex ${sizeClass} max-w-full flex-col justify-center rounded-lg border text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
-        hasInteraction
-          ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"
-          : "border-white/12 bg-slate-950/72"
-      }`}
-      aria-label={t(`battlefieldOverflow.${zone}.open`, { count: cardCount })}
-    >
-      <span className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-200">
-          {t(`battlefieldOverflow.${zone}.label`)}
-        </span>
-        <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-black tabular-nums text-white">
-          {cardCount}
-        </span>
-      </span>
-      <span className="mt-1 flex items-center gap-1">
-        {zone === "lands" ? (
-          manaOptions.length > 0 ? (
-            manaOptions.map(({ color, total, untapped, shard }) => (
-              <span
-                key={color}
-                className={`group relative inline-flex h-5 items-center gap-0.5 rounded-full bg-black/45 px-1.5 text-[10px] font-black tabular-nums ring-1 ring-white/12 ${
-                  untapped === 0 ? "text-slate-400 opacity-60" : "text-slate-100"
-                }`}
-              >
-                {/* untapped (available now) bright; tapped remainder as a dim
-                    "/total" so the box reads "available of how many lands". */}
-                <span>{untapped}</span>
-                {untapped !== total ? (
-                  <span className="font-bold text-slate-400">/{total}</span>
-                ) : null}
-                <span>×</span>
-                <ManaSymbol shard={shard} size="xs" className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.65)]" />
-                <GameplayTooltip className="left-0 right-auto w-56">
-                  <span className="inline-flex items-center gap-1.5">
-                    <span>{t("battlefieldOverflow.lands.pipAvailability", { untapped, total })}</span>
-                    <ManaSymbol shard={shard} size="sm" className="shrink-0" />
-                  </span>
-                </GameplayTooltip>
-              </span>
-            ))
-          ) : (
-            <span className="text-[11px] text-slate-400">
-              {t("battlefieldOverflow.noAvailablePips")}
-            </span>
-          )
-        ) : (
-          <SupportCounts counts={supportCounts} />
-        )}
-      </span>
-      <InteractionBadges interaction={interaction} />
-      {idSet.size > 0 && (
-        <span className="sr-only">
-          {t("battlefieldOverflow.groupCount", { count: groups.length })}
-        </span>
+      {showCollapseControl && (zone === "lands" || zone === "support") && (
+        <ZoneCollapseControl zone={zone} />
       )}
-    </button>
+      <button
+        type="button"
+        onClick={onOpen}
+        data-grouped-ids={objectIds.join(" ")}
+        className={`relative flex ${sizeClass} max-w-full flex-col justify-center rounded-lg border text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
+          hasInteraction
+            ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"
+            : "border-white/12 bg-slate-950/72"
+        }`}
+        aria-label={t(`battlefieldOverflow.${zone}.open`, { count: cardCount })}
+      >
+        <span className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-200">
+            {t(`battlefieldOverflow.${zone}.label`)}
+          </span>
+          <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-black tabular-nums text-white">
+            {cardCount}
+          </span>
+        </span>
+        <span className={zone === "support" ? "mt-1 block w-full" : "mt-1 flex items-center gap-1"}>
+          {zone === "lands" ? (
+            manaOptions.length > 0 ? (
+              manaOptions.map(({ color, total, untapped, shard }) => (
+                <span
+                  key={color}
+                  className={`group relative inline-flex h-5 items-center gap-0.5 rounded-full bg-black/45 px-1.5 text-[10px] font-black tabular-nums ring-1 ring-white/12 ${
+                    untapped === 0 ? "text-slate-400 opacity-60" : "text-slate-100"
+                  }`}
+                >
+                  {/* untapped (available now) bright; tapped remainder as a dim
+                      "/total" so the box reads "available of how many lands". */}
+                  <span>{untapped}</span>
+                  {untapped !== total ? (
+                    <span className="font-bold text-slate-400">/{total}</span>
+                  ) : null}
+                  <span>×</span>
+                  <ManaSymbol shard={shard} size="xs" className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.65)]" />
+                  <GameplayTooltip className="left-0 right-auto w-56">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span>{t("battlefieldOverflow.lands.pipAvailability", { untapped, total })}</span>
+                      <ManaSymbol shard={shard} size="sm" className="shrink-0" />
+                    </span>
+                  </GameplayTooltip>
+                </span>
+              ))
+            ) : (
+              <span className="text-[11px] text-slate-400">
+                {t("battlefieldOverflow.noAvailablePips")}
+              </span>
+            )
+          ) : (
+            <SupportCounts counts={supportCounts} />
+          )}
+        </span>
+        <InteractionBadges interaction={interaction} />
+        {idSet.size > 0 && (
+          <span className="sr-only">
+            {t("battlefieldOverflow.groupCount", { count: groups.length })}
+          </span>
+        )}
+      </button>
       {/* Edit-mode corner grip scales the pill (anchored to its column edge). */}
       {flexEditMode && (
         <ResizeHandle scaleKey="summaryTile" corner={zone === "support" ? "bl" : "br"} />
@@ -489,11 +533,42 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   );
 }
 
+/** Compact per-row collapse control (auto / always-on / always-off) shown above
+ *  the summary tile on the local player's own lands/support rows. A native
+ *  <select> keeps it touch-friendly and keyboard-accessible; it reads and writes
+ *  the row's own `collapse{Lands,Support}` preference, so the tile and the
+ *  Preferences-sheet segmented control stay in lockstep through one store value. */
+function ZoneCollapseControl({ zone }: { zone: "lands" | "support" }) {
+  const { t } = useTranslation("game");
+  const value = usePreferencesStore((s) => (zone === "lands" ? s.collapseLands : s.collapseSupport));
+  const setValue = usePreferencesStore((s) =>
+    zone === "lands" ? s.setCollapseLands : s.setCollapseSupport,
+  );
+  return (
+    <SelectField
+      chevronSize="sm"
+      aria-label={t("battlefieldOverflow.collapse.label")}
+      title={t("battlefieldOverflow.collapse.label")}
+      value={value}
+      onChange={(event) => setValue(event.target.value as ZoneCollapseMode)}
+      className="rounded-md border border-white/12 bg-slate-950/72 py-0.5 pl-1.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-300 backdrop-blur-md hover:border-white/25 hover:text-white"
+    >
+      {ZONE_COLLAPSE_MODES.map((mode) => (
+        <option key={mode} value={mode}>
+          {t(`battlefieldOverflow.collapse.${mode}`)}
+        </option>
+      ))}
+    </SelectField>
+  );
+}
+
 interface InteractionSummary {
   activatable: number;
   attacking: number;
   incoming: number;
   mana: number;
+  boardChoice: number;
+  sacrifice: number;
   selected: number;
   validAttackers: number;
   validTargets: number;
@@ -504,6 +579,12 @@ function InteractionBadges({ interaction }: { interaction: InteractionSummary })
   const badges = [
     interaction.validTargets > 0
       ? { key: "target", label: t("battlefieldOverflow.badges.target"), tooltip: t("battlefieldOverflow.badgeTooltips.target"), count: interaction.validTargets, className: "bg-lime-300 text-lime-950" }
+      : null,
+    interaction.sacrifice > 0
+      ? { key: "sacrifice", label: t("battlefieldOverflow.badges.sacrifice"), tooltip: t("battlefieldOverflow.badgeTooltips.sacrifice"), count: interaction.sacrifice, className: "bg-red-500 text-white" }
+      : null,
+    interaction.boardChoice > interaction.sacrifice
+      ? { key: "choice", label: t("battlefieldOverflow.badges.choice"), tooltip: t("battlefieldOverflow.badgeTooltips.choice"), count: interaction.boardChoice - interaction.sacrifice, className: "bg-sky-400 text-sky-950" }
       : null,
     interaction.validAttackers > 0
       ? { key: "attack", label: t("battlefieldOverflow.badges.attack"), tooltip: t("battlefieldOverflow.badgeTooltips.attack"), count: interaction.validAttackers, className: "bg-orange-500 text-white" }
@@ -550,6 +631,35 @@ interface SupportTypeCounts {
   other: number;
   planeswalkers: number;
 }
+
+interface SupportCountTone {
+  chip: string;
+  count: string;
+  label: string;
+}
+
+const SUPPORT_COUNT_TONES: Record<keyof SupportTypeCounts, SupportCountTone> = {
+  artifacts: {
+    chip: "bg-sky-400/10 ring-sky-300/30",
+    count: "text-sky-50",
+    label: "text-sky-200",
+  },
+  enchantments: {
+    chip: "bg-fuchsia-400/10 ring-fuchsia-300/30",
+    count: "text-fuchsia-50",
+    label: "text-fuchsia-200",
+  },
+  other: {
+    chip: "bg-slate-400/10 ring-slate-300/25",
+    count: "text-slate-50",
+    label: "text-slate-200",
+  },
+  planeswalkers: {
+    chip: "bg-amber-400/10 ring-amber-300/30",
+    count: "text-amber-50",
+    label: "text-amber-200",
+  },
+};
 
 function supportTypeCounts(objects: GameObject[]): SupportTypeCounts {
   const counts: SupportTypeCounts = {
@@ -607,32 +717,50 @@ function SupportCounts({ counts }: { counts: SupportTypeCounts }) {
       label: t("battlefieldOverflow.support.artifacts"),
       tooltip: t("battlefieldOverflow.supportTooltips.artifacts"),
       count: counts.artifacts,
+      tone: SUPPORT_COUNT_TONES.artifacts,
     } : null,
     counts.enchantments > 0 ? {
       key: "enchantments",
       label: t("battlefieldOverflow.support.enchantments"),
       tooltip: t("battlefieldOverflow.supportTooltips.enchantments"),
       count: counts.enchantments,
+      tone: SUPPORT_COUNT_TONES.enchantments,
     } : null,
     counts.planeswalkers > 0 ? {
       key: "planeswalkers",
       label: t("battlefieldOverflow.support.planeswalkers"),
       tooltip: t("battlefieldOverflow.supportTooltips.planeswalkers"),
       count: counts.planeswalkers,
+      tone: SUPPORT_COUNT_TONES.planeswalkers,
     } : null,
     counts.other > 0 ? {
       key: "other",
       label: t("battlefieldOverflow.support.other"),
       tooltip: t("battlefieldOverflow.supportTooltips.other"),
       count: counts.other,
+      tone: SUPPORT_COUNT_TONES.other,
     } : null,
-  ].filter((entry): entry is { key: string; label: string; tooltip: string; count: number } => entry != null);
+  ].filter((entry): entry is {
+    count: number;
+    key: string;
+    label: string;
+    tone: SupportCountTone;
+    tooltip: string;
+  } => entry != null);
 
   return (
-    <span className="flex flex-wrap gap-1">
+    <span className="flex w-full flex-wrap gap-1">
       {entries.map((entry) => (
-        <span key={entry.key} className="group relative rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-slate-100">
-          {entry.label} {entry.count}
+        <span
+          key={entry.key}
+          className={`group relative inline-flex h-5 min-w-[3.3rem] items-center justify-between gap-1 rounded-full bg-black/45 px-1.5 text-[10px] font-black tabular-nums ring-1 ${entry.tone.chip}`}
+        >
+          <span className={entry.tone.count}>
+            {entry.count}
+          </span>
+          <span className={`min-w-0 truncate ${entry.tone.label}`}>
+            {entry.label}
+          </span>
           <GameplayTooltip className="left-0 right-auto w-52">
             {entry.tooltip}
           </GameplayTooltip>

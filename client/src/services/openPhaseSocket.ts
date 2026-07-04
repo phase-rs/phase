@@ -1,4 +1,5 @@
 import {
+  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
   MIN_SUPPORTED_SERVER_PROTOCOL,
   PROTOCOL_VERSION,
   type ServerInfo,
@@ -188,19 +189,22 @@ export function openPhaseSocket(
         publicUrl: data.public_url,
       };
 
-      // Accept any server in [MIN_SUPPORTED_SERVER_PROTOCOL, PROTOCOL_VERSION].
-      // Mirrors the phase-server hello-gate range (crates/phase-server/src/main.rs)
-      // so a freshly-built client can connect to a not-yet-redeployed lobby
-      // broker during rollout. The error message distinguishes "server older,
-      // wait for redeploy" from "server newer, your client is out of date" so
-      // operators triaging logs can tell the two cases apart at a glance.
+      const minAcceptedProtocol =
+        info.mode === "LobbyOnly"
+          ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+          : MIN_SUPPORTED_SERVER_PROTOCOL;
+
+      // Accept any server in [minAcceptedProtocol, PROTOCOL_VERSION]. Full
+      // servers are current-only for breaking game protocol releases; LobbyOnly
+      // brokers keep a one-version rollout window because they do not carry
+      // game-state/action payloads.
       if (
-        info.protocolVersion < MIN_SUPPORTED_SERVER_PROTOCOL ||
+        info.protocolVersion < minAcceptedProtocol ||
         info.protocolVersion > PROTOCOL_VERSION
       ) {
         const reason =
-          info.protocolVersion < MIN_SUPPORTED_SERVER_PROTOCOL
-            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_PROTOCOL}). Please wait for the lobby to finish rolling out.`
+          info.protocolVersion < minAcceptedProtocol
+            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAcceptedProtocol}). Please wait for the lobby to finish rolling out.`
             : `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
         settle(() => {
           ws.close();
@@ -209,15 +213,19 @@ export function openPhaseSocket(
         return;
       }
 
-      // Send our ClientHello back. After this the socket is a live phase
-      // session; hand it off to the caller.
+      const clientProtocolVersion =
+        info.mode === "LobbyOnly" ? info.protocolVersion : PROTOCOL_VERSION;
+
+      // Send our ClientHello back. For LobbyOnly brokers in the rollout
+      // window, echo the accepted broker protocol so an older deployed worker
+      // does not reject a newer local-dev client as a future protocol.
       ws.send(
         JSON.stringify({
           type: "ClientHello",
           data: {
             client_version: __APP_VERSION__,
             build_commit: __BUILD_HASH__,
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: clientProtocolVersion,
           },
         }),
       );

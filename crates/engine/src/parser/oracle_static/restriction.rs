@@ -477,6 +477,47 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
     )
 }
 
+/// CR 701.23f + CR 614.1a: Parse the top-N library-search restriction class —
+/// "If an opponent would search a library, that player searches the top N cards
+/// of that library instead." (Aven Mindcensor). Parameterized by SEARCHER scope
+/// (`who`) and the visible-portion `count`. Lowers to
+/// `StaticMode::RestrictLibrarySearchToTop`; runtime enforcement lives in
+/// game/effects/search_library.rs.
+///
+/// Supported Oracle classes:
+/// - "If an opponent would search a library, that player searches the top N
+///   cards of that library instead." (`who = Opponents`)
+/// - "If a player would search a library, that player searches the top N cards
+///   of that library instead." (`who = AllPlayers`)
+pub(crate) fn parse_restrict_search_to_top(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    fn parse_restrict_clause(input: &str) -> OracleResult<'_, (ProhibitionScope, u32)> {
+        let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
+        // Searcher scope: "an opponent" → Opponents, "a player" → AllPlayers.
+        let (input, who) = alt((
+            value(ProhibitionScope::Opponents, tag("an opponent")),
+            value(ProhibitionScope::AllPlayers, tag("a player")),
+        ))
+        .parse(input)?;
+        let (input, _) =
+            tag(" would search a library, that player searches the top ").parse(input)?;
+        let (input, count) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" cards of that library instead").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof(input)?;
+        Ok((input, (who, count)))
+    }
+
+    let (who, count) =
+        nom_on_lower(tp.original, tp.lower, parse_restrict_clause).map(|(parsed, _rest)| parsed)?;
+    Some(
+        StaticDefinition::new(StaticMode::RestrictLibrarySearchToTop { who, count })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 603.2 + CR 609.3: Parse "Triggered abilities <scope> can't cause you to
 /// sacrifice or exile <affected>." statics (The Master, Multiplied class).
 ///
@@ -824,6 +865,21 @@ pub(crate) fn parse_per_player_conditional_prohibition(
             ParsedCondition::YouAttackedThisTurn,
             tag::<_, _, OracleError<'_>>("attacked with a creature this turn"),
         ),
+        // CR 508.6: "attacked you or a planeswalker you control this turn" — the
+        // attacked-defender is the source's controller (CR 109.5 "you"), distinct
+        // from `YouAttackedThisTurn`'s attacked-anyone. Longer disjunctive form
+        // first; the bare "attacked you this turn" is the same predicate (the
+        // planeswalker disjunct collapses to the controller via CR 508.5).
+        // Sandswirl Wanderglyph.
+        value(
+            ParsedCondition::YouAttackedSourceControllerThisTurn,
+            alt((
+                tag::<_, _, OracleError<'_>>(
+                    "attacked you or a planeswalker you control this turn",
+                ),
+                tag("attacked you this turn"),
+            )),
+        ),
         value(
             ParsedCondition::YouCastSpellThisTurn { filter: None },
             tag::<_, _, OracleError<'_>>("cast a spell this turn"),
@@ -880,7 +936,22 @@ pub(crate) fn parse_per_player_conditional_prohibition(
 /// - "[Subject] can't cast spells with the chosen name" (Alhammarret)
 /// - "[Subject] can't cast spells of the chosen type" (Archon of Valor's Reach)
 /// - "Enchanted creature's controller can't cast [type] spells" (Brand of Ill Omen)
-pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
+///
+/// `raw_lower` is the pre-`strip_reminder_text` lowercase line so trailing
+/// `(as long as/if <condition>)` gates are not lost to reminder stripping.
+pub(crate) fn parse_cant_cast_type_spells(
+    tp: &str,
+    text: &str,
+    raw_lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 611.3a: gate parentheticals must be read from the raw line — `strip_reminder_text`
+    // removes every parenthetical span before this parser runs.
+    let gate_condition_text = match extract_trailing_parenthetical_gate_condition(raw_lower) {
+        ParentheticalGateExtract::Unrecognized => return None,
+        ParentheticalGateExtract::Recognized(cond) => Some(cond),
+        ParentheticalGateExtract::Absent | ParentheticalGateExtract::Benign => None,
+    };
+
     // Exclude patterns handled by other parsers
     if nom_primitives::scan_contains(tp, "can't cast more than")
         || nom_primitives::scan_contains(tp, "can't cast spells during")
@@ -914,18 +985,14 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     // 2. Match "can't cast "
     let after_cant_cast = nom_tag_lower(predicate, predicate, "can't cast ")?;
 
-    // 3. Strip trailing period and parenthetical conditions
     let trimmed = after_cant_cast.trim_end_matches('.');
-    // Strip trailing parenthetical like "(as long as this creature is on the battlefield)"
-    let trimmed = if let Some(pos) = trimmed.rfind(" (") {
-        trimmed[..pos].trim()
-    } else {
-        trimmed
-    };
 
     // --- "spells with mana value N or less/greater" ---
     if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells with mana value ") {
-        return parse_cant_cast_mana_value(rest, who, text);
+        return attach_parsed_static_gate(
+            parse_cant_cast_mana_value(rest, who, text)?,
+            gate_condition_text,
+        );
     }
 
     // --- "spells with the chosen name" ---
@@ -933,7 +1000,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
         let def = StaticDefinition::new(StaticMode::CantBeCast { who })
             .affected(TargetFilter::HasChosenName)
             .description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells of the chosen type" ---
@@ -945,14 +1012,22 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
         let def = StaticDefinition::new(StaticMode::CantBeCast { who })
             .affected(filter)
             .description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells of the chosen color" ---
+    // CR 101.2 + CR 105.4: scope the prohibition to spells whose colors (CR 105.2)
+    // include the source's chosen color — not every spell. Mirrors the "chosen
+    // type" branch above; runtime resolution lives in `cant_cast_filter_matches`.
     if nom_tag_lower(trimmed, trimmed, "spells of the chosen color").is_some() {
-        let def =
-            StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        let filter = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::IsChosenColor],
+            ..TypedFilter::default()
+        });
+        let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+            .affected(filter)
+            .description(text.to_string());
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells with the same name as ..." ---
@@ -961,7 +1036,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     if nom_tag_lower(trimmed, trimmed, "spells with the same name as ").is_some() {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells with even mana values" / "spells with odd mana values" ---
@@ -970,14 +1045,14 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "spells by paying alternative costs" ---
     if nom_tag_lower(trimmed, trimmed, "spells by paying alternative cost").is_some() {
         let def =
             StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return Some(def);
+        return attach_parsed_static_gate(def, gate_condition_text);
     }
 
     // --- "[type] spells" / "[type] spell" — standard type-based prohibition ---
@@ -1004,7 +1079,7 @@ pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<Static
     if let Some(filter) = spell_filter {
         def = def.affected(filter);
     }
-    Some(def)
+    attach_parsed_static_gate(def, gate_condition_text)
 }
 
 /// Parse passive voice "[Type] spells can't be cast" pattern.
@@ -1052,6 +1127,43 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
             .affected(TargetFilter::Typed(tf))
             .description(text.to_string()),
         );
+    }
+
+    // --- "[Type] spells with {X} in their mana costs can't be cast" (passive voice) ---
+    // CR 101.2 + CR 107.3: Gaddock Teeg class — prohibits casting spells whose
+    // printed mana cost contains an {X} symbol. Combines an optional type prefix
+    // ("noncreature") with the `HasXInManaCost` filter property. Resolved at cast
+    // time by `cant_cast_filter_matches` → `SpellCastRecord.has_x_in_cost`.
+    fn parse_passive_x_mana_cost_prefix(input: &str) -> OracleResult<'_, &str> {
+        let (input, type_text) = terminated(
+            take_until(" spells with {x} in "),
+            tag(" spells with {x} in "),
+        )
+        .parse(input)?;
+        let (input, _) = alt((tag("their mana costs"), tag("their mana cost"))).parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof(input)?;
+        Ok((input, type_text))
+    }
+    if let Ok((_, type_text)) = parse_passive_x_mana_cost_prefix(before_cant) {
+        let (filter, remainder) = parse_type_phrase(type_text);
+        if remainder.trim().is_empty() {
+            // Only accept Typed filters with concrete type_filters; reject
+            // unsupported shapes (AnyOf, bare Any) to avoid silently broadening
+            // the prohibition scope.
+            let tf = match filter {
+                TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => tf,
+                _ => return None,
+            };
+            let tf = tf.properties(vec![FilterProp::HasXInManaCost]);
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeCast {
+                    who: ProhibitionScope::AllPlayers,
+                })
+                .affected(TargetFilter::Typed(tf))
+                .description(text.to_string()),
+            );
+        }
     }
 
     // --- "Spells with the chosen name can't be cast" (passive voice) ---
@@ -1285,6 +1397,46 @@ pub(crate) fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefini
     Some(StaticDefinition::new(StaticMode::CantDraw { who }).description(text.to_string()))
 }
 
+/// CR 121.1 + CR 613.11: Parse a draw-source redirection static from Oracle
+/// text: "[Subject] draw(s) cards from the bottom of [your|their] library
+/// rather than/instead of the top." → `DrawFromBottom { who }`.
+/// E.g., River Song ("Meet in Reverse"): "You draw cards from the bottom of
+/// your library rather than the top."
+pub(crate) fn parse_draw_from_bottom(tp: &str, text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    // Subject axis → `ProhibitionScope` via the shared building block.
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+    // Verb axis ("draw"/"draws") × quantity axis ("cards"/"a card") — composed, not permuted.
+    // Covers "draw a card", "draw cards", "draws a card", "draws cards".
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("draw "), tag("draws ")))
+        .parse(predicate)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("cards"), tag("a card")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" from the bottom of ")
+        .parse(rest)
+        .ok()?;
+    // Possessive axis composed (not permuted).
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("your "), tag("their ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>("library ").parse(rest).ok()?;
+    // Connector axis composed (not permuted).
+    let (rest, _) = alt((tag::<_, _, VE<'_>>("rather than"), tag("instead of")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VE<'_>>(" the top").parse(rest).ok()?;
+    // STRICT: reject a silently-dropped trailing clause — the redirect must be
+    // the whole sentence, not a fragment with an unparsed remainder.
+    let tail = rest.trim();
+    if !matches!(tail, "" | ".") {
+        return None;
+    }
+    Some(StaticDefinition::new(StaticMode::DrawFromBottom { who }).description(text.to_string()))
+}
+
 /// Parse the subject of "[type] cards in [zones] can't enter the battlefield".
 /// CR 604.3: Extracts the card type filter and zone restrictions into a TypedFilter.
 pub(crate) fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
@@ -1442,11 +1594,50 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(affected)
             .description(text.to_string()),
         );
     }
+
+    // CR 305.1 + CR 601.2a + CR 114.4: Unlimited combined permission —
+    // "You may play lands and cast permanent spells from your graveyard."
+    // (Wrenn and Realmbreaker emblem). Composed through the shared branch
+    // filter parser so trailing rules text is not silently dropped.
+    if let Some(def) = try_parse_unlimited_combined_graveyard_permission(text, lower) {
+        return Some(def);
+    }
+
+    // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive once-per-turn permission —
+    // "Once during each of your turns, you may play a <land-filter> or cast a
+    // <spell-filter> from your graveyard." (The Eighth Doctor, Serra Paragon).
+    // `Play` mode covers both the land-play branch (CR 305.1) and the
+    // spell-cast branch (CR 601.2a); the two branch filters are merged so the
+    // permission's `affected` admits either class of card. Parsed before the
+    // single-verb dispatch below because the disjunctive lead shares the
+    // "once during each of your turns, you may" prefix with the cast-only form.
+    //
+    // The granted leave-battlefield rider ("If you do, it gains \"…exile…\"")
+    // that may follow is a CR 614.1a Moved replacement on the *resolved*
+    // permanent (origin Battlefield → Exile), NOT the stack-exit
+    // `graveyard_destination_replacement` (which is structurally unreachable for
+    // permanent spells). Attaching it requires a resolution-grant carrier on the
+    // permission. Until that exists, decline this parser so the unmodeled rider
+    // remains an honest coverage gap instead of being silently dropped.
+    if let Some(def) = try_parse_disjunctive_graveyard_cast_permission(text, lower) {
+        return Some(def);
+    }
+
+    // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
+    // Embers). When present, the permission is gated to the source controller's
+    // turn via a `ParsedCondition::IsYourTurn` static condition
+    // (`evaluate_condition` → `state.active_player == controller`), the
+    // rules-correct enforcement at CR 102.1 — not silently dropped.
+    let (lower, your_turn_only) = match nom_tag_lower(lower, lower, "during your turn, ") {
+        Some(r) => (r, true),
+        None => (lower, false),
+    };
 
     // Determine pattern and extract the rest after the prefix
     let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
@@ -1492,6 +1683,14 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
         .is_ok()
         .then_some(Zone::Exile);
+    // CR 601.2f: Optional "by paying ... in addition to their other costs"
+    // ADDITIONAL non-mana cost rider (Festival of Embers). Recognized before the
+    // permission-condition fallback so it isn't misread as a condition tail.
+    let extra_cost =
+        parse_cast_permission_additional_cost_rider(trailing).map(|cost| CastExtraCost {
+            cost,
+            mode: CastCostMode::Additional,
+        });
     let condition = parse_graveyard_permission_condition(trailing)
         .ok()
         .and_then(|(rest, condition)| rest.is_empty().then_some(condition));
@@ -1506,16 +1705,233 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         frequency,
         play_mode,
         graveyard_destination_replacement,
+        extra_cost,
     })
     .affected(affected)
     .description(text.to_string());
     if let Some(condition) = condition {
         def = def.condition(condition);
+    } else if your_turn_only {
+        // CR 102.1 + CR 117.1c: gate the permission to the source controller's
+        // turn (Festival of Embers' "During your turn, ...").
+        def = def.condition(StaticCondition::DuringYourTurn);
     }
     if self_ref_permission {
         def = def.active_zones(vec![Zone::Graveyard]);
     }
     Some(def)
+}
+
+/// CR 601.2f: Parse a trailing ADDITIONAL-cost rider on a cast-from-zone
+/// permission — "by paying <N> life in addition to their other costs" (Festival
+/// of Embers). The cost is paid on TOP of the spell's normal mana cost (CR
+/// 601.2f), distinct from the CR 118.9 alternative rider parsed by
+/// `oracle_effect::try_parse_alt_cost_rider`. Composed from nom combinators so
+/// the prefix × quantity × suffix axes stay independent and future shapes
+/// (other costs, "its"/"their" pronoun) extend without permutation blowup.
+/// Returns `None` when the rider shape is absent.
+fn parse_cast_permission_additional_cost_rider(
+    trailing: &str,
+) -> Option<crate::types::ability::AbilityCost> {
+    let lower = trailing.trim_start();
+    // CR 601.2f: "by paying " opens the rider; "in addition to" distinguishes
+    // the additional shape from a CR 118.9 "rather than" alternative.
+    if !nom_primitives::scan_contains(lower, "in addition to") {
+        return None;
+    }
+    let rest = nom_tag_lower(lower, lower, "by paying ")?;
+    // CR 119.4: "<N> life" — the only additional-cost shape used by the current
+    // class that this permission carries (Festival of Embers).
+    let (after_num, n) = nom_primitives::parse_number(rest).ok()?;
+    let after_life = nom_tag_lower(after_num, after_num, " life")?;
+    // CR 601.2f: the tail must be the "in addition to (their|its) other costs"
+    // closer — anything else is an unmodeled shape.
+    let after_life = after_life.trim_start();
+    let after_in_addition = nom_tag_lower(after_life, after_life, "in addition to ")?;
+    let after_pronoun = nom_tag_lower(after_in_addition, after_in_addition, "their other costs")
+        .or_else(|| nom_tag_lower(after_in_addition, after_in_addition, "its other costs"))?;
+    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
+    let trimmed_pronoun = after_pronoun.trim_start();
+    let after_pronoun = trimmed_pronoun.strip_prefix('.').unwrap_or(trimmed_pronoun); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+    if !after_pronoun.trim().is_empty() {
+        return None;
+    }
+    Some(crate::types::ability::AbilityCost::PayLife {
+        amount: QuantityExpr::Fixed { value: n as i32 },
+    })
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive once-per-turn
+/// graveyard play/cast permission — "Once during each of your turns, you may
+/// play a <land-filter> or cast a <spell-filter> from your graveyard." — into a
+/// single `GraveyardCastPermission { frequency: OncePerTurn, play_mode: Play }`
+/// whose `affected` filter is the union of the two branch filters.
+///
+/// Two zone-placement variants are accepted (both observed in printed cards):
+/// - tail-zone: "play a <land> or cast a <spell> from your graveyard"
+///   (The Eighth Doctor — "from your graveyard" once, at the end).
+/// - per-branch-zone: "play a <land> from your graveyard or cast a <spell> from
+///   your graveyard" (Serra Paragon — "from your graveyard" on each branch).
+///
+/// The parser parses whatever filter each branch carries (it does NOT assume
+/// "historic"): Serra Paragon's spell branch carries "mana value 3 or less",
+/// proving the filter axis is general. When both branches resolve to the same
+/// filter (The Eighth Doctor: both "historic permanent"), the union collapses
+/// to that single filter; otherwise it emits `TargetFilter::Or`.
+///
+/// A trailing rider ("If you do, it gains \"…\"") is intentionally rejected:
+/// the granted leave-battlefield exile rider is a CR 614.1a Moved replacement
+/// on the resolved permanent. Parsing only the permission would make coverage
+/// report support while dropping rules text.
+fn try_parse_disjunctive_graveyard_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 601.2a: Frequency prefix. Only the once-per-turn lead is a real printed
+    // shape for this disjunctive form today; accept both the canonical wording
+    // and the shorter "once each turn" synonym via the file-wide `or_else` chain.
+    let rest = nom_tag_lower(
+        lower,
+        lower,
+        "once during each of your turns, you may play ",
+    )
+    .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
+    if nom_primitives::scan_contains(rest, "if you do, it gains") {
+        return None;
+    }
+
+    // CR 305.1 + CR 601.2a: The disjunction connector " or cast " splits the
+    // land-play branch from the spell-cast branch. `split_once_on` is the
+    // structural "everything up to delimiter" combinator.
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " or cast ")
+        .ok()
+        .map(|(_, pair)| pair)?;
+
+    // The spell branch must end with the source-zone anchor. Strip a per-branch
+    // " from your graveyard" if present (Serra form); otherwise the tail-zone
+    // anchor (Eighth form) lives on the spell branch alone.
+    let spell_branch = strip_graveyard_zone_anchor(spell_branch)?;
+
+    // The land branch optionally carries its own zone anchor (Serra form); strip
+    // it when present so the bare filter phrase reaches the filter parser.
+    let land_branch = strip_graveyard_zone_anchor(land_branch).unwrap_or(land_branch);
+
+    let land_filter = parse_graveyard_branch_filter(land_branch)?;
+    let spell_filter = parse_graveyard_branch_filter(spell_branch)?;
+
+    // CR 700.6: a land is itself a permanent, so when both branches resolve to
+    // the same typed filter (historic land ⊆ historic permanent), collapse the
+    // union to that single filter rather than emitting a redundant `Or`.
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            // CR 305.1: `Play` covers both the land-play and spell-cast branches.
+            play_mode: CardPlayMode::Play,
+            // Stack-exit redirect is wrong for the granted leave-battlefield
+            // rider (see doc comment); leave it unset.
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 305.1 + CR 601.2a + CR 114.4: Parse unlimited combined graveyard
+/// permission — "You may play <land-filter> and cast <spell-filter> from your
+/// graveyard." — using the shared branch-filter grammar and rejecting any
+/// trailing rules-bearing suffix.
+fn try_parse_unlimited_combined_graveyard_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "you may play ")?;
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " and cast ")
+        .ok()
+        .map(|(_, pair)| pair)?;
+    let (spell_branch, after_graveyard) =
+        nom_primitives::split_once_on(spell_branch, " from your graveyard")
+            .ok()
+            .map(|(_, pair)| pair)?;
+    if !after_graveyard.trim().trim_start_matches('.').is_empty() {
+        return None;
+    }
+    let land_filter = parse_graveyard_branch_filter(land_branch.trim())?;
+    let spell_filter = parse_graveyard_branch_filter(spell_branch.trim())?;
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// Strip the trailing " from your graveyard" source-zone anchor (plus any
+/// leading whitespace) from a branch phrase, returning the bare filter text.
+/// Returns `None` when the anchor is absent.
+fn strip_graveyard_zone_anchor(branch: &str) -> Option<&str> {
+    nom_primitives::split_once_on(branch, " from your graveyard")
+        .ok()
+        .map(|(_, (before, _))| before.trim())
+}
+
+/// Strip the leading article and trailing " spell"/" spells" from a single
+/// disjunctive-permission branch, then resolve it through
+/// `parse_graveyard_permission_filter`. Mirrors the cleanup the single-verb
+/// graveyard parser performs, so both paths share one filter grammar. Returns
+/// `None` if the branch does not resolve to a usable typed filter.
+fn parse_graveyard_branch_filter(branch: &str) -> Option<TargetFilter> {
+    let branch = branch.trim();
+    // Strip the leading article ("a "/"an ").
+    let branch = nom_tag_lower(branch, branch, "a ")
+        .or_else(|| nom_tag_lower(branch, branch, "an "))
+        .unwrap_or(branch);
+
+    // Drop " spell"/" spells" so `parse_type_phrase` sees the bare type word;
+    // "land"/"lands" is already a valid type phrase and needs no stripping.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(branch, "spells") {
+        Cow::Owned(branch.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(branch, "spell") {
+        Cow::Owned(branch.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(branch)
+    };
+
+    // CR 700.6: "historic spells" lowers to the Historic property on spell
+    // cards; suffix stripping leaves the bare adjective, so expand to the card
+    // phrase the type parser expects.
+    let cleaned: Cow<str> = if cleaned == "historic" {
+        Cow::Borrowed("historic card")
+    } else {
+        cleaned
+    };
+
+    let (filter, _self_ref) = parse_graveyard_permission_filter(&cleaned);
+    // Reject the unparseable fallbacks so a branch we cannot model declines the
+    // whole disjunctive parse rather than silently admitting everything.
+    match &filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
+        _ => None,
+    }
 }
 
 /// CR 122.2 + CR 113.6b: Parse the counter-persistence static — "Counters
@@ -1694,6 +2110,13 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
             // restriction beyond its once-each-turn frequency.
             pool,
             timing: ExileCastTiming::AnyTime,
+            // CR 609.4b / CR 702.8a: Maralen grants no mana-spend or flash
+            // concession.
+            mana_spend_permission: None,
+            grants_flash: false,
+            // CR 118.9 / CR 601.2f: Maralen casts at its alt-cost shape via
+            // `cost`, not an extra non-mana rider.
+            extra_cost: None,
         })
         .affected(filter)
         .description(text.to_string()),
@@ -1701,11 +2124,12 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
 }
 
 /// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Parse the persistent,
-/// name-anchored exile-play permission — "[During your turn, ]you may play
-/// lands and cast spells from among cards exiled with ~[.]" (The Matrix of
-/// Time) and the "you may look at cards exiled with ~, and you may play lands
-/// and cast spells from among those cards." variant (the Prosper/Tibalt
-/// impulse-commander class).
+/// name-anchored exile-play permission — "[During your turn, ][as long as
+/// <condition>, ]you may play lands and cast spells from among cards exiled
+/// with ~[.]" (The Matrix of Time), the compact "you may play cards exiled
+/// with ~" wording (Evendo Brushrazer), and the "you may look at cards exiled
+/// with ~, and you may play lands and cast spells from among those cards."
+/// variant (the Prosper/Tibalt impulse-commander class).
 ///
 /// Distinguished from `try_parse_exile_cast_permission` (Maralen) by:
 /// - **No "this turn" pool bound** → `pool: ExileCardPool::Persistent` reads the
@@ -1731,6 +2155,11 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         None => (lower, ExileCastTiming::AnyTime),
     };
 
+    let (rest, condition) = match strip_leading_permission_condition(rest) {
+        Some((rest, condition)) => (rest, Some(condition)),
+        None => (rest, None),
+    };
+
     // Optional "you may look at cards exiled with <self>, and " preamble
     // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
     // rather than re-naming the source; when absent, the play clause names the
@@ -1739,45 +2168,150 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     let uses_anaphor = after_look.is_some();
     let rest = after_look.unwrap_or(rest);
 
-    // Core permission phrase. CR 305.1: "play lands and cast spells" → Play mode.
-    let rest = nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")?;
-
-    // The play clause either names the source ("cards exiled with <self>") or
-    // refers back to the look-at preamble's set ("those cards").
-    let after_clause = if uses_anaphor {
-        nom_tag_lower(rest, rest, "those cards")?
+    // Core permission phrase. CR 305.1: "play lands and cast spells" / "play
+    // cards" lower to Play mode (lands are played, non-land cards are cast).
+    // CR 601.2a: the bare "cast cards exiled with ~" wording (Azula, Cunning
+    // Usurper) is spell-cast only and lowers to `Cast` — lands cannot be
+    // "cast", so the Cast branch never admits exiled lands.
+    let (after_clause, play_mode) = if let Some(rest) =
+        nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")
+    {
+        // The play clause either names the source ("cards exiled with <self>") or
+        // refers back to the look-at preamble's set ("those cards").
+        let rest = if uses_anaphor {
+            nom_tag_lower(rest, rest, "those cards")?
+        } else {
+            strip_exile_play_source_reference(rest)?
+        };
+        (rest, CardPlayMode::Play)
+    } else if let Some(rest) = nom_tag_lower(rest, rest, "you may cast ") {
+        // CR 601.2a: "you may cast cards exiled with ~" — spell-cast only.
+        let rest = if uses_anaphor {
+            nom_tag_lower(rest, rest, "those cards")?
+        } else {
+            strip_exile_play_source_reference(rest)?
+        };
+        (rest, CardPlayMode::Cast)
     } else {
-        let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")?;
-        strip_self_reference(after_anchor)?
+        let rest = nom_tag_lower(rest, rest, "you may play ")?;
+        let rest = if uses_anaphor {
+            nom_tag_lower(rest, rest, "those cards")?
+        } else {
+            strip_exile_play_source_reference(rest)?
+        };
+        (rest, CardPlayMode::Play)
     };
 
-    // CR 113.6b: A trailing period is the only permitted remainder; any other
-    // tail is an unmodeled shape — decline so it surfaces as a coverage gap
-    // rather than a silent misparse.
-    let tail = after_clause.trim_start();
+    // CR 601.3b + CR 609.4b: Optional payment/timing-concession riders that ride
+    // alongside the cast permission (Azula, Cunning Usurper). Parse them in
+    // order off the tail so any leftover proves an unmodeled shape.
+    let (after_riders, grants_flash, mana_spend_permission) =
+        strip_exile_cast_concession_riders(after_clause);
+
+    // CR 118.9: Optional trailing ALTERNATIVE-cost rider sentence — "If you cast
+    // a spell this way, pay life equal to its mana value rather than pay its mana
+    // cost." (Valgavoth, Terror Eater). Reuses the shared
+    // `try_parse_alt_cost_rider` authority (the same helper that stamps
+    // `TopOfLibraryCastPermission.alt_cost`), so the recognized cost shapes stay
+    // in lockstep with the top-of-library Bolas's Citadel class. When present the
+    // rider IS the only permitted remainder.
+    let tail = after_riders.trim_start();
     // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
-    let tail = tail.strip_prefix('.').unwrap_or(tail); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
-    if !tail.trim().is_empty() {
-        return None;
+    let tail = tail.strip_prefix('.').unwrap_or(tail).trim_start(); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+
+    let extra_cost = if tail.is_empty() {
+        None
+    } else {
+        // CR 113.6b: A non-empty tail must be the recognized alt-cost rider; an
+        // unmodeled remainder declines so it surfaces as a coverage gap rather
+        // than a silent misparse.
+        let cost = super::oracle_effect::try_parse_alt_cost_rider(tail)?;
+        Some(CastExtraCost {
+            cost,
+            mode: CastCostMode::Alternative,
+        })
+    };
+
+    let mut definition = StaticDefinition::new(StaticMode::ExileCastPermission {
+        // CR 601.2a: No once-per-turn cap on this class.
+        frequency: CastFrequency::Unlimited,
+        // CR 305.1 / CR 601.2a: `Play` covers lands + non-land cards; `Cast`
+        // covers spells only, set by the "you may cast" wording.
+        play_mode,
+        // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
+        cost: ExileCastCost::PayNormalCost,
+        // CR 406.6: Lifetime per-source exile-link pool.
+        pool: ExileCardPool::Persistent,
+        timing,
+        mana_spend_permission,
+        grants_flash,
+        // CR 118.9: Valgavoth's alternative pay-life cost (or None).
+        extra_cost,
+    })
+    // CR 305.1: The permission applies to every card in the source's exile
+    // pool; the pool itself is the scope, so no type/MV constraint.
+    .affected(TargetFilter::Any)
+    .description(text.to_string());
+    if let Some(condition) = condition {
+        definition = definition.condition(condition);
     }
 
-    Some(
-        StaticDefinition::new(StaticMode::ExileCastPermission {
-            // CR 601.2a: No once-per-turn cap on this class.
-            frequency: CastFrequency::Unlimited,
-            // CR 305.1: Play covers lands (played) and non-land cards (cast).
-            play_mode: CardPlayMode::Play,
-            // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
-            cost: ExileCastCost::PayNormalCost,
-            // CR 406.6: Lifetime per-source exile-link pool.
-            pool: ExileCardPool::Persistent,
-            timing,
-        })
-        // CR 305.1: The permission applies to every card in the source's exile
-        // pool; the pool itself is the scope, so no type/MV constraint.
-        .affected(TargetFilter::Any)
-        .description(text.to_string()),
-    )
+    Some(definition)
+}
+
+/// CR 601.3b + CR 609.4b: Strip the optional flash-grant and any-type-mana
+/// concession riders that follow the core exile-cast clause (Azula, Cunning
+/// Usurper: "… and you may cast them as though they had flash. Mana of any type
+/// can be spent to cast those spells."). Returns the remainder plus the parsed
+/// `(grants_flash, mana_spend_permission)` pair. Each rider is optional and
+/// recognized independently so future cards mixing only one of the two still
+/// parse. Riders not present leave the defaults `(false, None)`.
+fn strip_exile_cast_concession_riders(
+    input: &str,
+) -> (
+    &str,
+    bool,
+    Option<crate::types::ability::ManaSpendPermission>,
+) {
+    let mut rest = input.trim_start();
+    let mut grants_flash = false;
+    let mut mana_spend_permission = None;
+
+    // CR 601.3b: "[and] you may cast them as though they had flash[.]"
+    // Optional leading "and "/". " connective consumed via the file-wide
+    // nom-tag idiom so the rider may follow either the period or the conjunction.
+    if let Some(after) = nom_tag_lower(rest, rest, "and you may cast them as though they had flash")
+        .or_else(|| nom_tag_lower(rest, rest, "you may cast them as though they had flash"))
+    {
+        grants_flash = true;
+        let trimmed = after.trim_start();
+        // allow-noncombinator: punctuation cleanup (drop the sentence terminator) between riders on a pre-tokenized chunk, not parsing dispatch.
+        rest = trimmed.strip_prefix('.').unwrap_or(trimmed).trim_start(); // allow-noncombinator: punctuation cleanup between riders, not parsing dispatch.
+    }
+
+    // CR 609.4b: "Mana of any type can be spent to cast those spells[.]"
+    if let Some(after) = nom_tag_lower(
+        rest,
+        rest,
+        "mana of any type can be spent to cast those spells",
+    ) {
+        mana_spend_permission = Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor);
+        rest = after;
+    }
+
+    (rest, grants_flash, mana_spend_permission)
+}
+
+fn strip_leading_permission_condition(input: &str) -> Option<(&str, StaticCondition)> {
+    let (rest, condition) = nom_condition::parse_condition(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(rest).ok()?;
+    Some((rest, condition))
+}
+
+fn strip_exile_play_source_reference(rest: &str) -> Option<&str> {
+    let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")
+        .or_else(|| nom_tag_lower(rest, rest, "the cards exiled with "))?;
+    strip_self_reference(after_anchor)
 }
 
 /// CR 601.3f + CR 113.6b: Strip the "you may look at cards exiled with
@@ -1807,6 +2341,127 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
         .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 
+/// CR 609.4b: Parse the activation-source-filtered any-color-mana spend static —
+/// "You may spend mana as though it were mana of any color to activate abilities
+/// of <subject>." (Agatha's Soul Cauldron / Joiner Adept). Lowers to
+/// `StaticMode::SpendManaAsAnyColor { spell_filter: None,
+/// activation_source_filter: Some(filter) }`, scoping the any-color concession to
+/// activated abilities whose source permanent matches the subject filter (CR
+/// 609.4b: the concession changes only how a cost is paid, never the cost).
+///
+/// The unfiltered board-wide form ("you may spend mana as though it were mana of
+/// any color", Chromatic Orrery) and the spell-class-filtered form ("to cast
+/// creature spells", Vizier) are handled separately and must not be swallowed
+/// here — this handler requires the explicit "to activate abilities of <subject>"
+/// scope.
+pub(crate) fn try_parse_spend_any_color_to_activate_abilities(
+    text: &str,
+    tp: &TextPair<'_>,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(
+        tp,
+        "you may spend mana as though it were mana of any color to activate abilities of ",
+    )
+    .or_else(|| {
+        nom_tag_tp(
+            tp,
+            "spend mana as though it were mana of any color to activate abilities of ",
+        )
+    })?;
+
+    let subject = rest.trim_end().trim_end_matches('.');
+    let activation_source_filter = parse_continuous_subject_filter(subject.original)?;
+
+    Some(
+        StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: Some(activation_source_filter),
+        })
+        .affected(TargetFilter::Player)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 609.4b: Parse the spell-class-filtered any-type-mana spend static —
+/// "You (may|can) spend mana of any type to cast <spell-filter> spells."
+/// (Vizier of the Menagerie: "creature spells"). Lowers to
+/// `StaticMode::SpendManaAsAnyColor { spell_filter: Some(filter) }`, scoping the
+/// any-type-mana concession to spells the controller casts that match the filter
+/// (CR 609.4b: the concession changes only how a cost is paid, never the cost).
+///
+/// The unfiltered board-wide form ("you may spend mana as though it were mana of
+/// any color", Chromatic Orrery) is handled separately in `dispatch.rs` and
+/// lowers to `spell_filter: None`. This handler requires the explicit "to cast
+/// <X> spells" scope so it never swallows the board-wide phrasing.
+///
+/// The spell-filter is parsed with the same idiom as
+/// [`try_parse_top_of_library_cast_permission`]: strip the leading article and
+/// the trailing " spell"/" spells", then delegate to `parse_type_phrase` so one
+/// branch covers every spell class (creature, artifact, …), not just creatures.
+pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // CR 609.4b: "you may"/"you can" surface, then "spend mana of any type to
+    // cast ". The "mana of any type" wording (vs "any color") is the spell-cast
+    // any-type concession; the runtime treats both as `any_color` in
+    // mana_payment.rs (any mana satisfies a colored requirement).
+    let rest = nom_tag_lower(text, lower, "you may spend mana of any type to cast ")
+        .or_else(|| nom_tag_lower(text, lower, "you can spend mana of any type to cast "))?;
+
+    // Trailing period is optional; strip it so the type phrase is clean.
+    let rest = rest.trim_end().trim_end_matches('.').trim_end();
+
+    // Strip a leading article — `parse_type_phrase` expects the bare noun.
+    let rest_lower = rest.to_ascii_lowercase();
+    let filter_text = nom_tag_lower(rest, &rest_lower, "a ")
+        .or_else(|| nom_tag_lower(rest, &rest_lower, "an "))
+        .unwrap_or(rest);
+
+    // Drop the trailing " spells"/" spell" token so `parse_type_phrase` sees the
+    // bare type/subtype phrase. `strip_suffix` (not `replacen`) anchors to the
+    // end, so an interior "spell" (e.g. a hypothetical "spellshaper spells") is
+    // never clipped. Without the "spell(s)" anchor this is not the targeted
+    // class — bail so the static stays an honest defer rather than over-matching.
+    let cleaned = filter_text
+        .strip_suffix(" spells") // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
+        .or_else(|| filter_text.strip_suffix(" spell"))?; // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
+
+    let (filter, tail) = parse_type_phrase(cleaned);
+    // A non-empty unconsumed tail means an unrecognised spell class — defer.
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    // `parse_type_phrase` never yields `SelfRef`; for input it cannot classify
+    // (e.g. an empty `cleaned` from "to cast  spells") it returns a degenerate
+    // `Typed` carrying no type constraints and no properties, which would match
+    // EVERY spell — exactly the board-wide concession this filtered handler must
+    // not emit (CR 609.4b: the scope is the named spell class only). Bail on that
+    // empty-filter shape so the line stays an honest defer; any non-degenerate
+    // filter (`Or`/`And`, or a `Typed` with constraints) is kept.
+    if matches!(
+        &filter,
+        TargetFilter::Typed(typed) if typed.type_filters.is_empty() && typed.properties.is_empty()
+    ) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+            spell_filter: Some(filter),
+            activation_source_filter: None,
+        })
+        // For the filtered (`Some`) path `affected` is documentation-only:
+        // controller-scoping is enforced at runtime by the explicit
+        // `obj.controller != player_id` gate in
+        // `player_can_spend_as_any_color_for_spell_object`, which never reads
+        // `def.affected`. Kept for intent + structural parity with the
+        // board-wide (`None`) form, which DOES consult `affected`.
+        .affected(TargetFilter::Controller)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
 /// the top of your library [rider]" — top-of-library cast permission class
 /// (Realmwalker, Future Sight, Magus of the Future, Bolas's Citadel, Vivien
@@ -1825,6 +2480,24 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 601.2a: Strip an optional once-per-turn frequency prefix FIRST, before
+    // the Bolas-compound and disjunctive branches, so each branch sees the bare
+    // "you may play/cast …" lead and inherits the correct frequency. "Once each
+    // turn, …" (Assemble the Players, The Fourth Doctor) and the longer "Once
+    // during each of your turns, …" synonym both lower to OncePerTurn; absence
+    // keeps the Unlimited shape (Realmwalker, Future Sight, Crystal Skull).
+    // Strip both `text` and `lower` in lockstep so downstream helpers
+    // (alt-cost rider, condition parser, description) see aligned slices from
+    // the same character offset.
+    let (text, lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
+        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
+    {
+        let stripped_len = lower.len() - r.len();
+        (&text[stripped_len..], r, CastFrequency::OncePerTurn)
+    } else {
+        (text, lower, CastFrequency::Unlimited)
+    };
+
     // Compound Bolas's Citadel form first — "you may play lands and cast
     // spells from the top of your library". Both halves collapse to a single
     // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
@@ -1837,6 +2510,9 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
             play_mode: CardPlayMode::Play,
+            // CR 601.2a: inherit the once-per-turn cap stripped above (the
+            // shipping Bolas's Citadel form has no prefix → Unlimited).
+            frequency,
             alt_cost,
         })
         .affected(TargetFilter::Any)
@@ -1844,6 +2520,18 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         if let Some(condition) = parse_top_of_library_permission_condition(rest) {
             def = def.condition(condition);
         }
+        return Some(def);
+    }
+
+    // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive filtered permission —
+    // "You may play <land-filter> and/or cast <spell-filter> from the top of
+    // your library." (Crystal Skull, Isu Spyglass, The Fourth Doctor). `Play`
+    // mode covers both branches; distinct branch filters merge to
+    // `TargetFilter::Or`. Inherits the hoisted frequency so once-per-turn
+    // disjunctive permissions keep their per-turn cap. Parsed after the
+    // unfiltered Bolas compound so "play lands and cast spells" stays `Any`.
+    if let Some(def) = try_parse_disjunctive_top_of_library_cast_permission(text, lower, frequency)
+    {
         return Some(def);
     }
 
@@ -1884,9 +2572,166 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
         play_mode,
+        frequency,
         alt_cost,
     })
     .affected(filter)
+    .description(text.to_string());
+    if let Some(condition) = parse_top_of_library_permission_condition(trailing) {
+        def = def.condition(condition);
+    }
+    Some(def)
+}
+
+/// CR 702.170f: Parse "You may plot [filter] cards from the top of your library"
+/// — the plot-from-library PERMISSION line (Fblthp, Lost on the Range L4). This
+/// is the CR 702.170f effect that allows the plot ability to function in a zone
+/// other than hand and authorizes taking the special action there; it emits
+/// [`StaticMode::TopOfLibraryPlotPermission`], the permission role — DISTINCT
+/// from [`StaticMode::TopOfLibraryHasPlot`] (the L3 grant that the top card
+/// *has* plot). The runtime requires both. (Both are also categorically
+/// distinct from the cast-permission family: plot is a CR 702.170 special action
+/// — Library → Exile, then a later Exile → Stack free cast — not a CR 601.2a
+/// Library → Stack cast.)
+///
+/// Structurally a clone of [`try_parse_top_of_library_cast_permission`], anchored
+/// on the plot verb ("you may plot "). The eligibility filter ("nonland") rides
+/// `StaticDefinition.affected`, exactly as the cast-permission sibling carries
+/// its eligibility. Built for the class: any type/subtype phrase the cast arm
+/// accepts is accepted here, so future "you may plot <type> cards from the top
+/// of your library" printings slot in without parser changes.
+pub(crate) fn try_parse_top_of_library_plot_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // "you may plot <filter> from the top of your library"
+    let rest = nom_tag_lower(lower, lower, "you may plot ")?;
+
+    // Anchor on " from the top of your library"; the filter text precedes it.
+    let (filter_text, _trailing) =
+        nom_primitives::split_once_on(rest, " from the top of your library")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Strip a leading article so `parse_type_phrase` sees the bare noun.
+    let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
+        .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
+        .unwrap_or(filter_text);
+
+    // Drop trailing " cards"/" card" so `parse_type_phrase` sees the bare
+    // type/subtype phrase ("nonland cards" → "nonland"). Mirrors the
+    // " spells"/" spell" replacen idiom of the cast-permission arm; plot
+    // operates on cards (it exiles a card), so the noun is "card(s)".
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "cards") {
+        Cow::Owned(filter_text.replacen(" cards", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "card") {
+        Cow::Owned(filter_text.replacen(" card", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    let (filter, _) = parse_type_phrase(&cleaned);
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryPlotPermission)
+            .affected(filter)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 702.170a + CR 702.170f: Parse "The top card of your library has plot[. The
+/// plot cost is equal to its mana cost]" — the GRANT line that gives the top
+/// library card the plot ability (Fblthp, Lost on the Range L3). Emits
+/// [`StaticMode::TopOfLibraryHasPlot`] (the grant role) with `affected =
+/// TargetFilter::Any`; the *permission* to actually plot from the library (and
+/// its nonland scope) is the companion L4 `TopOfLibraryPlotPermission` — the
+/// runtime requires both.
+///
+/// The optional second sentence is consumed (no capture) so the full line
+/// classifies: the plot cost is the card's own mana cost (CR 702.170a),
+/// computed at activation synthesis from the live top card, not data carried on
+/// the static. The remainder must be empty after consuming the known sentences
+/// so an unexpected longer line is not silently swallowed.
+pub(crate) fn try_parse_top_of_library_has_plot(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "the top card of your library has plot")?;
+
+    // CR 702.170a: optional intrinsic cost sentence — consumed, never captured.
+    let rest =
+        nom_tag_lower(rest, rest, ". the plot cost is equal to its mana cost").unwrap_or(rest);
+
+    // Allow a trailing sentence period after either sentence.
+    let rest = nom_tag_lower(rest, rest, ".").unwrap_or(rest);
+
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryHasPlot)
+            .affected(TargetFilter::Any)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive filtered top-of-
+/// library play/cast permission — "You may play <land-filter> and cast
+/// <spell-filter> from the top of your library." — into a single
+/// `TopOfLibraryCastPermission { play_mode: Play }` whose `affected` filter is
+/// the union of the two branch filters. The `frequency` is supplied by the
+/// caller (hoisted once-per-turn prefix), so the disjunctive form covers both
+/// the unlimited (Crystal Skull) and once-per-turn (The Fourth Doctor) classes.
+///
+/// Accepts both "and cast" (Crystal Skull) and "or cast" (The Fourth Doctor,
+/// mirroring the graveyard disjunctive connector) before the shared library-top
+/// anchor.
+fn try_parse_disjunctive_top_of_library_cast_permission(
+    text: &str,
+    lower: &str,
+    frequency: CastFrequency,
+) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "you may play ")?;
+
+    // CR 305.1 + CR 601.2a: Split the land-play branch from the spell-cast
+    // branch. Prefer " and cast " (Crystal Skull) but accept " or cast "
+    // for the same structural class.
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " and cast ")
+        .ok()
+        .map(|(_, pair)| pair)
+        .or_else(|| {
+            nom_primitives::split_once_on(rest, " or cast ")
+                .ok()
+                .map(|(_, pair)| pair)
+        })?;
+
+    let (spell_filter_text, trailing) =
+        nom_primitives::split_once_on(spell_branch, " from the top of your library")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    let land_filter = parse_graveyard_branch_filter(land_branch.trim())?;
+    let spell_filter = parse_graveyard_branch_filter(spell_filter_text.trim())?;
+
+    // CR 700.6: when both branches resolve to the same filter, collapse the
+    // union rather than emitting a redundant `Or`.
+    let affected = if land_filter == spell_filter {
+        land_filter
+    } else {
+        TargetFilter::Or {
+            filters: vec![land_filter, spell_filter],
+        }
+    };
+
+    let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
+
+    let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        play_mode: CardPlayMode::Play,
+        frequency,
+        alt_cost,
+    })
+    .affected(affected)
     .description(text.to_string());
     if let Some(condition) = parse_top_of_library_permission_condition(trailing) {
         def = def.condition(condition);
@@ -1918,8 +2763,10 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     };
 
     // The zone qualifier "from your hand" is optional. When omitted, the static
-    // only replaces the mana cost for spells already castable from their current
-    // zone; it does not create an independent cast-from-anywhere permission.
+    // only replaces the mana cost for spells in the controller's built-in cast
+    // zones (runtime scope: hand plus command-zone commanders/signature spells,
+    // per `cast_free_origin_admits_object`); it does not create an independent
+    // cast-from-anywhere permission.
     //
     // Both branches must terminate at " without paying" — that token is the
     // single anchor for the static. The qualified branch keeps a permissive
@@ -1977,4 +2824,184 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
             .affected(filter)
             .description(text.to_string()),
     )
+}
+
+#[cfg(test)]
+mod spend_any_color_to_activate_abilities_tests {
+    use super::*;
+    use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
+
+    /// CR 609.4b: Agatha's Soul Cauldron / Joiner Adept — activation-source-scoped
+    /// any-color spend must lower to `activation_source_filter: Some(creatures you
+    /// control)`, not the board-wide form.
+    #[test]
+    fn parses_creatures_you_control_activation_scope() {
+        let text = "You may spend mana as though it were mana of any color to activate abilities of creatures you control.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let def = try_parse_spend_any_color_to_activate_abilities(text, &tp)
+            .expect("activation-source-scoped spend line must parse");
+
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+
+        match def.mode {
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: Some(TargetFilter::Typed(typed)),
+            } => {
+                assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+            }
+            other => panic!(
+                "expected SpendManaAsAnyColor {{ activation_source_filter: Some(creatures you control) }}, got {other:?}"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod filtered_spend_any_type_tests {
+    use super::*;
+
+    /// CR 609.4b: the building block must lower a recognised spell class to a
+    /// spell-class-FILTERED `SpendManaAsAnyColor { spell_filter: Some(Typed) }`,
+    /// scoped to the source's controller. Drives the helper directly (the
+    /// building block, not a single card) so the class — not just Vizier — is
+    /// covered.
+    #[test]
+    fn parses_creature_spell_class_to_filtered_static() {
+        let text = "You can spend mana of any type to cast creature spells.";
+        let lower = text.to_ascii_lowercase();
+        let def = try_parse_filtered_spend_any_type_to_cast(text, &lower)
+            .expect("recognised spell class must lower to a filtered static");
+
+        // The concession is "you may" — scoped to the source's controller.
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+
+        match def.mode {
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: Some(TargetFilter::Typed(typed)),
+                activation_source_filter: None,
+            } => assert!(
+                typed.type_filters.contains(&TypeFilter::Creature),
+                "spell filter must scope to creature spells; got {typed:?}"
+            ),
+            other => {
+                panic!("expected SpendManaAsAnyColor {{ Some(Typed(creature)) }}, got {other:?}")
+            }
+        }
+    }
+
+    /// The "you may" surface must also parse (building block covers both modal
+    /// surfaces, not just Vizier's "you can").
+    #[test]
+    fn parses_you_may_surface() {
+        let text = "You may spend mana of any type to cast artifact spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_some(),
+            "the \"you may\" surface must parse the same as \"you can\""
+        );
+    }
+
+    /// CR 609.4b: a degenerate input whose spell class is empty (here a double
+    /// space before "spells", so `cleaned` is "") reaches the empty-`Typed`
+    /// path in `parse_type_phrase` — a filter that would match EVERY spell, i.e.
+    /// the board-wide concession. The empty-filter guard must decline it.
+    ///
+    /// Non-vacuity: this is the exact input the guard exists for. Remove the
+    /// empty-filter guard and this assertion flips (the helper returns
+    /// `Some(SpendManaAsAnyColor { Some(Typed{}) })`, an over-match), proving the
+    /// guard is load-bearing. The dead `SelfRef` guard the WIP shipped never
+    /// fired on this input because `parse_type_phrase` does not yield `SelfRef`.
+    #[test]
+    fn declines_degenerate_empty_spell_class() {
+        let text = "You can spend mana of any type to cast  spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
+            "an empty spell class (matches every spell) must NOT lower to a filtered static"
+        );
+    }
+
+    /// An unrecognised spell class leaves a non-empty unconsumed tail — the
+    /// strict tail guard declines so the line stays an honest defer rather than
+    /// over-matching on a partial parse.
+    #[test]
+    fn declines_unrecognised_spell_class() {
+        let text = "You can spend mana of any type to cast wibble spells.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
+            "an unrecognised spell class must stay an honest defer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod draw_from_bottom_tests {
+    use super::*;
+
+    /// CR 121.1 + CR 613.11: River Song's exact "Meet in Reverse" line (after
+    /// ability-word stripping) lowers to `DrawFromBottom { Controller }`.
+    #[test]
+    fn parses_controller_draw_from_bottom() {
+        let text = "You draw cards from the bottom of your library rather than the top.";
+        let lower = text.to_ascii_lowercase();
+        let def = parse_draw_from_bottom(&lower, text)
+            .expect("River Song's draw-redirect line must lower to a static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Controller
+            }
+        );
+    }
+
+    /// The subject axis composes with the shared `strip_casting_prohibition_subject`
+    /// building block — "each opponent" scopes to `Opponents`, and "instead of"
+    /// is an accepted connector variant. Covers the class, not just River Song.
+    #[test]
+    fn parses_opponents_scope_and_instead_of_connector() {
+        let text = "Each opponent draws cards from the bottom of their library instead of the top.";
+        let lower = text.to_ascii_lowercase();
+        let def = parse_draw_from_bottom(&lower, text)
+            .expect("opponent-scoped draw-redirect must lower to a static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Opponents
+            }
+        );
+    }
+
+    /// The static dispatch chain (`parse_static_line_multi`) must route the
+    /// stripped body to `parse_draw_from_bottom` — guards against a future
+    /// dispatch-registration regression.
+    #[test]
+    fn static_line_multi_routes_to_draw_from_bottom() {
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "You draw cards from the bottom of your library rather than the top.",
+        );
+        assert_eq!(
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>(),
+            vec![&StaticMode::DrawFromBottom {
+                who: ProhibitionScope::Controller
+            }],
+            "static dispatch must lower to a single DrawFromBottom(controller)"
+        );
+    }
+
+    /// STRICT: a trailing clause must NOT be silently dropped — the redirect has
+    /// to be the whole sentence, else the line stays an honest defer.
+    #[test]
+    fn declines_trailing_clause() {
+        let text =
+            "You draw cards from the bottom of your library rather than the top and you lose 1 life.";
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            parse_draw_from_bottom(&lower, text).is_none(),
+            "a silently-dropped trailing clause must NOT parse"
+        );
+    }
 }

@@ -13,7 +13,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
     AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
     QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
@@ -35,6 +35,25 @@ use crate::types::zones::Zone;
 /// Plate) or "each color with the most votes" (Council Guardian) carry
 /// additional qualifiers and pass through unchanged for a future dynamic
 /// handler.
+///
+/// CR 702.16i: also expands a bare comma-list continuation — after a
+/// "protection from A" prefix, subsequent list members that are neither
+/// "from …"-prefixed continuations nor genuine trailing keywords (e.g. Tinfoil
+/// Helm's "protection from aliens, birds, …, and hybrid mana", or a color list
+/// "protection from white, blue, red") each become their own protection entry.
+/// A genuine trailing keyword (Akroma's "vigilance") resets the prefix and
+/// passes through unexpanded.
+fn protection_prefix(i: &str) -> nom::IResult<&str, &'static str, OracleError<'_>> {
+    // (prefix_with_space, emit_prefix_no_space) — strip the prefix+space,
+    // emit the prefix without space. Shared by the prefix branch and the
+    // fast-path guard so both recognize the same set.
+    alt((
+        value("protection from", tag("protection from ")),
+        value("hexproof from", tag("hexproof from ")),
+    ))
+    .parse(i)
+}
+
 pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
     // Fast path: skip allocation when no expansion is needed
     if !parts.iter().any(|p| {
@@ -47,7 +66,11 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             || tag::<_, _, OracleError<'_>>("and from ")
                 .parse(l.as_str())
                 .is_ok()
-    }) {
+    }) && !(parts.len() > 1
+        && parts
+            .iter()
+            .any(|p| protection_prefix(&p.to_ascii_lowercase()).is_ok()))
+    {
         return parts.iter().map(|&p| Cow::Borrowed(p)).collect();
     }
 
@@ -59,17 +82,7 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         let lower = part.to_ascii_lowercase();
 
         // Check for "protection from X and from Y" or "hexproof from X and from Y"
-        // (prefix_with_space, emit_prefix_no_space) — strip the prefix+space, emit prefix without space
-        let prefix_match: Option<&str> = alt((
-            value(
-                "protection from",
-                tag::<_, _, OracleError<'_>>("protection from "),
-            ),
-            value("hexproof from", tag("hexproof from ")),
-        ))
-        .parse(lower.as_str())
-        .ok()
-        .map(|(_, v)| v);
+        let prefix_match: Option<&str> = protection_prefix(lower.as_str()).ok().map(|(_, v)| v);
 
         if let Some(prefix) = prefix_match {
             // Strip "protection from " or "hexproof from " (prefix + space)
@@ -86,9 +99,23 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             if let Ok((rest, _)) =
                 alt((tag::<_, _, OracleError<'_>>("and from "), tag("from "))).parse(lower.as_str())
             {
-                // ", and from Zombies" or ", from Werewolves" — continuation
+                // CR 702.16g: ", and from Zombies" or ", from Werewolves" —
+                // an explicit "from"-prefixed continuation of the prior prefix.
                 push_quality_entry(&mut expanded, pfx, rest);
+            } else if is_bare_protection_quality(&lower) {
+                // CR 702.16i: bare comma-list member — a simple subtype/color/
+                // quality noun phrase that continues the shorthand list
+                // ("protection from aliens, birds, …" or "protection from white,
+                // blue, red"). Each such member behaves as its own separate
+                // protection ability.
+                push_quality_entry(&mut expanded, pfx, &lower);
             } else {
+                // Anything that is NOT a bare quality — a genuine trailing
+                // keyword (Akroma's "vigilance"), a verb-clause restriction rider
+                // ("and can't be blocked by …"), or a leaked relative clause from
+                // a stripped trailing sentence ("equipment you control that are
+                // already attached to it") — ends the protection list and passes
+                // through unexpanded for the downstream clause splitter.
                 active_prefix = None;
                 expanded.push(Cow::Borrowed(part));
             }
@@ -97,6 +124,83 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         }
     }
     expanded
+}
+
+/// CR 702.16i + CR 702.16a: Positive gate for a bare protection-list
+/// continuation member. Per CR 702.16i a "protection from each [set]" member is
+/// a *characteristic, quality, or player* — in practice a color ("white"), a
+/// single subtype/type word ("birds", "aliens"), or a short bounded noun phrase
+/// ("hybrid mana"). It is NEVER:
+///   - a genuine non-protection keyword (Akroma's trailing "vigilance") —
+///     these must reset the list;
+///   - a verb-clause restriction rider ("can't be blocked by …") from a
+///     compound grant line — these must reset so the downstream clause
+///     splitter handles them;
+///   - a leaked relative clause from a stripped trailing sentence
+///     ("equipment you control that are already attached to it").
+///
+/// So a member qualifies as a bare quality iff it is a short (1–2 word) noun
+/// phrase, contains no clause-connective/relative markers, and is either a
+/// recognized creature/type subtype OR does not map to a concrete non-protection
+/// keyword. A recognized subtype ALWAYS qualifies (subtype precedence), so a
+/// token that happens to be both a subtype and a keyword name still continues
+/// the list rather than resetting it. WUBRG colors and Tinfoil subtypes
+/// (aliens/birds/eldrazi/lizards/mutants/robots/yetis) satisfy this; "hybrid
+/// mana" (2 words) also qualifies; the failing riders/leaks above do not.
+fn is_bare_protection_quality(word: &str) -> bool {
+    let trimmed = word.trim().trim_end_matches(['.', ',', ';']).trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // At most a two-word noun phrase. Longer phrases are qualified clauses /
+    // leaked prose, not bare qualities (CR 702.16i members are atomic).
+    let word_count = trimmed.split_whitespace().count();
+    if word_count > 2 {
+        return false;
+    }
+    // Clause-connective / relative / possessive markers never appear in a bare
+    // quality — their presence signals a leaked clause, not a quality.
+    if trimmed.split_whitespace().any(|w| {
+        matches!(
+            w,
+            "that" | "which" | "who" | "you" | "your" | "with" | "of" | "this" | "already" | "and"
+        )
+    }) {
+        return false;
+    }
+    // CR 702.16i + CR 205.3 (205.3m creature / 205.3g artifact / ... subtypes):
+    // a recognized subtype is always a protection
+    // *quality*, even when the token happens to collide with a keyword name.
+    // Some tokens are simultaneously a keyword and a subtype (a shifting overlap
+    // as MTGJSON's card-type vocabulary and the keyword set both grow — e.g. a
+    // creature type that shares a spelling with a keyword ability). Protection
+    // "from <subtype>" is the intended reading, so the subtype classification
+    // must take precedence over the keyword-reset check below; otherwise a bare
+    // list like "protection from white, <subtype>, …" would wrongly reset and
+    // drop the subtype member. `is_subtype_word` is the canonical single-token
+    // subtype recognizer (the same vocabulary `game::keywords`'s
+    // `source_subtype_matches_protection_quality` resolves against); it only
+    // accepts atomic tokens, so gate on the single-word case and let the
+    // multi-word "hybrid mana" quality fall through to the keyword guard.
+    if word_count == 1 && crate::parser::oracle_util::is_subtype_word(trimmed) {
+        return true;
+    }
+    // A concrete non-protection keyword (Akroma's "vigilance", "first strike",
+    // "flying") resets the list. `map_keyword` maps unrecognized words to `None`,
+    // so colors and subtypes (which are not keywords) pass this guard.
+    !matches!(
+        super::oracle_static::map_keyword(trimmed),
+        Some(kw) if !matches!(kw, Keyword::Unknown(_)) && !is_protection_or_hexproof(&kw)
+    )
+}
+
+/// CR 702.16 / CR 702.11: Recognize a protection- or hexproof-family keyword.
+/// A protection/hexproof result must NOT reset the active protection list.
+fn is_protection_or_hexproof(kw: &Keyword) -> bool {
+    matches!(
+        kw,
+        Keyword::Protection(_) | Keyword::Hexproof | Keyword::HexproofFrom(_)
+    )
 }
 
 /// Push one "<prefix> <quality>" entry — or 5 WUBRG entries when the quality
@@ -404,13 +508,7 @@ fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
-    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
-    let (quantity_text, _) = alt((
-        tag::<_, _, OracleError<'_>>(", where x is "),
-        tag("where x is "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let quantity_text = strip_where_x_is_clause(rest)?;
     parse_cda_quantity(quantity_text).map(Keyword::Mobilize)
 }
 
@@ -430,13 +528,7 @@ fn parse_firebending_keyword_line(line: &str) -> Option<Keyword> {
     }
 
     let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
-    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
-    let (quantity_text, _) = alt((
-        tag::<_, _, OracleError<'_>>(", where x is "),
-        tag("where x is "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let quantity_text = strip_where_x_is_clause(rest)?;
     parse_cda_quantity(quantity_text).map(Keyword::Firebending)
 }
 
@@ -1067,6 +1159,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return result;
     }
 
+    // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
+    // creature] has \"Cumulative upkeep {1}\"") routes through this shared keyword
+    // parser; the top-level keyword-line path calls the dedicated cost-aware
+    // parser directly, so delegate to it here too (Mana Chains, Dreams of the
+    // Dead, Decomposition).
+    if let Some(kw) = super::oracle_special::parse_cumulative_upkeep_keyword(text) {
+        return Some(kw);
+    }
+
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
         return Some(kw);
     }
@@ -1254,6 +1355,28 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         let cost = normalize_escalate_cost(parse_oracle_cost(rest));
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
             return Some(Keyword::Escalate(cost));
+        }
+    }
+
+    // CR 702.138a: Escape with em-dash cost — composite mana + exile-from-graveyard
+    // ("escape—{2}{U}{R}, exile four other cards from your graveyard"). Mirrors the
+    // evoke/embalm/eternalize/escalate em-dash siblings above: detection is a
+    // structural split on the em-dash inside `parse_escape_keyword`, which delegates
+    // the comma-separated cost list wholesale to `parse_oracle_cost` (nom
+    // combinators), composing the clauses into `AbilityCost::Composite`. Escape
+    // appears on instants/sorceries (Run for Your Life, Cling to Dust) as well as
+    // permanents (Uro, Kroxa); registering it here lets BOTH `is_keyword_cost_line`
+    // guards in `dispatch_line_nom` (the `is_spell` guard and the general
+    // keyword-cost guard) extract it uniformly with its alt-cost siblings, instead
+    // of relying on a position-sensitive dedicated intercept. The `tag` prefix gate
+    // is required because `parse_escape_keyword` splits on *any* em-dash; without it
+    // an unrelated em-dash line could misfire.
+    if tag::<_, _, OracleError<'_>>("escape\u{2014}")
+        .parse(text)
+        .is_ok()
+    {
+        if let Some(kw) = super::oracle_special::parse_escape_keyword(text) {
+            return Some(kw);
         }
     }
 
@@ -1520,6 +1643,10 @@ fn is_numeric_count_keyword(name: &str) -> bool {
             tag("devour"),
             tag("toxic"),
             tag("saddle"),
+            // Teamwork N — leading integer is the total-power threshold (mirrors
+            // Crew/Saddle). The "(As an additional cost ...)" reminder text is
+            // stripped before keyword parsing.
+            tag("teamwork"),
             tag("soulshift"),
             tag("backup"),
             tag("firebending"),
@@ -1545,7 +1672,7 @@ fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
                 scope: EffectScope::Single,
                 state: TapStateChange::Tap,
             } => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: crate::types::ability::TapCreaturesRequirement::count(1),
                 filter: target,
             },
             effect => AbilityCost::EffectCost {
@@ -1683,6 +1810,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Devour(_) => "devour".to_string(),
         Keyword::Toxic(_) => "toxic".to_string(),
         Keyword::Saddle(_) => "saddle".to_string(),
+        Keyword::Teamwork(_) => "teamwork".to_string(),
         Keyword::Soulshift(_) => "soulshift".to_string(),
         Keyword::Backup(_) => "backup".to_string(),
         Keyword::Squad(_) => "squad".to_string(),
@@ -1826,12 +1954,17 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
 }
 
 /// Render a `ManaCost` as MTG-style brace symbols (e.g. `{2}{U}{U}`).
-/// `NoCost` collapses to `{0}`; `SelfManaCost` renders the Oracle phrase
-/// players see on cards like Snapcaster Mage's flashback.
+/// `NoCost` collapses to `{0}`; `SelfManaCost` / `SelfManaValue` render the Oracle
+/// phrase players see on cards like Snapcaster Mage's flashback or Sliver
+/// Gravemother's encore grant.
 fn format_mana_cost_symbols(cost: &ManaCost) -> String {
     match cost {
         ManaCost::NoCost => "{0}".to_string(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
+        ManaCost::SelfManaValue => "its mana value".to_string(),
+        ManaCost::SelfManaCostReduced { reduction } => {
+            format!("its mana cost reduced by {{{reduction}}}")
+        }
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {
@@ -1926,6 +2059,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
         TypeFilter::Sorcery => "sorcery".to_string(),
         TypeFilter::Planeswalker => "planeswalker".to_string(),
         TypeFilter::Battle => "battle".to_string(),
+        TypeFilter::Kindred => "kindred".to_string(),
         TypeFilter::Permanent => "permanent".to_string(),
         TypeFilter::Card => "card".to_string(),
         TypeFilter::Any => "permanent".to_string(),
@@ -2002,6 +2136,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "entwine",
         "toxic",
         "saddle",
+        "teamwork",
         "soulshift",
         "backup",
         "squad",
@@ -2064,6 +2199,26 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.24: a GRANTED cumulative upkeep (the quoted-ability grant path
+    /// routes through `parse_keyword_from_oracle`) must parse with its cost, like
+    /// the top-level keyword-line path — Mana Chains / Dreams of the Dead (mana),
+    /// Decomposition (pay-life em-dash form).
+    #[test]
+    fn parse_keyword_from_oracle_granted_cumulative_upkeep() {
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep {1}"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
+        ));
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep {2}"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
+        ));
+        assert!(matches!(
+            parse_keyword_from_oracle("cumulative upkeep\u{2014}pay 1 life"),
+            Some(Keyword::CumulativeUpkeep(AbilityCost::PayLife { .. }))
+        ));
     }
 
     /// CR 702.85c: a spell printing cascade as repeated bare words has one instance
@@ -2575,6 +2730,185 @@ mod tests {
     }
 
     // --- expand_protection_parts tests ---
+
+    /// CR 702.16i: a bare comma-separated color list continues the "protection
+    /// from" prefix. Building-block test with synthetic split input (the real
+    /// Swords use "protection from red and from blue" — the already-working
+    /// "and from" path — so this exercises the new bare-list branch directly).
+    #[test]
+    fn expand_protection_bare_color_list_continues_prefix() {
+        let expanded = expand_protection_parts(&["protection from white", "blue", "red"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert!(
+            entries.contains(&"protection from white"),
+            "got {entries:?}"
+        );
+        assert!(entries.contains(&"protection from blue"), "got {entries:?}");
+        assert!(entries.contains(&"protection from red"), "got {entries:?}");
+        assert_eq!(
+            entries.len(),
+            3,
+            "expected exactly three entries, got {entries:?}"
+        );
+    }
+
+    /// CR 702.16i + CR 702.16a: Tinfoil Helm — a bare comma-list of subtypes and
+    /// "hybrid mana" all continue the "protection from" prefix into eight
+    /// separate protection entries. The subtype/quality tokens are non-keywords
+    /// (map_keyword → None) so they do NOT reset the list.
+    #[test]
+    fn expand_protection_tinfoil_bare_subtype_list() {
+        // Caller (`split_keyword_list`) has already split on ", and "/", "/" and ",
+        // so the Oxford-comma "and " is consumed and each element is a clean token.
+        let expanded = expand_protection_parts(&[
+            "protection from aliens",
+            "birds",
+            "eldrazi",
+            "lizards",
+            "mutants",
+            "robots",
+            "yetis",
+            "hybrid mana",
+        ]);
+        let protection_entries = expanded
+            .iter()
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            .filter(|c| c.as_ref().starts_with("protection from "))
+            .count();
+        assert_eq!(
+            protection_entries, 8,
+            "expected eight protection entries, got {:?}",
+            expanded
+        );
+    }
+
+    /// CR 702.16i: a genuine trailing keyword (Akroma's "vigilance") ends the
+    /// protection list and passes through unexpanded — it must NOT become
+    /// "protection vigilance". Synthetic input, robust regardless of the caller
+    /// split path.
+    #[test]
+    fn expand_protection_trailing_keyword_resets() {
+        let expanded =
+            expand_protection_parts(&["protection from black", "protection from red", "vigilance"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(
+            entries,
+            vec!["protection from black", "protection from red", "vigilance"],
+            "vigilance must reset the list, not become a protection quality"
+        );
+    }
+
+    /// CR 702.16i: a multi-word trailing keyword ("first strike") also resets.
+    #[test]
+    fn expand_protection_trailing_multiword_keyword_resets() {
+        let expanded = expand_protection_parts(&["protection from black", "first strike"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(entries, vec!["protection from black", "first strike"]);
+    }
+
+    /// CR 702.16i: a genuine single-word keyword that is NOT a creature subtype
+    /// ("haste") still resets the list — subtype precedence must not weaken the
+    /// keyword-reset path for non-subtype keywords.
+    #[test]
+    fn expand_protection_trailing_haste_keyword_resets() {
+        let expanded = expand_protection_parts(&["protection from white", "haste"]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(
+            entries,
+            vec!["protection from white", "haste"],
+            "haste is a keyword, not a subtype, so it must reset the list"
+        );
+        assert!(!crate::parser::oracle_util::is_subtype_word("haste"));
+    }
+
+    /// CR 702.16i + CR 205.3 (205.3m creature subtypes): subtype precedence — a recognized creature subtype
+    /// is always classified as a bare protection *quality* and continues the
+    /// list, even for a token that also collides with a keyword name. This is the
+    /// invariant the subtype-precedence branch guarantees: for every recognized
+    /// single-word subtype, `is_bare_protection_quality` returns true regardless
+    /// of what `map_keyword` would return for that same token. Reverting the
+    /// subtype-precedence branch would break this for any subtype that is also a
+    /// keyword name (a latent overlap between the growing MTGJSON subtype
+    /// vocabulary and the keyword set).
+    #[test]
+    fn bare_protection_quality_subtype_precedence_over_keyword_collision() {
+        use crate::parser::oracle_util::is_subtype_word;
+
+        // Real singular subtypes continue the list (never reset), exercising the
+        // subtype-precedence branch directly. `is_subtype_word` matches the
+        // singular head, so use singular tokens here.
+        for subtype in ["alien", "sliver", "cleric", "dragon"] {
+            assert!(
+                is_subtype_word(subtype),
+                "{subtype} must be a recognized subtype token"
+            );
+            assert!(
+                is_bare_protection_quality(subtype),
+                "{subtype} is a recognized subtype and must be a protection quality"
+            );
+        }
+
+        // Invariant: whenever a single-word token is a recognized subtype, it is
+        // a bare quality — independent of its keyword status. This is what makes
+        // "protection from <color>, <subtype-that-is-also-a-keyword>, …" continue
+        // rather than reset. (No such collision exists in the current vocabulary,
+        // so this asserts the guarantee holds for the whole subtype class rather
+        // than a single hand-picked token.)
+        for token in ["merfolk", "wall", "assassin", "advisor"] {
+            if is_subtype_word(token) {
+                assert!(
+                    is_bare_protection_quality(token),
+                    "recognized subtype {token} must always be a protection quality"
+                );
+            }
+        }
+    }
+
+    /// CR 702.16i: subtype-and-quality members expand into individual protection
+    /// entries alongside colors and never reset, mirroring the Tinfoil Helm class
+    /// with a leading color prefix. Regression companion to the subtype-precedence
+    /// unit test above at the `expand_protection_parts` seam.
+    #[test]
+    fn expand_protection_color_then_subtype_list_all_continue() {
+        let expanded =
+            expand_protection_parts(&["protection from white", "sliver", "cleric", "hybrid mana"]);
+        let protection_entries = expanded
+            .iter()
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            .filter(|c| c.as_ref().starts_with("protection from "))
+            .count();
+        assert_eq!(
+            protection_entries, 4,
+            "color + two subtypes + hybrid mana must all expand as protection, got {expanded:?}"
+        );
+    }
+
+    /// CR 702.16i: a compound rider — "hexproof from that color … and can't be
+    /// blocked by creatures of that color" — must NOT swallow the "can't be
+    /// blocked …" restriction as a bogus hexproof quality. The verb-clause guard
+    /// resets the active prefix so the restriction passes through for the
+    /// downstream clause splitter (regression guard for the block-restriction
+    /// grant path).
+    #[test]
+    fn expand_protection_verb_clause_rider_resets() {
+        let expanded = expand_protection_parts(&[
+            "hexproof from that color until end of turn",
+            "can't be blocked by creatures of that color this turn",
+        ]);
+        let entries: Vec<&str> = expanded.iter().map(|c| c.as_ref()).collect();
+        assert!(
+            entries.contains(&"can't be blocked by creatures of that color this turn"),
+            "restriction rider must pass through unexpanded, got {entries:?}"
+        );
+        let swallowed = entries.iter().any(|e| {
+            // allow-noncombinator: test assertion on already-expanded output, not parsing dispatch.
+            e.contains("can't be blocked") && e.starts_with("hexproof from ")
+        });
+        assert!(
+            !swallowed,
+            "restriction must not be swallowed as a hexproof quality, got {entries:?}"
+        );
+    }
 
     #[test]
     fn expand_protection_baneslayer_pattern() {
@@ -3315,6 +3649,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_from_oracle_escape_em_dash() {
+        // CR 702.138a: Escape joins the em-dash alt-cost keyword family.
+        // parse_keyword_from_oracle receives already-lowercased oracle text.
+        use crate::types::keywords::EscapeCost;
+        let kw = parse_keyword_from_oracle(
+            "escape\u{2014}{2}{u}{r}, exile four other cards from your graveyard",
+        )
+        .expect("escape em-dash keyword must parse");
+        match kw {
+            Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) => {
+                assert!(
+                    matches!(
+                        costs.as_slice(),
+                        [
+                            AbilityCost::Mana { .. },
+                            AbilityCost::Exile {
+                                count: 4,
+                                zone: Some(Zone::Graveyard),
+                                ..
+                            }
+                        ]
+                    ),
+                    "unexpected escape composite cost: {costs:?}"
+                );
+            }
+            other => panic!("expected Keyword::Escape(NonMana(Composite)), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_keyword_from_oracle_suspend() {
         use crate::types::mana::ManaCost;
 
@@ -3590,12 +3954,14 @@ mod tests {
             "flashback\u{2014}tap three untapped white creatures you control",
         )
         .unwrap();
-        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::TapCreatures { count, .. })) =
-            kw
+        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::TapCreatures {
+            requirement,
+            ..
+        })) = kw
         else {
             panic!("expected NonMana(TapCreatures), got {:?}", kw);
         };
-        assert_eq!(count, 3);
+        assert_eq!(requirement.fixed_count(), Some(3));
     }
 
     /// CR 702.34a regression: simple `Flashback {cost}` (Cackling Counterpart,
@@ -3672,10 +4038,10 @@ mod tests {
     fn parse_keyword_from_oracle_escalate_tap_creature_cost() {
         let kw = parse_keyword_from_oracle("escalate\u{2014}tap an untapped creature you control")
             .unwrap();
-        let Keyword::Escalate(AbilityCost::TapCreatures { count, .. }) = kw else {
+        let Keyword::Escalate(AbilityCost::TapCreatures { requirement, .. }) = kw else {
             panic!("expected Escalate(TapCreatures), got {:?}", kw);
         };
-        assert_eq!(count, 1);
+        assert_eq!(requirement.fixed_count(), Some(1));
     }
 
     /// CR 303.4a + CR 702.5: "Enchant creature, land, or planeswalker"

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -87,12 +87,7 @@ function setWaitingFor(waitingFor: WaitingFor, objects?: Record<string, GameObje
   });
 }
 
-// CR 601.2h + CR 701.13: Lunar Hatchling's escape "Exile a land you control"
-// surfaces a `PayCost { kind: ExilePermanent }` state. These tests guard the
-// frontend wiring so the player is never softlocked with no modal (the bug:
-// the `PayCostDispatch` switch had no `ExilePermanent` arm and returned
-// `undefined`).
-describe("Exile-permanent cost modal", () => {
+describe("Exile-permanent cost board choice", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
     useMultiplayerStore.setState({ activePlayerId: 0 });
@@ -102,7 +97,7 @@ describe("Exile-permanent cost modal", () => {
     cleanup();
   });
 
-  it("renders a modal for the ExilePermanent cost kind (no softlock)", () => {
+  it("suppresses the modal for battlefield ExilePermanent costs", () => {
     setWaitingFor(
       {
         type: "PayCost",
@@ -120,105 +115,7 @@ describe("Exile-permanent cost modal", () => {
 
     render(<CardChoiceModal />);
 
-    // Title + subtitle resolve from the new `cardChoice.exilePermanent` keys.
-    expect(screen.getByText("Exile a permanent")).toBeInTheDocument();
-    expect(screen.getByText("Exile 1 permanent you control")).toBeInTheDocument();
-    // The eligible permanent is offered for selection.
-    expect(screen.getByRole("button", { name: /Forest/i })).toBeInTheDocument();
-  });
-
-  it("pluralizes the subtitle for multi-count fixed costs", () => {
-    setWaitingFor(
-      {
-        type: "PayCost",
-        data: {
-          player: 0,
-          kind: { type: "ExilePermanent", filter: null },
-          choices: [10, 11],
-          count: 2,
-          min_count: 2,
-          resume: { type: "Spell", Spell: {} },
-        },
-      } as unknown as WaitingFor,
-      { 10: makeObject(10, "Forest"), 11: makeObject(11, "Island") },
-    );
-
-    render(<CardChoiceModal />);
-
-    expect(screen.getByText("Exile 2 permanents you control")).toBeInTheDocument();
-  });
-
-  it("uses the range subtitle when min_count differs from count", () => {
-    setWaitingFor(
-      {
-        type: "PayCost",
-        data: {
-          player: 0,
-          kind: { type: "ExilePermanent", filter: null },
-          choices: [10, 11, 12],
-          count: 3,
-          min_count: 1,
-          resume: { type: "Spell", Spell: {} },
-        },
-      } as unknown as WaitingFor,
-      {
-        10: makeObject(10, "Forest"),
-        11: makeObject(11, "Island"),
-        12: makeObject(12, "Mountain"),
-      },
-    );
-
-    render(<CardChoiceModal />);
-
-    expect(screen.getByText("Exile 1 to 3 permanents you control")).toBeInTheDocument();
-  });
-
-  it("dispatches the selected permanent on confirm", () => {
-    setWaitingFor(
-      {
-        type: "PayCost",
-        data: {
-          player: 0,
-          kind: { type: "ExilePermanent", filter: null },
-          choices: [10],
-          count: 1,
-          min_count: 1,
-          resume: { type: "Spell", Spell: {} },
-        },
-      } as unknown as WaitingFor,
-      { 10: makeObject(10, "Forest") },
-    );
-
-    render(<CardChoiceModal />);
-
-    fireEvent.click(screen.getByRole("button", { name: /Forest/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Exile (1/1)" }));
-
-    expect(dispatchMock).toHaveBeenCalledWith({
-      type: "SelectCards",
-      data: { cards: [10] },
-    });
-  });
-
-  it("allows cancelling the cost", () => {
-    setWaitingFor(
-      {
-        type: "PayCost",
-        data: {
-          player: 0,
-          kind: { type: "ExilePermanent", filter: null },
-          choices: [10],
-          count: 1,
-          min_count: 1,
-          resume: { type: "Spell", Spell: {} },
-        },
-      } as unknown as WaitingFor,
-      { 10: makeObject(10, "Forest") },
-    );
-
-    render(<CardChoiceModal />);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });

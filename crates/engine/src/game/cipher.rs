@@ -24,7 +24,7 @@
 //! later cipher spell can re-encode onto the same creature (CR 702.99); each
 //! encode is an independent link.
 
-use super::triggers::{PendingTrigger, PendingTriggerContext};
+use super::triggers::{PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin};
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::card_type::CoreType;
@@ -249,6 +249,7 @@ fn recast_trigger(
         Effect::CastCopyOfCard {
             target: TargetFilter::None,
             cost: ManaCost::zero(),
+            count: None,
         },
         vec![TargetRef::Object(card_id)],
         creature_id,
@@ -275,5 +276,6 @@ fn recast_trigger(
             die_result: None,
         },
         trigger_events: vec![event.clone()],
+        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
     }
 }

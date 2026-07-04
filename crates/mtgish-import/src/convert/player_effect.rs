@@ -241,6 +241,7 @@ fn player_effect_to_static(
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(affected));
         }
@@ -314,6 +315,12 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
         ControllerRef::TriggeringPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "ProhibitionScope",
             needed_variant: "TriggeringPlayer".into(),
+        }),
+        // CR 303.4b: The enchanted player has no static `ProhibitionScope`
+        // meaning — strict-fail.
+        ControllerRef::EnchantedPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "EnchantedPlayer".into(),
         }),
     }
 }

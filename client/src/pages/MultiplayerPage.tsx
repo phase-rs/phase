@@ -133,6 +133,9 @@ export function MultiplayerPage() {
   // compatibility check react to the user's format choice without any
   // cross-component plumbing.
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
+  const compatibilityPlayerCount = useMultiplayerStore(
+    (s) => s.compatibilityPlayerCount,
+  );
   // Live deck-vs-format compatibility state, rendered as a chip under the
   // Active Deck banner on host-setup. `idle` suppresses the chip entirely
   // (no deck, no format, or not on host-setup). Evaluation runs through
@@ -197,7 +200,11 @@ export function MultiplayerPage() {
     setLiveCheck({ status: "checking", format });
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      evaluateDeckCompatibility(deck, { selectedFormat: format })
+      evaluateDeckCompatibility(deck, {
+        selectedFormat: format,
+        playerCount:
+          compatibilityPlayerCount ?? storeFormatConfig?.min_players ?? 2,
+      })
         .then((result) => {
           if (cancelled) return;
           setLiveCheck(classifyCompatResult(format, result));
@@ -211,7 +218,13 @@ export function MultiplayerPage() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [view, activeDeckName, storeFormatConfig?.format]);
+  }, [
+    view,
+    activeDeckName,
+    compatibilityPlayerCount,
+    storeFormatConfig?.format,
+    storeFormatConfig?.min_players,
+  ]);
 
   // In deck-select, tapping a deck tile IS the confirmation — there's no
   // other use for the screen since we don't show deck contents. We persist
@@ -364,6 +377,7 @@ export function MultiplayerPage() {
         try {
           const compat = await evaluateDeckCompatibility(parsedDeck, {
             selectedFormat: validationFormat,
+            playerCount: action.type === "host" ? action.settings.formatConfig.max_players : undefined,
           });
           if (compat.selected_format_compatible === false) {
             const reason =
@@ -397,6 +411,7 @@ export function MultiplayerPage() {
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
+          && action.settings.formatConfig.format !== "Planechase"
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {

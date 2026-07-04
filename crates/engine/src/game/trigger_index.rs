@@ -73,8 +73,11 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
         TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
         TypeFilter::Battle => Some(CoreType::Battle),
         // Non-narrow filter shapes — broad emission carries the trigger.
+        // CR 308.1: Kindred is a non-permanent supplemental type, never a
+        // narrowing battlefield-trigger card type.
         TypeFilter::Instant
         | TypeFilter::Sorcery
+        | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -175,6 +178,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(_) => push(TriggerEventKey::AbilityOrCopyActivated),
         TriggerMode::Countered => {
@@ -398,6 +402,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Explored => push(TriggerEventKey::Explored),
         TriggerMode::Discover => push(TriggerEventKey::DiscoverResolved),
         TriggerMode::Adapt => push(TriggerEventKey::AdaptResolved),
+        TriggerMode::Connives => push(TriggerEventKey::ConniveResolved),
         TriggerMode::Exerted => push(TriggerEventKey::Exerted),
         TriggerMode::Enlisted => push(TriggerEventKey::Enlisted),
         TriggerMode::Foretell => push(TriggerEventKey::Foretold),
@@ -411,6 +416,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::EntersOrAttacks => {
             push(TriggerEventKey::EnterBattlefield(narrow));
             push(TriggerEventKey::Attacks);
+        }
+        // CR 702.55c: Haunt creature ETB half fires on entering the battlefield.
+        TriggerMode::EntersOrHauntedCreatureDies => {
+            push(TriggerEventKey::EnterBattlefield(narrow));
         }
         TriggerMode::AttacksOrBlocks => {
             push(TriggerEventKey::Attacks);
@@ -440,7 +449,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
 /// consult time. Exhaustive `match` on `GameEvent` — adding a new variant is
 /// a compile error until classified. The nested `EffectResolved { kind }`
 /// dispatch on `EffectKind` is similarly exhaustive (no `_` arm).
-fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
+pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
     let mut out: Keys = SmallVec::new();
     let mut push = |k: TriggerEventKey| {
         if !out.contains(&k) {
@@ -454,9 +463,14 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
+        GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
         GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
+        // CR 702.143c: "becomes foretold" via an effect is NOT the foretell
+        // special action, so it produces no trigger key (a "whenever you
+        // foretell a card" trigger must not fire).
+        GameEvent::BecameForetold { .. } => {}
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
             if let Some(obj) = state.objects.get(object_id) {
@@ -487,12 +501,23 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::XValueChosen { .. } => {}
         GameEvent::AbilityActivated { .. } => push(TriggerEventKey::AbilityOrCopyActivated),
         GameEvent::ZoneChanged {
-            from, to, record, ..
+            from,
+            to,
+            record,
+            object_id,
         } => {
             // CR 603.6a: ETB. Emit broad + per-core-type narrow.
             if *to == Zone::Battlefield {
                 push(TriggerEventKey::EnterBattlefield(None));
-                for ct in &record.core_types {
+                // Use the live object's post-layer core_types if available (e.g., after
+                // Ashaya's layer effect adds the Land type). Fall back to the record's
+                // pre-layer types if the object is not in state.objects.
+                let core_types = if let Some(obj) = state.objects.get(object_id) {
+                    &obj.card_types.core_types
+                } else {
+                    &record.core_types
+                };
+                for ct in core_types {
                     push(TriggerEventKey::EnterBattlefield(Some(*ct)));
                 }
             }
@@ -574,7 +599,9 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. } => {}
         GameEvent::ReplacementApplied { .. } => {}
-        GameEvent::Transformed { .. } | GameEvent::TurnedFaceUp { .. } => {
+        GameEvent::Transformed { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
@@ -584,6 +611,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PlayerPerformedAction { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
         | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. } => {}
@@ -613,13 +641,19 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::SchemeSetInMotion { .. } | GameEvent::SchemeAbandoned { .. } => {}
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
-        GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
+        GameEvent::AttractionOpened { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::ContraptionCranked { .. } => {}
         GameEvent::AttractionVisited { .. } => push(TriggerEventKey::VisitAttraction),
         GameEvent::Specialized { .. } => push(TriggerEventKey::Specializes),
         // CR 702.140c-d: `TriggerMode::Mutates` is routed to the always-checked
         // unclassified bucket (see `keys_from_trigger_def`), so the `Mutated`
         // event needs no dedicated index key — `match_mutates` is always consulted.
         GameEvent::Mutated { .. } => {}
+        // Unstable Host/Augment combine is a distinct mechanic and has no
+        // dedicated trigger mode today.
+        GameEvent::Augmented { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -669,10 +703,12 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Explore => push(TriggerEventKey::Explored),
         EffectKind::Discover => push(TriggerEventKey::DiscoverResolved),
         EffectKind::Adapt => push(TriggerEventKey::AdaptResolved),
+        EffectKind::Connive => push(TriggerEventKey::ConniveResolved),
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
         EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
+        EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
@@ -681,6 +717,8 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
+        | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::EachDealsDamageEqualToPower
         | EffectKind::Draw
         | EffectKind::Pump
         | EffectKind::PairWith
@@ -716,6 +754,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Tribute
         | EffectKind::TimeTravel
         | EffectKind::BecomeMonarch
+        | EffectKind::NoOp
         | EffectKind::Proliferate
         | EffectKind::ProliferateTarget
         | EffectKind::EndTheTurn
@@ -735,6 +774,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
+        | EffectKind::GainActivatedAbilitiesOfTarget
         | EffectKind::ChooseCard
         | EffectKind::PutCounter
         | EffectKind::PutCounterAll
@@ -757,7 +797,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Choose
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
-        | EffectKind::Connive
+        | EffectKind::Unsuspect
         | EffectKind::PhaseOut
         | EffectKind::PhaseIn
         | EffectKind::ForceBlock
@@ -779,7 +819,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileResolvingSpellInsteadOfGraveyard
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
+        | EffectKind::CreateDrawReplacement
         | EffectKind::Regenerate
+        | EffectKind::RemoveAllDamage
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie
@@ -796,6 +838,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ProcessRadCounters
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
+        | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
         | EffectKind::ChooseAndSacrificeRest
         | EffectKind::Exploit
@@ -815,6 +858,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Goad
         | EffectKind::GoadAll
         | EffectKind::Detain
+        // CR 709.5h-i unlock/fully-unlock triggers fire on the
+        // `RoomDoorUnlocked` event, not on this `EffectResolved` kind.
+        | EffectKind::SetRoomDoorLock
         | EffectKind::ExchangeControl
         | EffectKind::ChangeTargets
         | EffectKind::Incubate
@@ -831,6 +877,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
+        | EffectKind::Harness
         | EffectKind::CollectEvidence
         | EffectKind::Endure
         | EffectKind::BlightEffect
@@ -841,6 +888,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
         | EffectKind::Intensify
+        | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize
@@ -848,8 +896,16 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Crew
         | EffectKind::Station
         | EffectKind::Saddle
+        // CR 702.171b: the BecomeSaddled effect fires the saddled trigger via the
+        // separately-emitted `GameEvent::Saddled`, mirroring the keyword `Saddle`
+        // action; its own `EffectResolved` dispatches no trigger key.
+        | EffectKind::BecomeSaddled
         | EffectKind::Transform
         | EffectKind::TurnFaceUp
+        // CR 701.27b: a turned-face-down permanent fires any face-down trigger
+        // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's
+        // `EffectResolved`. No-op here, mirroring `TurnFaceUp`.
+        | EffectKind::TurnFaceDown
         // Added on origin/main after this branch point. No production
         // EffectResolved-dispatching matcher consumes either: cast-copy fires
         // on cast events (CastCopyOfCard, Mizzix's Mastery), and life/P-T
@@ -857,7 +913,18 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // event arms (ExchangeLifeWithStat). No-op here.
         | EffectKind::CastCopyOfCard
         | EffectKind::ExchangeLifeWithStat
-        | EffectKind::ExchangeLifeTotals => {}
+        | EffectKind::ExchangeLifeTotals
+        // Heist/HeistExile have no production EffectResolved-dispatching matcher.
+        | EffectKind::Heist
+        | EffectKind::HeistExile
+        | EffectKind::CombineHost
+        | EffectKind::ChooseAugmentAndCombineWithHost
+        | EffectKind::AssembleContraptions
+        | EffectKind::AssembleContraptionsFromRollDifference
+        | EffectKind::CrankContraptions
+        | EffectKind::ReassembleContraption
+        | EffectKind::AssembleContraptionOnSprocket
+        | EffectKind::ReassembleContraptionOnSprocket => {}
     }
 }
 

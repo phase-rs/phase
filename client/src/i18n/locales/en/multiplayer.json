@@ -4,6 +4,16 @@
     "message": "Your opponent will be declared the winner.",
     "concede": "Concede"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} requests a takeback",
+    "requestedMessage": "Roll the game back to the moment right before their last action?",
+    "ownTitle": "Takeback requested",
+    "ownMessage": "Waiting for the other players to approve rolling back to before your last action.",
+    "approve": "Approve",
+    "decline": "Decline",
+    "cancel": "Cancel request",
+    "declinedToast": "Takeback request declined"
+  },
   "connectionDot": {
     "connected": "Connected",
     "connecting": "Connecting...",

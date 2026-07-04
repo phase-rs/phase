@@ -112,7 +112,7 @@ fn cloud_key_reduces_only_the_chosen_card_type_after_etb_choice() {
             ..
         } => {
             assert!(
-                matches!(choice_type, ChoiceType::CardType),
+                matches!(choice_type, ChoiceType::CardType { .. }),
                 "Cloud Key ETB must be a CardType choice, got {choice_type:?}"
             );
             assert_eq!(*source_id, Some(cloud_key));

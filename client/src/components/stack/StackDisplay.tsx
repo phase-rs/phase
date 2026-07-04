@@ -3,13 +3,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { StackEntry } from "./StackEntry.tsx";
-import {
-  pressureMultiplier,
-  stackPressureFromLength,
-} from "../../utils/stackPressure.ts";
+import { pressureMultiplier } from "../../utils/stackPressure.ts";
+import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { getSeatCount, isSplitBoardActive } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
@@ -34,6 +33,9 @@ function getPendingCastObjectId(
 ): ObjectId | null {
   if (!waitingFor) return null;
   switch (waitingFor.type) {
+    // These cast-flow prompts all carry the casting spell in `pending_cast`, so
+    // the stack keeps its "Casting" badge while the prompt is up. CostTypeChoice
+    // is Celestial Reunion's pre-cost "choose a creature type" (CR 601.2b).
     case "TargetSelection":
     case "ModeChoice":
     case "OptionalCostChoice":
@@ -41,6 +43,7 @@ function getPendingCastObjectId(
     case "BlightChoice":
     case "HarmonizeTapChoice":
     case "ChooseXValue":
+    case "CostTypeChoice":
       return waitingFor.data.pending_cast.object_id;
     // CR 601.2b: PayCost carries its pending cast inside `resume` (only the
     // spell-cast resume; mana-ability cost payment has no pending cast).
@@ -75,7 +78,8 @@ function getViewportSize() {
 
 export function StackDisplay() {
   const { t } = useTranslation("game");
-  const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
+  const gameState = useGameStore((s) => s.gameState);
+  const stack = gameState?.stack ?? EMPTY_STACK;
   const waitingFor = useGameStore((s) => s.waitingFor);
   // Engine-authored stack grouping rides on the same state snapshot that
   // carries `state.stack` (see `engine::game::derived_views`). Reading
@@ -97,6 +101,7 @@ export function StackDisplay() {
   // choice on every resolution.
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const dockedLeft = stackDockSide === "left";
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
@@ -173,8 +178,10 @@ export function StackDisplay() {
   // clamped to a pixel top below so the panel header — the only controls (swap,
   // collapse, count) — can never be pushed off the top edge when the pile is
   // taller than the viewport.
-  const topFraction =
-    viewport.width < 640 ? 0.38 :
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const topFraction = splitBoardActive
+    ? viewport.width < 640 ? 0.52 : viewport.width < 1024 ? 0.58 : 0.66
+    : viewport.width < 640 ? 0.38 :
       viewport.width < 1024 ? 0.43 : 0.5;
   const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
@@ -316,11 +323,12 @@ export function StackDisplay() {
             >
               <AnimatePresence mode="popLayout">
                 {(() => {
-                  // Mass-trigger pacing: engine-authored StackPressure thresholds
-                  // (10/30/100) collapse per-entry animation under stack pressure.
-                  // See crates/engine/src/game/stack.rs + utils/stackPressure.ts.
+                  // Mass-trigger pacing: collapse per-entry animation under stack
+                  // pressure — depth (engine thresholds 10/30/100) OR recent
+                  // resolution churn (rate axis, for low-depth-high-throughput
+                  // loops depth can't see). See utils/stackThroughput.ts.
                   const pacing = pressureMultiplier(
-                    stackPressureFromLength(displayStack.length),
+                    effectiveStackPressure(displayStack.length),
                   );
                   return groupedStack.map(({ entry, count }, index) => (
                     <StackEntry

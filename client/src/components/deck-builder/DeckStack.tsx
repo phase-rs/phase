@@ -9,10 +9,10 @@ import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
-import { BASIC_LAND_NAMES } from "../../constants/game";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
+import { groupAccent, groupKey, groupRank, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckStackProps {
@@ -27,9 +27,8 @@ interface DeckStackProps {
   /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
   format?: GameFormat;
-  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. Returns
-   *  the format default (4 / 1) unless the card prints an override. */
-  getEffectiveCap: (name: string) => number;
+  /** Whether the main deck is sub-grouped by card type or by color. */
+  groupMode: GroupMode;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -38,12 +37,12 @@ interface DeckStackItem {
   count: number;
   name: string;
   section: DeckStackSection;
-  typeRank: number;
+  groupTitle: string;
   sortKey: [number, number, string];
   sourcePrinting?: SourcePrinting;
 }
 
-interface DeckStackTypeGroup {
+interface DeckStackGroup {
   key: string;
   title: string;
   entries: DeckStackItem[];
@@ -51,13 +50,6 @@ interface DeckStackTypeGroup {
 
 const CARD_HEIGHT = 156;
 const CARD_WIDTH = 112;
-
-function getTypeRank(card: ScryfallCard | undefined): number {
-  const typeLine = card?.type_line.toLowerCase() ?? "";
-  if (typeLine.includes("land")) return 2;
-  if (typeLine.includes("creature")) return 0;
-  return 1;
-}
 
 function sortDeckStackItems(items: DeckStackItem[]): DeckStackItem[] {
   const next = [...items];
@@ -75,6 +67,7 @@ function createDeckStackItems(
   deck: ParsedDeck,
   commanders: string[],
   cardDataCache: Map<string, ScryfallCard>,
+  mode: GroupMode,
 ): Record<DeckStackSection, DeckStackItem[]> {
   const commandersItems: DeckStackItem[] = [];
   for (const name of commanders) {
@@ -83,7 +76,7 @@ function createDeckStackItems(
       count: 1,
       name,
       section: "commander",
-      typeRank: 0,
+      groupTitle: "",
       sortKey: [0, card?.cmc ?? 0, name.toLowerCase()],
     });
   }
@@ -91,28 +84,26 @@ function createDeckStackItems(
   const mainItems: DeckStackItem[] = [];
   for (const entry of deck.main) {
     const card = cardDataCache.get(entry.name);
-    const typeRank = getTypeRank(card);
     mainItems.push({
       count: entry.count,
       name: entry.name,
       sourcePrinting: entry.sourcePrinting,
       section: "main",
-      typeRank,
-      sortKey: [1 + typeRank, card?.cmc ?? 0, entry.name.toLowerCase()],
+      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
 
   const sideboardItems: DeckStackItem[] = [];
   for (const entry of deck.sideboard) {
     const card = cardDataCache.get(entry.name);
-    const typeRank = getTypeRank(card);
     sideboardItems.push({
       count: entry.count,
       name: entry.name,
       sourcePrinting: entry.sourcePrinting,
       section: "sideboard",
-      typeRank,
-      sortKey: [4 + typeRank, card?.cmc ?? 0, entry.name.toLowerCase()],
+      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
 
@@ -127,26 +118,26 @@ function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
-function buildTypeGroups(entries: DeckStackItem[]): DeckStackTypeGroup[] {
+function buildGroups(entries: DeckStackItem[]): DeckStackGroup[] {
   if (entries.length === 0) return [];
 
-  const groups: DeckStackTypeGroup[] = [];
-  let currentRank: number | null = null;
+  const groups: DeckStackGroup[] = [];
+  let currentTitle: string | null = null;
   let currentEntries: DeckStackItem[] = [];
 
   const flush = () => {
-    if (currentRank === null || currentEntries.length === 0) return;
+    if (currentTitle === null || currentEntries.length === 0) return;
     groups.push({
-      key: `type-${currentRank}`,
-      title: currentRank === 0 ? "group.Creatures" : currentRank === 1 ? "group.Spells" : "group.Lands",
+      key: `group-${currentTitle}`,
+      title: currentTitle,
       entries: currentEntries,
     });
   };
 
   for (const entry of entries) {
-    if (currentRank !== entry.typeRank) {
+    if (currentTitle !== entry.groupTitle) {
       flush();
-      currentRank = entry.typeRank;
+      currentTitle = entry.groupTitle;
       currentEntries = [entry];
       continue;
     }
@@ -330,7 +321,7 @@ function DeckStackSectionLane({
   badge,
   entries,
   emptyLabel,
-  showTypeSections = false,
+  showGroupSections = false,
   extraGroups,
   isMaybeboard,
   onAddCard,
@@ -345,10 +336,10 @@ function DeckStackSectionLane({
   badge: string;
   entries: DeckStackItem[];
   emptyLabel: string;
-  showTypeSections?: boolean;
-  /** Extra groups rendered after the type groups (e.g. Sideboard appended
+  showGroupSections?: boolean;
+  /** Extra groups rendered after the main groups (e.g. Sideboard appended
    *  to the Main Deck lane below the Lands subsection). */
-  extraGroups?: DeckStackTypeGroup[];
+  extraGroups?: DeckStackGroup[];
   isMaybeboard: boolean;
   onAddCard: (name: string) => void;
   canAddCard: (item: DeckStackItem) => boolean;
@@ -359,13 +350,13 @@ function DeckStackSectionLane({
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { t } = useTranslation("deck-builder");
-  const typeGroups = useMemo(() => {
-    const base = showTypeSections
-      ? buildTypeGroups(entries)
+  const groups = useMemo(() => {
+    const base = showGroupSections
+      ? buildGroups(entries)
       : [{ key: "all", title: "", entries }];
     return extraGroups && extraGroups.length > 0 ? [...base, ...extraGroups] : base;
-  }, [entries, showTypeSections, extraGroups]);
-  const showGroupHeaders = showTypeSections || (extraGroups?.length ?? 0) > 0;
+  }, [entries, showGroupSections, extraGroups]);
+  const showGroupHeaders = showGroupSections || (extraGroups?.length ?? 0) > 0;
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -383,11 +374,14 @@ function DeckStackSectionLane({
       ) : (
         <div className="pb-1">
           <div className="flex min-w-0 flex-col gap-6">
-            {typeGroups.map((group, groupIndex) => (
+            {groups.map((group, groupIndex) => (
               <div key={group.key} className={groupIndex > 0 ? "pt-1" : undefined}>
-                {showGroupHeaders && (
+                {showGroupHeaders && (() => {
+                  const accent = groupAccent(group.title);
+                  return (
                   <div className="mb-3 flex items-center gap-3">
-                    <div className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                    <span className={`h-3.5 w-1 shrink-0 rounded-full ${accent.bar}`} aria-hidden="true" />
+                    <div className={`text-[0.68rem] font-semibold uppercase tracking-[0.22em] ${accent.text}`}>
                       {t(`stack.${group.title}`)}
                     </div>
                     <div className="h-px flex-1 bg-white/8" />
@@ -397,7 +391,8 @@ function DeckStackSectionLane({
                       })}
                     </div>
                   </div>
-                )}
+                  );
+                })()}
                 <div
                   className="grid justify-start gap-4"
                   style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, ${CARD_WIDTH}px))` }}
@@ -437,13 +432,13 @@ export function DeckStack({
   onRemoveCommander,
   onCardHover,
   format,
-  getEffectiveCap,
+  groupMode,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
   const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
   const sections = useMemo(
-    () => createDeckStackItems(deck, commanders, cardDataCache),
-    [deck, commanders, cardDataCache],
+    () => createDeckStackItems(deck, commanders, cardDataCache, groupMode),
+    [deck, commanders, cardDataCache, groupMode],
   );
   const mainDeckCount = totalCards(deck.main) + commanders.length;
   const sideboardCount = totalCards(deck.sideboard);
@@ -452,17 +447,8 @@ export function DeckStack({
     || sections.main.length > 0
     || sections.sideboard.length > 0;
   const canAddCard = useMemo(
-    () => (item: DeckStackItem) => {
-      if (item.section !== "main") return false;
-      // CR 100.2a / CR 903.5b: basic lands are always addable; every other card
-      // is capped at its engine-resolved effective limit (4 / 1 default, raised
-      // by "any number" / "up to N" overrides). Mirrors the guard inside
-      // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
-      // disagree with the hook's add path.
-      if (BASIC_LAND_NAMES.has(item.name)) return true;
-      return item.count < getEffectiveCap(item.name);
-    },
-    [getEffectiveCap],
+    () => (item: DeckStackItem) => item.section === "main",
+    [],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
@@ -472,7 +458,7 @@ export function DeckStack({
   // below the Lands subsection, so it shows up naturally as you scroll the
   // visual stack. Titled "Maybeboard" for Forbidden-policy formats, else
   // "Sideboard" — consistent with the list view.
-  const sideboardGroups = useMemo<DeckStackTypeGroup[]>(
+  const sideboardGroups = useMemo<DeckStackGroup[]>(
     () =>
       sections.sideboard.length > 0
         ? [
@@ -562,7 +548,7 @@ export function DeckStack({
               }
               entries={sections.main}
               emptyLabel={t("stack.mainEmpty")}
-              showTypeSections
+              showGroupSections
               extraGroups={sideboardGroups}
               isMaybeboard={isMaybeboard}
               onAddCard={onAddCard}

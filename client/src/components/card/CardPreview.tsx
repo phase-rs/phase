@@ -13,6 +13,7 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { RichLabel } from "../mana/RichLabel.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
@@ -548,6 +549,13 @@ function CardImagePreview({
   debugObjectId?: number | null;
 }) {
   const { t } = useTranslation("game");
+  // Card art can 404 even when a URL resolves — future-dated sets whose images
+  // aren't on the CDN yet, or tokens whose preset (and image ref) is missing.
+  // Track the load failure so we render a named placeholder in the image slot
+  // instead of the browser's broken-image glyph, keeping the alt-view info
+  // panel usable. Reset whenever the src changes so navigating cards re-tries.
+  const [imgError, setImgError] = useState(false);
+  useEffect(() => setImgError(false), [src]);
   const frameClass = mobileMode
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
@@ -608,12 +616,21 @@ function CardImagePreview({
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        <img
-          src={src}
-          alt={cardName}
-          className={imageClass}
-          draggable={false}
-        />
+        {imgError ? (
+          <div
+            className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+          >
+            <span className="text-sm font-medium text-gray-300">{cardName}</span>
+          </div>
+        ) : (
+          <img
+            src={src}
+            alt={cardName}
+            className={imageClass}
+            draggable={false}
+            onError={() => setImgError(true)}
+          />
+        )}
         {displayCost && (
           <ManaCostPips cost={displayCost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}
@@ -676,7 +693,8 @@ function DetailPills({ details, badgeClass }: { details: [string, string][]; bad
     <div className="mt-1 flex flex-wrap gap-1">
       {details.map(([key, value]) => (
         <span key={key} className={`inline-block rounded-[4px] px-1.5 py-px text-[9px] leading-tight ${badgeClass}`}>
-          <span className="opacity-60">{key}:</span> {value}
+          <span className="opacity-60">{key}:</span>{" "}
+          <RichLabel text={value} size="xs" />
         </span>
       ))}
     </div>
@@ -701,11 +719,19 @@ function ParsedItemRow({ item, depth = 0 }: { item: ParsedItem; depth?: number }
               <span className={`text-[8px] font-bold uppercase tracking-wider ${statusColor} opacity-70`}>
                 {CATEGORY_ABBR[item.category]}
               </span>
-              <span className="text-[11px] leading-snug text-gray-200 font-medium">{item.label}</span>
+              <RichLabel
+                text={item.label}
+                size="xs"
+                className="text-[11px] leading-snug text-gray-200 font-medium"
+              />
               {!item.supported && <span className="text-[9px] text-rose-400">{t("preview.unsupported")}</span>}
             </div>
             {item.source_text && (
-              <div className="text-[10px] leading-snug text-gray-500 mt-0.5 italic">{item.source_text}</div>
+              <RichLabel
+                text={item.source_text}
+                size="xs"
+                className="mt-0.5 block text-[10px] italic leading-snug text-gray-500"
+              />
             )}
             <DetailPills details={item.details ?? []} badgeClass={catStyle.badge} />
           </div>
@@ -880,13 +906,18 @@ function CardInfoPanel({
       )}
       {/* Type line */}
       <div className="font-semibold text-gray-300">
-        {formatTypeLine(obj.card_types, obj.keywords)}
+        <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">
           {activateLabels.map((label) => (
-            <div key={label}>{t("preview.activateCost", { cost: label })}</div>
+            <RichLabel
+              key={label}
+              text={t("preview.activateCost", { cost: label })}
+              size="xs"
+              className="block"
+            />
           ))}
         </div>
       )}
@@ -906,7 +937,7 @@ function CardInfoPanel({
                 aria-describedby={tooltipId}
                 className={`group relative cursor-default rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/60 ${granted ? "text-indigo-300" : "text-white"}`}
               >
-                {getKeywordDisplayText(kw)}
+                <RichLabel text={getKeywordDisplayText(kw)} size="xs" />
                 {source && (
                   <span className="ml-1 text-[10px] text-indigo-400/80">
                     {t("preview.fromSource", { source })}
@@ -914,7 +945,7 @@ function CardInfoPanel({
                 )}
                 {reminder && (
                   <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
-                    {reminder}
+                    <RichLabel text={reminder} size="xs" />
                   </GameplayTooltip>
                 )}
               </span>
@@ -976,12 +1007,15 @@ function CardInfoPanel({
             {chosenAttributes.map((attribute, index) => {
               const formatted = formatChosenAttribute(attribute);
               return (
-                <div key={`${attribute.type}-${index}`}>
-                  {t("preview.chosen.entry", {
+                <RichLabel
+                  key={`${attribute.type}-${index}`}
+                  text={t("preview.chosen.entry", {
                     kind: formatted.label,
                     value: formatted.value,
                   })}
-                </div>
+                  size="xs"
+                  className="block"
+                />
               );
             })}
           </div>
@@ -1012,7 +1046,7 @@ function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
         {visible.map((ruling, i) => (
           <li key={`${ruling.date}-${i}`} className="leading-snug">
             <span className="mr-1 text-gray-500">[{ruling.date}]</span>
-            <span>{ruling.text}</span>
+            <RichLabel text={ruling.text} size="xs" />
           </li>
         ))}
       </ul>

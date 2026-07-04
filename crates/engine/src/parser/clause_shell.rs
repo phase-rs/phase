@@ -69,7 +69,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use super::oracle_effect::conditions::{
@@ -299,8 +299,31 @@ fn try_peel_opponent_may_prefix(
     text: &str,
 ) -> Option<(Option<OpponentMayScope>, Option<PlayerFilter>, String)> {
     let lower = text.to_lowercase();
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
+        value((), tag("each player may ")).parse(i)
+    }) {
+        let rest_lower = rest.trim_start().to_lowercase();
+        if alt((tag::<_, _, OracleError<'_>>("play "), tag("cast ")))
+            .parse(rest_lower.as_str())
+            .is_err()
+        {
+            return Some((None, Some(PlayerFilter::All), rest.to_string()));
+        }
+    }
     nom_on_lower(text, &lower, |input| {
         alt((
+            // CR 102.2 + CR 603.2: "each of that player's opponents may" — the
+            // caster's opponents, fanned out per-player. Must precede the bare
+            // "each opponent may" arm (which scopes to the controller's
+            // opponents). Apostrophe variants: ASCII ' and curly U+2019 '.
+            value(
+                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
+                tag("each of that player's opponents may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
+                tag("each of that player\u{2019}s opponents may "),
+            ),
             value(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("each opponent may "),
@@ -346,7 +369,10 @@ fn peel_you_may_prefix(text: &str, blocklist: YouMayBlocklist) -> Option<String>
     let rest_lower = rest.to_lowercase();
     let blocked = match blocklist {
         YouMayBlocklist::PeelClause => is_specialized_you_may_phrase(&rest_lower),
-        YouMayBlocklist::ChunkLoop => is_specialized_you_may_retarget_phrase(&rest_lower),
+        YouMayBlocklist::ChunkLoop => {
+            is_specialized_you_may_retarget_phrase(&rest_lower)
+                || is_you_may_pay_to_end_effect_phrase(&rest_lower)
+        }
     };
     if blocked {
         return None;
@@ -451,6 +477,28 @@ pub(crate) fn is_specialized_you_may_retarget_phrase(rest_lower: &str) -> bool {
         value((), tag("choose new target ")),
     ))
     .parse(rest_lower)
+    .is_ok()
+}
+
+/// CR 611.2 + CR 702.5a: Licid-class "you may pay {U} to end this effect" grants a
+/// separate activated way to terminate the ongoing enchantment. The "may" is the
+/// later payment permission, not an optional resolution choice on the licid
+/// activation itself (issue #4000).
+///
+/// Accepts either the post-optional-strip body (`pay {U} to end this effect`) or
+/// the full clause surface (`you may pay {U} to end this effect`) so chunk-loop
+/// and full-clause carve-out call sites share one detector.
+pub(crate) fn is_you_may_pay_to_end_effect_phrase(text_lower: &str) -> bool {
+    value(
+        (),
+        (
+            opt(tag::<_, _, OracleError<'_>>("you may ")),
+            tag("pay "),
+            take_until(" to end this effect"),
+            tag(" to end this effect"),
+        ),
+    )
+    .parse(text_lower)
     .is_ok()
 }
 
@@ -772,6 +820,38 @@ mod tests {
     }
 
     #[test]
+    fn peel_each_player_may_put_strips_optional_and_all_scope() {
+        let (peeled, ctx) = peel_clause(
+            "each player may put an artifact, creature, enchantment, or land card from their hand onto the battlefield",
+        );
+        assert_eq!(
+            peeled,
+            "put an artifact, creature, enchantment, or land card from their hand onto the battlefield"
+        );
+        assert!(ctx.optional);
+        assert_eq!(ctx.may_implicit_player_scope, Some(PlayerFilter::All));
+    }
+
+    #[test]
+    fn peel_each_player_may_play_permission_is_not_generic_optional() {
+        let text = "each player may play the card they exiled this way";
+        let (peeled, ctx) = peel_clause(text);
+        assert_eq!(peeled, text);
+        assert!(!ctx.optional);
+        assert!(ctx.may_implicit_player_scope.is_none());
+    }
+
+    #[test]
+    fn peel_optional_slots_each_player_may_put() {
+        let (is_optional, _, implicit_scope, rest) = peel_optional_slots(
+            "each player may put a land card from their hand onto the battlefield",
+        );
+        assert!(is_optional);
+        assert_eq!(implicit_scope, Some(PlayerFilter::All));
+        assert_eq!(rest, "put a land card from their hand onto the battlefield");
+    }
+
+    #[test]
     fn peel_any_opponent_may_strips_and_captures_first_accept_scope() {
         let (peeled, ctx) = peel_clause("any opponent may pay {3}");
         assert_eq!(peeled, "pay {3}");
@@ -785,6 +865,34 @@ mod tests {
             peel_optional_slots("you may cast the exiled card without paying its mana cost");
         assert!(is_optional);
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
+    }
+
+    #[test]
+    fn is_you_may_pay_to_end_effect_phrase_matches_body_and_full_clause() {
+        assert!(is_you_may_pay_to_end_effect_phrase(
+            "pay {u} to end this effect"
+        ));
+        assert!(is_you_may_pay_to_end_effect_phrase(
+            "you may pay {u} to end this effect"
+        ));
+        assert!(!is_you_may_pay_to_end_effect_phrase(
+            "you may pay {u} rather than pay this spell's mana cost"
+        ));
+    }
+
+    #[test]
+    fn peel_optional_slots_chunk_loop_licid_pay_to_end_does_not_strip() {
+        let text = "you may pay {U} to end this effect";
+        let (is_optional, _, _, rest) = peel_optional_slots(text);
+        assert!(
+            !is_optional,
+            "licid pay-to-end must keep full surface form, not become optional"
+        );
+        assert_eq!(rest, text);
+        assert!(is_you_may_pay_to_end_effect_phrase(text));
+        assert!(is_you_may_pay_to_end_effect_phrase(
+            "pay {u} to end this effect"
+        ));
     }
 
     #[test]

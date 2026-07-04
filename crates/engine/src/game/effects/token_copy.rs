@@ -1,11 +1,12 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
-use crate::game::layers::compute_current_copiable_values;
+use crate::game::layers::{compute_current_copiable_values, has_active_copy_layer_effects};
+use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
-    ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef, TriggerCondition, TriggerDefinition,
+    ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition,
+    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
@@ -423,14 +424,17 @@ pub(crate) fn apply_copy_token_after_replacement(
     } = copy;
     let name = values.name.clone();
     let mut created_ids = Vec::with_capacity(final_count as usize);
+    let copied_loyalty =
+        copy_starting_loyalty_override(&additional_modifications).or(values.loyalty);
 
-    // CR 306.5b + CR 707.2: A token that's a copy of a planeswalker enters with
-    // loyalty counters equal to the copied permanent's loyalty — CR 306.5c makes
-    // the counter map the single source of truth for loyalty. The copy path
-    // builds the object directly (not through the ZoneChange ETB-counter seeding
-    // used by cast/play/effect entries), so seed the intrinsic loyalty counters
-    // here, ahead of any explicit `enter_with_counters`, routing them through
-    // `add_counter_with_replacement` below so Doubling Season etc. apply
+    // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
+    // enters with loyalty counters equal to the copied loyalty, except a copy
+    // exception may set that starting loyalty to a different value. CR 306.5c
+    // makes the counter map the single source of truth for loyalty. The copy
+    // path builds the object directly (not through the ZoneChange ETB-counter
+    // seeding used by cast/play/effect entries), so seed the intrinsic loyalty
+    // counters here, ahead of any explicit `enter_with_counters`, routing them
+    // through `add_counter_with_replacement` below so Doubling Season etc. apply
     // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
     // counters and dies immediately to CR 704.5i. Copies don't track battle
     // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
@@ -441,7 +445,7 @@ pub(crate) fn apply_copy_token_after_replacement(
     // intrinsic "enters with counters" replacement is seeded here from its
     // copiable replacement set rather than firing during entry.
     let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
-        crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None)
+        crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None)
             .into_iter()
             .chain(crate::game::printed_cards::self_etb_counter_replacements(
                 &values.replacement_definitions,
@@ -457,6 +461,10 @@ pub(crate) fn apply_copy_token_after_replacement(
             name.clone(),
             Zone::Battlefield,
         );
+
+        // CR 613.7d: a copy token enters the battlefield, so it receives a
+        // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
 
         let token = state.objects.get_mut(&token_id).unwrap();
         token.is_token = true;
@@ -478,8 +486,8 @@ pub(crate) fn apply_copy_token_after_replacement(
         token.power = values.power;
         token.base_toughness = values.toughness;
         token.toughness = values.toughness;
-        token.base_loyalty = values.loyalty;
-        token.loyalty = values.loyalty;
+        token.base_loyalty = copied_loyalty;
+        token.loyalty = copied_loyalty;
         token.base_keywords = values.keywords.clone();
         token.keywords = values.keywords.clone();
         // All four ability sets are Arc-shared — refcount bumps, no deep copy.
@@ -495,7 +503,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
         // below via `extra_keywords` (Twinflame, etc.) is folded in at query
         // time by `has_summoning_sickness`.
-        token.reset_for_battlefield_entry(state.turn_number);
+        token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
 
         // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
         // keywords on top of the copied characteristics. Twinflame's haste
@@ -765,6 +773,23 @@ pub(crate) fn compute_copy_batch_prefix(
     source_ids: &[ObjectId],
 ) -> Option<(crate::types::ability::CopiableValues, u32)> {
     let top_id = *source_ids.first()?;
+    if !has_active_copy_layer_effects(state) {
+        let top = state.objects.get(&top_id)?;
+        let prefix_values = intrinsic_copiable_values(top);
+        let mut prefix_len = 1u32;
+        for &id in source_ids.iter().skip(1) {
+            let Some(obj) = state.objects.get(&id) else {
+                break;
+            };
+            if intrinsic_copiable_values(obj) == prefix_values {
+                prefix_len += 1;
+            } else {
+                break;
+            }
+        }
+        return Some((prefix_values, prefix_len));
+    }
+
     // Conserve on a vanished top source.
     let prefix_values = compute_current_copiable_values(state, top_id)?;
 
@@ -1059,16 +1084,85 @@ fn apply_token_modifications(
                     token.toughness = Some(val);
                 }
             }
-            // CR 707.2 + CR 702 keyword grants flow through `extra_keywords`,
-            // not here. Other layered-only modifications (CopyValues,
-            // ChangeController, etc.) are intentionally skipped — their
-            // "stamp at copy time" interpretation is ambiguous, and a
-            // future except body needing them should route through the
-            // BecomeCopy layered path instead.
+            // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are already
+            // consumed before loyalty counters are seeded, but apply the live
+            // fields idempotently so a paused/resumed modification sequence
+            // keeps the stamped token coherent.
+            ContinuousModification::SetStartingLoyalty { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_loyalty = Some(*value);
+                    token.loyalty = Some(*value);
+                }
+            }
+            // CR 707.9a + CR 603.1: "except it has \"<triggered ability>\""
+            // (Chandra, Flameshaper [+1]: "…and \"At the beginning of the end
+            // step, sacrifice this token.\""). The granted trigger becomes part
+            // of the copy's copiable values, so stamp it onto both the live and
+            // base trigger sets. `SelfRef`/`This`-anchored triggers in the
+            // grant resolve against the token because they fire with the token
+            // as their source.
+            ContinuousModification::GrantTrigger { trigger } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.trigger_definitions.push((**trigger).clone());
+                    Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                }
+            }
+            // CR 707.9a: "except it has \"<activated/static ability>\"" — the
+            // granted ability is part of the copy's copiable values. Mirrors the
+            // GrantTrigger arm for the `obj.abilities` list.
+            ContinuousModification::GrantAbility { definition } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    Arc::make_mut(&mut token.abilities).push((**definition).clone());
+                    Arc::make_mut(&mut token.base_abilities).push((**definition).clone());
+                }
+            }
+            // CR 707.9a + CR 604.1: quoted static text in a copy exception is
+            // also part of the token's copiable values. Mirror predefined token
+            // rules text by carrying static-rule modifications on a self static.
+            ContinuousModification::GrantStaticAbility { .. }
+            | ContinuousModification::AddStaticMode { .. } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    let static_def = StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(vec![modification.clone()]);
+                    Arc::make_mut(&mut token.base_static_definitions).push(static_def.clone());
+                    token.static_definitions.push(static_def);
+                }
+            }
+            // CR 707.9a + CR 702: a keyword granted via an except body that
+            // landed in `additional_modifications` (rather than `extra_keywords`)
+            // — e.g. a keyword adjacent to a quoted-ability grant. Apply it to
+            // the copiable keyword set, idempotently, mirroring `extra_keywords`.
+            ContinuousModification::AddKeyword { keyword } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    if !token.keywords.contains(keyword) {
+                        token.keywords.push(keyword.clone());
+                    }
+                    if !token.base_keywords.contains(keyword) {
+                        token.base_keywords.push(keyword.clone());
+                    }
+                }
+            }
+            // Other layered-only modifications (CopyValues, ChangeController,
+            // etc.) are intentionally skipped — their "stamp at copy time"
+            // interpretation is ambiguous, and a future except body needing
+            // them should route through the BecomeCopy layered path instead.
             _ => {}
         }
     }
     true
+}
+
+pub(crate) fn copy_starting_loyalty_override(
+    modifications: &[ContinuousModification],
+) -> Option<u32> {
+    modifications.iter().rev().find_map(|modification| {
+        if let ContinuousModification::SetStartingLoyalty { value } = modification {
+            Some(*value)
+        } else {
+            None
+        }
+    })
 }
 
 /// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
@@ -1395,7 +1489,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }
@@ -1495,7 +1589,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }
@@ -2586,6 +2680,59 @@ mod tests {
         );
     }
 
+    /// CR 205.4 + CR 707.9d: Adagia, Windswept Bastion class —
+    /// `additional_modifications: [AddSupertype(Legendary)]` grants Legendary
+    /// to a token copy of a non-legendary permanent.
+    #[test]
+    fn copy_token_add_supertype_grants_legendary_to_nonlegendary_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(
+            token.card_types.supertypes.contains(&Supertype::Legendary),
+            "token must be Legendary; got {:?}",
+            token.card_types.supertypes
+        );
+    }
+
     /// CR 704.5j + CR 707.9b: Issue #685 regression. When token-copy strips
     /// the Legendary supertype via `additional_modifications`, the legend
     /// rule SBA must NOT prompt the controller to choose which copy to
@@ -2965,6 +3112,77 @@ mod tests {
             Some(5),
             "copied planeswalker loyalty must derive from its seeded counters",
         );
+    }
+
+    /// CR 707.9b + CR 306.5b/c: Jace, Mirror Mage's token-copy exception sets
+    /// the copy's starting loyalty to 1. This is not an extra loyalty counter;
+    /// it replaces the loyalty value used for intrinsic planeswalker counter
+    /// seeding, so the token must enter with one loyalty counter even if the
+    /// copied source has a different loyalty value.
+    #[test]
+    fn copy_token_starting_loyalty_exception_overrides_seeded_loyalty() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jace, Mirror Mage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_loyalty = Some(5);
+            source.loyalty = Some(5);
+            source.base_card_types = CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Planeswalker],
+                subtypes: vec!["Jace".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::RemoveSupertype {
+                        supertype: crate::types::card_type::Supertype::Legendary,
+                    },
+                    ContinuousModification::SetStartingLoyalty { value: 1 },
+                ],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.base_loyalty, Some(1));
+        assert_eq!(
+            token.counters.get(&CounterType::Loyalty).copied(),
+            Some(1),
+            "starting-loyalty exception must seed one loyalty counter"
+        );
+        assert!(!token
+            .card_types
+            .supertypes
+            .contains(&crate::types::card_type::Supertype::Legendary));
+
+        evaluate_layers(&mut state);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(token.loyalty, Some(1));
     }
 
     /// Regression: Helm of the Host (DOM, MH3, BLC) — pin the already-shipped
@@ -3390,5 +3608,128 @@ mod tests {
         assert_eq!(token.toughness, Some(2));
         assert_eq!(token.name, "Sawed Beast");
         assert!(token.is_token);
+    }
+
+    /// Count copy-tokens of `copied_name` controlled by `player` on the
+    /// battlefield (CR 111.2 — the player who creates a token is its owner and
+    /// the token enters under that player's control).
+    fn copy_tokens_for(state: &GameState, player: PlayerId, copied_name: &str) -> usize {
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token && obj.name == copied_name && obj.controller == player)
+            .count()
+    }
+
+    /// CR 707.2 + CR 608.2c + CR 109.4 + CR 608.2h: Fractured Identity end-to-end
+    /// in a 3-player game. Exile a permanent P1 controls, then EACH PLAYER OTHER
+    /// THAN ITS CONTROLLER (P1) creates a token copy. P0 and P2 each get exactly
+    /// one copy; P1 (the exiled permanent's controller) gets none. The exclusion
+    /// anchor resolves through the ability-aware `players_for_filter` using the
+    /// exiled object's preserved last-known controller.
+    #[test]
+    fn fractured_identity_three_player_excludes_exiled_controller() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // The exile target: a creature P1 owns and controls.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Exile,
+            "the targeted permanent must be exiled"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            1,
+            "P0 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p2, "Grizzly Bears"),
+            1,
+            "P2 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            0,
+            "P1 (the exiled permanent's controller) must NOT create a copy"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2h: "its controller" should anchor on the exiled
+    /// permanent's last-known battlefield CONTROLLER, not its owner. A creature
+    /// P1 owns but P0 controls (Mind Control style) is exiled; "each player other
+    /// than its controller" should exclude P0, so only P1 creates a copy.
+    ///
+    /// `parent_target_controller` now prefers the LKI snapshot (captured before
+    /// `reset_for_battlefield_exit` reverts the controller to the owner) for any
+    /// object that is no longer on the battlefield (CR 608.2h).
+    #[test]
+    fn fractured_identity_its_controller_excludes_controller_not_owner() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A creature P1 OWNS but P0 CONTROLS.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // Simulate a stolen-control effect: P0 controls the P1-owned creature.
+        // `base_controller` is the layer-stable control anchor (layers reset
+        // `controller` to `base_controller.unwrap_or(owner)`), so both must be set
+        // for the control change to survive recomputation.
+        {
+            let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
+            obj.base_controller = Some(p0);
+            obj.controller = p0;
+        }
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            1,
+            "P1 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            0,
+            "P0 (the controller of the exiled permanent) must NOT create a copy"
+        );
     }
 }

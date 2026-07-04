@@ -38,6 +38,7 @@ export interface PrintingEntry {
   set: string;
   set_name: string;
   collector_number: string;
+  released_at: string;
   border_color: string;
   frame_effects: string[];
   full_art: boolean;
@@ -50,6 +51,8 @@ type TokenImagesDataMap = Record<string, ScryfallDataEntry & { scryfall_id: stri
 
 let scryfallDataPromise: Promise<ScryfallDataMap | null> | null = null;
 let scryfallDataResolved: ScryfallDataMap | null = null;
+/** Maps diacritic-folded lowercase names to canonical scryfall-data keys. */
+let scryfallFoldedNameIndex: Map<string, string> | null = null;
 let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
 let tokenImagesDataPromise: Promise<TokenImagesDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
@@ -60,6 +63,7 @@ export function loadScryfallData(): Promise<ScryfallDataMap | null> {
       .then((r) => r.json() as Promise<ScryfallDataMap>)
       .then((data) => {
         scryfallDataResolved = data;
+        scryfallFoldedNameIndex = buildFoldedNameIndex(data);
         return data;
       })
       .catch(() => null);
@@ -106,8 +110,8 @@ export async function getCardPrintings(oracleId: string): Promise<PrintingEntry[
 }
 
 export async function getCardPrintingsByName(cardName: string): Promise<PrintingEntry[]> {
-  const data = await loadScryfallData();
-  const entry = data?.[cardName.toLowerCase()];
+  await loadScryfallData();
+  const entry = lookupEntryByName(cardName);
   if (!entry) return [];
   return getCardPrintings(entry.oracle_id);
 }
@@ -128,9 +132,20 @@ export function findPrintingById(
   return printings.find((p) => p.id === scryfallId);
 }
 
+/** Pick the earliest printing by release date, breaking ties by collector number. */
+export function pickOldestPrinting(printings: PrintingEntry[]): PrintingEntry {
+  return [...printings].sort((a, b) => {
+    const byDate = a.released_at.localeCompare(b.released_at);
+    if (byDate !== 0) return byDate;
+    return a.collector_number.localeCompare(b.collector_number, undefined, {
+      numeric: true,
+    });
+  })[0];
+}
+
 export function resolveOracleIdSync(cardName: string): string | null {
   if (!scryfallDataResolved) return null;
-  return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
+  return lookupEntryByName(cardName)?.oracle_id ?? null;
 }
 
 /**
@@ -159,7 +174,7 @@ export function resolveFaceIndexSync(
 export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]
-    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+    ?? lookupEntryByName(cardName);
   return isSidewaysLayout(entry?.layout);
 }
 
@@ -169,7 +184,7 @@ export function isCardImageRotatedSync(oracleId: string, cardName: string): bool
 export function isCardImageFlipLayoutSync(oracleId: string, cardName: string): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]
-    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+    ?? lookupEntryByName(cardName);
   return isFlipLayout(entry?.layout);
 }
 
@@ -211,6 +226,7 @@ export interface ScryfallCard {
 }
 
 const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
+  Archenemy: null,
   Brawl: "standardbrawl",
   DuelCommander: "duel",
   FreeForAll: null,
@@ -340,12 +356,40 @@ export function normalizeCardName(name: string): string {
     .trim();
 }
 
+/** Strip combining marks so "Eomer" matches "Éomer" in local image data. */
+function foldDiacritics(value: string): string {
+  return value.normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+function buildFoldedNameIndex(data: ScryfallDataMap): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const key of Object.keys(data)) {
+    const folded = foldDiacritics(key);
+    if (!index.has(folded)) {
+      index.set(folded, key);
+    }
+  }
+  return index;
+}
+
+function resolveNameLookupKey(name: string): string {
+  const normalized = normalizeCardName(name).toLowerCase();
+  if (!scryfallDataResolved) return normalized;
+  if (scryfallDataResolved[normalized]) return normalized;
+  const folded = foldDiacritics(normalized);
+  return scryfallFoldedNameIndex?.get(folded) ?? normalized;
+}
+
+function lookupEntryByName(name: string): ScryfallDataEntry | undefined {
+  if (!scryfallDataResolved) return undefined;
+  return scryfallDataResolved[resolveNameLookupKey(name)];
+}
+
 export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
-  const name = normalizeCardName(cardName);
-  const localMap = await loadScryfallData();
-  const entry = localMap?.[name.toLowerCase()];
+  await loadScryfallData();
+  const entry = lookupEntryByName(cardName);
   if (!entry) {
-    throw new Error(`Card not in local data: "${name}"`);
+    throw new Error(`Card not in local data: "${normalizeCardName(cardName)}"`);
   }
   return {
     name: entry.name,
@@ -426,12 +470,12 @@ export async function fetchCardImageAsset(
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<CardImageAsset> {
-  const data = await loadScryfallData();
-  const name = normalizeCardName(cardName).toLowerCase();
-  const entry = data?.[name];
+  await loadScryfallData();
+  const entry = lookupEntryByName(cardName);
   if (!entry) {
-    throw new Error(`Card image not in local data: "${name}"`);
+    throw new Error(`Card image not in local data: "${normalizeCardName(cardName)}"`);
   }
+  const name = resolveNameLookupKey(cardName);
   return resolveImageAsset(entry, faceIndex, size, name);
 }
 

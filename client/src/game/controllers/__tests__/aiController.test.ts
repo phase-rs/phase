@@ -83,6 +83,27 @@ function declareAttackersState(): GameState {
   } as unknown as GameState;
 }
 
+function castOfferState(): GameState {
+  const waitingFor = {
+    type: "CastOffer",
+    data: {
+      player: 1,
+      kind: {
+        type: "Cascade",
+        hit_card: 300,
+        exiled_misses: [],
+        source_mv: 4,
+      },
+    },
+  } as unknown as WaitingFor;
+  return {
+    waiting_for: waitingFor,
+    stack: [],
+    has_pending_cast: false,
+    priority_player: 1,
+  } as unknown as GameState;
+}
+
 /** Flush pending microtasks (promise `.then` chains). */
 async function flushMicrotasks() {
   for (let i = 0; i < 10; i++) {
@@ -159,7 +180,7 @@ describe("aiController stuck-fallback (issue #484)", () => {
     controller.dispose();
   });
 
-  it("falls through to PassPriority when getLegalActions yields no matching action", async () => {
+  it("falls through to PassPriority when getLegalActions yields only PassPriority", async () => {
     const getAiAction = vi.fn(async () => ILLEGAL_DECLARE);
     // Degenerate engine response: no DeclareAttackers entry.
     const getLegalActions = vi.fn(
@@ -196,6 +217,47 @@ describe("aiController stuck-fallback (issue #484)", () => {
     expect(dispatchedPass).toBe(true);
     // `undefined` is never dispatched.
     expect(dispatchAction.mock.calls.every(([action]) => action != null)).toBe(true);
+
+    controller.dispose();
+  });
+
+  it("uses the first legal action for CastOffer fallback instead of matching the WaitingFor type", async () => {
+    const illegalAction = { type: "PassPriority" } as GameAction;
+    const legalCastOfferAction = {
+      type: "CascadeChoice",
+      data: { choice: { type: "Decline" } },
+    } as unknown as GameAction;
+    const getAiAction = vi.fn(async () => illegalAction);
+    const getLegalActions = vi.fn(
+      async (): Promise<LegalActionsResult> => ({
+        actions: [legalCastOfferAction],
+        autoPassRecommended: false,
+      }),
+    );
+
+    const state = castOfferState();
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions },
+    };
+
+    dispatchAction.mockImplementation(async (action: GameAction) => {
+      if (action.type === "CascadeChoice") return undefined;
+      throw new Error("CastOffer requires a cast-offer response action");
+    });
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(getLegalActions).toHaveBeenCalled();
+    expect(dispatchAction.mock.calls).toContainEqual([legalCastOfferAction, 1]);
+    expect(notifyEngineLost).not.toHaveBeenCalled();
 
     controller.dispose();
   });

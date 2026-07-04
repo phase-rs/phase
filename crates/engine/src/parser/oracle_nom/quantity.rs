@@ -7,28 +7,30 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{map, opt, value};
+use nom::combinator::{all_consuming, map, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::context::ParseContext;
-use super::error::OracleResult;
+use super::duration::parse_cast_snapshot_suffix;
+use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
-    parse_shared_quality, parse_shared_quality_clause, parse_type_phrase,
+    parse_shared_quality, parse_shared_quality_clause, parse_target_with_syntax, parse_type_phrase,
+    TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
+    ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
     ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
@@ -38,11 +40,51 @@ use crate::types::zones::Zone;
 /// same `parse_quantity_ref` / `parse_number` primitives used for plain quantities.
 pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
     alt((
+        parse_max_quantity,
         parse_fraction_rounded,
         map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
     .parse(input)
+}
+
+pub fn parse_quantity_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
+    let input = input.trim().trim_end_matches('.');
+    all_consuming(parse_quantity_ref).parse(input)
+}
+
+pub fn parse_for_each_clause_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
+    let input = input.trim().trim_end_matches('.');
+    all_consuming(parse_for_each_clause_ref).parse(input)
+}
+
+fn parse_quantity_operand(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        parse_fraction_rounded,
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
+    ))
+    .parse(input)
+}
+
+/// CR 107.1 + CR 120.4a/120.10: Parse "A or B, whichever is greater" into
+/// the maximum of independently parsed integer quantity operands. The suffix is
+/// mandatory so ordinary "or" type phrases and modal choices keep falling
+/// through to their specialized parsers.
+pub fn parse_max_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (rest, (left, _, right, _)) = (
+        parse_quantity_operand,
+        tag(" or "),
+        parse_quantity_operand,
+        alt((tag(", whichever is greater"), tag(" whichever is greater"))),
+    )
+        .parse(input)?;
+    Ok((
+        rest,
+        QuantityExpr::Max {
+            exprs: vec![left, right],
+        },
+    ))
 }
 
 /// CR 107.1a: Parse "half <inner>, rounded up/down" fractional expressions.
@@ -456,6 +498,11 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
         // CR 701.9: the caster's own discards this turn.
         value(PlayerScope::Controller, tag("you've discarded this turn")),
         value(PlayerScope::Controller, tag("you have discarded this turn")),
+        // CR 701.9 + CR 115.1: a single targeted opponent's discards this turn.
+        value(
+            PlayerScope::Target,
+            tag("target opponent discarded this turn"),
+        ),
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
@@ -514,9 +561,14 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_object_count_by_shared_quality,
         parse_the_number_of,
-        parse_the_total_mana_value,
+        parse_object_property_aggregate_ref,
         parse_distinct_card_types_exiled_with_source,
-        parse_linked_exile_mana_value_ref,
+        // Group mana-value aggregate parsers to reduce alt arity
+        alt((
+            parse_linked_exile_mana_value_ref,
+            parse_greatest_commander_mana_value_ref,
+            parse_commander_mana_value_ref,
+        )),
         parse_distinct_card_types_in_zone,
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm so the chain-tracked-set,
@@ -564,8 +616,19 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // mana value — must precede `parse_event_context_refs` so the
         // cost/effect referent resolver wins over the generic event-source
         // resolver for sacrificed/exiled/milled possessives (Food Chain, Burnt
-        // Offering, Metamorphosis, Heed the Mists).
-        parse_cost_paid_object_ref,
+        // Offering, Metamorphosis, Heed the Mists). The two cost-paid-object
+        // front-forms (possessive "the sacrificed permanent's mana value" and
+        // prepositional "the mana value of the sacrificed permanent" —
+        // Morbid Curiosity) are nested to keep the outer `alt` within nom 8.0's
+        // 21-item tuple arity; both resolve the same `ObjectScope::CostPaidObject`.
+        // The chosen/revealed prepositional power/toughness form (the beheld
+        // cost-paid object — Close Encounter, Monstrous Emergence) shares the
+        // same `ObjectScope::CostPaidObject` referent, so it joins this nest.
+        alt((
+            parse_cost_paid_object_ref,
+            parse_cost_paid_object_prepositional_ref,
+            parse_cost_paid_object_chosen_revealed_ref,
+        )),
         parse_event_context_refs,
     ))
     .or(alt((
@@ -573,10 +636,18 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_target_life_ref,
         parse_basic_land_type_count,
         // Bare suffix form — reachable when a parent combinator has already
-        // consumed "there are N " (see `parse_there_are_conditions`).
-        parse_basic_land_types_among_lands_controlled_by_ref,
+        // consumed "there are N " (see `parse_there_are_conditions`). Anaphoric
+        // "they control" binds to a target player here (not a for-each scope).
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, ControllerRef::TargetPlayer),
         parse_devotion_ref,
+        parse_chroma_devotion_ref,
+        parse_graveyard_chroma_ref,
         parse_counters_among_ref,
+        // CR 402.1: "the player with the {most|fewest} cards in hand" — the
+        // cross-player hand-size extremum, the hand-zone peer of the life
+        // extremum. Distinctive "the player with the " prefix; no ordering
+        // hazard with sibling arms.
+        parse_player_with_extremum_cards_in_hand,
     )))
     .parse(input)
 }
@@ -639,23 +710,167 @@ fn parse_linked_exile_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRe
         tag("the exiled card's converted mana cost"),
     ))
     .parse(input)?;
+    // CR 702.167c: "...the exiled card used to craft it." — the craft-material
+    // qualifier is the same linked-exile set, so consume the optional suffix and
+    // emit the same aggregate (Jadeheart Attendant).
+    let (rest, _) = opt(parse_craft_materials_suffix).parse(rest)?;
     Ok((
         rest,
         QuantityRef::Aggregate {
             function: AggregateFunction::Sum,
             property: ObjectProperty::ManaValue,
-            filter: TargetFilter::And {
-                filters: vec![
-                    TargetFilter::ExiledBySource,
-                    TargetFilter::Typed(TypedFilter::default().properties(vec![
-                        FilterProp::Owned {
-                            controller: ControllerRef::You,
-                        },
-                    ])),
-                ],
-            },
+            filter: linked_exile_owned_filter(),
         },
     ))
+}
+
+/// CR 702.167c: The `And { [ExiledBySource, Owned { You }] }` filter shared by
+/// every craft-material / linked-exile reference. `ExiledBySource` resolves the
+/// source's linked-exile pool (which includes `ExileLinkKind::CraftMaterial`);
+/// `Owned { You }` rebinds per owner under player-scope iteration, matching the
+/// existing Skyclave linked-exile precedent (`parse_linked_exile_mana_value_ref`).
+fn linked_exile_owned_filter() -> TargetFilter {
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])),
+        ],
+    }
+}
+
+/// CR 702.167c: Consume the craft-material qualifier "used to craft <self>",
+/// where `<self>` is the source self-anaphor (`it` / `~` / `this creature` /
+/// `this permanent` / `this artifact` / …). "An ability of a permanent may refer
+/// to the exiled cards used to craft it." This is a pure suffix combinator —
+/// callers decide which linked-exile ref to emit; it only confirms the qualifier
+/// is present and returns the remainder.
+fn parse_craft_materials_suffix(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag(" used to craft ").parse(input)?;
+    let (rest, _) = parse_source_self_anaphor(rest)?;
+    Ok((rest, ()))
+}
+
+/// CR 109.5: The source self-anaphor used by craft / linked-exile references:
+/// `it`, `~`, or `this <noun>` (creature / permanent / artifact / card). Mirrors
+/// the anaphor `alt` already used by `parse_cards_exiled_with_source`, factored
+/// out so the craft-suffix and the craft noun-phrase combinator share it.
+fn parse_source_self_anaphor(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("~"),
+            tag("it"),
+            preceded(
+                tag("this "),
+                take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 702.167c: Parse the craft-material reference noun phrase
+/// "the exiled card[s] used to craft <self>" into the shared linked-exile
+/// filter. Single building block reused by the aggregate-property,
+/// distinct-colors, and for-each-color (mana) paths so "total power of …",
+/// "number of colors among …", and "for each color among …" all resolve over
+/// the same `ExileLinkKind::CraftMaterial` pool without per-card phrase tables.
+pub(crate) fn parse_craft_materials_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("the exiled card").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = parse_craft_materials_suffix(rest)?;
+    Ok((rest, linked_exile_owned_filter()))
+}
+
+/// CR 202.3: Parse "mana value" or "converted mana cost" phrase.
+fn parse_mana_value_phrase(input: &str) -> OracleResult<'_, ObjectProperty> {
+    let (rest, _) = alt((tag("mana value"), tag("converted mana cost"))).parse(input)?;
+    Ok((rest, ObjectProperty::ManaValue))
+}
+
+/// CR 108.3: Parse ownership phrase - handles "you own" and per-player "they own".
+/// CR 109.5: "they own" in each-player contexts binds to ScopedPlayer (the iterating player),
+/// not Opponent. This ensures "each player ... a commander they own" selects each player's own commander.
+fn parse_commander_owner_phrase(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag("you own ")),
+        value(ControllerRef::ScopedPlayer, tag("they own ")),
+    ))
+    .parse(input)
+}
+
+/// CR 903.3d: Parse zone disjunction - "on the battlefield or in the command zone".
+fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("on the battlefield or in the command zone").parse(input)?;
+
+    // Build zone disjunction filter using InAnyZone for efficiency
+    Ok((
+        rest,
+        TargetFilter::Typed(TypedFilter {
+            controller: None,
+            type_filters: vec![],
+            properties: vec![
+                FilterProp::IsCommander,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Battlefield, Zone::Command],
+                },
+            ],
+        }),
+    ))
+}
+
+/// Parse "the greatest mana value of a commander you own on the battlefield or in the command zone".
+///
+/// CR 202.3: Superlative "greatest" requires aggregate-max.
+/// CR 903.3d: Commander references by zone.
+///
+/// Used for flashback costs with "where X is the greatest mana value of a commander you own
+/// on the battlefield or in the command zone".
+///
+/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders.
+fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the greatest ").parse(input)?;
+    let (rest, property) = parse_mana_value_phrase(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
+    let (rest, owner) = parse_commander_owner_phrase(rest)?;
+    let (rest, mut zone_filter) = parse_commander_zone_disjunction(rest)?;
+
+    // Add ownership to the zone filter
+    if let TargetFilter::Typed(ref mut tf) = zone_filter {
+        tf.properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+    }
+
+    Ok((
+        rest,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Max,
+            property,
+            filter: zone_filter,
+        },
+    ))
+}
+
+/// Parse "the mana value of a commander you own on the battlefield or in the command zone".
+///
+/// CR 202.3: Mana value query without superlative.
+/// CR 903.3d: Commander references by zone.
+///
+/// Used for flashback costs with "where X is the mana value of a commander you own
+/// on the battlefield or in the command zone" (Stinging Study).
+///
+/// Maps to `QuantityRef::CommanderManaValue` to select the first matching commander's mana value.
+fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, _) = parse_mana_value_phrase(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
+    let (rest, owner) = parse_commander_owner_phrase(rest)?;
+    let (rest, _) = parse_commander_zone_disjunction(rest)?;
+
+    Ok((rest, QuantityRef::CommanderManaValue { owner }))
 }
 
 /// CR 122.1: Parse "counters among [filter]" — sum across every counter type.
@@ -707,10 +922,19 @@ fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityR
 }
 
 /// Parse the object scope for counter references: "it", "that creature", "that permanent", etc.
+///
+/// CR 122.1 + CR 608.2k: A creature's ability that counts "+1/+1 counters on
+/// him" / "on her" / "on them" refers to that same source object's counters
+/// (Red Hulk's Enrage reflex). The gendered/plural objective pronouns are
+/// interchangeable with the neuter "it" for the source — same rationale as
+/// `parse_self_possessive`.
 fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
         value(ObjectScope::Source, tag("it")),
         value(ObjectScope::Source, tag("~")),
+        value(ObjectScope::Source, tag("him")),
+        value(ObjectScope::Source, tag("her")),
+        value(ObjectScope::Source, tag("them")),
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that artifact")),
@@ -727,24 +951,81 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_number_of_inner(rest)
 }
 
-/// Parse "the total mana value" patterns used in "where X is the total mana value".
-/// Used for patterns like "where X is the total mana value of cards in your graveyard".
-/// Maps to `QuantityRef::Aggregate` summing mana values across the filter.
-fn parse_the_total_mana_value(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the total mana value").parse(input)?;
-    let (rest, _) = tag(" of ").parse(rest)?;
+/// CR 208.1 + CR 202.3: Parse object-property aggregate quantities such as
+/// "the greatest power among <filter>" and "the total mana value of <filter>".
+/// The aggregate axis and object-property axis are independent typed choices,
+/// so new siblings extend this combinator instead of adding one-off phrase
+/// recognition in the legacy quantity entry points.
+fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, (function, property)) = alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("the greatest mana value among "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::Power),
+            tag("the total power of "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::Toughness),
+            tag("the total toughness of "),
+        ),
+        value(
+            (AggregateFunction::Sum, ObjectProperty::ManaValue),
+            tag("the total mana value of "),
+        ),
+    ))
+    .parse(input)?;
+    // CR 702.167c: "the total power of the exiled cards used to craft it" — the
+    // craft-material aggregate (Mastercraft Raptor). Tried before the bare
+    // "the exiled cards" tracked-set anaphor because the craft form shares that
+    // prefix but reads the persistent `CraftMaterial` linked-exile pool, not the
+    // most-recent chain tracked set.
+    if let Ok((craft_rest, filter)) = parse_craft_materials_filter(rest) {
+        return Ok((
+            craft_rest,
+            QuantityRef::Aggregate {
+                function,
+                property,
+                filter,
+            },
+        ));
+    }
+    if let Ok((anaphor_rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("those exiled cards"),
+        tag("the exiled cards"),
+    ))
+    .parse(rest)
+    {
+        return Ok((
+            anaphor_rest,
+            QuantityRef::TrackedSetAggregate { function, property },
+        ));
+    }
     let (filter, remainder) = parse_type_phrase(rest);
-    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+    let final_remainder = parse_cast_snapshot_suffix(remainder.trim_start())
+        .ok()
+        .and_then(|(snapshot_rest, _)| snapshot_rest.trim().is_empty().then_some(snapshot_rest))
+        .unwrap_or(remainder);
+    if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
     Ok((
-        remainder,
+        final_remainder,
         QuantityRef::Aggregate {
-            function: AggregateFunction::Sum,
-            property: ObjectProperty::ManaValue,
+            function,
+            property,
             filter,
         },
     ))
@@ -825,17 +1106,20 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         )),
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
-        // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
-        // must be tried BEFORE the scoped-zone combinator so the target-referring
-        // possessive routes to `TargetZoneCardCount` (resolves against the player
-        // target in scope) instead of falling back to a controller-less
-        // `InZone` filter that counts every player's cards.
-        // CR 613.1: "cards in the chosen player's <zone>" — the persisted ETB
-        // choice; must precede the generic target/zone arms below.
-        parse_number_of_cards_in_chosen_player_zone,
-        parse_number_of_cards_in_target_zone,
-        parse_number_of_cards_in_all_players_hands,
-        parse_number_of_cards_in_zone,
+        // CR 109.4 + CR 115.7 + CR 402.1: "cards in …" hand/zone counts share a
+        // nested alt to stay within nom's top-level `alt` arity (nom 8.0 max: 21
+        // items). Ordering within the nest is load-bearing: chosen-player and
+        // extremum-hand phrases must precede the generic target-zone and zone
+        // arms they share a "cards in " prefix with.
+        alt((
+            parse_number_of_cards_in_chosen_player_zone,
+            // CR 402.1: "cards in the hand of the {player|opponent} with the
+            // {most|fewest} cards in hand" (Adamaro P/T CDA class).
+            parse_number_of_cards_in_hand_of_extremum_player,
+            parse_number_of_cards_in_target_zone,
+            parse_number_of_cards_in_all_players_hands,
+            parse_number_of_cards_in_zone,
+        )),
         parse_number_of_opponents,
     ))
     .or(alt((
@@ -867,6 +1151,15 @@ fn parse_number_of_distinct_colors_among_permanents_tail(
     input: &str,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("colors among ").parse(input)?;
+    // CR 702.167c + CR 105.1: "the number of colors among the exiled cards used
+    // to craft it" — distinct colors over the craft-material linked-exile pool
+    // (Sunbird Effigy P/T). Tried before the generic type-phrase filter so the
+    // craft noun phrase wins.
+    if let Ok((craft_rest, filter)) = parse_craft_materials_filter(rest) {
+        if matches!(craft_rest.trim(), "" | "." | ",") {
+            return Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }));
+        }
+    }
     let (remainder, filter) = super::target::parse_type_phrase(rest)?;
     if !matches!(remainder.trim(), "" | "." | ",")
         || !quantity_filter_has_meaningful_content(&filter)
@@ -945,7 +1238,8 @@ fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Used by Balance / Restore Balance / Balancing Act for the equalization
 /// minimum ("a number of lands they control equal to the number of lands
 /// controlled by the player who controls the fewest"). Battlefield-scoped: the
-/// hand-zone analogue is `HandSize { AllPlayers { Min } }`, parsed elsewhere.
+/// hand-zone analogue is `HandSize { AllPlayers { aggregate } }`, parsed by
+/// [`parse_player_with_extremum_cards_in_hand`].
 fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, filter) = super::target::parse_type_phrase(input)?;
     if !quantity_filter_has_meaningful_content(&filter) {
@@ -966,6 +1260,65 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
         rest,
         QuantityRef::ControlledByEachPlayer { filter, aggregate },
     ))
+}
+
+/// CR 402.1 + CR 102.2/102.3: Shared core for cross-player hand-size extrema.
+/// Two independent nom axes — population scope (`player` ↔ `opponent`) and
+/// aggregate direction (`most` ↔ `fewest`) — plus the fixed "cards in hand"
+/// zone suffix (CR 402). The hand-zone peer of `parse_cross_player_life_extremum`
+/// (the life axis, CR 119): routes to `HandSize`/`PlayerScope`, never the CR
+/// 208/202 object-property `Aggregate`.
+fn parse_extremum_hand_size_scope_and_aggregate(input: &str) -> OracleResult<'_, PlayerScope> {
+    let (rest, player) = alt((
+        map(
+            (
+                tag("player"),
+                tag(" with the "),
+                alt((
+                    value(AggregateFunction::Max, tag("most")),
+                    value(AggregateFunction::Min, tag("fewest")),
+                )),
+            ),
+            |(_, _, aggregate)| PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        ),
+        map(
+            (
+                tag("opponent"),
+                tag(" with the "),
+                alt((
+                    value(AggregateFunction::Max, tag("most")),
+                    value(AggregateFunction::Min, tag("fewest")),
+                )),
+            ),
+            |(_, _, aggregate)| PlayerScope::Opponent { aggregate },
+        ),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" cards in hand").parse(rest)?;
+    Ok((rest, player))
+}
+
+/// CR 402.1: Parse "the {player|opponent} with the {most|fewest} cards in hand"
+/// → `QuantityRef::HandSize`. Used by the catch-up-draw interceptor (Tales of
+/// the Ancestors) and any card naming the short cross-player hand-size extremum.
+pub(crate) fn parse_player_with_extremum_cards_in_hand(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, player) = parse_extremum_hand_size_scope_and_aggregate(rest)?;
+    Ok((rest, QuantityRef::HandSize { player }))
+}
+
+/// CR 402.1: Parse "cards in the hand of the {player|opponent} with the
+/// {most|fewest} cards in hand" after "the number of" → `QuantityRef::HandSize`.
+/// Verbose wrapper for P/T CDAs (Adamaro, First to Desire).
+fn parse_number_of_cards_in_hand_of_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards in the hand of the ").parse(input)?;
+    let (rest, player) = parse_extremum_hand_size_scope_and_aggregate(rest)?;
+    Ok((rest, QuantityRef::HandSize { player }))
 }
 
 /// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
@@ -1184,6 +1537,23 @@ fn parse_recipient_controller_hand_count(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 506.2 + CR 402: Parse "defending player's hand" → defending-player hand
+/// size. Mr. Foxglove's "the number of cards in defending player's hand" — the
+/// possessive references the player being attacked (CR 506.2 defines the
+/// defending player), resolved at runtime via `PlayerScope::DefendingPlayer`.
+/// Does not consume the leading "cards in " — the caller
+/// (`parse_zone_card_count`) has stripped that prefix.
+fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("defending player's ").parse(input)?;
+    let (rest, _) = tag("hand").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::HandSize {
+            player: PlayerScope::DefendingPlayer,
+        },
+    ))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -1207,6 +1577,9 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     // singular zone (`CountScope::All`) and silently misroute the count.
     if card_types.is_empty() || card_types == vec![TypeFilter::Card] {
         if let Ok((after_zone, q)) = parse_recipient_controller_hand_count(rest) {
+            return Ok((after_zone, q));
+        }
+        if let Ok((after_zone, q)) = parse_defending_player_hand_count(rest) {
             return Ok((after_zone, q));
         }
     }
@@ -1354,7 +1727,10 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
 fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, QuantityRef> {
     use crate::types::ability::PlayerFilter;
     let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
-    let (rest, _) = tag("opponents ").parse(rest)?;
+    // Singular "opponent who lost life this turn" (Gev, Scaled Scorch's per-each
+    // counter scaling) and plural "opponents who …" (Belbe, Corrupted Observer)
+    // resolve to the same `PlayerCount` over the qualifying-opponents set.
+    let (rest, _) = alt((tag("opponents "), tag("opponent "))).parse(rest)?;
     let (rest, filter) = alt((
         value(
             PlayerFilter::OpponentLostLife,
@@ -1536,98 +1912,118 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
     .parse(input)
 }
 
-/// Parse "its power" / "~'s power" / "this creature's power" / "this card's power".
+/// Parse the possessive form of a source self-reference: "its", "~'s",
+/// "this creature's", "this card's", or a gendered/plural pronoun ("his",
+/// "her", "their").
+///
+/// CR 208.3 + CR 608.2k: A creature's ability that says "his power" / "her
+/// power" / "their power" refers to that same source object's power (recently
+/// templated this way on Marvel's Spider-Man cards such as Iron Fist, Living
+/// Weapon). The gendered/plural pronouns are interchangeable with the neuter
+/// "its" for the purpose of referencing the ability's own source — modern
+/// templating used "its" exclusively, so admitting the gendered forms here
+/// keeps the whole "his/her/their <characteristic>" class on one path rather
+/// than special-casing one card.
+fn parse_self_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("its"),
+            tag("~'s"),
+            tag("this creature's"),
+            tag("this card's"),
+            tag("his"),
+            tag("her"),
+            tag("their"),
+        )),
+    )
+    .parse(input)
+}
+
+/// Parse "its power" / "~'s power" / "this creature's power" / "this card's
+/// power" / "his power" / "her power" / "their power".
 ///
 /// CR 400.7 + CR 208.3: Scavenge and other graveyard-activated effects reference
 /// the source via "this card's power" because the source is a card (not a
 /// creature) when the ability is activated. `SelfPower` is LKI-aware at
-/// resolution time (see `game/quantity.rs`), so all four phrasings resolve
-/// identically.
+/// resolution time (see `game/quantity.rs`), so all phrasings resolve
+/// identically. See `parse_self_possessive` for the gendered-pronoun rationale.
 fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    alt((
-        value(
-            QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("its power"),
-        ),
-        value(
-            QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("~'s power"),
-        ),
-        value(
-            QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("this creature's power"),
-        ),
-        value(
-            QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("this card's power"),
-        ),
+    let (rest, _) = parse_self_possessive(input)?;
+    let (rest, _) = tag(" power").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::Power {
+            scope: crate::types::ability::ObjectScope::Source,
+        },
     ))
-    .parse(input)
 }
 
 /// Parse "its toughness" / "~'s toughness" / "this creature's toughness" /
-/// "this card's toughness". See `parse_self_power_ref` for the card-vs-creature
-/// rationale.
+/// "this card's toughness" / "his toughness" / "her toughness" /
+/// "their toughness". See `parse_self_power_ref` for the card-vs-creature
+/// rationale and `parse_self_possessive` for the gendered-pronoun rationale.
 fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    alt((
-        value(
-            QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("its toughness"),
-        ),
-        value(
-            QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("~'s toughness"),
-        ),
-        value(
-            QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("this creature's toughness"),
-        ),
-        value(
-            QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("this card's toughness"),
-        ),
+    let (rest, _) = parse_self_possessive(input)?;
+    let (rest, _) = tag(" toughness").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::Toughness {
+            scope: crate::types::ability::ObjectScope::Source,
+        },
     ))
-    .parse(input)
 }
 
 /// Parse damage-history references such as Chandra's Incinerator's
-/// "total amount of noncombat damage dealt to your opponents this turn".
+/// "total amount of noncombat damage dealt to your opponents this turn" and
+/// Knollspine Dragon's "damage dealt to target opponent this turn".
+///
+/// CR 120.9 + CR 115.1: "damage dealt" refers only to damage dealt to the
+/// specified target opponent (115.1 targeting); the count aggregates all such
+/// damage this turn (120.9 specified-source semantics).
 fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = opt(tag("the ")).parse(input)?;
-    let (input, _) =
-        tag("total amount of noncombat damage dealt to your opponents this turn").parse(input)?;
+    alt((
+        value(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
 
-    Ok((
-        input,
-        QuantityRef::DamageDealtThisTurn {
-            source: Box::new(TargetFilter::Any),
-            target: Box::new(TargetFilter::And {
-                filters: vec![
-                    TargetFilter::Player,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                ],
-            }),
-            aggregate: AggregateFunction::Sum,
-            group_by: None,
-            damage_kind: DamageKindFilter::NoncombatOnly,
-        },
+                channel: DamageChannel::Total,
+            },
+            tag("total amount of noncombat damage dealt to your opponents this turn"),
+        ),
+        value(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+
+                channel: DamageChannel::Total,
+            },
+            tag("damage dealt to target opponent this turn"),
+        ),
     ))
+    .parse(input)
 }
 
 /// Parse life-lost references: "the life you've lost this turn", "life you've lost", etc.
@@ -1878,9 +2274,44 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// references ("that creature's mana value") lower through the same
 /// `QuantityRef::ObjectManaValue` building block.
 fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 202.3 + CR 115.1: "mana value of target <filter>" — a count whose value
+    // reads the object chosen for this ref's OWN target slot (Fateful Handoff,
+    // Knollspine Dragon). Tried before the bare possessive scope so the
+    // "target ..." object phrase is captured via the shared `parse_target`
+    // building block. Only fires when the phrase actually used the "target"
+    // keyword; the bare "that creature's mana value" possessive stays
+    // `ObjectManaValue { scope: Target }`.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("mana value of "),
+        tag("converted mana cost of "),
+    ))
+    .parse(input)
+    {
+        let (after, filter) = parse_target_with_syntax_target_keyword(rest)?;
+        return Ok((
+            after,
+            QuantityRef::TargetObjectManaValue {
+                filter: Box::new(filter),
+            },
+        ));
+    }
+
     let (rest, scope) = parse_object_possessive_scope(input)?;
     let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
+}
+
+/// Bridge the `parse_target` building block into the nom `OracleResult` world,
+/// requiring the phrase to have used the "target" keyword (CR 115.1). Returns
+/// `oracle_err` when the remainder is not a targeted object phrase so the caller
+/// falls through to the bare-possessive path.
+fn parse_target_with_syntax_target_keyword(input: &str) -> OracleResult<'_, TargetFilter> {
+    let mut ctx = ParseContext::default();
+    let (filter, rest, syntax) = parse_target_with_syntax(input, &mut ctx);
+    if syntax != TargetSyntax::TargetKeyword {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, filter))
 }
 
 /// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
@@ -1901,25 +2332,9 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// object that moved from the library to the graveyard; its mana value is read
 /// from that public-zone object or LKI as needed.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // Possessive form: "[the] (sacrificed|…) (permanent|…)'s (mana value|power|…)"
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((
-        tag("sacrificed "),
-        tag("exiled "),
-        tag("discarded "),
-        // CR 701.17a: "milled" — card moved library → graveyard by the mill action.
-        tag("milled "),
-    ))
-    .parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_participle_noun(rest)?;
     let (rest, property) = parse_object_property_possessive_suffix(rest)?;
     let qty = match property {
         ObjectProperty::Power => QuantityRef::Power {
@@ -1931,8 +2346,135 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
+        // ManaSymbolCount is produced only via `QuantityRef::Aggregate`, never
+        // as a single cost-paid-object reference.
+        ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
     Ok((rest, qty))
+}
+
+/// CR 202.3 + CR 608.2k + CR 400.7j: Prepositional cost-paid mana-value form,
+/// e.g. Morbid Curiosity's "the mana value of the sacrificed permanent".
+///
+/// Mirrors the possessive `parse_cost_paid_object_ref` but reads
+/// `[the] mana value of the (sacrificed|exiled|discarded|milled) (creature|permanent|…)`.
+/// Reuses the shared participle+noun combinator so both prepositional and
+/// possessive front-forms resolve the same `ObjectScope::CostPaidObject` ref.
+/// Power/toughness have no idiomatic prepositional Oracle phrasing, so this arm
+/// only emits the mana-value reference.
+fn parse_cost_paid_object_prepositional_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = alt((
+        tag("mana value of the "),
+        tag("converted mana cost of the "),
+    ))
+    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_participle_noun(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    ))
+}
+
+/// CR 208.1 + CR 608.2 + CR 608.2k + CR 400.7j: Prepositional power/toughness of
+/// the additional-cost CHOSEN-or-REVEALED (beheld) object.
+///
+/// Covers the "behold an object as a cost, then deal damage equal to its power"
+/// class where the spell body refers to the beheld object by the choose/reveal
+/// verbs rather than the sacrifice/exile/mill participles handled by
+/// `parse_cost_paid_object_ref`:
+///   - "the power of the chosen creature or card"               (Close Encounter)
+///   - "the power of the creature you chose or the card you revealed" (Monstrous Emergence)
+///
+/// The beheld object is stamped as this ability's `cost_paid_object` by
+/// `handle_behold_for_cost` (CR 400.7j: a cost that reveals/moves an object in a
+/// public zone makes that object findable by the spell's effects), so the
+/// referent resolves to `ObjectScope::CostPaidObject`. CR 208.1 + CR 608.2:
+/// power/toughness are read at resolution from that snapshot. The leading
+/// "the {power|toughness} of " preposition mirrors
+/// `parse_cost_paid_object_prepositional_ref` (mana value); the object phrase is
+/// its own `alt()` axis so a new beheld-object phrasing extends one branch.
+fn parse_cost_paid_object_chosen_revealed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, property) = alt((
+        value(ObjectProperty::Power, tag("power of ")),
+        value(ObjectProperty::Toughness, tag("toughness of ")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = parse_chosen_revealed_object_phrase(rest)?;
+    let qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::CostPaidObject,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::CostPaidObject,
+        },
+        // The leading `alt` only emits Power/Toughness; ManaValue and
+        // ManaSymbolCount are unreachable here.
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            return Err(oracle_err(input))
+        }
+    };
+    Ok((rest, qty))
+}
+
+/// Object phrase for the choose/reveal behold referent. Each form names the same
+/// single beheld object (CR 608.2k) via the disjunction printed on the card:
+///   - "the chosen creature or card"                     (Close Encounter)
+///   - "the creature you chose or the card you revealed" (Monstrous Emergence)
+///
+/// The two legs of each disjunction are alternative descriptions of the SAME
+/// stamped `cost_paid_object` (a creature chosen on the battlefield OR a card
+/// chosen/revealed elsewhere), so the whole phrase collapses to one referent
+/// rather than a multi-object set.
+fn parse_chosen_revealed_object_phrase(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("the chosen creature or card")),
+        value((), tag("the creature you chose or the card you revealed")),
+    ))
+    .parse(input)
+}
+
+/// Shared participle + noun matcher for the cost-paid / event-context object
+/// class. Each axis is a single `alt()` over independent variants — adding a
+/// participle or noun extends one branch and both the possessive and
+/// prepositional arms inherit it.
+///
+/// CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+/// "returned" names an object moved to another zone by a previous instruction.
+fn parse_cost_paid_participle_noun(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        alt((
+            tag("sacrificed "),
+            tag("exiled "),
+            tag("discarded "),
+            tag("milled "),
+            tag("targeted "),
+        )),
+        alt((
+            tag("destroyed "),
+            tag("countered "),
+            tag("returned "),
+            tag("revealed "),
+            tag("drawn "),
+            tag("copied "),
+            tag("discovered "),
+        )),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn parse_object_property_possessive_suffix(input: &str) -> OracleResult<'_, ObjectProperty> {
@@ -1967,7 +2509,7 @@ fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, Qua
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::Target,
         },
-        ObjectProperty::Power | ObjectProperty::Toughness => {
+        ObjectProperty::Power | ObjectProperty::Toughness | ObjectProperty::ManaSymbolCount(_) => {
             return Err(nom::Err::Error(OracleError::new(
                 input,
                 nom::error::ErrorKind::Tag,
@@ -2113,13 +2655,16 @@ fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// appears after "for each"; the plural form appears after "the number of".
 fn parse_basic_land_types_among_lands_controlled_by_ref(
     input: &str,
+    they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("basic land type").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" among lands ").parse(rest)?;
     let (rest, controller) = alt((
         value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::TargetPlayer, tag("they control")),
+        // The caller supplies the anaphoric "they control" binding: the iterating
+        // player inside a `for each` clause, or a target player in "the number of …".
+        value(they_controller, tag("they control")),
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::BasicLandTypeCount { controller }))
@@ -2129,7 +2674,9 @@ fn parse_basic_land_types_among_lands_controlled_by_ref(
 fn parse_basic_land_type_count(input: &str) -> OracleResult<'_, QuantityRef> {
     preceded(
         tag("the number of "),
-        parse_basic_land_types_among_lands_controlled_by_ref,
+        // In a quantity reference, anaphoric "they control" binds to a target
+        // player rather than a `for each` scoped player.
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, ControllerRef::TargetPlayer),
     )
     .parse(input)
 }
@@ -2161,6 +2708,63 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         rest,
         QuantityRef::Devotion {
             colors: DevotionColors::Fixed(vec![color]),
+        },
+    ))
+}
+
+/// CR 700.5: Chroma — "the number of \<color\> mana symbols in the mana costs of
+/// permanents you control" counts the same colored mana symbols among permanents
+/// you control as devotion, so it maps to the existing `Devotion` quantity
+/// (Outrage Shaman, Primalcrux). The graveyard-scope and single-object Chroma
+/// forms are a different population and intentionally not matched here.
+fn parse_chroma_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the number of ").parse(input)?;
+    let (rest, color) = super::primitives::parse_color(rest)?;
+    let (rest, _) = tag(" mana symbols in the mana costs of permanents you control").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::Devotion {
+            colors: DevotionColors::Fixed(vec![color]),
+        },
+    ))
+}
+
+/// CR 202.1 + CR 404.2: Graveyard-scope Chroma — "the number of \<color\> mana symbols in
+/// the mana costs of cards in your graveyard" counts colored mana symbols among
+/// cards in the owner's graveyard. Distinct from the permanents-scope
+/// Chroma (devotion, CR 700.5).
+fn parse_graveyard_chroma_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the number of ").parse(input)?;
+    let (rest, color) = super::primitives::parse_color(rest)?;
+    let (rest, _) =
+        tag(" mana symbols in the mana costs of cards in your graveyard").parse(rest)?;
+    // CR 107.4a + CR 202.1: graveyard-scope chroma is the SUM of per-card
+    // colored-mana-symbol counts over cards in your graveyard — expressed via the
+    // zone-general `Aggregate` / `ObjectProperty::ManaSymbolCount` building block
+    // rather than a graveyard-specific `QuantityRef` leaf. The `InZone { Graveyard }`
+    // filter makes `Aggregate` scan the graveyard.
+    //
+    // CR 404.2: a graveyard is a zone owned by a single player; "your graveyard" is
+    // the graveyard you own. Scope the population with `Owned { You }` (matches by
+    // owner) rather than `.controller(You)`: a card in a graveyard is neither on the
+    // stack nor the battlefield, so the controller filter reads the at-departure
+    // controller via LKI (CR 109.4), which can diverge from ownership (e.g. a card
+    // you owned but an opponent controlled before it died into your graveyard, or
+    // one you controlled before it left for theirs). Ownership is the correct,
+    // LKI-independent axis here.
+    Ok((
+        rest,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::ManaSymbolCount(color),
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
         },
     ))
 }
@@ -2275,51 +2879,61 @@ pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     parse_for_each_clause_ref_with_they_controller(input, they_controller)
 }
 
+/// CR 608.2c + CR 609.3: Read the Runes — "for each card[s] drawn this way".
+fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("card drawn this way"), tag("cards drawn this way"))).parse(input)?;
+    Ok((rest, QuantityRef::EventContextAmount))
+}
+
 fn parse_for_each_clause_ref_with_they_controller(
     input: &str,
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
-        parse_for_each_one_life_changed,
-        parse_for_each_opponents_life_change,
-        parse_counter_added_this_turn_for_each,
-        parse_object_colors_for_each,
-        parse_object_name_word_count_for_each,
-        parse_object_typeline_component_count_for_each,
-        parse_mana_symbols_in_object_mana_cost_for_each,
-        parse_distinct_card_types_in_zone,
-        parse_foretold_cards_owned_in_exile,
-        parse_zone_card_count,
-        parse_for_each_attached_to_source,
-        // CR 201.2: "for each differently named <type>" — distinct-by-name
-        // iteration. Must precede generic type-filter arm.
-        parse_for_each_differently_named,
-        // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
-        // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
-        // Insight). Must precede the generic type-filter arm so the "different
-        // <quality>" adjective prefix is consumed before the bare type word.
-        parse_distinct_quality_among_objects,
-        // CR 700.8: "creature in your party" must precede the generic
-        // "<type> you control" arm — same reason as in
-        // `parse_number_of_inner`.
-        parse_creature_in_party_for_each,
-        parse_player_counter_ref_tail,
-        // CR 700.4: "creature that died this turn" / "creature that
-        // died under your control this turn" — event-based count of dies-events
-        // tracked in `state.zone_changes_this_turn`. Must precede
-        // `parse_for_each_controlled_type` since the leading "creature" token
-        // would otherwise commit the simple `<type> you control` arm.
-        parse_for_each_subtype_died_this_turn,
-        parse_for_each_creature_died_this_turn,
-        // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
-        // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
-        // leading type token does not commit to the generic `<type> you control` arm.
-        parse_for_each_sacrificed_this_turn,
-        // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
-        // control this turn" — destination-agnostic zone-change count, distinct
-        // from the graveyard-only "died" arm above.
-        parse_for_each_creature_left_battlefield_this_turn,
-        parse_entered_this_turn_ref,
+        parse_for_each_card_drawn_this_way,
+        alt((
+            parse_for_each_one_life_changed,
+            parse_for_each_opponents_life_change,
+            parse_counter_added_this_turn_for_each,
+            parse_color_of_object_for_each,
+            parse_object_colors_for_each,
+            parse_object_name_word_count_for_each,
+            parse_object_typeline_component_count_for_each,
+            parse_mana_symbols_in_object_mana_cost_for_each,
+            parse_distinct_card_types_in_zone,
+            parse_foretold_cards_owned_in_exile,
+            parse_zone_card_count,
+            parse_for_each_attached_to_source,
+            // CR 201.2: "for each differently named <type>" — distinct-by-name
+            // iteration. Must precede generic type-filter arm.
+            parse_for_each_differently_named,
+            // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
+            // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
+            // Insight). Must precede the generic type-filter arm so the "different
+            // <quality>" adjective prefix is consumed before the bare type word.
+            parse_distinct_quality_among_objects,
+            // CR 700.8: "creature in your party" must precede the generic
+            // "<type> you control" arm — same reason as in
+            // `parse_number_of_inner`.
+            parse_creature_in_party_for_each,
+            parse_player_counter_ref_tail,
+            // CR 700.4: "creature that died this turn" / "creature that
+            // died under your control this turn" — event-based count of dies-events
+            // tracked in `state.zone_changes_this_turn`. Must precede
+            // `parse_for_each_controlled_type` since the leading "creature" token
+            // would otherwise commit the simple `<type> you control` arm.
+            parse_for_each_subtype_died_this_turn,
+            parse_for_each_creature_died_this_turn,
+            // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
+            // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
+            // leading type token does not commit to the generic `<type> you control` arm.
+            parse_for_each_sacrificed_this_turn,
+            // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+            // control this turn" — destination-agnostic zone-change count, distinct
+            // from the graveyard-only "died" arm above.
+            parse_for_each_creature_left_battlefield_this_turn,
+            parse_entered_this_turn_ref,
+        )),
     ))
     .or(alt((
         |input| parse_for_each_combat_creature_controlled(input, they_controller.clone()),
@@ -2327,6 +2941,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
         parse_for_each_recipient_shared_quality,
+        // CR 604.1 + CR 611.3a + CR 613.4c: "<type> on the battlefield with
+        // <keyword>" — must precede `parse_for_each_battlefield_type`, whose
+        // shorter " on the battlefield" tag would otherwise match first and
+        // strand " with <keyword>" as an unconsumed remainder.
+        parse_for_each_battlefield_type_with_keyword,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
@@ -2338,7 +2957,14 @@ fn parse_for_each_clause_ref_with_they_controller(
         // permanent (Gavel of the Righteous: "for each counter on this Equipment").
         // Placed before `parse_for_each_controlled_type` so the bare "counter" token
         // does not commit to a type-phrase fallback.
-        parse_for_each_any_counters_on_source,
+        parse_for_each_counters_on_source,
+        // CR 305.6: "for each basic land type among lands you/they control" —
+        // domain scaling (Jodah's Codex, Wandering Treefolk, Radha's Firebrand,
+        // Scion of Draco). Reuses the shared bare-domain-suffix combinator and
+        // must precede the generic `<type> you control` arm so the leading
+        // "basic land type" is not mis-consumed as a creature/permanent type.
+        // Anaphoric "they control" binds to the iterating/scoped player here.
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, they_controller.clone()),
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -2350,22 +2976,32 @@ fn parse_for_each_clause_ref_with_they_controller(
     .parse(input)
 }
 
-/// CR 122.1: Parse "counter(s) on [self-ref]" in a "for each" context —
-/// any counter type, source-scoped. Covers the untyped form found in cards
-/// like Gavel of the Righteous ("gets +1/+1 for each counter on this
-/// Equipment"). The typed form ("[type] counter on ~") is already handled
-/// in the legacy `parse_for_each_clause_with_they_controller` path.
-fn parse_for_each_any_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("counters"), tag("counter"))).parse(input)?;
+/// CR 122.1: Parse "[counter-type] counter(s) on [self-ref]" and
+/// "counter(s) on [self-ref]" in a "for each" context. Covers both typed
+/// source-scoped costs like Tornado ("for each velocity counter on this
+/// enchantment") and untyped source-scoped pumps like Gavel of the Righteous
+/// ("for each counter on this Equipment").
+fn parse_for_each_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = alt((
+        parse_typed_counter_type_for_each_source,
+        value(None, parse_generic_counter_match),
+    ))
+    .parse(input)?;
     let (rest, _) = tag(" on ").parse(rest)?;
     let (rest, _) = parse_source_self_ref(rest)?;
     Ok((
         rest,
         QuantityRef::CountersOn {
             scope: ObjectScope::Source,
-            counter_type: None,
+            counter_type,
         },
     ))
+}
+
+fn parse_typed_counter_type_for_each_source(input: &str) -> OracleResult<'_, Option<CounterType>> {
+    let (rest, counter_type) = parse_counter_type_typed(input)?;
+    let (rest, _) = parse_counter_word(rest)?;
+    Ok((rest, Some(counter_type)))
 }
 
 /// CR 122.1: Match a source self-reference phrase: "~", "it", or any shared
@@ -2660,6 +3296,9 @@ fn parse_counter_word(input: &str) -> OracleResult<'_, ()> {
 fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
     alt((
+        // CR 201.5: self-reference ("on ~" ← "on Beast") binds the counter-added
+        // filter to the source object (Beast, Erudite Aerialist).
+        value(TargetFilter::SelfRef, tag("~")),
         value(
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             // number axis × controller-phrase axis (PATTERNS.md §8b) — "creatures"
@@ -2725,7 +3364,23 @@ fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<
     let (rest, _) = tag(" in ").parse(rest)?;
     let (rest, scope) = parse_object_possessive_scope(rest)?;
     let (rest, _) = tag(" mana cost").parse(rest)?;
-    Ok((rest, QuantityRef::ManaSymbolsInManaCost { scope, color }))
+    Ok((
+        rest,
+        QuantityRef::ManaSymbolsInManaCost {
+            scope,
+            color: Some(color),
+        },
+    ))
+}
+
+/// CR 105.1 + CR 601.2f: "for each color[s] of <object>" — scoped object-color
+/// count for cost reductions and similar per-color riders. Delegates object
+/// binding to `parse_object_color_of_scope` (target/enchanted/equipped/it-
+/// targets anaphors).
+fn parse_color_of_object_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("color of "), tag("colors of "))).parse(input)?;
+    let (rest, scope) = parse_object_color_of_scope(rest)?;
+    Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
 /// CR 105.1 + CR 105.2: Parse "for each [of] <object>'s colors" into a
@@ -2852,6 +3507,14 @@ fn parse_object_color_of_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that planeswalker")),
+        value(
+            ObjectScope::Target,
+            (
+                alt((tag("the "), tag("a "))),
+                alt((tag("creature"), tag("permanent"))),
+                tag(" it targets"),
+            ),
+        ),
         value(ObjectScope::Source, tag("~")),
         value(ObjectScope::Source, tag("this creature")),
         value(ObjectScope::Source, tag("this permanent")),
@@ -2921,13 +3584,17 @@ pub(crate) fn parse_died_this_turn_suffix(input: &str) -> OracleResult<'_, Optio
 /// phrasing. Engine tracking is per-turn-only, so the trailing "this turn"
 /// qualifier is semantically redundant when present.
 ///
-/// Returns `Some(ControllerRef::You)` for forms qualified by "under your
-/// control" or "your graveyard" (CR 109.5: "your" graveyard = the source's
-/// controller), and `None` for unqualified forms that count every player's
-/// deaths. The longer qualified tags MUST precede the bare "that died" /
+/// Returns `(controller scope, nontoken-only)` where controller is
+/// `Some(ControllerRef::You)` for forms qualified by "under your control" /
+/// "your graveyard" (CR 109.5: "your" graveyard = the source's controller),
+/// and `None` for unqualified forms that count every player's deaths. The
+/// longer qualified tags MUST precede the bare "that died" /
 /// "a graveyard" tags so the qualified suffix isn't shadowed by `alt`.
-fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
-    alt((
+fn parse_creatures_died_this_turn_tail(
+    input: &str,
+) -> OracleResult<'_, (Option<ControllerRef>, bool)> {
+    let (rest, nontoken) = opt(tag("nontoken ")).parse(input)?;
+    let (rest, controller) = alt((
         value(
             Some(ControllerRef::You),
             tag("creatures that died under your control this turn"),
@@ -2985,21 +3652,22 @@ fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, Option<C
             tag("creature put into a graveyard from the battlefield"),
         ),
     ))
-    .parse(input)
+    .parse(rest)?;
+    Ok((rest, (controller, nontoken.is_some())))
 }
 
 /// CR 700.4: Parse "creature(s) that died" → filtered zone-change count for
 /// "for each creature that died this turn" iteration sources.
 fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
-    Ok((rest, creatures_died_this_turn_ref(controller)))
+    let (rest, (controller, nontoken)) = parse_creatures_died_this_turn_tail(input)?;
+    Ok((rest, creatures_died_this_turn_ref(controller, nontoken)))
 }
 
 /// CR 700.4: Parse "the number of creature(s) that died this turn" → the same
 /// `ZoneChangeCountThisTurn` quantity ref used by for-each iteration.
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
-    Ok((rest, creatures_died_this_turn_ref(controller)))
+    let (rest, (controller, nontoken)) = parse_creatures_died_this_turn_tail(input)?;
+    Ok((rest, creatures_died_this_turn_ref(controller, nontoken)))
 }
 
 /// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
@@ -3118,10 +3786,13 @@ fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, Quanti
 /// graveyard", `controller` is `Some(ControllerRef::You)` and the count is
 /// scoped to creatures controlled by the source's controller when they died;
 /// otherwise it is `None` and every player's deaths are counted.
-fn creatures_died_this_turn_ref(controller: Option<ControllerRef>) -> QuantityRef {
+fn creatures_died_this_turn_ref(controller: Option<ControllerRef>, nontoken: bool) -> QuantityRef {
     let mut tf = TypedFilter::creature();
     if let Some(c) = controller {
         tf = tf.controller(c);
+    }
+    if nontoken {
+        tf = tf.properties(vec![FilterProp::NonToken]);
     }
     QuantityRef::ZoneChangeCountThisTurn {
         from: Some(Zone::Battlefield),
@@ -3163,6 +3834,19 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
     // `FilterProp` from a typed pair.
     let (rest, prop) = alt((
         value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        // CR 301.5a + CR 303.4: source-anaphoric gendered pronoun denotes the
+        // ability source (same id as `~`) — Winter Soldier, Captain America
+        // (MSH templates). Maps to AttachedToSource, identical to the `~` arm.
+        // Distinct from the recipient pronoun "it"/"that creature" arm below.
+        // Only the unambiguously source-anaphoric "him"/"her" are accepted; the
+        // singular-they "them" is excluded because it is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" =
+        // the enchanted player, not the Aura source), which would bind the wrong
+        // object set.
+        value(
+            FilterProp::AttachedToSource,
+            alt((tag(" attached to him"), tag(" attached to her"))),
+        ),
         value(
             FilterProp::AttachedToRecipient,
             alt((tag(" attached to it"), tag(" attached to that creature"))),
@@ -3258,6 +3942,51 @@ fn parse_for_each_battlefield_type(input: &str) -> OracleResult<'_, QuantityRef>
                 type_filters: vec![tf],
                 controller: None,
                 properties: Vec::new(),
+            }),
+        },
+    ))
+}
+
+/// CR 604.1 + CR 611.3a + CR 613.4c: Parse "[other] <type> on the
+/// battlefield with <keyword>" in a "for each" clause -> a battlefield-wide
+/// (any-controller) population count of permanents of the given type that
+/// have the named keyword, with an optional "other"/"another" exclusion of
+/// the source object. This is a static ability (CR 604.1) whose continuous
+/// effect isn't locked in — it applies at any given moment to whatever the
+/// count currently is (CR 611.3a) — as a layer 7c power/toughness
+/// modification (CR 613.4c), not a characteristic-defining ability.
+///
+/// "for each" sibling of `parse_number_of_type_on_battlefield_with_keyword`
+/// (the "the number of" CR 604.3 CDA form of the same "on the battlefield
+/// with <keyword>" grammar) and of `parse_for_each_battlefield_type` (the
+/// keyword-less bare form, which this arm must precede — its shorter
+/// `tag(" on the battlefield")` would otherwise match first and strand
+/// " with <keyword>" as an unconsumed remainder).
+/// Backs dynamic P/T anthems such as Radiant, Archangel and Pride of the
+/// Clouds ("~ gets +1/+1 for each other creature on the battlefield with
+/// flying"). Generalized over every evergreen keyword via `parse_keyword_name`
+/// + `FilterProp::WithKeyword`, so it covers the whole class, not one card.
+fn parse_for_each_battlefield_type_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    let (rest, _) = tag(" on the battlefield with ").parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name.parse().unwrap();
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(FilterProp::WithKeyword { value: keyword });
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties,
             }),
         },
     ))
@@ -3472,6 +4201,126 @@ mod tests {
     }
 
     #[test]
+    fn parse_object_property_aggregate_greatest_power() {
+        let (rest, q) =
+            parse_quantity_ref("the greatest power among dinosaurs you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+                ..
+            }
+        ));
+    }
+
+    /// CR 702.167c: the craft-material noun phrase recognizes every self-anaphor
+    /// variant ("it" / "~" / "this <noun>") and rejects unrelated exile phrases.
+    #[test]
+    fn parse_craft_materials_filter_anaphors() {
+        for phrase in [
+            "the exiled card used to craft it",
+            "the exiled cards used to craft it",
+            "the exiled cards used to craft ~",
+            "the exiled cards used to craft this creature",
+            "the exiled cards used to craft this permanent",
+            "the exiled cards used to craft this artifact",
+        ] {
+            let (rest, filter) = parse_craft_materials_filter(phrase)
+                .unwrap_or_else(|e| panic!("craft phrase {phrase:?} should parse: {e:?}"));
+            assert_eq!(rest, "", "craft phrase {phrase:?} must fully consume");
+            assert_eq!(filter, linked_exile_owned_filter(), "phrase {phrase:?}");
+        }
+        // Bare exile anaphors (no "used to craft") must NOT match the craft form.
+        assert!(parse_craft_materials_filter("the exiled cards").is_err());
+        assert!(parse_craft_materials_filter("those exiled cards").is_err());
+    }
+
+    /// CR 702.167c + CR 208.1: "the total power of the exiled cards used to craft
+    /// it" routes to the linked-exile aggregate, NOT the tracked-set anaphor
+    /// (Mastercraft Raptor). The shared "the exiled cards" prefix must resolve to
+    /// the craft pool when the craft suffix follows.
+    #[test]
+    fn parse_total_power_of_craft_materials_is_aggregate() {
+        let (rest, q) =
+            parse_quantity_ref("the total power of the exiled cards used to craft it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter,
+            } => assert_eq!(filter, linked_exile_owned_filter()),
+            other => panic!("expected craft-material power aggregate, got {other:?}"),
+        }
+    }
+
+    /// CR 702.167c + CR 105.1: "the number of colors among the exiled cards used
+    /// to craft it" routes to the distinct-colors ref over the craft pool
+    /// (Sunbird Effigy P/T).
+    #[test]
+    fn parse_colors_among_craft_materials_is_distinct_colors() {
+        let (rest, q) =
+            parse_quantity_ref("the number of colors among the exiled cards used to craft it")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctColorsAmongPermanents { filter } => {
+                assert_eq!(filter, linked_exile_owned_filter())
+            }
+            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+        }
+    }
+
+    /// CR 702.167c + CR 202.3: "the mana value of the exiled card used to craft
+    /// it" still resolves to the linked-exile mana-value aggregate even with the
+    /// craft suffix appended (Jadeheart Attendant).
+    #[test]
+    fn parse_mana_value_of_craft_material_is_aggregate() {
+        let (rest, q) =
+            parse_quantity_ref("the mana value of the exiled card used to craft it").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_max_quantity_whichever_greater() {
+        let (rest, qty) = parse_max_quantity(
+            "2 or the greatest power among dinosaurs you control, whichever is greater",
+        )
+        .expect("max-of-two quantity should parse");
+        assert_eq!(rest, "");
+        let QuantityExpr::Max { exprs } = qty else {
+            panic!("expected QuantityExpr::Max, got {qty:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        assert!(matches!(exprs[0], QuantityExpr::Fixed { value: 2 }));
+        assert!(matches!(
+            exprs[1],
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_max_quantity_rejects_bare_or() {
+        assert!(parse_max_quantity("2 or the greatest power among dinosaurs you control").is_err());
+    }
+
+    #[test]
     fn parse_number_of_chosen_type_on_battlefield_global_count() {
         // CR 604.3: Caller of the Hunt — "the number of creatures of the chosen
         // type on the battlefield" is a battlefield-wide CDA count (any
@@ -3526,6 +4375,54 @@ mod tests {
                     );
                 }
                 other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 604.1 + CR 611.3a + CR 613.4c: "for each" sibling of
+    /// `parse_number_of_type_on_battlefield_with_keyword_global_count` — the
+    /// dynamic-pump grammar backing Radiant, Archangel / Pride of the Clouds
+    /// ("~ gets +1/+1 for each other creature on the battlefield with
+    /// flying"), generalized over the KEYWORDS table and the optional
+    /// "other"/"another" exclusion.
+    #[test]
+    fn parse_for_each_battlefield_type_with_keyword_global_count() {
+        for (clause, other, kw) in [
+            (
+                "other creature on the battlefield with flying",
+                true,
+                Keyword::Flying,
+            ),
+            (
+                "another creature on the battlefield with shadow",
+                true,
+                Keyword::Shadow,
+            ),
+            (
+                "creature on the battlefield with flying",
+                false,
+                Keyword::Flying,
+            ),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, None, "{clause:?}: counts every controller");
+                    assert_eq!(
+                        tf.properties.contains(&FilterProp::Another),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
             }
         }
     }
@@ -3774,6 +4671,86 @@ mod tests {
                 other => panic!("expected Typed filter, got {other:?}"),
             },
             other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_gendered_animate_pronoun() {
+        // CR 301.5a + CR 303.4: MSH/Marvel templates phrase the attachment count
+        // with the source-anaphoric gendered pronoun "him"/"her"
+        // (Winter Soldier "for each Equipment attached to him"). These denote the
+        // SAME object id as `~`, so the combinator must emit `AttachedToSource`.
+        // Fail-before: no "attached to him/her" arm → Err.
+        for pronoun in ["him", "her"] {
+            let clause = format!("equipment attached to {pronoun}");
+            let (rest, q) = parse_for_each_clause_ref(&clause)
+                .unwrap_or_else(|e| panic!("expected Ok for {clause:?}, got {e:?}"));
+            assert_eq!(rest, "", "remainder for {clause:?}");
+            match q {
+                QuantityRef::ObjectCount { filter } => match filter {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert_eq!(controller, None, "controller for {clause:?}");
+                        assert_eq!(
+                            properties,
+                            vec![FilterProp::AttachedToSource],
+                            "properties for {clause:?}"
+                        );
+                        assert_eq!(
+                            type_filters,
+                            vec![TypeFilter::Subtype("Equipment".into())],
+                            "type_filters for {clause:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter for {clause:?}, got {other:?}"),
+                },
+                other => panic!("expected ObjectCount for {clause:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_them_not_source_bound() {
+        // CR 301.5a + CR 303.4: the singular-they "them" is recipient-anaphoric for
+        // player-enchanting Auras (Curse of Thirst: "Curses attached to them" = the
+        // enchanted player), so it must NOT bind to the source. The gendered arm
+        // deliberately omits "them"; this combinator therefore does not produce an
+        // AttachedToSource count for it (the clause is left unconsumed). Guards
+        // against a future re-add that would silently count the wrong object set.
+        let result = parse_for_each_attached_to_source("curse attached to them");
+        match result {
+            Err(_) => {}
+            Ok((rest, q)) => {
+                // If some other arm consumes it, it must not be AttachedToSource.
+                if let QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                } = &q
+                {
+                    assert!(
+                        !properties.contains(&FilterProp::AttachedToSource),
+                        "\"attached to them\" must not bind to the source, got {q:?} (rest {rest:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_it_preserved_after_gendered_arm() {
+        // Discrimination/regression: the recipient authority ("it") must stay
+        // AttachedToRecipient even with the new source-pronoun arm above it.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => {
+                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+            }
+            other => panic!("expected recipient ObjectCount, got {other:?}"),
         }
     }
 
@@ -4228,6 +5205,30 @@ mod tests {
         );
     }
 
+    /// MSH Wave 2 (Beast, Erudite Aerialist): "you've put one or more +1/+1
+    /// counters on ~ this turn" (self-ref normalized from "on Beast") must parse
+    /// the counter-added target as `TargetFilter::SelfRef`, so the runtime quantity
+    /// resolver counts only counters placed on the source object (CR 201.5). Without
+    /// the `~` arm the target is unmatched and the whole condition fails to parse.
+    #[test]
+    fn parse_counter_added_condition_accepts_self_ref_target() {
+        let (rest, q) = parse_counter_added_this_turn_condition(
+            "you've put one or more +1/+1 counters on ~ this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::Controller,
+                counters: crate::types::counter::CounterMatch::OfType(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                ),
+                target: TargetFilter::SelfRef,
+            }
+        );
+    }
+
     #[test]
     fn parse_for_each_foretold_card_owned_in_exile() {
         let (rest, q) = parse_for_each_clause_ref("foretold card you own in exile").unwrap();
@@ -4409,6 +5410,37 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 105.1 + CR 601.2f + CR 115.1: generalized "color of <object>" for-each.
+    #[test]
+    fn test_parse_for_each_color_of_object() {
+        let (rest, q) = parse_for_each_clause_ref("color of the creature it targets").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref("color of target creature").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref("colors of the enchanted creature").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Recipient
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
     #[test]
     fn test_parse_for_each_object_name_word_count_recipient_and_target() {
         let (rest, q) = parse_for_each("for each word in its name").unwrap();
@@ -4437,7 +5469,7 @@ mod tests {
             q,
             QuantityRef::ManaSymbolsInManaCost {
                 scope: crate::types::ability::ObjectScope::Recipient,
-                color: ManaColor::White,
+                color: Some(ManaColor::White),
             }
         );
         assert_eq!(rest, "");
@@ -4509,6 +5541,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_for_each_typed_counter_on_source() {
+        let (rest, q) = parse_for_each_clause_ref("velocity counter on this enchantment").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(_),
+            }
+        ));
+    }
+
+    #[test]
     fn test_parse_number_of_object_name_words() {
         let (rest, q) =
             parse_quantity_ref("the number of words in target creature's name").unwrap();
@@ -4555,6 +5600,82 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 202.3 + CR 608.2k: prepositional cost-paid mana-value form
+    /// (Morbid Curiosity) resolves the same `CostPaidObject` referent as the
+    /// possessive "the sacrificed permanent's mana value".
+    #[test]
+    fn parse_quantity_ref_cost_paid_object_prepositional_mana_value() {
+        for phrase in [
+            "the mana value of the sacrificed permanent",
+            "mana value of the sacrificed permanent",
+            "the mana value of the exiled creature",
+            "the converted mana cost of the sacrificed artifact",
+            "the mana value of the returned creature",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: crate::types::ability::ObjectScope::CostPaidObject,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
+    /// CR 208.1 + CR 608.2k + CR 400.7j: "the power/toughness of the
+    /// chosen/revealed (beheld) object" resolves the same `CostPaidObject`
+    /// referent as the sacrifice/exile possessives — the additional-cost-chosen
+    /// object's power read at resolution (Close Encounter, Monstrous Emergence).
+    #[test]
+    fn parse_quantity_ref_cost_paid_object_chosen_revealed_power() {
+        for phrase in [
+            "the power of the chosen creature or card",
+            "power of the chosen creature or card",
+            "the power of the creature you chose or the card you revealed",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::CostPaidObject,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+        // Toughness axis composes through the same combinator.
+        let (rest, q) = parse_quantity_ref("the toughness of the chosen creature or card").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::CostPaidObject,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 506.2 + CR 402: "cards in defending player's hand" → defending-player
+    /// hand size (Mr. Foxglove), reachable both bare and after "the number of".
+    #[test]
+    fn parse_quantity_ref_defending_player_hand() {
+        for phrase in [
+            "cards in defending player's hand",
+            "the number of cards in defending player's hand",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::HandSize {
+                    player: PlayerScope::DefendingPlayer,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
     }
 
     #[test]
@@ -4717,6 +5838,164 @@ mod tests {
     }
 
     #[test]
+    fn parse_player_with_most_cards_in_hand() {
+        // CR 402.1: the cross-player hand-size MAX extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the player with the most cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_player_with_fewest_cards_in_hand() {
+        // CR 402.1: the MIN direction — proves the aggregate parameterization,
+        // not just Tales' Max direction.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the player with the fewest cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_opponent_with_most_cards_in_hand() {
+        // CR 402.1 + CR 102.2/102.3: opponent-scoped MAX extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the opponent with the most cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_opponent_with_fewest_cards_in_hand() {
+        // CR 402.1 + CR 102.2/102.3: opponent-scoped MIN extremum.
+        let (rest, q) =
+            parse_player_with_extremum_cards_in_hand("the opponent with the fewest cards in hand")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_all_players_max_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the player with the most cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_all_players_min_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the player with the fewest cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_opponent_max_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the opponent with the most cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_verbose_opponent_min_extremum_hand_size() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the opponent with the fewest cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn player_with_extremum_cards_in_hand_reachable_via_quantity_ref() {
+        // Confirms the new combinator is registered in the shared
+        // `parse_quantity_ref` `alt`, so any quantity context gains the phrase.
+        let (rest, q) = parse_quantity_ref("the player with the most cards in hand").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn parse_quantity_ref_cards_in_their_hand_is_target_zone_count() {
         // CR 109.4 + CR 115.7: "the number of cards in their hand" must resolve
         // against the effect's player target, not count every hand in the game.
@@ -4764,12 +6043,59 @@ mod tests {
             "~'s power",
             "this creature's power",
             "this card's power",
+            // CR 208.3 + CR 608.2k: gendered/plural possessive pronouns are
+            // interchangeable with "its" for the source's own power (Iron Fist,
+            // Living Weapon — "deals damage equal to his power").
+            "his power",
+            "her power",
+            "their power",
         ] {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
             assert_eq!(
                 q,
                 QuantityRef::Power {
                     scope: crate::types::ability::ObjectScope::Source
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
+    /// CR 208.3 + CR 608.2k: gendered/plural possessive pronouns reference the
+    /// source's own toughness, mirroring the power phrasings.
+    #[test]
+    fn test_parse_quantity_ref_self_toughness_gendered_pronouns() {
+        for phrase in ["his toughness", "her toughness", "their toughness"] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
+    /// CR 122.1 + CR 608.2k: "the number of +1/+1 counters on him/her/them"
+    /// counts counters on the ability's own source — the gendered/plural
+    /// objective pronouns are interchangeable with "it" (Red Hulk's Enrage
+    /// reflex: "damage equal to the number of +1/+1 counters on him").
+    #[test]
+    fn test_parse_quantity_ref_counters_on_source_gendered_pronouns() {
+        for phrase in [
+            "the number of +1/+1 counters on him",
+            "the number of +1/+1 counters on her",
+            "the number of +1/+1 counters on them",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
                 },
                 "phrase: {phrase}"
             );
@@ -5176,6 +6502,13 @@ mod tests {
             },
             _ => panic!("expected ObjectCount"),
         }
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_card_drawn_this_way() {
+        let (rest, q) = parse_for_each_clause_ref("card drawn this way").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
     }
 
@@ -6082,6 +7415,36 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 700.5: the Chroma wording for devotion — "the number of <color> mana
+    /// symbols in the mana costs of permanents you control" (Outrage Shaman,
+    /// Primalcrux) — maps to the same `Devotion` quantity as "your devotion to
+    /// <color>".
+    #[test]
+    fn test_parse_chroma_devotion() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of green mana symbols in the mana costs of permanents you control",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::Green])
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (_, red) = parse_quantity_ref(
+            "the number of red mana symbols in the mana costs of permanents you control",
+        )
+        .unwrap();
+        assert_eq!(
+            red,
+            QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(vec![ManaColor::Red])
+            }
+        );
+    }
+
     #[test]
     fn test_parse_devotion_chosen_color() {
         let (rest, q) = parse_quantity_ref("your devotion to that color").unwrap();
@@ -6089,6 +7452,32 @@ mod tests {
             q,
             QuantityRef::Devotion {
                 colors: DevotionColors::ChosenColor
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 202.1 + CR 404.2: graveyard-scope Chroma — "the number of <color> mana symbols in
+    /// the mana costs of cards in your graveyard" (Umbra Stalker).
+    #[test]
+    fn test_parse_graveyard_chroma() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of black mana symbols in the mana costs of cards in your graveyard",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
             }
         );
         assert_eq!(rest, "");
@@ -6116,6 +7505,66 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 202.3 + CR 115.1: "mana value of target <filter>" lowers to the
+    /// object-axis `TargetObjectManaValue` (Fateful Handoff, Knollspine Dragon),
+    /// carrying the parsed target filter. The bare possessive "target creature's
+    /// mana value" stays `ObjectManaValue { Target }` (test below).
+    #[test]
+    fn test_parse_target_object_mana_value_of_form() {
+        let (rest, q) =
+            parse_quantity_ref("mana value of target artifact or creature you control").unwrap();
+        match q {
+            QuantityRef::TargetObjectManaValue { filter } => {
+                assert_ne!(
+                    *filter,
+                    TargetFilter::Any,
+                    "the carried slot filter must be the parsed 'artifact or creature you control'",
+                );
+            }
+            other => panic!("expected TargetObjectManaValue, got {other:?}"),
+        }
+        assert_eq!(rest, "");
+    }
+
+    /// The bare possessive must NOT route to the of-form variant.
+    #[test]
+    fn test_parse_target_creature_possessive_mana_value_unchanged() {
+        let (rest, q) = parse_quantity_ref("target creature's mana value").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Target,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 701.9 + CR 115.1: "cards target opponent discarded this turn" lowers to
+    /// the player-axis Target scope (Dream Salvage).
+    #[test]
+    fn test_parse_cards_target_opponent_discarded_this_turn() {
+        let (rest, q) =
+            parse_quantity_ref("the number of cards target opponent discarded this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::CardsDiscardedThisTurn {
+                player: PlayerScope::Target,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// Serde round-trip for the new object-axis variant.
+    #[test]
+    fn test_target_object_mana_value_serde_round_trip() {
+        let qty = QuantityRef::TargetObjectManaValue {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        let json = serde_json::to_string(&qty).expect("serialize");
+        let back: QuantityRef = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(qty, back);
     }
 
     #[test]
@@ -6153,6 +7602,36 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 305.6 + CR 601.2f: domain must be reachable through the `for each`
+    /// clause path (not just `parse_quantity_ref`), so domain-scaled cost
+    /// reducers — "costs {1} less to activate for each basic land type among
+    /// lands you control" (Jodah's Codex, Wandering Treefolk, Scion of Draco) —
+    /// resolve their reduction quantity instead of dropping to `Unimplemented`.
+    #[test]
+    fn parse_for_each_clause_ref_handles_domain() {
+        let (rest, q) =
+            parse_for_each_clause_ref_complete("basic land type among lands you control").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::You,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // Inside a `for each` clause, "they control" binds to the iterating/scoped
+        // player (the default `they_controller`), NOT a target player — so
+        // per-player/per-opponent domain reducers count the right player's lands.
+        let (_, q_they) =
+            parse_for_each_clause_ref_complete("basic land type among lands they control").unwrap();
+        assert_eq!(
+            q_they,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::ScopedPlayer,
+            }
+        );
     }
 
     #[test]
@@ -6526,6 +8005,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_greatest_commander_mana_value_ref() {
+        // Test the greatest pattern (CR 202.3 aggregate-max)
+        let phrase = "the greatest mana value of a commander you own on the battlefield or in the command zone";
+        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        assert_eq!(rest, "", "phrase should be fully consumed");
+
+        // Verify it produces Aggregate with Max function
+        let QuantityRef::Aggregate {
+            function,
+            property,
+            filter,
+        } = q
+        else {
+            panic!("Expected Aggregate, got {q:?}");
+        };
+
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::ManaValue);
+
+        // Verify the filter uses InAnyZone for multi-zone disjunction
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+
+        assert!(tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn test_parse_commander_mana_value_ref() {
+        // Test the non-greatest pattern (Stinging Study)
+        let phrase =
+            "the mana value of a commander you own on the battlefield or in the command zone";
+        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        assert_eq!(rest, "", "phrase should be fully consumed");
+
+        // Verify it produces CommanderManaValue
+        let QuantityRef::CommanderManaValue { owner } = q else {
+            panic!("Expected CommanderManaValue, got {q:?}");
+        };
+
+        assert_eq!(owner, ControllerRef::You);
+    }
+
     /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
     /// `parse_cost_paid_object_ref` (participle = "milled") and yields
     /// `ObjectManaValue { CostPaidObject }`. Covers Heed the Mists and the
@@ -6639,11 +8162,13 @@ mod tests {
         );
     }
 
-    /// Test parse_the_total_mana_value for "where X is the total mana value" patterns.
+    /// Test the object-property aggregate parser for "where X is the total
+    /// mana value" patterns.
     #[test]
-    fn parse_the_total_mana_value_basic() {
+    fn parse_object_property_aggregate_total_mana_value_basic() {
         let (rest, q) =
-            parse_the_total_mana_value("the total mana value of cards in your graveyard").unwrap();
+            parse_object_property_aggregate_ref("the total mana value of cards in your graveyard")
+                .unwrap();
         assert_eq!(rest, "");
         match q {
             QuantityRef::Aggregate {
@@ -6797,5 +8322,85 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// CR 120.9 + CR 115.1: "(the) damage dealt to target opponent this turn"
+    /// parses to a target-player-scoped, all-damage Sum reference so the
+    /// count-derived trigger target slot resolves against `ability.targets`.
+    #[test]
+    fn test_parse_damage_dealt_target_opponent_this_turn() {
+        let (rest, q) =
+            parse_damage_dealt_this_turn_ref("damage dealt to target opponent this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+
+                channel: DamageChannel::Total,
+            }
+        );
+
+        // The optional "the " prefix is absorbed by the shared combinator.
+        let (rest, q_the) =
+            parse_damage_dealt_this_turn_ref("the damage dealt to target opponent this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q_the, q);
+    }
+
+    /// Regression: Chandra's Incinerator phrasing still parses to the
+    /// Opponent-scoped, noncombat-only Sum reference.
+    #[test]
+    fn test_parse_damage_dealt_chandra_noncombat_unchanged() {
+        let (rest, q) = parse_damage_dealt_this_turn_ref(
+            "the total amount of noncombat damage dealt to your opponents this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
+
+                channel: DamageChannel::Total,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_nontoken_creature_died_this_turn_for_each() {
+        let (_, q) =
+            parse_for_each_creature_died_this_turn("nontoken creature that died this turn")
+                .unwrap();
+        let QuantityRef::ZoneChangeCountThisTurn { filter, .. } = q else {
+            panic!("expected ZoneChangeCountThisTurn, got {q:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter");
+        };
+        assert!(tf.properties.contains(&FilterProp::NonToken));
     }
 }

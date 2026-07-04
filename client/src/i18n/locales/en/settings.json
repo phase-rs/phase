@@ -12,6 +12,13 @@
     "data": "Data"
   },
   "gameplay": {
+    "collapseLands": "Collapse Lands",
+    "collapseSupport": "Collapse Support",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Always on",
+      "off": "Always off"
+    },
     "title": "Gameplay",
     "language": "Language",
     "cardSize": "Card Size",
@@ -54,6 +61,11 @@
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
     "showOpponentBoard": "Show opponent's board on HUD hover",
+    "multiplayerBoardLayout": "Multiplayer Board Layout",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Focused opponent",
+      "split": "Split table"
+    },
     "cardPreviewDelay": "Hover Delay",
     "cardPreviewDelayInstant": "Instant",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -74,6 +86,7 @@
     "clearArtOverrides_other": "Clear All Art Overrides ({{count}})",
     "clearArtOverridesConfirm_one": "Clear all {{count}} art override?",
     "clearArtOverridesConfirm_other": "Clear all {{count}} art overrides?",
+    "clearArtOverridesAction": "Clear",
     "vfxQualityOptions": {
       "full": "Full",
       "reduced": "Reduced",
@@ -160,6 +173,10 @@
     "description": "Export bundles your preferences, imported decks, and feed subscriptions into a single JSON file. Import restores them on another machine. IndexedDB caches (feed cache, audio cache, saved games) are not included — those rebuild automatically.",
     "exportBackup": "Export backup…",
     "importBackup": "Import backup…",
+    "importModeTitle": "Import backup",
+    "importModeMessage": "Replace everything with the backup (destructive), or merge — keep existing decks and add new ones from the backup.",
+    "importOverwrite": "Replace all",
+    "importMerge": "Merge",
     "importConfirm": "Overwrite existing preferences and decks?\n\nOK: replace everything with the backup (destructive).\nCancel: merge — keep existing decks, add new ones from the backup.",
     "backupDownloaded": "Backup downloaded.",
     "imported_one": "Imported {{count}} deck.",
@@ -171,7 +188,8 @@
   },
   "resetAll": {
     "confirm": "Reset all preferences to defaults? This clears every setting in this dialog.",
-    "button": "Reset all preferences"
+    "button": "Reset all preferences",
+    "confirmAction": "Reset"
   },
   "pacing": {
     "title": "Pacing",

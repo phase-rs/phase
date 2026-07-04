@@ -19,13 +19,14 @@ pub mod player;
 pub mod proposed_event;
 pub mod replacements;
 pub mod statics;
+pub mod stickers;
 pub mod triggers;
 pub mod zones;
 
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, BasicLandType,
     ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect,
-    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, PtValue,
+    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, ParitySource, PtValue,
     ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
     TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
@@ -58,5 +59,6 @@ pub use player::{Player, PlayerId};
 pub use proposed_event::{ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use statics::StaticMode;
+pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};
 pub use zones::Zone;

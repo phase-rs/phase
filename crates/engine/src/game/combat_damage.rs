@@ -42,11 +42,19 @@ fn process_combat_damage_triggers(
     state: &mut GameState,
     damage_events: &[GameEvent],
     all_events: &mut Vec<GameEvent>,
+    include_phase_event: bool,
 ) {
     // Step 1: Collect triggers from damage events while creatures are still alive.
     // CR 603.2: Triggers fire at the moment the event occurs — process_triggers
     // scans state.battlefield, so this must run before SBAs remove dying objects.
-    triggers::process_triggers(state, damage_events);
+    let mut before_priority_events = Vec::new();
+    if include_phase_event {
+        before_priority_events.push(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::CombatDamage,
+        });
+    }
+    before_priority_events.extend_from_slice(damage_events);
+    let mut pending = triggers::collect_triggers_for_batch(state, &before_priority_events);
 
     // Steps 2-4: SBA/trigger loop per CR 704.3.
     // SBAs may generate events (ZoneChanged for dying creatures) that need trigger
@@ -58,11 +66,30 @@ fn process_combat_damage_triggers(
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
             let new_events: Vec<_> = all_events[events_before..].to_vec();
-            triggers::process_triggers(state, &new_events);
+            before_priority_events.extend_from_slice(&new_events);
+            pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
         } else {
             break;
         }
     }
+
+    if matches!(
+        state.waiting_for,
+        crate::types::game_state::WaitingFor::GameOver { .. }
+    ) {
+        return;
+    }
+    // CR 800.4a: If combat-damage SBAs eliminated a player before this
+    // collect-only batch is put on the stack, drop triggers controlled by that
+    // player before constructing the APNAP ordering pass.
+    pending.retain(|ctx| crate::game::players::is_alive(state, ctx.pending.controller));
+
+    triggers::process_collected_triggers_with_delayed_phase_events(
+        state,
+        pending,
+        &before_priority_events,
+        all_events,
+    );
 }
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
@@ -119,7 +146,7 @@ pub fn resolve_combat_damage(
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
-        process_combat_damage_triggers(state, &damage_events, events);
+        process_combat_damage_triggers(state, &damage_events, events, true);
 
         // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
         // controller trigger-ordering prompt, surface it now — before the regular
@@ -169,7 +196,12 @@ pub fn resolve_combat_damage(
         c.damage_step_index = None;
     }
 
-    process_combat_damage_triggers(state, &damage_events, events);
+    process_combat_damage_triggers(
+        state,
+        &damage_events,
+        events,
+        !combat.first_strike_done && !has_first_or_double,
+    );
     None
 }
 
@@ -787,6 +819,12 @@ struct BatchEntry<'a> {
     ctx: DamageContext,
     source_is_commander: bool,
     assignment: &'a DamageAssignment,
+    /// CR 119.3 + CR 702.15b: when the source has lifelink, the controller it
+    /// gains life for. `ctx.has_lifelink` is forced off so the per-assignment
+    /// apply path does NOT emit a life-gain event; instead the whole batch from
+    /// one source is summed and gained once (see Phase C) so "whenever you gain
+    /// life" triggers fire once per source, not once per damaged target.
+    lifelink_controller: Option<PlayerId>,
 }
 
 /// Apply all combat damage assignments simultaneously (CR 510.2).
@@ -820,6 +858,10 @@ pub(crate) fn apply_combat_damage(
     // `(player, [(source_id, amount)], step_total)`.
     type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
     let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
+    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
+    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
+    // per source after the batch so "whenever you gain life" triggers once.
+    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -835,7 +877,7 @@ pub(crate) fn apply_combat_damage(
             .unwrap_or(false);
         // In practice, from_source always succeeds during combat (source is on battlefield).
         // CR 702.15c: Fallback uses LKI controller when the source is gone.
-        let ctx = DamageContext::from_source(state, *source_id).unwrap_or_else(|| {
+        let mut ctx = DamageContext::from_source(state, *source_id).unwrap_or_else(|| {
             let controller = state
                 .lki_cache
                 .get(source_id)
@@ -843,6 +885,18 @@ pub(crate) fn apply_combat_damage(
                 .unwrap_or(state.active_player);
             DamageContext::fallback(*source_id, controller)
         });
+
+        // CR 119.3 + CR 702.15b: defer lifelink to a single per-source life-gain
+        // after the whole simultaneous batch is applied. A source dealing combat
+        // damage to several recipients at once (multiple blockers, trample to a
+        // blocker + the player, etc.) gains life ONCE for the total — so a
+        // "whenever you gain life" trigger fires once, not once per target.
+        let lifelink_controller = if ctx.has_lifelink {
+            Some(ctx.controller)
+        } else {
+            None
+        };
+        ctx.has_lifelink = false;
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
@@ -861,6 +915,7 @@ pub(crate) fn apply_combat_damage(
                 ctx,
                 source_is_commander,
                 assignment,
+                lifelink_controller,
             });
             proposed_events.push(proposed);
         }
@@ -897,6 +952,24 @@ pub(crate) fn apply_combat_damage(
             // Fully prevented or skipped — no damage applied.
             None => 0,
         };
+
+        // CR 119.3 + CR 702.15b: accumulate this source's lifelink over the batch
+        // (damage to any recipient — creature, planeswalker, or player — feeds the
+        // same life gain). Keyed by source so two different lifelink sources stay
+        // separate events while one source hitting many targets is summed.
+        if let Some(controller) = entry.lifelink_controller {
+            if actual_amount > 0 {
+                let source_id = entry.ctx.source_id;
+                if let Some((_, _, total)) = lifelink_by_source
+                    .iter_mut()
+                    .find(|(id, _, _)| *id == source_id)
+                {
+                    *total += actual_amount;
+                } else {
+                    lifelink_by_source.push((source_id, controller, actual_amount));
+                }
+            }
+        }
 
         // Combat-only bookkeeping (not part of the shared damage pipeline):
         if let DamageTarget::Player(player_id) = &entry.assignment.target {
@@ -940,6 +1013,22 @@ pub(crate) fn apply_combat_damage(
                         });
                 }
             }
+        }
+    }
+
+    // CR 119.3 + CR 702.15b: apply each source's lifelink as ONE life-gain event
+    // for its whole batch. A deferred life-gain replacement (CR 614.7) can't pause
+    // combat, so the deferred portion is dropped — mirrors the per-assignment
+    // behavior this replaced (DamageResult::NeedsChoice => 0 above). apply_life_gain
+    // sets state.waiting_for when it defers; snapshot and restore it so a dropped
+    // lifelink replacement never leaves combat paused on a choice nothing answers.
+    let waiting_before = state.waiting_for.clone();
+    for (_source_id, controller, total) in lifelink_by_source {
+        if total > 0
+            && crate::game::effects::life::apply_life_gain(state, controller, total, &mut events)
+                .is_err()
+        {
+            state.waiting_for = waiting_before.clone();
         }
     }
 
@@ -1651,6 +1740,66 @@ mod tests {
             .map(|o| o.zone != Zone::Battlefield)
             .unwrap_or(true);
         assert!(blocker_dead, "Blocker should have died from 3 damage");
+    }
+
+    /// CR 119.3 + CR 702.15b: A single lifelink source that deals combat damage to
+    /// several recipients at once (here: lethal to a blocker plus trample to the
+    /// player) gains life ONCE for the total — so a "whenever you gain life"
+    /// trigger (e.g. Blech, Loafing Pest, issue #4366) fires once, not once per
+    /// damaged target. Regression: per-assignment life gain emitted one
+    /// `LifeChanged` per target, over-triggering such abilities.
+    #[test]
+    fn lifelink_one_source_many_targets_gains_life_once() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lifelinker", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        // One source, two simultaneous damage assignments (2 to blocker + 3 to player).
+        let assignments = vec![
+            (
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Object(blocker),
+                    amount: 2,
+                },
+            ),
+            (
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Player(PlayerId(1)),
+                    amount: 3,
+                },
+            ),
+        ];
+        let events = apply_combat_damage(&mut state, &assignments);
+
+        // Exactly one life-gain event for the controller — the whole point.
+        let gains: Vec<i32> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::LifeChanged { player_id, amount }
+                    if *player_id == PlayerId(0) && *amount > 0 =>
+                {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            gains,
+            vec![5],
+            "one lifelink source must gain life once for the batch total (2+3), \
+             not once per damaged target"
+        );
+        // And the total life gained is still correct (20 + 5).
+        assert_eq!(state.players[0].life, 25);
     }
 
     #[test]
@@ -3469,5 +3618,40 @@ mod tests {
             "blocker took 5 (>= lethal) and should have died"
         );
         assert_eq!(state.players[1].life, 20);
+    }
+
+    /// CR 701.19a + CR 510.2: Regeneration shield installed before combat
+    /// damage must survive lethal damage from the combat-damage SBA pass.
+    #[test]
+    fn regeneration_shield_survives_combat_damage_resolution() {
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lotleth Troll", 2, 1);
+        let blocker = create_creature(&mut state, PlayerId(1), "Big Blocker", 5, 5);
+        {
+            let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate".to_string())
+                .regeneration_shield();
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .replacement_definitions
+                .push(shield);
+        }
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&attacker].zone,
+            Zone::Battlefield,
+            "attacker with regen shield must survive lethal combat damage"
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
     }
 }

@@ -4,6 +4,16 @@
     "message": "Seu oponente será declarado o vencedor.",
     "concede": "Conceder"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} solicita um retrocesso",
+    "requestedMessage": "Voltar ao momento exatamente antes da última ação dele?",
+    "ownTitle": "Retrocesso solicitado",
+    "ownMessage": "Aguardando a aprovação dos outros jogadores para retroceder antes da sua última ação.",
+    "approve": "Aprovar",
+    "decline": "Recusar",
+    "cancel": "Cancelar solicitação",
+    "declinedToast": "Solicitação de retrocesso recusada"
+  },
   "connectionDot": {
     "connected": "Conectado",
     "connecting": "Conectando...",

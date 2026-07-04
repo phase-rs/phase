@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import {
   sideboardPolicyForFormat,
   type SideboardPolicy,
@@ -10,12 +10,13 @@ import {
 /**
  * Map the lowercase deck-builder format string (e.g. "standard", "commander")
  * to the engine's `GameFormat` PascalCase identifier. Derived from the
- * engine-authored FORMAT_REGISTRY so adding a format is automatic here.
+ * engine-authored deck-construction formats so adding a deck format is
+ * automatic here.
  */
 function mapToEngineFormat(format: string | undefined): GameFormat | null {
   if (!format) return null;
   const lower = format.toLowerCase();
-  const match = FORMAT_REGISTRY.find((m) => m.format.toLowerCase() === lower);
+  const match = DECK_CONSTRUCTION_FORMATS.find((m) => m.format.toLowerCase() === lower);
   return match?.format ?? null;
 }
 

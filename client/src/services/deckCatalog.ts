@@ -6,7 +6,7 @@ import {
   feedDeckToParsedDeck,
 } from "./feedService";
 import { FEED_REGISTRY } from "../data/feedRegistry";
-import { FORMAT_REGISTRY } from "../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../data/formatRegistry";
 import {
   listSavedDeckNames,
   loadDeckOrigins,
@@ -50,7 +50,7 @@ export interface DeckCatalogOptions {
 }
 
 const FORMAT_BY_SOURCE_KEY = new Map(
-  FORMAT_REGISTRY.flatMap((m) => [
+  DECK_CONSTRUCTION_FORMATS.flatMap((m) => [
     [m.format.toLowerCase(), m.format],
     [m.label.toLowerCase(), m.format],
     [m.short_label.toLowerCase(), m.format],

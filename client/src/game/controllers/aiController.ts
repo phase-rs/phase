@@ -2,7 +2,8 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
@@ -207,8 +208,10 @@ export function createAIController(config: AIControllerConfig): AIController {
       // Resolve a guaranteed-legal escape action. A hardcoded empty combat
       // declaration is NOT always legal — CR 508.1d / CR 701.15b require
       // goaded / "attacks if able" creatures to be declared. Instead, ask the
-      // engine for its legal-action list (the single authority for legality)
-      // and pick the first entry matching the current WaitingFor.
+      // engine for its legal-action list (the single authority for legality).
+      // Non-priority legal actions are already scoped to the current
+      // WaitingFor; Priority fallback keeps preferring PassPriority as the
+      // least invasive escape.
       // CancelCast escapes a stuck casting flow; PassPriority is the final
       // fallthrough — never dispatch `undefined`.
       const fallbackPromise: Promise<GameAction> = state.has_pending_cast
@@ -217,8 +220,13 @@ export function createAIController(config: AIControllerConfig): AIController {
             const { adapter } = useGameStore.getState();
             if (!adapter) return Promise.resolve<GameAction>({ type: "PassPriority" });
             return adapter.getLegalActions().then((result) => {
-              const match = result.actions.find((a) => a.type === waitingFor.type);
-              return match ?? { type: "PassPriority" };
+              if (waitingFor.type === "Priority") {
+                return (
+                  result.actions.find((a) => a.type === "PassPriority") ??
+                  { type: "PassPriority" }
+                );
+              }
+              return result.actions[0] ?? { type: "PassPriority" };
             });
           })();
       // Dispatch the fallback as the authorized submitter being unstuck —
@@ -277,7 +285,13 @@ export function createAIController(config: AIControllerConfig): AIController {
       waitingForType === "MulliganDecision" ||
       waitingForType === "MulliganBottomCards" ||
       waitingForType === "OpeningHandBottomCards";
-    const delay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
+    // Collapse the humanization delay under stack pressure. The depth-based skip
+    // gate (checkAndSchedule) only fires at Elevated depth, which a 0↔1 trigger
+    // loop never reaches — so without this the AI pays a full 500–900ms beat on
+    // every oscillation cycle. Rate-driven pressure shrinks it (Rapid → ~75ms).
+    const stackLen = gameState?.stack?.length ?? 0;
+    const baseDelay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
+    const delay = Math.round(baseDelay * pressureMultiplier(effectiveStackPressure(stackLen)));
     timeoutId = setTimeout(async () => {
       timeoutId = null;
       if (!active) {

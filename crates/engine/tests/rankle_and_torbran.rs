@@ -23,7 +23,7 @@ use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
+    QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -35,7 +35,9 @@ use engine::types::zones::Zone;
 /// The replacement the parser emits for Rankle and Torbran's third mode.
 fn torbran_replacement() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .damage_modification(DamageModification::Plus { value: 2 })
+        .damage_modification(DamageModification::Plus {
+            value: QuantityExpr::Fixed { value: 2 },
+        })
         .damage_target_filter(DamageTargetFilter::Player {
             player: DamageTargetPlayerScope::Any,
         })

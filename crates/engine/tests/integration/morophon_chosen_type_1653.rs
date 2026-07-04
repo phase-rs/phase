@@ -111,7 +111,7 @@ fn morophon_creature_type_choice_marks_layers_dirty() {
 
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
         player: P0,
-        choice_type: ChoiceType::CreatureType,
+        choice_type: ChoiceType::creature_type(),
         options: vec!["Human".to_string(), "Elf".to_string()],
         source_id: Some(morophon),
     };

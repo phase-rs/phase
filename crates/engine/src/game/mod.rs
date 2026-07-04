@@ -1,6 +1,8 @@
+pub mod ability_scan;
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
+pub mod augment;
 pub mod bending;
 pub mod blitz;
 // Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
@@ -9,6 +11,7 @@ pub mod blitz;
 #[path = "blitz_tests.rs"]
 mod blitz_tests;
 pub mod bracket_estimate;
+pub mod card_subset;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;
@@ -23,6 +26,10 @@ pub mod combat_damage;
 pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
+pub mod contraptions;
+#[cfg(test)]
+#[path = "contraptions_tests.rs"]
+mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;
@@ -48,6 +55,7 @@ pub(crate) mod engine_payment_choices;
 pub(crate) mod engine_priority;
 pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
+pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
 pub(crate) mod exile_links;
 pub mod filter;
@@ -72,9 +80,15 @@ pub mod meld;
 // Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
 // so `meld.rs` stays implementation-only).
 #[cfg(test)]
+#[path = "marksman_tests.rs"]
+mod marksman_tests;
+#[cfg(test)]
 #[path = "meld_tests.rs"]
 mod meld_tests;
 pub mod merge;
+#[cfg(test)]
+#[path = "omnath_tests.rs"]
+mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
@@ -97,6 +111,9 @@ pub mod perf_counters;
 #[cfg(test)]
 #[path = "archenemy_tests.rs"]
 mod archenemy_tests;
+#[cfg(test)]
+#[path = "augment_tests.rs"]
+mod augment_tests;
 pub mod phasing;
 pub mod planechase;
 // Tests for `planechase` live in a sibling file (declared here, not in
@@ -125,8 +142,13 @@ mod splice_tests;
 pub mod stack;
 pub mod static_abilities;
 pub mod static_source_index;
+pub mod stickers;
+#[cfg(test)]
+#[path = "stickers_tests.rs"]
+mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
+pub mod topology;
 pub mod transform;
 pub mod trigger_index;
 pub(crate) mod trigger_matchers;
@@ -144,6 +166,13 @@ pub use bracket_estimate::{
     estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
     BracketViolation, CommanderBracketTier,
 };
+// Plumbing: read-only re-export of the X-affordability authority
+// (`max_x_value`) so the `phase-ai` consumer crate can price "the only legal X
+// is 0" without duplicating the cost machinery. `casting_costs` is otherwise
+// `pub(crate)`; this exposes exactly that one function from it. The governing
+// rule annotation lives on the function definition in `casting_costs.rs`, not
+// on this visibility re-export.
+pub use casting_costs::max_x_value;
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
@@ -151,21 +180,25 @@ pub use deck_loading::{
 pub use deck_validation::{
     can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    validate_deck_for_format, validate_name_deck_for_format, CompatibilityCheck,
-    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
+    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
+    UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,
     start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::route_debug_create_to_battlefield;
+pub use engine_resolve_batch::{
+    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+};
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
 pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
 pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;
 pub use triggers::process_triggers;
-pub use visibility::filter_state_for_viewer;
+pub use visibility::{filter_events_for_viewer, filter_state_for_viewer};
 pub use zones::{
     add_to_zone, create_object, move_to_library_at_index, move_to_library_position, move_to_zone,
     remove_from_zone,

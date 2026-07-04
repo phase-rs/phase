@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -14,11 +15,11 @@ import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multip
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
-import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
+import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -34,6 +35,7 @@ const EMPTY_OBJECT_IDS: readonly ObjectId[] = [];
 
 interface OpponentHudProps {
   opponentName?: string | null;
+  splitOverview?: boolean;
   /**
    * P2P host-only callback to kick a player. When provided AND the game is
    * 3+ players, an inline kick button appears on each opponent tab. The
@@ -42,7 +44,11 @@ interface OpponentHudProps {
   onKickPlayer?: (playerId: PlayerId) => void;
 }
 
-export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
+export function OpponentHud({
+  opponentName,
+  splitOverview = false,
+  onKickPlayer,
+}: OpponentHudProps) {
   const { t } = useTranslation("game");
   const [kickTarget, setKickTarget] = useState<PlayerId | null>(null);
   const playerId = usePerspectivePlayerId();
@@ -66,21 +72,24 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   }, [gameState, playerId]);
 
   const eliminated = gameState?.eliminated_players ?? [];
-  const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
+  const liveOpponents = useMemo(() => getOpponentIds(gameState, playerId), [gameState, playerId]);
   // Routed through `isOneOnOne` so this can't drift from GameBoard's
   // layout decision — the bug that motivated the helper was exactly
   // those two derivations disagreeing after an elimination. The
   // `gameState != null` guard preserves the original null-state default
   // (treat as 1v1) so the pre-game placeholder renders the pill, not an
-  // empty rail.
-  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
+  // empty rail. When only one opponent remains in a multi-seat game
+  // (Commander pod → last rival), collapse back to the single pill so
+  // eliminated tabs don't keep stealing focus/layout (#1324).
+  const isMultiplayer =
+    gameState != null && !isOneOnOne(gameState) && liveOpponents.length > 1;
 
   // The `OpponentTab` row renders with a default-focused opponent even when
   // `focusedOpponent` is null (it falls back to the first live opponent).
   // The cross-board glimpse must exclude the *visually* focused opponent,
   // not just the explicit one — otherwise the default-focused tab lights
   // up a redundant badge at game start.
-  const effectiveFocused = focusedOpponent ?? liveOpponents[0] ?? null;
+  const effectiveFocused = resolveFocusedOpponent(focusedOpponent, liveOpponents);
   const activeOpponentId = gameState?.active_player;
   const activeFollowedOpponent =
     activeOpponentId != null && liveOpponents.includes(activeOpponentId)
@@ -119,6 +128,16 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     }
     return map;
   }, [attackers, objectsMap, playerId, effectiveFocused]);
+
+  useEffect(() => {
+    if (
+      focusedOpponent != null
+      && liveOpponents.length > 0
+      && !liveOpponents.includes(focusedOpponent)
+    ) {
+      setFocusedOpponent(liveOpponents[0] ?? null);
+    }
+  }, [focusedOpponent, liveOpponents, setFocusedOpponent]);
 
   useEffect(() => {
     const activeOpponentId = gameState?.active_player;
@@ -226,8 +245,12 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
+  // Seat the game is currently waiting on (semantic actor). Drives the
+  // decision marker on opponent plates, distinct from the turn ring.
+  const { waitingSeatId } = useTurnStatus();
 
-  const primaryOpponentId = allOpponents[0] ?? (playerId === 0 ? 1 : 0);
+  const primaryOpponentId =
+    liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
   const primaryOpponentAvatarUrl = useMultiplayerStore(
     (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
   );
@@ -276,6 +299,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
           playerId={opponentId}
+          hasPendingDecision={waitingSeatId === opponentId}
           density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={
@@ -301,6 +325,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
+              {[...new Set(opponentDesignations.unboundedResources.map((u) => familyOf(u.axis)))].map(
+                (family) => (
+                  <UnboundedBadge key={family} family={family} />
+                ),
+              )}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
@@ -316,9 +345,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   }
 
   // Multiplayer: tabbed opponent selector
-  const focusedId = focusedOpponent ?? liveOpponents[0];
+  const focusedId = effectiveFocused;
   const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
-  const effectiveCompact = forceCompactHud || opponentHudDensity === "compact";
+  const effectiveCompact = splitOverview || forceCompactHud || opponentHudDensity === "compact";
 
   return (
     // Single-row opponent rail. Tabs flex to share the available width — they
@@ -331,7 +360,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     // overlay portaled to document.body: this rail can sit inside a Flex Layout
     // DraggableWidget whose transform would otherwise become the containing
     // block for the dialog's `fixed` positioning and clip it to the rail box.
-    <div className="flex w-full items-center justify-center gap-1.5 px-2 py-1">
+    <div className={`flex w-full items-center justify-center ${splitOverview ? "gap-1 px-1 py-0.5" : "gap-1.5 px-2 py-1"}`}>
       {allOpponents.map((opId) => (
         <OpponentTab
           key={opId}
@@ -344,6 +373,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           legalObjectTargetIds={legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS}
           showMana={focusedId === opId}
           compact={effectiveCompact}
+          splitOverview={splitOverview}
           incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS}
           onSelectFocus={() => handleSelectFocus(opId)}
           onTargetPlayer={() => handlePlayerTarget(opId)}
@@ -354,7 +384,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           }
         />
       ))}
-      {!forceCompactHud && (
+      {!forceCompactHud && !splitOverview && (
         <DensityToggle
           compact={opponentHudDensity === "compact"}
           onToggle={() =>
@@ -365,6 +395,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       <FollowActiveToggle
         enabled={followActiveOpponent}
         onToggle={handleToggleFollowActiveOpponent}
+        compact={splitOverview}
       />
       {createPortal(
         <KickConfirmDialog
@@ -385,9 +416,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 function FollowActiveToggle({
   enabled,
   onToggle,
+  compact = false,
 }: {
   enabled: boolean;
   onToggle: () => void;
+  compact?: boolean;
 }) {
   const { t } = useTranslation("game");
   const tooltipId = useId();
@@ -402,7 +435,7 @@ function FollowActiveToggle({
       aria-describedby={tooltipId}
       aria-pressed={enabled}
       onClick={onToggle}
-      className={`group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200 ${
+      className={`group relative flex shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200 ${compact ? "h-7 w-7" : "h-9 w-9"} ${
         enabled
           ? "border-amber-300/45 bg-amber-500/18 text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.24)]"
           : "border-white/10 bg-slate-950/62 text-slate-300 hover:border-white/20 hover:text-white"
@@ -410,7 +443,7 @@ function FollowActiveToggle({
     >
       <span
         aria-hidden
-        className={`relative flex h-[18px] w-[18px] items-center justify-center rounded-full border ${
+        className={`relative flex items-center justify-center rounded-full border ${compact ? "h-3.5 w-3.5" : "h-[18px] w-[18px]"} ${
           enabled ? "border-amber-200" : "border-current"
         }`}
       >
@@ -508,6 +541,7 @@ interface OpponentTabProps {
   legalObjectTargetIds: readonly ObjectId[];
   showMana: boolean;
   compact: boolean;
+  splitOverview: boolean;
   /** Attacker object ids this opponent has declared against me / my stuff.
    *  When non-empty, the tab renders a red ⚔×N badge and a hover popover
    *  with mini card images so the defender can assess incoming threats
@@ -522,11 +556,28 @@ interface OpponentTabProps {
   onKick?: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, compact, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
+function OpponentTab({
+  playerId,
+  isFocused,
+  isEliminated,
+  isTeammate: ally,
+  isValidTarget,
+  isTargeting,
+  legalObjectTargetIds,
+  showMana,
+  compact,
+  splitOverview,
+  incomingAttackerIds,
+  onSelectFocus,
+  onTargetPlayer,
+  onKick,
+}: OpponentTabProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
+  const { waitingSeatId } = useTurnStatus();
+  const isWaitingOnThem = waitingSeatId === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
   const isUnderAttack = gameState?.combat?.attackers.some(
     (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
@@ -583,7 +634,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const shouldReduceMotion = useReducedMotion();
 
   const counts = useMemo(() => {
-    if (!gameState) return { creatures: 0, lands: 0, other: 0 };
+    if (!gameState || compact) return { creatures: 0, lands: 0, other: 0 };
     const objects = gameState.battlefield
       .map((id) => gameState.objects[id])
       .filter(Boolean)
@@ -594,7 +645,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       lands: partition.lands.length,
       other: partition.support.length + partition.planeswalkers.length + partition.other.length,
     };
-  }, [gameState, playerId]);
+  }, [compact, gameState, playerId]);
 
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
@@ -681,6 +732,9 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       ? t("opponentHud.clickToViewThenTarget", { name: label })
       : t("opponentHud.clickToViewBoard", { name: label });
   const onTabClick = commitReady ? onTargetPlayer : onSelectFocus;
+  const liveSizeClass = splitOverview
+    ? "max-w-[12rem] min-w-[4.75rem] flex-1"
+    : "max-w-[16rem] min-w-[5.5rem] flex-1";
 
   // Shared pieces so the comfortable (two-row) and compact (single-row) layouts
   // render identical content without duplication — only their arrangement differs.
@@ -695,6 +749,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   const statusCluster = (
     <div className="flex shrink-0 items-center gap-1">
+      {isWaitingOnThem && (
+        <span
+          aria-hidden
+          title={t("status.waitingFor", { player: label })}
+          className="h-1.5 w-1.5 rounded-full bg-amber-300 shadow-[0_0_6px_1px_rgba(251,191,36,0.7)] animate-pulse"
+        />
+      )}
       {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />}
       <span className={`flex items-center gap-0.5 text-xs font-semibold tabular-nums @min-[10rem]:text-sm ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
@@ -720,6 +781,9 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
       {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+      {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map((family) => (
+        <UnboundedBadge key={family} family={family} />
+      ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       {onKick && !isEliminated && (
         // Stop propagation so clicking the kick affordance doesn't also fire
@@ -775,7 +839,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       // ~14rem (~227px at the default 16px root, verified in-browser). Cap at
       // 16rem gives headroom; the reveal is gated at 15rem so a tab too narrow
       // to fit the breakdown collapses to the HAND-only tier (tap to focus).
-      className={`@container relative flex min-w-0 max-w-[16rem] flex-1 items-center gap-1.5 rounded-lg border px-1.5 backdrop-blur-xl transition-all duration-200 ${compact ? "py-0.5" : "py-1"} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`@container relative flex min-w-0 items-center rounded-lg border backdrop-blur-xl transition-all duration-200 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div

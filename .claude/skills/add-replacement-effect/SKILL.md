@@ -148,9 +148,14 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 
 ### Phase 5 — Tests
 
-- [ ] Parser test: Oracle text → correct `ReplacementDefinition`
-- [ ] Pipeline test: proposed event → replacement applies → modified event
+- [ ] Parser test: Oracle text → correct `ReplacementDefinition` (verbatim Oracle text, never a paraphrase)
+- [ ] Pipeline test: proposed event → replacement applies → modified event — with an assertion that FAILS if the change is reverted; any "replacement does NOT apply" assertion needs a positive reach-guard proving the card parsed (see `/card-test` foot-gun 6)
 - [ ] Engine flow test: full game action → replacement → zone change → post-effect
+- [ ] Provenance test: identify the selected replacement identity carried through `ReplacementId`, `PendingReplacement`, `ProposedEvent::applied`, or the relevant pending/pre-zone-change state. Assert the selected replacement's execute/decline/rider/effect is the one consumed.
+- [ ] Candidate-count tests when applicable: 0 candidates, exactly 1 candidate, and 2+ candidates where CR 616.1 order choice matters.
+- [ ] Multi-replacement test: with two matching replacements, selecting one must not apply the other's execute/decline/rider/effect, and the applied set must prevent reapplication of exactly the selected replacement.
+- [ ] Optional replacement test: accept and decline through the actual `GameAction::ChooseReplacement` / `engine_replacement.rs` path, not only direct `replacement.rs` helper calls.
+- [ ] Serialized-state test: if `ProposedEvent`, pending replacement state, `WaitingFor`, `GameAction`, or serialized replacement fields change, add `#[serde(default)]` or an explicit migration plus a fixture/load test for existing repo-owned serialized data.
 - [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
@@ -176,6 +181,8 @@ For replacements that need interactive choice before zone completion:
 
 This ensures layers never evaluate the permanent in an undefined state.
 
+Interactive replacement tests must enter the waiting state from the real zone-change / cast / play path, then resume through the real `GameAction`. Assert the permanent never exists on the battlefield without the chosen characteristic or effect state; a manually constructed pending replacement is not enough for that invariant.
+
 ### Example: "As ~ enters, choose a basic land type"
 
 Cards: Multiversal Passage, Convincing Mirage
@@ -195,6 +202,7 @@ The `ProposedEvent::ZoneChange` can carry additional data (or the choice can be 
 | Running interactive choice post-zone-change | Permanent on battlefield without chosen characteristic | Use pre-zone-change pattern (see above) |
 | Not handling both accept and decline paths | Optional replacement silently no-ops on one path | Test both branches |
 | Missing `#[serde(default)]` on new ProposedEvent fields | Deserialization breaks for existing card data | Always default new optional fields |
+| Rescanning replacement candidates after player choice | Multiple matching replacements can apply the wrong execute/decline/rider/effect | Consume the stored `PendingReplacement` / `ReplacementId` identity selected by the player |
 | Handler returns `Modified` but doesn't modify anything | Event processed as-is but marked as "replaced" | Either modify the event or return the original unchanged |
 
 ---

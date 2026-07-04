@@ -346,3 +346,47 @@ fn abigale_strips_non_keyword_abilities_from_target() {
         target.keywords,
     );
 }
+
+#[test]
+fn abigale_strips_death_shadow_life_based_cda() {
+    // CR 613.1f: "Loses all abilities" must suppress characteristic-defining
+    // statics sourced from the affected object itself, not just keywords and
+    // activated abilities (issue #1321).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let abigale_oracle = "Flying, first strike, lifelink\n\
+        When Abigale enters, up to one other target creature loses all abilities. \
+        Put a flying counter, a first strike counter, and a lifelink counter on that creature.";
+    let abigale_builder =
+        scenario.add_creature_to_hand_from_oracle(P0, "Abigale", 1, 1, abigale_oracle);
+    let abigale_id = abigale_builder.id();
+
+    let death_shadow_oracle =
+        "This creature's power and toughness are each equal to 13 minus your life total.";
+    let death_shadow_id = scenario
+        .add_creature(P1, "Death's Shadow", 13, 13)
+        .from_oracle_text(death_shadow_oracle)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P1.0 as usize].life = 10;
+
+    let outcome = runner
+        .cast(abigale_id)
+        .target_object(death_shadow_id)
+        .resolve();
+
+    let shadow = outcome
+        .state()
+        .objects
+        .get(&death_shadow_id)
+        .expect("Death's Shadow present");
+    assert_eq!(
+        (shadow.power, shadow.toughness),
+        (Some(13), Some(13)),
+        "After losing all abilities, Death's Shadow must revert to printed 13/13, not 3/3 at 10 life; got {:?}/{:?}",
+        shadow.power,
+        shadow.toughness,
+    );
+}

@@ -89,6 +89,7 @@ pub fn convert_as_enters(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -170,6 +171,7 @@ pub fn convert_replace_would_enter(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -234,6 +236,7 @@ pub fn convert_replace_would_deal_damage(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -607,6 +610,7 @@ pub fn convert_replace_would_draw(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: valid_player.clone(),
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -707,7 +711,9 @@ pub fn convert_replace_would_put_into_graveyard(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -729,6 +735,7 @@ pub fn convert_replace_would_put_into_graveyard(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -954,7 +961,9 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -976,6 +985,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1027,11 +1037,11 @@ fn graveyard_action_to_destination(
 /// - `Plus(WouldPutCounters_NumberOfCounters, Integer(n))` →
 ///   `QuantityModification::Plus { value: n }`
 /// - `Twice(WouldPutCounters_NumberOfCounters)` →
-///   `QuantityModification::Double`
+///   `QuantityModification::DOUBLE` (`Times { factor: 2 }`)
 ///
-/// Other quantity expressions (multipliers other than 2, references to
-/// other game state) strict-fail until `QuantityModification` grows
-/// additional axes.
+/// Other quantity expressions (multipliers other than 2 — the engine's
+/// `Times { factor }` axis exists but no mtgish counter idiom emits a
+/// non-2 multiplier — or references to other game state) strict-fail.
 pub fn convert_replace_would_put_counters(
     event: &ReplacableEventWouldPutCounters,
     actions: &[ReplacementActionWouldPutCounters],
@@ -1065,6 +1075,7 @@ pub fn convert_replace_would_put_counters(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1172,7 +1183,7 @@ fn game_number_to_modification(
     idiom: &'static str,
 ) -> ConvResult<QuantityModification> {
     match g {
-        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::Double),
+        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::DOUBLE),
         GameNumber::Plus(a, b) if is_self_ref(a) || is_self_ref(b) => {
             let n_node = if is_self_ref(a) { &**b } else { &**a };
             match n_node {
@@ -1216,8 +1227,8 @@ fn game_number_to_modification(
 ///
 /// - `GainLife(Plus(LifeAmount, Integer(N)))` →
 ///   `QuantityModification::Plus { value: N }` (Hardened-Heart pattern).
-/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::Double`
-///   (Boon Reflection / Rhox Faithmender).
+/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::DOUBLE`
+///   (`Times { factor: 2 }`; Boon Reflection / Rhox Faithmender).
 ///
 /// Other actions (DrawNumberCards, GainNoLifeInstead, LoseLife,
 /// PlayerAction wrappers) strict-fail.
@@ -1248,6 +1259,7 @@ pub fn convert_replace_would_gain_life(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: valid_player.clone(),
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1368,6 +1380,7 @@ fn try_build_may_cost_pair(
         token_owner_scope: None,
         token_owner_redirect: None,
         valid_player: None,
+        consume_on_apply: false,
         is_consumed: false,
         redirect_target: None,
         mana_modification: None,
@@ -1770,7 +1783,7 @@ fn build_replacement_exec(
         // the native parser shape in `oracle_replacement.rs`
         // (`parse_as_enters_choose`).
         A::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -1785,7 +1798,7 @@ fn build_replacement_exec(
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -1881,21 +1894,16 @@ fn build_replacement_exec(
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
-        A::ChooseACardtypeFromList(opts) => {
-            if opts.is_empty() {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "ChoiceType::Labeled",
-                    needed_variant: "ChooseACardtypeFromList with empty option list".into(),
-                });
-            }
-            Effect::Choose {
-                choice_type: ChoiceType::Labeled {
-                    options: opts.iter().map(|c| format!("{c:?}")).collect(),
-                },
-                persist: true,
-                selection: engine::types::ability::TargetSelectionMode::Chosen,
-            }
-        }
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // artifact, enchantment, instant, sorcery, or planeswalker", Archon
+        // of Valor's Reach) is a narrowed `ChoiceType::CardType`, not a
+        // free-form `Labeled` choice — see `filter::restricted_card_type_choice`
+        // (shared with the spell-action sibling in `action.rs`) for why.
+        A::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: crate::convert::filter::restricted_card_type_choice(opts)?,
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
         A::ChooseWord(opts) => {
             if opts.is_empty() {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -2730,7 +2738,7 @@ fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rewrite_variable_x_to_cost_x_paid(inner);
             }
@@ -3279,6 +3287,40 @@ mod tests {
                 } if *target == TargetFilter::SelfRef
             )
         ));
+    }
+
+    // Issue #4201 — Archon of Valor's Reach's "choose artifact, enchantment,
+    // instant, sorcery, or planeswalker" ETB action must lower to a
+    // restricted `ChoiceType::CardType` (excluding Creature and Land), not a
+    // free-form `Labeled` choice, so the companion "can't cast spells of the
+    // chosen type" prohibition (`FilterProp::IsChosenCardType`) can bind.
+    #[test]
+    fn choose_a_cardtype_from_list_lowers_to_restricted_card_type_choice() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::ChooseACardtypeFromList(vec![
+                CardType::Artifact,
+                CardType::Enchantment,
+                CardType::Instant,
+                CardType::Sorcery,
+                CardType::Planeswalker,
+            ])],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        let exec = defs[0].execute.as_ref().expect("execute must be set");
+        match exec.effect.as_ref() {
+            Effect::Choose {
+                choice_type: engine::types::ability::ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(*persist);
+                assert_eq!(excluded, &vec![CoreType::Creature, CoreType::Land]);
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
     }
 
     #[test]

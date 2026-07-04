@@ -7,7 +7,7 @@
 //!
 //! The synthesized Backup ETB ability (`synthesize_backup`) is stamped with
 //! `AbilityTag::Backup`; the trigger's `valid_source` is
-//! `TargetFilter::StackAbility { tag: Some(AbilityTag::Backup) }`, honored at
+//! `TargetFilter::StackAbility { tag: Some(AbilityTag::Backup), kind: None }`, honored at
 //! runtime by `stack_ability_matches_filter` (CR 113.7a — the ability exists on
 //! the stack independently of its source, so the tag is read off the resolved
 //! ability). The backup ETB targets `target creature` (CR 115.1d), so locking

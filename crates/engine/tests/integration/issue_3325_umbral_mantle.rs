@@ -8,6 +8,7 @@ use engine::ai_support::legal_actions_full;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::derived::derive_display_state;
 use engine::game::effects::attach::attach_to;
+use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
@@ -159,6 +160,57 @@ fn umbral_mantle_grants_untap_pump_ability_to_equipped_creature() {
             })
         }),
         "legal_actions_by_object must surface the granted Umbral Mantle ability"
+    );
+}
+
+#[test]
+fn umbral_mantle_equip_zero_via_activated_ability() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brigid = scenario
+        .add_creature_from_oracle(P0, "Brigid, Doun's Mind", 2, 3, BRIGID)
+        .id();
+    let mantle = scenario
+        .add_creature(P0, "Umbral Mantle", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(UMBRAL_MANTLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let equip_idx = runner.state().objects[&mantle]
+        .abilities
+        .iter()
+        .position(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.contains("Equip"))
+        })
+        .expect("Umbral Mantle equip ability");
+
+    runner
+        .activate(mantle, equip_idx)
+        .target_object(brigid)
+        .resolve();
+
+    let mantle_obj = runner.state().objects.get(&mantle).unwrap();
+    assert!(
+        matches!(
+            mantle_obj.attached_to,
+            Some(AttachTarget::Object(id)) if id == brigid
+        ),
+        "Equip {{0}} must attach Umbral Mantle to Brigid, got {:?}",
+        mantle_obj.attached_to
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&brigid)
+            .unwrap()
+            .attachments
+            .contains(&mantle),
+        "Brigid must list Umbral Mantle as an attachment"
     );
 }
 

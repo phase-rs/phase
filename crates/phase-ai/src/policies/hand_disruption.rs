@@ -289,6 +289,7 @@ mod tests {
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
             ),
         );
@@ -321,6 +322,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert!(HandDisruptionPolicy.score(&ctx) < 0.0);
@@ -355,6 +357,7 @@ mod tests {
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -424,6 +427,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -470,6 +474,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };
@@ -551,6 +556,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -593,6 +599,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };
@@ -641,6 +648,7 @@ mod tests {
                 count: None,
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
+                reveal: true,
             },
             Vec::new(),
             peek,
@@ -683,6 +691,7 @@ mod tests {
                 config: &config,
                 context: &context,
                 cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
             };
             HandDisruptionPolicy.score(&ctx)
         };
@@ -703,6 +712,7 @@ mod tests {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         };
         assert!(reveal_hand_matches_chosen_player_target(
             &state,
@@ -723,6 +733,7 @@ mod tests {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         };
         assert!(!reveal_hand_matches_chosen_player_target(
             &state,

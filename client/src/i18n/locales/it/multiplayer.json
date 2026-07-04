@@ -4,6 +4,16 @@
     "message": "Il tuo avversario sarà dichiarato vincitore.",
     "concede": "Concedi"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} richiede un ripristino",
+    "requestedMessage": "Tornare al momento subito prima della sua ultima azione?",
+    "ownTitle": "Ripristino richiesto",
+    "ownMessage": "In attesa che gli altri giocatori approvino il ripristino a prima della tua ultima azione.",
+    "approve": "Approva",
+    "decline": "Rifiuta",
+    "cancel": "Annulla richiesta",
+    "declinedToast": "Richiesta di ripristino rifiutata"
+  },
   "connectionDot": {
     "connected": "Connesso",
     "connecting": "Connessione...",

@@ -28,6 +28,12 @@
     "updateIssue": "Update-Problem",
     "updated": "aktualisiert"
   },
+  "comboDetector": {
+    "label": "Combo-Detektor",
+    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
+    "on": "An",
+    "off": "Aus"
+  },
   "gameMenu": {
     "menu": "Spielmenü",
     "sandboxTools": "Sandbox-Werkzeuge",
@@ -37,6 +43,7 @@
     "helpShortcuts": "Hilfe & Tastenkürzel",
     "showAiHand": "KI-Hand anzeigen",
     "hideAiHand": "KI-Hand verbergen",
+    "requestTakeback": "Rücknahme beantragen",
     "concede": "Aufgeben",
     "backToDraft": "Zurück zum Draft",
     "mainMenu": "Hauptmenü",
@@ -55,6 +62,7 @@
     "seatPlayer": "Spieler",
     "seatOpen": "Frei",
     "seatAi": "KI ({{difficulty}})",
+    "teamLabel": "Team {{number}}",
     "waiting": "Warten…",
     "seatLabel": "Platz {{id}}",
     "addAi": "KI hinzufügen",

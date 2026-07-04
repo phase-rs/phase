@@ -122,6 +122,7 @@ mod tests {
             sub_link: SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 

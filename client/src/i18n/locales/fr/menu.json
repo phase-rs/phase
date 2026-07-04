@@ -156,6 +156,7 @@
     "errorInvalidUrl": "Saisissez une URL de deck Moxfield ou Archidekt valide.",
     "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
     "errorGeneric": "Échec de l'import du deck.",
+    "errorNoCards": "Aucune carte trouvée. Collez un deck au format MTGA ou .dck.",
     "fileSupports": "Prend en charge les formats .dck, .dec, .txt et MTGA",
     "chooseFile": "Choisir un fichier",
     "importedSuccessTitle": "Deck importé",
@@ -173,7 +174,9 @@
     "totalCount": "· {{count}} au total",
     "searchPlaceholder": "Rechercher par nom, code d'extension ou type…",
     "allTypes": "Tous ({{count}})",
+    "typeFilter": "Type de deck",
     "loadingCatalog": "Chargement du catalogue de decks…",
+    "loadFailed": "Impossible de charger le catalogue de decks préconstruits. Vérifiez votre connexion et réessayez.",
     "noMatch": "Aucun deck ne correspond.",
     "selectDeck": "Sélectionner {{name}}",
     "cardCount_one": "{{count}} carte",
@@ -197,7 +200,13 @@
     "unknown": "Inconnues {{count}}",
     "unknownCardsTitle": "Cartes inconnues :\n{{cards}}",
     "unsupportedTitle": "Non prises en charge ({{unique}} uniques, {{copies}} copies) :\n{{cards}}",
-    "setIconAlt": "Icône d'extension {{code}}"
+    "setIconAlt": "Icône d'extension {{code}}",
+    "actionsMenu": "Options du deck",
+    "star": "Mettre en favori",
+    "unstar": "Retirer des favoris",
+    "moveToFolder": "Déplacer vers un dossier",
+    "unfiled": "Non classé",
+    "newFolder": "Nouveau dossier…"
   },
   "myDecks": {
     "headingManage": "Mes decks",
@@ -252,7 +261,11 @@
     "loadMore": "Charger plus",
     "selectedDeck": "Deck sélectionné",
     "chooseDeckToContinue": "Choisissez un deck pour continuer",
-    "filterAll": "Tous"
+    "filterAll": "Tous",
+    "sectionStarred": "Favoris",
+    "sectionUnfiled": "Non classé",
+    "collapseAll": "Tout réduire",
+    "expandAll": "Tout développer"
   },
   "subscriptions": {
     "emptyTitle": "Aucun abonnement à un flux",
@@ -278,6 +291,44 @@
     "decks": "Decks",
     "alpha": "Alpha",
     "profile": "Profil",
-    "settings": "Réglages"
+    "settings": "Réglages",
+    "whatsNew": "Nouveautés"
+  },
+  "folder": {
+    "actionsMenu": "Options du dossier",
+    "rename": "Renommer",
+    "delete": "Supprimer",
+    "newFolder": "Nouveau dossier",
+    "newFolderPrompt": "Nom du dossier :",
+    "createButton": "Créer",
+    "renamePrompt": "Renommer le dossier :",
+    "deleteConfirm": "Supprimer le dossier « {{name}} » ? Les decks passeront dans Non classé.",
+    "emptyHint": "Ce dossier est vide.",
+    "unfiledEmptyHint": "Aucun deck non classé."
+  },
+  "whatsNew": {
+    "title": "Quoi de neuf",
+    "empty": "No updates yet — check back soon.",
+    "loading": "Loading updates…",
+    "failed": "Couldn't load updates. Check your connection and try again.",
+    "retry": "Try again",
+    "discordLink": "Read on Discord",
+    "unread": "New updates available",
+    "searchPlaceholder": "Search updates…",
+    "noResults": "No updates match your search.",
+    "pageStatus": "Page {{current}} of {{total}}",
+    "prevPage": "Previous",
+    "nextPage": "Next",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "tag": {
+      "new-cards": "New Cards",
+      "card-fixes": "Card Fixes",
+      "gameplay": "Gameplay",
+      "interface": "Interface",
+      "localization": "Localization",
+      "ai": "AI",
+      "multiplayer": "Multiplayer"
+    }
   }
 }

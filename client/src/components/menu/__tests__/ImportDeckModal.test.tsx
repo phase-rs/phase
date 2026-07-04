@@ -53,4 +53,26 @@ Deck
       STORAGE_KEY_PREFIX + "Lagomos Sacrifice Pauper Duel Commander",
     )).not.toBeNull();
   });
+
+  it("shows an error when pasted text contains no recognizable cards", async () => {
+    const onImported = vi.fn();
+    render(
+      <ImportDeckModal
+        open
+        onClose={vi.fn()}
+        onImported={onImported}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByPlaceholderText(/Paste deck list here/i),
+      "asdasd",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't find any cards/i)).toBeInTheDocument();
+    });
+    expect(onImported).not.toHaveBeenCalled();
+  });
 });

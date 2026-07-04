@@ -1,8 +1,9 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::tag;
-use nom::combinator::verify;
-use nom::sequence::terminated;
+use nom::bytes::complete::{tag, take_until};
+use nom::combinator::{opt, peek, value, verify};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::primitives as nom_primitives;
@@ -46,6 +47,41 @@ pub(crate) fn is_flashback_equal_mana_cost(lower: &str) -> bool {
     scan_contains(lower, "flashback cost")
         && scan_contains(lower, "equal to")
         && scan_contains(lower, "mana cost")
+}
+
+/// CR 702.34a + CR 601.2f: Split a compound flashback line that also carries a
+/// self-spell cost reduction (Visions of Ruin: "Flashback {8}{R}{R}. This spell
+/// costs {X} less to cast this way, …").
+pub(crate) fn split_flashback_trailing_self_spell_cost_reduction<'a>(
+    line: &'a str,
+    lower: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    const SPELL_MARKER: &str = ". this spell costs ";
+    const CARD_MARKER: &str = ". this card costs ";
+
+    if let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        preceded(
+            tag("flashback"),
+            value((), (take_until(SPELL_MARKER), tag(". "))),
+        )
+        .parse(input)
+    }) {
+        let flashback_len = line.len() - ". ".len() - reduction_text.len();
+        return Some((line[..flashback_len].trim(), reduction_text.trim()));
+    }
+
+    if let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        preceded(
+            tag("flashback"),
+            value((), (take_until(CARD_MARKER), tag(". "))),
+        )
+        .parse(input)
+    }) {
+        let flashback_len = line.len() - ". ".len() - reduction_text.len();
+        return Some((line[..flashback_len].trim(), reduction_text.trim()));
+    }
+
+    None
 }
 
 pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
@@ -198,12 +234,26 @@ fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
 }
 
 fn is_self_spell_cost_modification(lower: &str) -> bool {
+    if is_self_spell_cost_modification_body(lower) {
+        return true;
+    }
+    // CR 207.2c: an ability-word prefix ("Void — This spell costs {2} less to
+    // cast if …", Temporal Intervention) has no rules meaning — strip it so the
+    // self-cost-modification guard recognizes the body. Without this, the
+    // "this turn" inside the gating condition makes `should_defer_spell_to_effect`
+    // route the line to the effect parser, dropping the cost reduction.
+    super::oracle_modal::strip_ability_word(lower)
+        .as_deref()
+        .is_some_and(is_self_spell_cost_modification_body)
+}
+
+fn is_self_spell_cost_modification_body(body: &str) -> bool {
     let Ok((after_subject, _)) = alt((
         tag::<_, _, OracleError<'_>>("this spell costs "),
         tag("this card costs "),
         tag("~ costs "),
     ))
-    .parse(lower) else {
+    .parse(body) else {
         return false;
     };
     let Some((_, after_cost)) = parse_mana_symbols(after_subject) else {
@@ -241,6 +291,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't be copied",
     "can't be the target",
     "can't be sacrificed",
+    // CR 116.2b + CR 708.7: "Permanents your opponents control can't be turned
+    // face up during your turn" (Karlov Watchdog) — prohibition static. Routes
+    // to parse_static_line so it lowers to StaticMode::CantBeTurnedFaceUp.
+    "can't be turned face up",
     "doesn't untap",
     "don't untap",
     "attacks or blocks each combat if able",
@@ -276,8 +330,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // quote is required: scan_contains only matches at word starts, and "legend"
     // is glued to its opening quote ("legend) in the Oracle text.
     "\"legend rule\" doesn't apply",
-    "can block an additional",
-    "can block any number",
+    "play any number of lands",
     "play an additional land",
     "play two additional lands",
     "triggers an additional time",
@@ -385,6 +438,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "spells you cast ",
     "spells your opponents cast ",
     "you may look at the top card of your library",
+    // CR 708.5: "You may look at face-down creatures [you don't control | your
+    // opponents control] any time." (Found Footage) — top-level look-permission
+    // static. Routed to `parse_static_line` so it lowers to MayLookAtFaceDown.
+    "you may look at face-down creatures",
     "once during each of your turns, you may cast",
     // CR 601.3e: shorter sibling of "once during each of your turns, you may
     // cast" — Maralen, Fae Ascendant prints "Once each turn, you may cast a
@@ -419,6 +476,18 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
+        return true;
+    }
+
+    if super::oracle_static::is_extra_blockers_static_candidate(lower) {
+        return true;
+    }
+
+    // CR 509.1c: A printed permanent forced-block ("lure") static, "All creatures
+    // able to block <self/enchanted creature> do so" (Ochran Assassin, Breaker of
+    // Armies, Lure), routes to the static parser — NOT the one-shot spell form
+    // "… target creature this turn do so", which stays an effect.
+    if super::oracle_static::is_forced_block_static_candidate(lower) {
         return true;
     }
 
@@ -464,10 +533,21 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return false;
     }
-    if alt((
-        tag::<_, _, OracleError<'_>>("you may play"),
-        tag("you may cast"),
-    ))
+    // CR 604.2 + CR 601.2a: head-anchor the "you may play"/"you may cast"
+    // permission lead, allowing an optional leading once-per-turn frequency
+    // phrase ("Once during each of your turns, " / "Once each turn, ") to be
+    // stripped first. This classifies the disjunctive once-per-turn play/cast-
+    // from-zone permission (The Eighth Doctor, Serra Paragon) as static so it
+    // routes ahead of the Priority 8 "would" replacement fallback — the granted
+    // rider's "would leave the battlefield" text would otherwise misclassify the
+    // whole line as a replacement. Class-level anchor, not a per-card branch.
+    if preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("once during each of your turns, "),
+            tag("once each turn, "),
+        ))),
+        alt((tag("you may play"), tag("you may cast"))),
+    )
     .parse(lower)
     .is_ok()
         && (scan_contains(lower, "from your graveyard")
@@ -498,6 +578,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         lower,
         "play lands and cast spells from among cards exiled with",
     ) {
+        return true;
+    }
+    // CR 117.1c + CR 113.6b: Evendo-class compact persistent exile-play
+    // permission. Like the Matrix form above, this may be preceded by timing
+    // and condition qualifiers.
+    if scan_contains(lower, "you may play cards exiled with")
+        || scan_contains(lower, "you may play the cards exiled with")
+    {
         return true;
     }
     // CR 601.3f + CR 406.6: The "look-at" variant leads with "you may look at
@@ -532,6 +620,29 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     // `GrantsExtraVote`). Route it to Priority 7 static dispatch — which runs
     // before the Priority 8 replacement gate — so it lowers to the static.
     if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
+        return true;
+    }
+    // CR 701.23f + CR 614.1a: "If an opponent/a player would search a library,
+    // that player searches the top N cards of that library instead." (Aven
+    // Mindcensor) leads with "...would search...", which the Priority-8 "would "
+    // replacement gate would otherwise swallow (there is no Search replacement
+    // event). Route to Priority-7 static. Specific conjunction avoids false hits.
+    if scan_contains(lower, "would search a library") && scan_contains(lower, "instead") {
+        return true;
+    }
+    // CR 121.1 / CR 613.11: "[subject] draw(s) cards from the bottom of [your|
+    // their] library rather than/instead of the top." — River Song's draw-source
+    // redirection static (Meet in Reverse). The body verb is "draw", so none of
+    // the generic static keywords (get/have/can't) anchor it; without this gate
+    // the (ability-word-prefixed) line never reaches Priority 7 and falls to the
+    // spell catch-all as Unimplemented. The "from the bottom of" + "library" +
+    // top-reference combination is the diagnostic; extraction is delegated to
+    // `parse_draw_from_bottom`, which lowers it to `StaticMode::DrawFromBottom`.
+    if scan_contains(lower, "from the bottom of")
+        && scan_contains(lower, "library")
+        && (scan_contains(lower, "rather than the top")
+            || scan_contains(lower, "instead of the top"))
+    {
         return true;
     }
     false
@@ -595,6 +706,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    // CR 608.2c: reflexive "enters this way" riders on triggered abilities
+    // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
+    // not CR 614.1c ETB replacements.
+    if has_trigger_prefix(lower) && scan_contains(lower, "enters this way,") {
+        return false;
+    }
+
     if is_counter_prohibition_replacement_pattern(lower) {
         return true;
     }
@@ -614,6 +732,13 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 614.1e + CR 708.11: "As ~ is turned face up, [effect]"
+    // is a replacement effect. The "When ~ is turned face up" form is a trigger
+    // and stays out of this path, so the lead is required to be "As".
+    if lower_starts_with(lower, "as ") && scan_contains(lower, "is turned face up") {
+        return true;
+    }
+
     is_replacement_compound_pattern(lower)
 }
 
@@ -621,7 +746,32 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
-    if (scan_contains(lower, "enters") || scan_contains(lower, "escapes"))
+    // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
+    // creature in addition to its other types" — a replacement from another
+    // source affecting a subset of entrants (Displaced Dinosaurs). Routes to
+    // `parse_replacement_line`. The line does not match `is_static_pattern`
+    // (no "becomes"/"in addition" static-contains entry; the "as " prefix is
+    // not a static-prefix entry), so no Priority-7 reroute is required.
+    if is_as_enters_becomes_in_addition_pattern(lower) {
+        return true;
+    }
+    // CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+    // [P/T profiles]" as-enters replacement (Primal Plasma / Primal Clay /
+    // Corrupted Shapeshifter / Aquamorph Entity). The self-anchored modal
+    // form is claimed here so the Priority-8 modal-lowering branch fires
+    // before the generic replacement/static parsers.
+    if is_as_enters_becomes_choice_pattern(lower) {
+        return true;
+    }
+    // CR 614.1c: "enters with [counters]" replacement effects. The plural-subject
+    // forms ("Other creatures you control enter with …", "… creatures escape
+    // with …") use the bare-verb "enter"/"escape" rather than "enters"/"escapes",
+    // so accept both at word boundaries. Gated on "counter" so the bare verb
+    // alone never reclassifies a non-counter line.
+    if (scan_contains(lower, "enters")
+        || scan_contains(lower, "escapes")
+        || scan_contains(lower, "enter with")
+        || scan_contains(lower, "escape with"))
         && scan_contains(lower, "counter")
     {
         return true;
@@ -646,6 +796,111 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
         return true;
     }
     false
+}
+
+/// CR 614.1c + CR 614.12: Recognizer for the *dynamically scaled* distributive
+/// "[Other/each] [type] you control enter(s) with [an additional] [counter] …
+/// for each …" replacement lines (Gev, Scaled Scorch). Used by the Priority 7
+/// (static-pattern) dispatcher to route these counter replacements to the
+/// replacement parser before the static parser claims them — their
+/// "[type] you control …" subject also satisfies `is_static_pattern`.
+///
+/// The " for each " gate is load-bearing: the fixed-count and conditional-tier
+/// distributive forms ("Each other Vehicle … enters with an additional +1/+1
+/// counter on it if its mana value is 4 or less. Otherwise …" — Thunderous
+/// Velocipede) are owned by `StaticMode::EntersWithAdditionalCounters` (which
+/// carries a fixed `count`), so this recognizer must NOT intercept them. Only
+/// the per-each *scaled* count, which the static mode cannot represent, routes
+/// to the dynamic-capable replacement (`PutCounter { count: QuantityExpr }`).
+pub(crate) fn is_enters_with_counter_replacement_line(lower: &str) -> bool {
+    (scan_contains(lower, "enters")
+        || scan_contains(lower, "escapes")
+        || scan_contains(lower, "enter with")
+        || scan_contains(lower, "escape with"))
+        && scan_contains(lower, "counter")
+        && scan_contains(lower, "for each")
+}
+
+/// CR 614.1c + CR 614.12: nom recognizer for the non-self "As a [filter] enters,
+/// it becomes a [P/T] [type] creature in addition to its other types" replacement
+/// template (Displaced Dinosaurs). The subject is a non-empty external permanent
+/// filter (never the bare self anaphor), and the additive "in addition to its
+/// other types" tail (CR 205.1b) is required so this never claims a set-replacing
+/// "becomes" line. Self / copy "enter as a copy" lines are claimed by earlier
+/// handlers and additionally fail the handler's `Typed`-subject guard.
+fn parse_as_enters_becomes_in_addition(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim().is_empty() || subject.trim() == "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes a "),
+        tag(" enters, it becomes an "),
+        tag(" enters the battlefield, it becomes a "),
+        tag(" enters the battlefield, it becomes an "),
+    ))
+    .parse(input)?;
+    // CR 205.1b + CR 105.3: require the full additive marker via the shared
+    // animation combinator so this recognizer covers the entire marker class
+    // (possessive variants, "creature types", "colors and types") rather than
+    // the single hardcoded Displaced Dinosaurs literal.
+    let (input, _) =
+        crate::parser::oracle_effect::animation::locate_in_addition_other_types_marker(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_in_addition_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_in_addition(lower).is_ok()
+}
+
+/// CR 614.1c + CR 208.2b: modal "As ~ enters, it becomes your choice of
+/// [P/T profiles]" as-enters replacement recognizer. Mirrors
+/// [`parse_as_enters_becomes_in_addition`] but inverts its self-anchor gate: the
+/// modal-choice form is always self-anchored (the entering creature becomes one
+/// of two-or-more profiles it chooses for itself), so the subject MUST be the
+/// bare `~` anaphor — the exact opposite of the non-self "in addition" subset
+/// template. The "your choice of " pivot plus a required following fixed `<n>/<n>`
+/// power/toughness token distinguishes this modal-P/T class from anchor-word
+/// modals (bullet blocks) and from generic "choose a color" as-enters lines.
+fn parse_as_enters_becomes_choice(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("as ").parse(input)?;
+    let (input, subject) = take_until(" enters").parse(input)?;
+    if subject.trim() != "~" {
+        return Err(oracle_err(input));
+    }
+    let (input, _) = alt((
+        tag(" enters, it becomes your choice of "),
+        tag(" enters the battlefield, it becomes your choice of "),
+        tag(" enters or is turned face up, it becomes your choice of "),
+    ))
+    .parse(input)?;
+    // Strip an optional leading article so the fixed-P/T peek reaches the token
+    // ("a 3/3 creature" / "5/1"). `opt` never fails, preserving the slice when
+    // absent.
+    let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    // Require a following fixed `<n>/<n>` power/toughness token: the modal
+    // as-enters replacement (CR 208.2b) always lists specific P/T values. This
+    // excludes non-P/T "becomes your choice of" phrasings from claiming the
+    // modal-P/T lowering path.
+    peek(verify(
+        nom_primitives::parse_pt_value,
+        |(power, toughness)| {
+            matches!(
+                (power, toughness),
+                (
+                    crate::types::ability::PtValue::Fixed(_),
+                    crate::types::ability::PtValue::Fixed(_)
+                )
+            )
+        },
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_as_enters_becomes_choice_pattern(lower: &str) -> bool {
+    parse_as_enters_becomes_choice(lower).is_ok()
 }
 
 fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
@@ -774,6 +1029,19 @@ mod tests {
     fn unquoted_cant_block_static_unchanged() {
         // No quotes → fast path → classification unchanged.
         assert!(is_static_pattern("creatures you control can't block"));
+    }
+
+    #[test]
+    fn split_flashback_trailing_self_spell_cost_reduction_splits_visions_line() {
+        let line = "Flashback {8}{R}{R}. This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.";
+        let lower = line.to_lowercase();
+        let (flashback, reduction) =
+            split_flashback_trailing_self_spell_cost_reduction(line, &lower).unwrap();
+        assert_eq!(flashback, "Flashback {8}{R}{R}");
+        assert_eq!(
+            reduction,
+            "This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone."
+        );
     }
 
     #[test]

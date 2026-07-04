@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState } from "../../../adapter/types.ts";
@@ -84,7 +84,7 @@ function makeState(): GameState {
   } as unknown as GameState;
 }
 
-describe("RingBearerModal (via CardChoiceModal)", () => {
+describe("ChooseRingBearer board choice", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
     const state = makeState();
@@ -100,15 +100,10 @@ describe("RingBearerModal (via CardChoiceModal)", () => {
     cleanup();
   });
 
-  it("dispatches the selected ring-bearer candidate", () => {
+  it("suppresses the modal for board-native ring-bearer selection", () => {
     render(<CardChoiceModal />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Samwise Gamgee" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
-
-    expect(dispatchMock).toHaveBeenCalledWith({
-      type: "ChooseRingBearer",
-      data: { target: 43 },
-    });
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });

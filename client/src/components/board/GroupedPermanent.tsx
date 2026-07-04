@@ -1,12 +1,21 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
+import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
-import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import {
+  boardChoiceMaxSelection,
+  boardChoiceSelectedPower,
+  buildBoardChoiceAction,
+  canConfirmBoardChoice,
+  getBoardChoiceView,
+  getWaitingForObjectChoiceIds,
+  isBoardChoiceImmediate,
+  type BoardChoiceView,
+} from "../../viewmodel/gameStateView.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
@@ -24,12 +33,9 @@ interface GroupedPermanentProps {
   onExpand: () => void;
 }
 
-type PickerMode = "attackers" | "blockers" | "equip" | "target" | "tap";
-
-interface PickerContext {
-  mode: PickerMode;
-  eligibleIds: ObjectId[];
-}
+type PickerContext =
+  | { mode: "attackers" | "blockers" | "equip" | "target" | "tap"; eligibleIds: ObjectId[] }
+  | { mode: "boardChoice"; eligibleIds: ObjectId[]; choice: BoardChoiceView };
 
 function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | null {
   switch (waitingFor?.type) {
@@ -44,6 +50,16 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "TriggerTargetSelection":
     case "RetargetChoice":
     case "PayCost":
+    case "EffectZoneChoice":
+    case "WardSacrificeChoice":
+    case "UnlessBounceChoice":
+    case "ChooseRingBearer":
+    case "BlightChoice":
+    case "CrewVehicle":
+    case "StationTarget":
+    case "SaddleMount":
+    case "HarmonizeTapChoice":
+    case "KeepWithinTotalPowerChoice":
       return waitingFor.data.player;
     default:
       return null;
@@ -68,7 +84,9 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const setGroupSelectedCards = useUiStore((s) => s.setGroupSelectedCards);
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const gameObjects = useGameStore((s) => s.gameState?.objects);
   const {
+    boardChoiceObjectIds,
     committedAttackerIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -86,6 +104,14 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const pickerContext = useMemo<PickerContext | null>(() => {
     if (renderMode !== "collapsed") return null;
     if (waitingForPlayer(waitingFor) !== playerId) return null;
+
+    const boardChoice = getBoardChoiceView(waitingFor, gameObjects);
+    if (boardChoice) {
+      const eligibleIds = group.ids.filter((id) => boardChoiceObjectIds.has(id));
+      return eligibleIds.length > 0
+        ? { mode: "boardChoice", eligibleIds, choice: boardChoice }
+        : null;
+    }
 
     if (combatMode === "attackers") {
       const eligibleIds = group.ids.filter((id) => validAttackerIds.has(id));
@@ -127,8 +153,10 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     return null;
   }, [
     blockerAssignments,
+    boardChoiceObjectIds,
     combatClickHandler,
     combatMode,
+    gameObjects,
     group.ids,
     playerId,
     renderMode,
@@ -363,6 +391,7 @@ function CollapsedGroupPicker({
   onClose,
 }: CollapsedGroupPickerProps) {
   const { t } = useTranslation("game");
+  const objects = useGameStore((s) => s.gameState?.objects);
   const selectedAttackerCount = context.eligibleIds.filter((id) => selectedAttackers.includes(id)).length;
   const selectedTapCount = context.eligibleIds.filter((id) => selectedCardIds.includes(id)).length;
 
@@ -409,6 +438,17 @@ function CollapsedGroupPicker({
           onChange={selectTapCount}
         />
       )}
+      {context.mode === "boardChoice" && (
+        <BoardChoiceGroupControls
+          choice={context.choice}
+          eligibleIds={context.eligibleIds}
+          groupIds={group.ids}
+          objects={objects}
+          selectedCardIds={selectedCardIds}
+          setGroupSelectedCards={setGroupSelectedCards}
+          onClose={onClose}
+        />
+      )}
       {context.mode === "blockers" && (
         <ObjectChoiceList
           eligibleIds={context.eligibleIds}
@@ -442,6 +482,118 @@ function CollapsedGroupPicker({
           }}
         />
       )}
+    </div>
+  );
+}
+
+interface BoardChoiceGroupControlsProps {
+  choice: BoardChoiceView;
+  eligibleIds: ObjectId[];
+  groupIds: ObjectId[];
+  objects: Record<ObjectId, GameObject> | undefined;
+  selectedCardIds: ObjectId[];
+  setGroupSelectedCards: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
+  onClose: () => void;
+}
+
+function BoardChoiceGroupControls({
+  choice,
+  eligibleIds,
+  groupIds,
+  objects,
+  selectedCardIds,
+  setGroupSelectedCards,
+  onClose,
+}: BoardChoiceGroupControlsProps) {
+  const { t } = useTranslation("game");
+  const selectedForChoice = selectedCardIds.filter((id) => choice.objectIds.includes(id));
+  const selectedInGroup = eligibleIds.filter((id) => selectedCardIds.includes(id));
+  const maxSelection = boardChoiceMaxSelection(choice);
+
+  // Every eligible id in a collapsed group is visually identical to the others
+  // (same name, P/T, counters, keywords, tap/flip state — that's why they're
+  // stacked). Distinguishing them with a #1..#N list (the old UI) forced the
+  // player to pick among indistinguishable tokens, e.g. choosing which of five
+  // Food tokens to sacrifice. Resolve by quantity instead.
+
+  // Immediate single pick: nothing to distinguish — resolve with one click on a
+  // labelled action button using the first eligible id.
+  if (isBoardChoiceImmediate(choice)) {
+    // Guard against an empty eligible list: the picker only opens when there is
+    // at least one eligible id, but defending here avoids ever dispatching an
+    // action with an undefined id payload.
+    const firstId = eligibleIds[0];
+    if (firstId === undefined) return null;
+    return (
+      <button
+        type="button"
+        className="w-full rounded bg-sky-700 px-2 py-1.5 font-bold text-white hover:bg-sky-600"
+        onClick={() => {
+          dispatchAction(buildBoardChoiceAction(choice, [firstId]));
+          onClose();
+        }}
+      >
+        {t(`boardChoice.actions.${choice.intent}`)}
+      </button>
+    );
+  }
+
+  // Multi-select: a quantity stepper that maps to the first N eligible ids.
+  // The cap accounts for selections already made in other groups so the
+  // choice-wide count limit can't be exceeded.
+  const selectedOutsideGroup = Math.max(
+    0,
+    selectedForChoice.length - selectedInGroup.length,
+  );
+  const groupCeiling =
+    maxSelection == null ? eligibleIds.length : Math.max(0, maxSelection - selectedOutsideGroup);
+  const effectiveMax = Math.min(eligibleIds.length, groupCeiling);
+
+  const setCount = (n: number) => {
+    const clamped = Math.max(0, Math.min(n, effectiveMax));
+    setGroupSelectedCards(groupIds, eligibleIds.slice(0, clamped));
+  };
+
+  const canConfirm = canConfirmBoardChoice(choice, selectedForChoice, objects);
+  const requiredPower =
+    choice.selection.type === "totalPowerAtLeast" ||
+    choice.selection.type === "totalPowerAtMost"
+      ? choice.selection.power
+      : null;
+  const power =
+    requiredPower != null
+      ? boardChoiceSelectedPower(choice, selectedForChoice, objects)
+      : null;
+
+  return (
+    <div className="space-y-2">
+      <CountPickerControls
+        count={selectedInGroup.length}
+        max={effectiveMax}
+        onChange={setCount}
+      />
+      <div className="text-center text-[11px] text-slate-300">
+        {power == null
+          ? t("boardChoice.groupCount", {
+              selected: selectedForChoice.length,
+              count: maxSelection ?? eligibleIds.length,
+            })
+          : t("boardChoice.groupPower", {
+              selected: power,
+              required: requiredPower,
+            })}
+      </div>
+      <button
+        type="button"
+        className="w-full rounded bg-sky-700 px-2 py-1 font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
+        disabled={!canConfirm}
+        onClick={() => {
+          dispatchAction(buildBoardChoiceAction(choice, selectedForChoice));
+          onClose();
+        }}
+      >
+        {t("boardChoice.confirm")}
+      </button>
     </div>
   );
 }

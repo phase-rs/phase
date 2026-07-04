@@ -13,7 +13,6 @@ import type {
   CounterType,
   ExileCostSourceZone,
   GameObject,
-  ManaCost,
   ManaType,
   ObjectId,
   OutsideGameChoiceEntry,
@@ -32,9 +31,11 @@ import {
 } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
+import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
+import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
 import {
   SeparatePilesChoiceModal,
   SeparatePilesPartitionModal,
@@ -63,9 +64,12 @@ import {
   EFFECT_ZONE_BADGE_KEYS,
   EFFECT_ZONE_VISUAL_CLASSES,
   canAssignDistinctCardTypes,
+  searchChoiceAllowsPartialFind,
   searchChoiceSubtitle,
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
+import { manaValueOfObject } from "./cardChoice/manaValue.ts";
+import SelectableCardGrid from "./cardChoice/SelectableCardGrid.tsx";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -87,12 +91,10 @@ type MultiTargetSelection = Extract<
   { type: "MultiTargetSelection" }
 >;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
-type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type CollectEvidenceChoice = Extract<
   WaitingFor,
   { type: "CollectEvidenceChoice" }
 >;
-type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
@@ -102,11 +104,7 @@ type RevealUntilKeptChoice = Extract<
 >;
 type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
-type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
-type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
-type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
-type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 
 /**
@@ -117,6 +115,7 @@ export function CardChoiceModal() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (!waitingFor) return null;
 
@@ -152,14 +151,30 @@ export function CardChoiceModal() {
       );
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
-      return <ChooseFromZoneModal data={waitingFor.data} />;
+      // A "for each player, choose ..." iteration (Breach the Multiverse) emits
+      // this WaitingFor once per player's zone in sequence. Keying on the prompt
+      // identity (player + source + card set) remounts the modal between steps so
+      // its internal `selectedSet` resets — otherwise a stale prior pick survives
+      // and the next confirm dispatches a card not in the new candidate set.
+      return (
+        <ChooseFromZoneModal
+          key={`${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`}
+          data={waitingFor.data}
+        />
+      );
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor, objects)) return null;
       return <EffectZoneModal data={waitingFor.data} />;
     case "DrawnThisTurnTopdeckChoice":
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
     case "NamedChoice":
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
+    // Pre-choice behold ("choose a creature type and behold N of that type"):
+    // same creature-type picker + ChooseOption dispatch as NamedChoice.
+    case "CostTypeChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
     case "DamageSourceChoice":
@@ -176,12 +191,13 @@ export function CardChoiceModal() {
       return <SeparatePilesChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} />;
+      return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       if (!canActForWaitingState) return null;
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
     case "PayCost":
       if (!canActForWaitingState) return null;
+      if (getBoardChoiceView(waitingFor, objects)) return null;
       return <PayCostDispatch data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
@@ -199,23 +215,15 @@ export function CardChoiceModal() {
       // Handled by TargetingOverlay + battlefield clicks (ChooseTarget slot-by-slot).
       return null;
     case "BlightChoice":
-      if (!canActForWaitingState) return null;
-      return <BlightModal data={waitingFor.data} />;
     case "CrewVehicle":
-      if (!canActForWaitingState) return null;
-      return <CrewModal data={waitingFor.data} />;
     case "StationTarget":
-      if (!canActForWaitingState) return null;
-      return <StationTargetModal data={waitingFor.data} />;
     case "SaddleMount":
-      if (!canActForWaitingState) return null;
-      return <SaddleModal data={waitingFor.data} />;
+      return null;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
     case "HarmonizeTapChoice":
-      if (!canActForWaitingState) return null;
-      return <HarmonizeTapModal data={waitingFor.data} />;
+      return null;
     case "PairChoice":
       if (!canActForWaitingState) return null;
       return <PairChoiceModal data={waitingFor.data} />;
@@ -235,6 +243,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
@@ -245,6 +254,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={
             waitingFor.data.up_to
@@ -261,16 +271,16 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
         />
       );
     case "WardSacrificeChoice":
       if (!canActForWaitingState) return null;
-      return <WardSacrificeModal data={waitingFor.data} />;
+      return null;
     case "UnlessBounceChoice":
-      if (!canActForWaitingState) return null;
-      return <UnlessBounceModal data={waitingFor.data} />;
+      return null;
     case "AssignCombatDamage":
       if (!canActForWaitingState) return null;
       return <DamageAssignmentModal data={waitingFor.data} />;
@@ -322,8 +332,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return <RoomChoiceModal data={waitingFor.data} />;
     case "ChooseRingBearer":
-      if (!canActForWaitingState) return null;
-      return <RingBearerModal data={waitingFor.data} />;
+      return null;
     case "LearnChoice":
       if (!canActForWaitingState) return null;
       return <LearnModal data={waitingFor.data} />;
@@ -333,76 +342,12 @@ export function CardChoiceModal() {
     case "SpecializeColor":
       if (!canActForWaitingState) return null;
       return <SpecializeColorModal data={waitingFor.data} />;
+    case "ChooseRoomDoor":
+      if (!canActForWaitingState) return null;
+      return <RoomDoorChoiceModal data={waitingFor.data} />;
     default:
       return null;
   }
-}
-
-// ── Ring-bearer Modal ──────────────────────────────────────────────────────
-
-function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected !== null) {
-      dispatch({ type: "ChooseRingBearer", data: { target: selected } });
-    }
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.ringBearer.title")}
-      subtitle={t("cardChoice.ringBearer.subtitle")}
-      footer={
-        <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.candidates.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              type="button"
-              aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
-                isSelected
-                  ? "ring-2 ring-emerald-400/80"
-                  : "ring-1 ring-white/10 hover:ring-white/35"
-              }`}
-              initial={{ opacity: 0, y: 40, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
 }
 
 // ── Learn Modal ────────────────────────────────────────────────────────────
@@ -503,7 +448,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
-  const countValid = data.up_to
+  const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
   const subtitle = searchChoiceSubtitle(data, t);
@@ -598,6 +543,12 @@ function SearchPartitionModal({
   const tappedText = data.primary_enter_tapped
     ? t("cardChoice.searchPartition.tapped")
     : "";
+  const primaryText = t(
+    `cardChoice.searchPartition.zones.${data.primary_destination}`,
+  );
+  const restText = t(
+    `cardChoice.searchPartition.zones.${data.rest_destination}`,
+  );
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -635,6 +586,8 @@ function SearchPartitionModal({
       subtitle={t("cardChoice.searchPartition.subtitle", {
         count: data.primary_count,
         tapped: tappedText,
+        primary: primaryText,
+        rest: restText,
       })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
@@ -1001,9 +954,11 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
+  const isAttachChoice = data.effect_kind === "Attach";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
+    !isAttachChoice &&
     !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
@@ -1037,6 +992,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     ? data.effect_kind === "Untap"
       ? "Untap"
       : "Tap"
+    : isAttachChoice
+      ? "Attach"
     : isSacrifice
       ? "Sacrifice"
       : isTopdeck
@@ -2028,518 +1985,6 @@ function PermanentCostModal({
   );
 }
 
-// ── Blight Modal ─────────────────────────────────────────────────────────────
-
-function BlightModal({ data }: { data: BlightChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.count],
-  );
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
-
-  const handleCancel = useCallback(() => {
-    dispatch({ type: "CancelCast" });
-  }, [dispatch]);
-
-  if (!objects) return null;
-
-  const isReady = selected.size === data.count;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.blight.title")}
-      subtitle={t("cardChoice.blight.subtitle", { count: data.count })}
-      footer={
-        <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.confirmCount", {
-              selected: selected.size,
-              count: data.count,
-            })}
-          />
-        </CostActionFooter>
-      }
-    >
-      <ScrollableCardStrip>
-        {data.creatures.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-purple-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-purple-500/20">
-                  <span className="rounded-full bg-purple-500/90 px-3 py-1 text-xs font-bold text-white">
-                    -1/-1
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Crew Vehicle Modal ──────────────────────────────────────────────────────
-
-function CrewModal({ data }: { data: CrewVehicle["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback((id: ObjectId) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const totalPower = Array.from(selected).reduce((sum, id) => {
-    const obj = objects?.[id];
-    return sum + Math.max(obj?.power ?? 0, 0);
-  }, 0);
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "CrewVehicle",
-      data: { vehicle_id: data.vehicle_id, creature_ids: Array.from(selected) },
-    });
-  }, [dispatch, data.vehicle_id, selected]);
-
-  if (!objects) return null;
-
-  const isReady = totalPower >= data.crew_power;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.crew.title")}
-      subtitle={t("cardChoice.crew.subtitle", { power: data.crew_power })}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={!isReady}
-          label={t("cardChoice.crew.label", {
-            total: totalPower,
-            power: data.crew_power,
-          })}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.eligible_creatures.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-blue-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
-                  <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.crew", { power: obj.power ?? 0 })}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Station Target Modal ────────────────────────────────────────────────────
-// CR 702.184a: Pick exactly one untapped creature you control to tap as the
-// station ability's cost. Charge counters added = that creature's power.
-
-function StationTargetModal({ data }: { data: StationTarget["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected == null) return;
-    dispatch({
-      type: "ActivateStation",
-      data: { spacecraft_id: data.spacecraft_id, creature_id: selected },
-    });
-  }, [dispatch, data.spacecraft_id, selected]);
-
-  if (!objects) return null;
-
-  const selectedPower =
-    selected != null ? Math.max(objects[selected]?.power ?? 0, 0) : 0;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.station.title")}
-      subtitle={t("cardChoice.station.subtitle")}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={selected == null}
-          label={
-            selected != null
-              ? t("cardChoice.station.labelWithCharge", {
-                  charge: selectedPower,
-                })
-              : t("cardChoice.station.label")
-          }
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.eligible_creatures.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-blue-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
-                  <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.station", {
-                      power: Math.max(obj.power ?? 0, 0),
-                    })}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Saddle Mount Modal ──────────────────────────────────────────────────────
-// CR 702.171a: Tap any number of other untapped creatures you control with
-// total power ≥ N. Mirrors CrewModal's selection + total-power gate.
-
-function SaddleModal({ data }: { data: SaddleMount["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback((id: ObjectId) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const totalPower = Array.from(selected).reduce((sum, id) => {
-    const obj = objects?.[id];
-    return sum + Math.max(obj?.power ?? 0, 0);
-  }, 0);
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SaddleMount",
-      data: { mount_id: data.mount_id, creature_ids: Array.from(selected) },
-    });
-  }, [dispatch, data.mount_id, selected]);
-
-  if (!objects) return null;
-
-  const isReady = totalPower >= data.saddle_power;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.saddle.title")}
-      subtitle={t("cardChoice.saddle.subtitle", { power: data.saddle_power })}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={!isReady}
-          label={t("cardChoice.saddle.label", {
-            total: totalPower,
-            power: data.saddle_power,
-          })}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.eligible_creatures.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-blue-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
-                  <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.saddle", { power: obj.power ?? 0 })}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Ward Sacrifice Modal ─────────────────────────────────────────────────────
-
-type WardSacrificeChoice = Extract<WaitingFor, { type: "WardSacrificeChoice" }>;
-
-function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected == null) return;
-    dispatch({
-      type: "SelectCards",
-      data: { cards: [selected] },
-    });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.wardSacrifice.title", { count: data.remaining })}
-      subtitle={t("cardChoice.wardSacrifice.subtitle")}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={selected == null}
-          label={t("cardChoice.badges.sacrifice")}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.permanents.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(isSelected ? null : id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.sacrifice")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Unless Bounce Modal ─────────────────────────────────────────────────────
-
-type UnlessBounceChoice = Extract<WaitingFor, { type: "UnlessBounceChoice" }>;
-
-function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected == null) return;
-    dispatch({
-      type: "SelectCards",
-      data: { cards: [selected] },
-    });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.unlessBounce.title", { count: data.remaining })}
-      subtitle={t("cardChoice.unlessBounce.subtitle")}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={selected == null}
-          label={t("cardChoice.badges.return")}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.permanents.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-blue-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(isSelected ? null : id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
-                  <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.return")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
 // ── Exile from Graveyard Modal (Escape cost) ────────────────────────────────
 
 // ── Shared exile-for-cost modal (graveyard and hand variants share this) ─────
@@ -2726,6 +2171,7 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
     case "Discard":
       return (
         <DiscardModal
+          key={choicesKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
@@ -2814,38 +2260,6 @@ function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
       confirmLabel={t("cardChoice.badges.exile")}
     />
   );
-}
-
-function manaValueOfShard(shard: string): number {
-  switch (shard) {
-    case "TwoWhite":
-    case "TwoBlue":
-    case "TwoBlack":
-    case "TwoRed":
-    case "TwoGreen":
-      return 2;
-    case "X":
-      return 0;
-    default:
-      return 1;
-  }
-}
-
-function manaValueOfCost(cost: ManaCost): number {
-  switch (cost.type) {
-    case "NoCost":
-    case "SelfManaCost":
-      return 0;
-    case "Cost":
-      return (
-        cost.generic +
-        cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0)
-      );
-  }
-}
-
-function manaValueOfObject(obj: { mana_cost: ManaCost }): number {
-  return manaValueOfCost(obj.mana_cost);
 }
 
 function CollectEvidenceModal({
@@ -2975,27 +2389,27 @@ function DiscardModal({
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
 
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.count],
-  );
+  // Keep-mode is offered only for fixed-count exact discards with room to keep
+  // (covers DiscardToHandSize + exact DiscardChoice/ConniveDiscard; hidden for
+  // WardDiscardChoice count=1 and up-to/unless modes).
+  const keepEligible =
+    !isUpTo && !hasUnlessOption && data.count > 1 && data.count < data.cards.length;
+  const [keepMode, setKeepMode] = useState(false);
+  const active = keepMode && keepEligible;
+  const keepCap = data.cards.length - data.count;
+  const cap = active ? keepCap : data.count;
+
+  const onToggleKeep = useCallback(() => {
+    setKeepMode((m) => !m);
+    setSelected(new Set());
+  }, []);
 
   const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
+    const cards = active
+      ? data.cards.filter((id) => !selected.has(id))
+      : Array.from(selected);
+    dispatch({ type: "SelectCards", data: { cards } });
+  }, [active, data.cards, dispatch, selected]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -3005,15 +2419,32 @@ function DiscardModal({
 
   // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
   // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card OR count cards.
-  const isReady = isUpTo
-    ? selected.size <= data.count
-    : selected.size === data.count || (hasUnlessOption && selected.size === 1);
+  // Keep-mode: keeping exactly keepCap leaves exactly `count` to discard.
+  const isReady = active
+    ? selected.size === keepCap
+    : isUpTo
+      ? selected.size <= data.count
+      : selected.size === data.count || (hasUnlessOption && selected.size === 1);
 
-  const subtitle = isUpTo
-    ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
-    : hasUnlessOption
-      ? t("cardChoice.discard.subtitleUnless", { count: data.count })
-      : t("cardChoice.discard.subtitleExact", { count: data.count });
+  const subtitle = active
+    ? t("cardChoice.discard.subtitleKeep", { count: keepCap })
+    : isUpTo
+      ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
+      : hasUnlessOption
+        ? t("cardChoice.discard.subtitleUnless", { count: data.count })
+        : t("cardChoice.discard.subtitleExact", { count: data.count });
+
+  const tone = active
+    ? EFFECT_ZONE_VISUAL_CLASSES.Battlefield // green ring/overlay/badge = "keep"
+    : EFFECT_ZONE_VISUAL_CLASSES.Sacrifice; // red = "discard"
+  const badgeLabel = active ? t("cardChoice.badges.keep") : t("cardChoice.badges.discard");
+  const counterText = active
+    ? t("cardChoice.bulk.counterKeep", { selected: selected.size, cap: keepCap })
+    : t("cardChoice.bulk.counterDiscard", { selected: selected.size, cap: data.count });
+
+  // The confirm button always shows the discard count (even in keep-mode where
+  // `selected` tracks the keep set — invert to show how many will be discarded).
+  const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
 
   return (
     <ChoiceOverlay
@@ -3026,7 +2457,7 @@ function DiscardModal({
               onClick={handleConfirm}
               disabled={!isReady}
               label={t("cardChoice.buttons.discardCount", {
-                selected: selected.size,
+                selected: discardSelectedForLabel,
                 count: data.count,
               })}
             />
@@ -3036,121 +2467,39 @@ function DiscardModal({
             onClick={handleConfirm}
             disabled={!isReady}
             label={t("cardChoice.buttons.discardCount", {
-              selected: selected.size,
+              selected: discardSelectedForLabel,
               count: data.count,
             })}
           />
         )
       }
     >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
+      <>
+        {keepEligible && (
+          <div className="px-1 pb-1">
+            <button
+              type="button"
+              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+              onClick={onToggleKeep}
             >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.discard")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Harmonize Tap Choice Modal ──────────────────────────────────────────────
-
-function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-
-  const handleTap = useCallback(
-    (id: ObjectId) => {
-      dispatch({ type: "HarmonizeTap", data: { creature_id: id } });
-    },
-    [dispatch],
-  );
-
-  const handleSkip = useCallback(() => {
-    dispatch({ type: "HarmonizeTap", data: { creature_id: null } });
-  }, [dispatch]);
-
-  const handleCancel = useCallback(() => {
-    dispatch({ type: "CancelCast" });
-  }, [dispatch]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.harmonize.title")}
-      subtitle={t("cardChoice.harmonize.subtitle")}
-      footer={
-        <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton
-            onClick={handleSkip}
-            label={t("cardChoice.harmonize.labelSkip")}
-          />
-        </CostActionFooter>
-      }
-    >
-      <ScrollableCardStrip>
-        {data.eligible_creatures.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const power = obj.power ?? 0;
-          return (
-            <motion.button
-              key={id}
-              className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: 0.85, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => handleTap(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              <div className="absolute bottom-1 left-1/2 -translate-x-1/2">
-                <span className="rounded-full bg-emerald-600/90 px-2 py-0.5 text-xs font-bold text-white shadow">
-                  -{power} generic
-                </span>
-              </div>
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+            </button>
+          </div>
+        )}
+        <SelectableCardGrid
+          cards={data.cards}
+          objects={objects}
+          value={selected}
+          onChange={setSelected}
+          cap={cap}
+          tone={tone}
+          badgeLabel={badgeLabel}
+          counterText={counterText}
+          hoverProps={hoverProps}
+          onConfirm={handleConfirm}
+          canConfirm={isReady}
+        />
+      </>
     </ChoiceOverlay>
   );
 }
