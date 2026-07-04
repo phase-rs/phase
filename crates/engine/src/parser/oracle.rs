@@ -5282,6 +5282,10 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
     None
 }
 
+// CR 602.1b: Activation instructions after the colon restrict when an ability
+// can be activated and are not part of the ability's effect.
+// CR 304.5 / CR 307.5: "Only as an instant" and "only as a sorcery" define
+// the priority and timing permissions for activating the ability.
 fn parse_activation_speed_parenthetical_body(phrase: &str) -> Option<Vec<ActivationRestriction>> {
     let lower = phrase.to_lowercase();
     let (_, rest_original) = nom_on_lower(phrase, &lower, |i| {
@@ -5299,6 +5303,8 @@ fn parse_activation_speed_parenthetical_body(phrase: &str) -> Option<Vec<Activat
         .then_some(restrictions)
 }
 
+// CR 602.1b: A parenthesized speed instruction after an activated ability is
+// still an activation restriction, so keep it visible before reminder stripping.
 fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
     let lower = raw_line.to_lowercase();
     let (_, parenthetical_original) = nom_on_lower(raw_line, &lower, |i| {
@@ -5309,9 +5315,8 @@ fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
     let prefix_len = raw_line.len() - parenthetical_original.len() - " (".len();
     let prefix = raw_line[..prefix_len].trim_end();
 
-    let parenthetical_lower = parenthetical_original.to_lowercase();
-    let Ok((tail, inner_lower)) = terminated(take_until::<_, _, OracleError<'_>>(")"), tag(")"))
-        .parse(parenthetical_lower.as_str())
+    let Ok((tail, inner_original)) = terminated(take_until::<_, _, OracleError<'_>>(")"), tag(")"))
+        .parse(parenthetical_original)
     else {
         return None;
     };
@@ -5319,8 +5324,7 @@ fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
         return None;
     }
 
-    let inner_original = parenthetical_original[..inner_lower.len()].trim();
-    let timing_text = inner_original.trim_end_matches('.').trim();
+    let timing_text = inner_original.trim().trim_end_matches('.').trim();
     parse_activation_speed_parenthetical_body(timing_text)?;
     Some(format!("{prefix} {timing_text}."))
 }
@@ -5706,6 +5710,10 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     (remaining, constraints)
 }
 
+// CR 602.1d: Older cards referred to activating an activated ability as
+// "playing" that ability.
+// CR 602.1b + CR 307.5: "Play this ability as a sorcery" is a trailing
+// activation instruction, not part of the ability's effect.
 fn split_legacy_play_this_ability_timing(text: &str) -> Option<(&str, Vec<ActivationRestriction>)> {
     let lower = text.to_lowercase();
     let (_, restriction_original) = nom_on_lower(text, &lower, |i| {
