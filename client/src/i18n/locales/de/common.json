@@ -228,5 +228,10 @@
     "settings": "Einstellungen",
     "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
     "languageTitle": "Sprache: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Etwas ist schiefgelaufen",
+    "body": "Die App ist auf einen unerwarteten Fehler gestoßen und kann auf diesem Bildschirm nicht fortfahren. Ein Neuladen behebt das meist.",
+    "reload": "Neu laden"
   }
 }
