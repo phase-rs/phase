@@ -3,66 +3,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { GameState } from "../../../adapter/types.ts";
-import { buildGameObject, buildGameObjectWithCoreTypes } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameObject, buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPendingCast,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  buildTargetSelectionWaitingFor,
+  buildTriggerTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
 import { TargetingOverlay } from "../TargetingOverlay.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: {
-      type: "TriggerTargetSelection",
+  return buildGameState({
+    waiting_for: buildTriggerTargetSelectionWaitingFor({
       data: {
         player: 0,
-        target_slots: [{ legal_targets: [{ Player: 1 }], optional: false }],
-        selection: {
-          current_slot: 0,
+        target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Player: 1 }] })],
+        selection: buildTargetSelectionProgress({
           current_legal_targets: [{ Player: 1 }],
-        },
+        }),
       },
-    },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    seat_order: [0, 1],
-    format_config: {
-      format: "Standard",
-      starting_life: 20,
-      min_players: 2,
-      max_players: 2,
-      deck_size: 60,
-      singleton: false,
-      command_zone: false,
-      commander_damage_threshold: null,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: false,
-
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
+    }),
     ...overrides,
-  };
+  });
 }
 
 describe("TargetingOverlay", () => {
@@ -100,17 +67,9 @@ describe("TargetingOverlay", () => {
         type: "TargetSelection",
         data: {
           player: 0,
-          pending_cast: {
-            object_id: 5,
-            card_id: 10,
-            ability: { targets: [] },
-            cost: { type: "NoCost" },
-          },
-          target_slots: [{ legal_targets: [], optional: true }],
-          selection: {
-            current_slot: 0,
-            current_legal_targets: [],
-          },
+          pending_cast: buildPendingCast({ object_id: 5, card_id: 10 }),
+          target_slots: [buildTargetSelectionSlot({ optional: true })],
+          selection: buildTargetSelectionProgress(),
         },
       },
     });
@@ -136,12 +95,12 @@ describe("TargetingOverlay", () => {
   it("allows cancelling tap-creatures spell costs", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
-      objects: {
-        "7": buildGameObjectWithCoreTypes(["Creature"], {
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
           id: 7,
           name: "Memnite",
         }),
-      },
+      ),
       waiting_for: {
         type: "PayCost",
         data: {
@@ -181,16 +140,16 @@ describe("TargetingOverlay", () => {
   it("confirms selected creatures for mana ability costs", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
-      objects: {
-        "4": buildGameObjectWithCoreTypes(["Land"], {
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Land"], {
           id: 4,
           name: "Holdout Settlement",
         }),
-        "7": buildGameObjectWithCoreTypes(["Creature"], {
+        buildGameObjectWithCoreTypes(["Creature"], {
           id: 7,
           name: "Memnite",
         }),
-      },
+      ),
       waiting_for: {
         type: "PayCost",
         data: {
@@ -237,22 +196,22 @@ describe("TargetingOverlay", () => {
   it("confirms aggregate-power board choices when the selected power is high enough", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
-      objects: {
-        "20": buildGameObjectWithCoreTypes(["Artifact"], {
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Artifact"], {
           id: 20,
           name: "Vehicle",
         }),
-        "21": buildGameObjectWithCoreTypes(["Creature"], {
+        buildGameObjectWithCoreTypes(["Creature"], {
           id: 21,
           name: "Pilot One",
           power: 2,
         }),
-        "22": buildGameObjectWithCoreTypes(["Creature"], {
+        buildGameObjectWithCoreTypes(["Creature"], {
           id: 22,
           name: "Pilot Two",
           power: 3,
         }),
-      },
+      ),
       waiting_for: {
         type: "CrewVehicle",
         data: {
@@ -303,27 +262,15 @@ describe("TargetingOverlay", () => {
     });
 
     const gameState = createGameState({
-      objects: {
-        "8": stackSpellTarget,
-        "9": counterspell,
-      },
-      waiting_for: {
-        type: "TargetSelection",
+      objects: buildObjectMap(stackSpellTarget, counterspell),
+      waiting_for: buildTargetSelectionWaitingFor({
         data: {
           player: 0,
-          pending_cast: {
-            object_id: 9,
-            card_id: 9,
-            ability: { targets: [] },
-            cost: { type: "NoCost" },
-          },
-          target_slots: [{
-            legal_targets: [{ Object: 8 }],
-            optional: false,
-          }],
-          selection: { current_slot: 0, current_legal_targets: [{ Object: 8 }] },
+          pending_cast: buildPendingCast({ object_id: 9, card_id: 9 }),
+          target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Object: 8 }] })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 8 }] }),
         },
-      },
+      }),
     });
 
     act(() => {
@@ -353,22 +300,15 @@ describe("TargetingOverlay", () => {
     });
 
     const gameState = createGameState({
-      objects: {
-        "7": nonLandTarget,
-        "9": sourceObject,
-      },
-      waiting_for: {
-        type: "TriggerTargetSelection",
+      objects: buildObjectMap(nonLandTarget, sourceObject),
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
         data: {
           player: 0,
-          target_slots: [{
-            legal_targets: [{ Object: 7 }],
-            optional: true,
-          }],
-          selection: { current_slot: 0, current_legal_targets: [{ Object: 7 }] },
+          target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Object: 7 }], optional: true })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 7 }] }),
           source_id: 9,
         },
-      },
+      }),
     });
 
     act(() => {
@@ -461,19 +401,16 @@ describe("TargetingOverlay", () => {
     });
 
     const gameState = createGameState({
-      objects: {
-        "9": sourceObject,
-      },
-      waiting_for: {
-        type: "TriggerTargetSelection",
+      objects: buildObjectMap(sourceObject),
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
         data: {
           player: 0,
-          target_slots: [{ legal_targets: [{ Player: 1 }], optional: true }],
-          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+          target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Player: 1 }], optional: true })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: [{ Player: 1 }] }),
           source_id: 9,
           description: "~ costs {U}{U}",
         },
-      },
+      }),
     });
 
     act(() => {
@@ -493,8 +430,7 @@ describe("TargetingOverlay", () => {
   it("shows the active trigger damage amount during target selection", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
-      waiting_for: {
-        type: "TriggerTargetSelection",
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
         data: {
           player: 0,
           trigger_controller: 0,
@@ -502,10 +438,10 @@ describe("TargetingOverlay", () => {
             type: "DamageDealt",
             data: { source_id: 9, target: { Object: 7 }, amount: 3, is_combat: true },
           },
-          target_slots: [{ legal_targets: [{ Object: 7 }], optional: false }],
-          selection: { current_slot: 0, current_legal_targets: [{ Object: 7 }] },
+          target_slots: [buildTargetSelectionSlot({ legal_targets: [{ Object: 7 }] })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 7 }] }),
         },
-      },
+      }),
     });
 
     act(() => {

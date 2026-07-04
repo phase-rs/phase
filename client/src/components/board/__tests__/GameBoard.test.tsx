@@ -2,10 +2,14 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import {
+  buildGameState,
+  buildPlayers,
+  buildPriorityWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
 import { GameBoard } from "../GameBoard.tsx";
 
 vi.mock("../ArchenemyPanel.tsx", () => ({
@@ -54,42 +58,18 @@ vi.mock("../../zone/LibraryPile.tsx", () => ({
   LibraryPile: () => null,
 }));
 
-function createFourPlayerState(): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [0, 1, 2, 3].map((id) => ({
-      id,
-      life: 40,
-      poison_counters: 0,
-      mana_pool: { mana: [] },
-      library: [],
-      hand: [],
-      graveyard: [],
-      has_drawn_this_turn: false,
-      lands_played_this_turn: 0,
-      turns_taken: 0,
-    })),
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
+function createFourPlayerState() {
+  return buildGameState({
+    players: buildPlayers([
+      { id: 0, life: 40 },
+      { id: 1, life: 40 },
+      { id: 2, life: 40 },
+      { id: 3, life: 40 },
+    ]),
+    waiting_for: buildPriorityWaitingFor(),
     seat_order: [0, 1, 2, 3],
     eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 describe("GameBoard multiplayer layout", () => {

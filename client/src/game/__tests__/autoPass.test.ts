@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 
 import type { GameState, Phase, WaitingFor } from "../../adapter/types";
+import { buildGameObject, buildObjectMap } from "../../test/factories/gameObjectFactory";
+import {
+  buildGameState,
+  buildPlayers,
+  buildPriorityWaitingFor,
+  buildStackEntry,
+} from "../../test/factories/gameStateFactory";
 import { shouldAutoPass } from "../autoPass";
 
 /**
@@ -10,23 +17,23 @@ import { shouldAutoPass } from "../autoPass";
 function createState(overrides: {
   phase?: Phase;
   priority_player?: number;
-  stack?: unknown[];
-  objects?: Record<string, unknown>;
-  players?: unknown[];
+  stack?: GameState["stack"];
+  objects?: GameState["objects"];
+  players?: GameState["players"];
   phase_stops?: Record<number, Phase[]>;
 } = {}): GameState {
-  return {
+  return buildGameState({
     phase: overrides.phase ?? "PreCombatMain",
     stack: overrides.stack ?? [],
-    objects: overrides.objects ?? { 1: { id: 1 } },
-    players: overrides.players ?? [{ id: 0 }, { id: 1 }],
+    objects: overrides.objects ?? buildObjectMap(buildGameObject({ id: 1 })),
+    players: overrides.players ?? buildPlayers([0, 1]),
     priority_player: overrides.priority_player ?? 0,
     phase_stops: overrides.phase_stops,
-  } as unknown as GameState;
+  });
 }
 
 function priority(player: number): WaitingFor {
-  return { type: "Priority", data: { player } } as WaitingFor;
+  return buildPriorityWaitingFor({ data: { player } });
 }
 
 describe("shouldAutoPass", () => {
@@ -49,7 +56,7 @@ describe("shouldAutoPass", () => {
         pending: [{ player: 0, mulligan_count: 0 }],
         free_first_mulligan: false,
       },
-    } as WaitingFor;
+    };
     expect(shouldAutoPass(createState(), mulligan, false, true)).toBe(false);
   });
 
@@ -91,7 +98,7 @@ describe("shouldAutoPass", () => {
   it("ignores phase stops when stack is non-empty (responding to spell)", () => {
     const stateWithStack = createState({
       phase: "PreCombatMain",
-      stack: [{ id: 1, card_id: 5, controller: 0 }],
+      stack: [buildStackEntry({ id: 1, controller: 0 })],
       phase_stops: { 0: ["PreCombatMain"] },
     });
     expect(shouldAutoPass(stateWithStack, priority(0), false, true)).toBe(true);
@@ -112,8 +119,7 @@ describe("shouldAutoPass", () => {
   });
 
   it("does not auto-pass with no players in game state (invalid state)", () => {
-    const state = createState();
-    (state as unknown as { players: unknown[] }).players = [];
+    const state = createState({ players: [] });
     expect(shouldAutoPass(state, priority(0), false, true)).toBe(false);
   });
 });

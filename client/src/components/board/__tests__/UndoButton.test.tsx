@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { UndoButton } from "../UndoButton.tsx";
 
 describe("UndoButton", () => {
@@ -13,7 +13,7 @@ describe("UndoButton", () => {
 
   it("renders when single-player history exists", () => {
     useGameStore.setState({
-      stateHistory: [{} as GameState],
+      stateHistory: [buildGameState()],
       gameMode: "ai",
     });
 
@@ -34,7 +34,7 @@ describe("UndoButton", () => {
     // Multiplayer state is authoritative and shared — a client-side rewind
     // would desync, so the affordance must stay hidden regardless of history.
     useGameStore.setState({
-      stateHistory: [{} as GameState],
+      stateHistory: [buildGameState()],
       gameMode: "online",
     });
 

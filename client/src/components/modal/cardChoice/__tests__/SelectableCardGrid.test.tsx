@@ -2,17 +2,18 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, ObjectId } from "../../../../adapter/types.ts";
+import { buildGameObjectWithCoreTypes } from "../../../../test/factories/gameObjectFactory.ts";
 import SelectableCardGrid from "../SelectableCardGrid.tsx";
 
 function obj(id: number, name: string): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Creature"], {
     id,
+    card_id: id,
     name,
     zone: "Hand",
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: id },
     color: [],
-  } as unknown as GameObject;
+  });
 }
 
 const objects: Record<ObjectId, GameObject> = { 1: obj(1, "Alpha"), 2: obj(2, "Bravo"), 3: obj(3, "Cosmo") };
