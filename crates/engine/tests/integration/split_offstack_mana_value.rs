@@ -268,4 +268,20 @@ fn fused_split_spell_on_stack_reports_both_halves_colors_and_mana_value() {
         "fused Breaking // Entering on the stack reports the COMBINED MV 8, not the \
          front half's MV 2"
     );
+
+    // CR 202.3d + CR 702.102b: the spell-cast history records the fused spell's
+    // COMBINED mana value (8), not the front half (2), so per-turn / per-game
+    // "cast a spell with mana value N" history filters see the fused value. The
+    // fuse marker is set before payment, so `record_spell_cast_from_zone` (which
+    // routes through `spell_mana_value`) captures the combined value.
+    let history_mv = state
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.last())
+        .map(|record| record.mana_value)
+        .expect("the fused cast is recorded in spell-cast history");
+    assert_eq!(
+        history_mv, 8,
+        "spell-cast history records fused Breaking // Entering with combined MV 8, not front MV 2"
+    );
 }

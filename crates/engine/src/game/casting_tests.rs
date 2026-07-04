@@ -420,6 +420,68 @@ fn build_spell_meta_for_foretold_card_is_not_face_down() {
     );
 }
 
+// CR 202.3d + CR 702.102b + CR 709.4d: The restricted-mana metadata built during
+// mana payment (`build_spell_meta` → `SpellMeta`) must characterize a FUSED split
+// spell by the COMBINED mana value / color count of both halves, so restricted
+// mana such as "spend only to cast a spell with mana value N" / "... color count
+// N" gates the fused cast on both halves — while a non-fused split cast still
+// reports only the chosen half. The `fused_split_spell` marker is set BEFORE
+// payment, and `spell_mana_value`/`spell_colors` key on it (not the zone), so a
+// non-fused split spell mid-cast (object still in its origin zone) is NOT
+// over-combined.
+//
+// Discriminating revert: reading `obj.mana_cost.mana_value()` / `obj.color.len()`
+// (the pre-fix path) reports the front half (MV 2, 2 colors) even for the fused
+// cast, so the fused assertions fail.
+#[test]
+fn build_spell_meta_fused_split_spell_uses_combined_mana_value_and_colors() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    // Breaking // Entering (Fuse): Breaking {U}{B} (MV 2, colors U/B) is the front
+    // half; Entering {4}{B}{R} (MV 6, colors B/R) is the back Split half. Combined
+    // MV 8, colors {U, B, R}.
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+
+    // Non-fused (marker unset): the metadata reports the chosen/front half only.
+    let meta_unfused =
+        build_spell_meta(&scenario.state, P0, breaking).expect("split card builds a spell meta");
+    assert_eq!(
+        meta_unfused.mana_value,
+        Some(2),
+        "a non-fused split cast reports the front half's mana value (2)"
+    );
+    assert_eq!(
+        meta_unfused.color_count,
+        Some(2),
+        "a non-fused split cast reports the front half's color count (2)"
+    );
+
+    // Fused (marker set before payment): the metadata reports both halves combined.
+    scenario
+        .state
+        .objects
+        .get_mut(&breaking)
+        .unwrap()
+        .fused_split_spell = true;
+    let meta_fused =
+        build_spell_meta(&scenario.state, P0, breaking).expect("split card builds a spell meta");
+    assert_eq!(
+        meta_fused.mana_value,
+        Some(8),
+        "a fused split spell's restricted-mana metadata must use the COMBINED mana value (8), \
+         not the front half (2)"
+    );
+    assert_eq!(
+        meta_fused.color_count,
+        Some(3),
+        "a fused split spell's restricted-mana metadata must use the COMBINED color count (3: \
+         U, B, R), not the front half (2)"
+    );
+}
+
 #[test]
 fn foretell_cast_uses_foretell_cost_only_after_current_turn() {
     let mut state = setup_game_at_main_phase();

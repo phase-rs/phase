@@ -5864,6 +5864,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             state, object_id, player,
         );
 
+    // CR 202.3d + CR 702.102b + CR 709.4d: Mark the fused split spell BEFORE mana
+    // payment, so the restricted-mana metadata built during payment
+    // (`build_spell_meta` → `spell_mana_value`/`spell_colors`) and the spell-cast
+    // history recorded afterward see the COMBINED characteristics of both halves,
+    // not just the front half. Set explicitly (`== Fuse`) for every cast so a
+    // previously cancelled fuse can never leave a stale marker on a later,
+    // non-fused cast of the same card object.
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
+    }
+
     super::casting::pay_mana_cost_with_choices(
         state,
         player,
@@ -6144,10 +6155,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // protection all see the merged characteristics while the spell resolves.
     if casting_variant == CastingVariant::Fuse {
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            // CR 202.3d + CR 709.4d: mark this stack object as a fused split spell
-            // so its mana value combines both halves (via `effective_mana_value`),
-            // matching the combined card types/colors unioned below.
-            obj.fused_split_spell = true;
+            // `fused_split_spell` was already set before mana payment (above). Here
+            // we union the right (Split back face) half's card types (CR 709.4c) and
+            // colors (CR 105.2) into the on-stack object so counterspell filters,
+            // type-matters effects, and protection that read `card_types`/`color`
+            // directly see the merged characteristics while the spell resolves.
             let right_half_characteristics = obj
                 .back_face
                 .as_ref()

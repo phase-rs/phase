@@ -1260,6 +1260,59 @@ impl GameObject {
         }
     }
 
+    /// The other Split half to combine when this object is a FUSED split spell
+    /// (CR 702.102b). `None` for non-fused casts and non-split objects, so callers
+    /// combine both halves ONLY for a fused spell. Distinct from
+    /// `split_half_to_combine`, which also fires for ANY split card off the stack
+    /// (the object-characteristic rule, CR 709.4) — this one is keyed purely on the
+    /// `fused_split_spell` marker and is therefore zone-independent.
+    fn fused_split_half(&self) -> Option<&BackFaceData> {
+        if !self.fused_split_spell {
+            return None;
+        }
+        self.back_face
+            .as_ref()
+            .filter(|bf| bf.layout_kind == Some(LayoutKind::Split))
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b + CR 202.3e: The mana value of the SPELL
+    /// this object represents while being cast / on the stack. For a FUSED split
+    /// spell (both halves cast) this is the COMBINED mana value of both halves; for
+    /// every other object it is the object's own cost, honoring announced X on the
+    /// stack. Distinct from [`effective_mana_value`](Self::effective_mana_value),
+    /// which ALSO combines a split card merely SITTING off the stack: mid-cast the
+    /// spell is still in its origin zone yet must be characterized as its single
+    /// (chosen) half unless it was fused, so restricted-mana payment metadata and
+    /// spell-cast history must key on the fuse marker, not the zone. The
+    /// `fused_split_spell` marker is set BEFORE mana payment so both consumers see
+    /// the combined value.
+    pub fn spell_mana_value(&self) -> u32 {
+        match self.fused_split_half() {
+            // Fuse cards carry no {X} in either half, so summing X-as-0 mana values
+            // is exact (CR 202.3e is moot here).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
+        }
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
+    /// represents while being cast / on the stack — the COMBINED colors of both
+    /// halves for a fused split spell, otherwise the object's own colors. See
+    /// [`spell_mana_value`](Self::spell_mana_value) for why this keys on the
+    /// `fused_split_spell` marker rather than the zone gate used by
+    /// `effective_colors`.
+    pub fn spell_colors(&self) -> Vec<ManaColor> {
+        match self.fused_split_half() {
+            Some(bf) => ManaColor::ALL
+                .into_iter()
+                .filter(|c| self.color.contains(c) || bf.color.contains(c))
+                .collect(),
+            None => self.color.clone(),
+        }
+    }
+
     /// CR 603.10 + CR 400.7: Snapshot this object's public characteristics
     /// for a zone-change event. The record captures state *at the moment of
     /// the move* so zone-change trigger filters and past-tense conditions
