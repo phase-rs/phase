@@ -341,6 +341,157 @@ fn apply_search_partition(
     Ok(())
 }
 
+/// CR 701.38: The mutable round state of a `WaitingFor::VoteChoice`. Bundles
+/// every field so the single ballot-tally authority
+/// ([`append_vote_ballot_and_advance`]) can be shared by both the named
+/// (`ChooseOption`) and object (`SubmitVoteCandidate`) submission arms without
+/// duplicating the advance/resolve logic across them.
+struct VoteRoundState {
+    player: crate::types::player::PlayerId,
+    remaining_votes: u32,
+    options: Vec<String>,
+    option_labels: Vec<String>,
+    remaining_voters: Vec<(crate::types::player::PlayerId, u32)>,
+    tallies: Vec<u32>,
+    ballots: crate::im::Vector<(crate::types::player::PlayerId, u32)>,
+    // Mirrors `WaitingFor::VoteChoice.per_choice_effect`'s boxed shape so this
+    // round-state can be moved into it directly without re-boxing.
+    #[allow(clippy::vec_box)]
+    per_choice_effect: Vec<Box<crate::types::ability::AbilityDefinition>>,
+    controller: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    actor: crate::types::game_state::VoteActor,
+    tally_mode: crate::types::ability::VoteTally,
+    candidate_objects: crate::im::Vector<ObjectId>,
+    outcome_template: Option<Box<crate::types::ability::AbilityDefinition>>,
+    visibility: crate::types::ability::VoteVisibility,
+}
+
+/// CR 701.38 + CR 608.2c: The single ballot-tally authority. Records one
+/// validated ballot at `idx` for `round.player`, then either advances to the
+/// same voter's next vote (CR 701.38d), the next voter (CR 101.4), or — once
+/// every voter has voted — fans out the per-choice sub-effects via
+/// `vote::resolve_tally` and drains the post-vote continuation.
+///
+/// `idx` is the ballot index: for named votes it indexes `options`; for object
+/// votes it indexes `candidate_objects`. Validation (membership / range) is the
+/// caller's responsibility — this function trusts `idx` to be in range for the
+/// active tallies vector.
+///
+/// Secret ballots (`VoteVisibility::Secret`) suppress the per-ballot public
+/// `VoteCast` event; the single `VoteResolved` emitted when the queue empties is
+/// the simultaneous reveal.
+fn append_vote_ballot_and_advance(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    idx: u32,
+    round: VoteRoundState,
+) -> ResolutionChoiceOutcome {
+    let VoteRoundState {
+        player,
+        remaining_votes,
+        options,
+        option_labels,
+        remaining_voters,
+        tallies,
+        ballots,
+        per_choice_effect,
+        controller,
+        source_id,
+        actor,
+        tally_mode,
+        candidate_objects,
+        outcome_template,
+        visibility,
+    } = round;
+
+    let mut new_tallies = tallies;
+    new_tallies[idx as usize] += 1;
+    let mut new_ballots = ballots;
+    new_ballots.push_back((player, idx));
+
+    // CR 701.38: Emit the public ballot event unless this is a secret vote —
+    // secret ballots are revealed simultaneously at `VoteResolved`, so the
+    // per-ballot `VoteCast` is withheld to avoid leaking the choice early.
+    if visibility != crate::types::ability::VoteVisibility::Secret {
+        let choice_label = options.get(idx as usize).cloned().unwrap_or_default();
+        events.push(GameEvent::VoteCast {
+            voter: player,
+            choice: choice_label,
+            source_id,
+        });
+    }
+
+    if remaining_votes > 1 {
+        // CR 701.38d: Same player still has votes to cast.
+        state.waiting_for = WaitingFor::VoteChoice {
+            player,
+            remaining_votes: remaining_votes - 1,
+            options,
+            option_labels,
+            remaining_voters,
+            tallies: new_tallies,
+            ballots: new_ballots,
+            per_choice_effect,
+            controller,
+            source_id,
+            actor,
+            tally_mode,
+            candidate_objects,
+            outcome_template,
+            visibility,
+        };
+        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+    } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
+        // CR 101.4: Advance to the next voter in turn order.
+        state.waiting_for = WaitingFor::VoteChoice {
+            player: *next_player,
+            remaining_votes: *next_votes,
+            options,
+            option_labels,
+            remaining_voters: rest.to_vec(),
+            tallies: new_tallies,
+            ballots: new_ballots,
+            per_choice_effect,
+            controller,
+            source_id,
+            actor,
+            tally_mode,
+            candidate_objects,
+            outcome_template,
+            visibility,
+        };
+        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+    } else {
+        // CR 701.38: All votes cast — emit the final tally (the reveal step for
+        // secret ballots), fan out per-choice sub-effects, then drain any
+        // post-Vote continuation.
+        events.push(GameEvent::VoteResolved {
+            source_id,
+            tallies: options
+                .iter()
+                .cloned()
+                .zip(new_tallies.iter().copied())
+                .collect(),
+        });
+        let candidate_object_ids: Vec<ObjectId> = candidate_objects.iter().copied().collect();
+        let _ = effects::vote::resolve_tally(
+            state,
+            source_id,
+            controller,
+            &options,
+            &per_choice_effect,
+            &new_tallies,
+            &new_ballots,
+            tally_mode,
+            &candidate_object_ids,
+            outcome_template.as_deref(),
+            events,
+        );
+        ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
+    }
+}
+
 pub(super) fn handle_resolution_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1275,11 +1426,23 @@ pub(super) fn handle_resolution_choice(
                 source_id,
                 actor,
                 tally_mode,
+                candidate_objects,
+                outcome_template,
+                visibility,
             },
             GameAction::ChooseOption { choice },
         ) => {
-            // CR 701.38a: Validate the cast vote. Compare lowercase against
-            // the canonical options list; reject anything else.
+            // CR 701.38a: Validate the cast vote. Named votes match the choice
+            // word against the canonical options list. Object votes (where
+            // `candidate_objects` is non-empty) reject the string path — their
+            // candidates are not canonical option words and same-named
+            // candidates can't be disambiguated by string; those go through
+            // `SubmitVoteCandidate`.
+            if !candidate_objects.is_empty() {
+                return Err(EngineError::InvalidAction(
+                    "Object-pool votes require SubmitVoteCandidate, not ChooseOption".into(),
+                ));
+            }
             let lower = choice.to_lowercase();
             let Some(idx) = options.iter().position(|o| o == &lower) else {
                 return Err(EngineError::InvalidAction(format!(
@@ -1287,85 +1450,84 @@ pub(super) fn handle_resolution_choice(
                     choice, options
                 )));
             };
-            let mut new_tallies = tallies.clone();
-            new_tallies[idx] += 1;
-            // CR 608.2c + CR 701.38: Append the per-vote ballot. `idx` is
-            // guaranteed to fit in `u8` because `parse_vote_block` rejects
-            // any vote AST with more than a few choices (no Magic card has
-            // ever exceeded ~3-5 vote options).
-            let mut new_ballots = ballots.clone();
-            new_ballots.push_back((player, idx as u8));
-            events.push(GameEvent::VoteCast {
-                voter: player,
-                choice: lower,
-                source_id,
-            });
-
-            if remaining_votes > 1 {
-                // CR 701.38d: Same player still has votes to cast — `player`
-                // and `actor` are both unchanged.
-                state.waiting_for = WaitingFor::VoteChoice {
+            // CR 608.2c + CR 701.38: Named vote options are a small bounded set
+            // (parse_vote_block yields at most a few choices per Oracle text).
+            append_vote_ballot_and_advance(
+                state,
+                events,
+                idx as u32,
+                VoteRoundState {
                     player,
-                    remaining_votes: remaining_votes - 1,
+                    remaining_votes,
                     options,
                     option_labels,
                     remaining_voters,
-                    tallies: new_tallies,
-                    ballots: new_ballots,
+                    tallies,
+                    ballots,
                     per_choice_effect,
                     controller,
                     source_id,
                     actor,
                     tally_mode,
-                };
-                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-            } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
-                // CR 101.4: Advance to the next voter in turn order.
-                // `actor` carries forward unchanged: `SubjectActs` re-resolves
-                // to whichever player is the next subject on each step, while
-                // `Delegated(p)` keeps `p` pinned across subjects.
-                state.waiting_for = WaitingFor::VoteChoice {
-                    player: *next_player,
-                    remaining_votes: *next_votes,
+                    candidate_objects,
+                    outcome_template,
+                    visibility,
+                },
+            )
+        }
+        // CR 701.38b: Object-pool vote ballot — the player picks one candidate
+        // object by index. Index-based submission disambiguates same-named
+        // candidates that `ChooseOption`'s string match cannot. Named votes
+        // (empty `candidate_objects`) reject this path.
+        (
+            WaitingFor::VoteChoice {
+                player,
+                remaining_votes,
+                options,
+                option_labels,
+                remaining_voters,
+                tallies,
+                ballots,
+                per_choice_effect,
+                controller,
+                source_id,
+                actor,
+                tally_mode,
+                candidate_objects,
+                outcome_template,
+                visibility,
+            },
+            GameAction::SubmitVoteCandidate { candidate_index },
+        ) => {
+            if (candidate_index as usize) >= candidate_objects.len() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid vote candidate index {}; {} candidates available",
+                    candidate_index,
+                    candidate_objects.len()
+                )));
+            }
+            append_vote_ballot_and_advance(
+                state,
+                events,
+                candidate_index,
+                VoteRoundState {
+                    player,
+                    remaining_votes,
                     options,
                     option_labels,
-                    remaining_voters: rest.to_vec(),
-                    tallies: new_tallies,
-                    ballots: new_ballots,
+                    remaining_voters,
+                    tallies,
+                    ballots,
                     per_choice_effect,
                     controller,
                     source_id,
                     actor,
                     tally_mode,
-                };
-                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-            } else {
-                // CR 701.38: All votes cast — resolve per-choice sub-effects,
-                // emit the final tally event, then drain any post-Vote
-                // continuation (e.g., a chained effect).
-                events.push(GameEvent::VoteResolved {
-                    source_id,
-                    tallies: options
-                        .iter()
-                        .cloned()
-                        .zip(new_tallies.iter().copied())
-                        .collect(),
-                });
-                let _ = effects::vote::resolve_tally(
-                    state,
-                    source_id,
-                    controller,
-                    &options,
-                    &per_choice_effect,
-                    &new_tallies,
-                    &new_ballots,
-                    tally_mode,
-                    events,
-                );
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
-                    state, controller, events,
-                ))
-            }
+                    candidate_objects,
+                    outcome_template,
+                    visibility,
+                },
+            )
         }
         // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
         // pile B is derived as `eligible \ pile_a`. Advance the subject queue

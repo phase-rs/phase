@@ -21,7 +21,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
-    normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, parse_rounding_suffix_only,
+    rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -485,6 +486,10 @@ fn parse_token_description_with_context(
     let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix);
     if is_all_colors {
         colors = ManaColor::ALL.to_vec();
+    }
+    // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+    if let Some(rounding) = parse_rounding_suffix_only(suffix) {
+        rewrite_quantity_expr_rounding(&mut count, rounding);
     }
     let mut keywords = parse_token_keyword_clause(suffix);
     let (mut name, types) = parse_token_identity(descriptor, ctx.card_name.as_deref())?;
@@ -1727,6 +1732,34 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn token_count_half_x_rounding_after_token_noun_is_applied() {
+        let txt = "Create half X Food tokens, rounded up.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Food token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Token, got {effect:?}");
+        };
+        assert_eq!(name, "Food");
+        match count {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
+                assert_eq!(rounding, RoundingMode::Up);
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ));
+            }
+            other => panic!("expected DivideRounded token count, got {other:?}"),
+        }
     }
 
     /// CR 109.4: `try_parse_token` emits the default `owner` of

@@ -6680,7 +6680,7 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 3 }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[1].affected, defs[0].affected);
 }
 
@@ -7225,7 +7225,7 @@ fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 3 }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[2].mode, StaticMode::Goaded);
     assert_eq!(defs[1].affected, defs[0].affected);
     assert_eq!(defs[2].affected, defs[0].affected);
@@ -7253,18 +7253,29 @@ fn is_unimplemented_residual(def: &StaticDefinition, needle: &str) -> bool {
     })
 }
 
-/// CR 508.1a + CR 611.3a + CR 613.1f: "As long as equipped creature is
+/// CR 508.1a + CR 611.3a + CR 509.1c: "As long as equipped creature is
 /// attacking, it has first strike and must be blocked by a Dalek if able."
-/// (Ace's Baseball Bat). The first-strike grant must land on the EquippedBy
-/// creature gated on the recipient being attacking — NOT on SelfRef with
-/// SourceIsAttacking — and the unmodeled "must be blocked by a Dalek if able"
-/// lure must surface as an `Effect::Unimplemented` residual, not be dropped.
+/// (Ace's Baseball Bat). The first-strike grant lands on the EquippedBy creature
+/// gated on the recipient being attacking — NOT on SelfRef with
+/// SourceIsAttacking — and the "must be blocked by a Dalek if able" lure lowers
+/// to the typed `MustBeBlocked { by: Some(Dalek) }` requirement gated on the
+/// same combat condition (no Unimplemented residual).
 #[test]
 fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host() {
     let defs = parse_static_line_multi(
         "As long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.",
     );
-    assert_eq!(defs.len(), 2, "expected supported + residual, got {defs:?}");
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected first-strike grant + typed MustBeBlocked, got {defs:?}"
+    );
+
+    let attacking_gate = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+        ),
+    };
 
     // Supported static: first strike on the host, gated on the host attacking.
     assert_eq!(defs[0].mode, StaticMode::Continuous);
@@ -7274,27 +7285,24 @@ fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host(
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::FirstStrike,
         }));
-    assert_eq!(
-        defs[0].condition,
-        Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
-        }),
-    );
+    assert_eq!(defs[0].condition, Some(attacking_gate.clone()));
     // Must NOT regress to the wrong subject/condition.
     assert_ne!(defs[0].affected, Some(TargetFilter::SelfRef));
     assert_ne!(defs[0].condition, Some(StaticCondition::SourceIsAttacking));
 
-    // Residual static surfaces the dropped lure.
+    // CR 509.1c: the lure is the typed MustBeBlocked { by: Some(Dalek) }, gated
+    // on the same attacking condition, affecting the equipped creature.
+    let dalek = crate::parser::oracle_target::parse_type_phrase("a dalek").0;
+    assert_ne!(dalek, TargetFilter::Any, "Dalek subtype must be recognized");
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: Some(dalek) });
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert_eq!(defs[1].condition, Some(attacking_gate));
+    // The lure is modeled, NOT an Unimplemented residual.
     assert!(
-        is_unimplemented_residual(&defs[1], "must be blocked by a"),
-        "lure must surface as an Unimplemented residual, got {:?}",
+        !is_unimplemented_residual(&defs[1], "must be blocked by a"),
+        "lure must be modeled, got Unimplemented residual {:?}",
         defs[1]
     );
-    // The lure must NOT be modeled as a (bare) MustBeBlocked mode.
-    assert_ne!(defs[1].mode, StaticMode::MustBeBlocked);
 }
 
 /// CR 611.3a: the Aura analog binds the gate to the EnchantedBy host.
@@ -7366,7 +7374,7 @@ fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::FirstStrike,
         }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
     // The requirement is also gated on the combat condition (CR 611.3a).
     assert_eq!(
@@ -7392,7 +7400,7 @@ fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
         "As long as equipped creature is attacking, it must be blocked if able.",
     );
     assert_eq!(defs.len(), 1, "pure requirement, got {defs:?}");
-    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
     assert_eq!(
         defs[0].condition,
@@ -7430,14 +7438,19 @@ fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
 
 /// CR 509.1c: the un-gated direct attached-subject grant lure (Slayer's Cleaver:
 /// "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.")
-/// surfaces the filtered lure as an Unimplemented residual. The first def carries
-/// the P/T grant and no condition; the residual carries no condition either.
+/// models the filtered lure as the typed `MustBeBlocked { by: Some(Eldrazi) }`.
+/// The first def carries the P/T grant and no condition; the requirement carries
+/// no condition either (this is the unconditional, non-"as long as" form).
 #[test]
-fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
+fn slayers_cleaver_lure_conjunct_models_typed_must_be_blocked() {
     let defs = parse_static_line_multi(
         "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.",
     );
-    assert_eq!(defs.len(), 2, "P/T grant + residual, got {defs:?}");
+    assert_eq!(
+        defs.len(),
+        2,
+        "P/T grant + typed MustBeBlocked, got {defs:?}"
+    );
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
@@ -7446,37 +7459,147 @@ fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 1 }));
     assert_eq!(defs[0].condition, None);
-    assert!(
-        is_unimplemented_residual(&defs[1], "must be blocked by an"),
-        "lure must surface as an Unimplemented residual, got {:?}",
-        defs[1]
+
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    assert_ne!(
+        eldrazi,
+        TargetFilter::Any,
+        "Eldrazi subtype must be recognized"
+    );
+    assert_eq!(
+        defs[1].mode,
+        StaticMode::MustBeBlocked { by: Some(eldrazi) }
     );
     assert_eq!(defs[1].condition, None);
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert!(
+        !is_unimplemented_residual(&defs[1], "must be blocked by an"),
+        "lure must be modeled, got Unimplemented residual {:?}",
+        defs[1]
+    );
 }
 
 /// CR 509.1c: a direct attached-subject filtered lure with no continuous grant
-/// sibling is still an explicit unsupported residual, not a silent drop.
+/// sibling is fully modeled as the typed `MustBeBlocked { by: Some(Eldrazi) }`.
 #[test]
-fn attached_subject_pure_filtered_lure_surfaces_as_unimplemented_residual() {
+fn attached_subject_pure_filtered_lure_models_typed_must_be_blocked() {
     let defs = parse_static_line_multi("Equipped creature must be blocked by an Eldrazi if able.");
-    assert_eq!(defs.len(), 1, "pure filtered lure residual, got {defs:?}");
-    assert!(
-        is_unimplemented_residual(&defs[0], "must be blocked by an"),
-        "filtered lure must surface as an Unimplemented residual, got {:?}",
-        defs[0]
+    assert_eq!(
+        defs.len(),
+        1,
+        "pure filtered lure → one static, got {defs:?}"
+    );
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::MustBeBlocked { by: Some(eldrazi) }
     );
     assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(
+        !is_unimplemented_residual(&defs[0], "must be blocked by an"),
+        "filtered lure must be modeled, got Unimplemented residual {:?}",
+        defs[0]
+    );
 }
 
-/// Building-block: the filtered-lure detector recognizes ONLY the by-filter form,
-/// never the bare form (which is a modeled requirement).
+/// Building-block: `parse_must_be_blocked_by_quality` captures ONLY the filtered
+/// "must be blocked by <quality> if able" form (returning the inner quality
+/// span); the bare "must be blocked if able" form has no "by " and must NOT
+/// match. `parse_must_be_blocked_by_filter` lowers the captured quality into the
+/// blocker `TargetFilter` for the two known subtypes.
 #[test]
-fn must_be_blocked_by_filter_lure_detector_excludes_bare_form() {
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by a Dalek if able").is_ok());
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by an Eldrazi if able").is_ok());
-    // Bare form has no "by <filter>" — must NOT match.
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked if able").is_err());
+fn parse_must_be_blocked_by_filter_building_block() {
+    // Detector: filtered form matches, bare form does not.
+    assert!(parse_must_be_blocked_by_quality("must be blocked by a Dalek if able").is_ok());
+    assert!(parse_must_be_blocked_by_quality("must be blocked by an Eldrazi if able").is_ok());
+    assert!(parse_must_be_blocked_by_quality("must be blocked if able").is_err());
+
+    // Filter lowering for both known subtypes (case-insensitive canonicalization).
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked by a Dalek if able"),
+        Some(crate::parser::oracle_target::parse_type_phrase("a dalek").0),
+    );
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked by an Eldrazi if able"),
+        Some(crate::parser::oracle_target::parse_type_phrase("an eldrazi").0),
+    );
+    // Bare form yields no filter.
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked if able"),
+        None,
+    );
+}
+
+/// Building-block (CR 509.1c): `extract_must_be_blocked_by_conjunct` distinguishes
+/// an ABSENT filtered lure (`None`) from a PRESENT one, classifying whether its
+/// quality is recognized vs. unrecognized. The Unrecognized arm carries the
+/// reconstructed conjunct so the un-gated attached-grant path surfaces a residual
+/// diagnostic instead of silently dropping the requirement.
+#[test]
+fn extract_must_be_blocked_by_conjunct_classifies_quality() {
+    // Absent / bare form → None (no filtered lure present).
+    assert!(extract_must_be_blocked_by_conjunct("equipped creature gets +1/+1").is_none());
+    assert!(extract_must_be_blocked_by_conjunct("must be blocked if able").is_none());
+
+    // Recognized quality → Recognized(filter).
+    assert!(matches!(
+        extract_must_be_blocked_by_conjunct("must be blocked by an Eldrazi if able"),
+        Some(MustBeBlockedByConjunct::Recognized(_)),
+    ));
+
+    // Guard: the fixture quality is genuinely unrecognized — it constrains no
+    // blocker, so the lowering helper rejects it (returns no filter). NOTE:
+    // `parse_type_phrase` yields an empty `Typed` (not `TargetFilter::Any`) here.
+    assert!(parse_must_be_blocked_by_filter("must be blocked by a splorf if able").is_none());
+    // Unrecognized quality → Unrecognized(diagnostic), NOT collapsed to None.
+    let conjunct = extract_must_be_blocked_by_conjunct("must be blocked by a Splorf if able");
+    assert!(
+        matches!(
+            &conjunct,
+            Some(MustBeBlockedByConjunct::Unrecognized(text))
+                // allow-noncombinator: test assertion verifying diagnostic text content, not parsing dispatch
+                if text.contains("must be blocked by a splorf if able")
+        ),
+        "expected an Unrecognized diagnostic conjunct, never None",
+    );
+}
+
+/// CR 509.1c (regression): the un-gated direct attached-subject path must NOT
+/// silently drop a filtered "must be blocked by <quality> if able" lure whose
+/// quality is UNRECOGNIZED. The P/T grant is modeled and the unrecognized lure
+/// surfaces as a sibling `Unimplemented` residual (coverage-visible), mirroring
+/// the gated path — the requirement never vanishes, and it is never weakened to a
+/// typed `MustBeBlocked { by: Some(<unconstrained filter>) }`.
+#[test]
+fn unrecognized_lure_conjunct_surfaces_unimplemented_residual() {
+    // Guard: the fixture quality is genuinely unrecognized — it constrains no
+    // blocker, so the lowering helper rejects it (returns no filter).
+    assert!(parse_must_be_blocked_by_filter("must be blocked by a splorf if able").is_none());
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +3/+1 and must be blocked by a Splorf if able.",
+    );
+    // The P/T grant is still modeled.
+    assert!(
+        defs.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 })),
+        "P/T grant must be modeled, got {defs:?}"
+    );
+    // The lure is surfaced as an Unimplemented residual, not dropped.
+    assert!(
+        defs.iter()
+            .any(|d| is_unimplemented_residual(d, "must be blocked by a")),
+        "unrecognized lure must surface an Unimplemented residual, got {defs:?}"
+    );
+    // It must NOT be modeled as a typed MustBeBlocked — an unrecognized quality
+    // would carry only an unconstrained filter ("any blocker"), so no typed
+    // MustBeBlocked { by: Some(..) } may appear.
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&d.mode, StaticMode::MustBeBlocked { by: Some(_) })),
+        "unrecognized quality must not be modeled as typed MustBeBlocked, got {defs:?}"
+    );
 }
 
 /// Building-block (Step 3 backstop): `parse_static_condition` for combat state
@@ -8398,8 +8521,29 @@ fn parse_compound_static_kaito_animation() {
 fn static_must_be_blocked_if_able() {
     // CR 509.1b: "must be blocked if able"
     let def = parse_static_line("Darksteel Myr must be blocked if able.").unwrap();
-    assert_eq!(def.mode, StaticMode::MustBeBlocked);
+    assert_eq!(def.mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 509.1c (regression): the STANDALONE self-ref "must be blocked [by
+/// <quality>] if able" dispatch must classify the optional blocker quality
+/// exactly like the attached-grant paths — the requirement is never silently
+/// weakened to the bare "any blocker" (`by: None`) form when a quality is
+/// present but unrecognized.
+#[test]
+fn static_must_be_blocked_standalone_quality_classification() {
+    // Recognized quality → typed `MustBeBlocked { by: Some(filter) }`.
+    let recognized =
+        parse_static_line("This creature must be blocked by an Eldrazi if able.").unwrap();
+    assert!(matches!(
+        recognized.mode,
+        StaticMode::MustBeBlocked { by: Some(_) }
+    ));
+    assert_eq!(recognized.affected, Some(TargetFilter::SelfRef));
+
+    // Unrecognized quality → line left Unimplemented (`None`), NOT weakened to a
+    // bare `MustBeBlocked { by: None }` that would force a block by ANY creature.
+    assert!(parse_static_line("This creature must be blocked by a Splorf if able.").is_none());
 }
 
 #[test]
@@ -18588,6 +18732,34 @@ fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
         defs.iter()
             .any(|def| def.mode == StaticMode::CantBlock && def.affected == expected_affected),
         "expected CantBlock on enchanted host, got {defs:?}"
+    );
+}
+
+#[test]
+fn static_ignore_this_effect_special_action_fails_closed() {
+    let supported_head = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated.",
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| def.mode == StaticMode::CantAttackOrBlock),
+        "head restriction should still parse, got {supported_head:?}"
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::CantBeActivated { .. })),
+        "head activation lock should still parse, got {supported_head:?}"
+    );
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated. \
+         Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn.",
+    );
+    assert!(
+        defs.is_empty(),
+        "unimplemented ignore-this-effect special action must fail closed, got {defs:?}"
     );
 }
 
