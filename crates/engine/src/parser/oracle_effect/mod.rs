@@ -22925,6 +22925,11 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
+            // trigger context so non-target event anaphors ("that permanent or
+            // player" on Ghyrson) bind to the triggering event instead of being
+            // reparsed as ordinary target phrases.
+            in_trigger: ctx.in_trigger,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
