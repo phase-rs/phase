@@ -403,7 +403,7 @@ fn setup_game_at_main_phase() -> GameState {
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
 /// squirrel state). The AI `SimulationFilter` legality probe
-/// (`apply_as_current_for_legality`) discards its mutated clone and only
+/// (`apply_as_current_for_simulation`) discards its mutated clone and only
 /// reads `.is_ok()`, so it must NOT run `finalize_display_state`'s
 /// board-global mana-availability sweep — that sweep is O(N^2) on a board of
 /// hundreds of mana sources and the filter pays it once per candidate.
@@ -414,7 +414,7 @@ fn apply_for_legality_skips_display_mana_sweep() {
     let mut sim = setup_game_at_main_phase();
     sim.public_state_dirty.mana_display_dirty = true;
     crate::game::perf_counters::reset();
-    apply_as_current_for_legality(&mut sim, GameAction::PassPriority).unwrap();
+    apply_as_current_for_simulation(&mut sim, GameAction::PassPriority).unwrap();
     assert_eq!(
         crate::game::perf_counters::snapshot().mana_display_sweeps,
         0,
@@ -890,6 +890,172 @@ fn walking_ballista_db_load_path_enters_with_x_counters() {
             .unwrap_or_default(),
         4,
         "Walking Ballista must enter with X=4 +1/+1 counters (DB-load path)"
+    );
+}
+
+/// CR 704.4 + CR 616.1 + CR 614.1c + CR 704.5f: Walking Ballista enters with
+/// X +1/+1 counters while the controller also has TWO order-material
+/// counter-modifying replacements — Branching Evolution ("twice that many")
+/// and Ozolith, the Shattered Spire ("that many plus one"). Placing the ETB
+/// counters is replaced by both, and because `(N*2)+1 != (N+1)*2` the CR
+/// 616.1 application order is material, so the engine pauses on a
+/// `ReplacementChoice`. That pause happens DURING the resolution of the
+/// Ballista spell. Per CR 704.4 ("state-based actions pay no attention to
+/// what happens during the resolution of a spell or ability") SBAs must NOT
+/// fire while the choice is pending — otherwise the 0/0 Ballista is sent to
+/// the graveyard (CR 704.5f) before its entering counters land. Regression
+/// test for that interaction: single-replacement cases never paused, so the
+/// existing `walking_ballista_*` tests did not catch it.
+#[test]
+fn walking_ballista_enters_with_counters_survives_with_two_material_replacements() {
+    let mut state = setup_game_at_main_phase();
+
+    // Branching Evolution: doubles +1/+1 counters put on your creatures.
+    let branching = create_object(
+        &mut state,
+        CardId(9140),
+        PlayerId(0),
+        "Branching Evolution".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&branching)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Enchantment];
+    apply_oracle_to_object(
+        &mut state,
+        branching,
+        "Branching Evolution",
+        "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.",
+    );
+
+    // Ozolith, the Shattered Spire: adds one to +1/+1 counter placements.
+    let ozolith = create_object(
+        &mut state,
+        CardId(9141),
+        PlayerId(0),
+        "Ozolith, the Shattered Spire".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&ozolith)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Artifact];
+    apply_oracle_to_object(
+        &mut state,
+        ozolith,
+        "Ozolith, the Shattered Spire",
+        "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.",
+    );
+
+    let ballista = create_object(
+        &mut state,
+        CardId(9130),
+        PlayerId(0),
+        "Walking Ballista".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&ballista).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Construct".to_string());
+        obj.power = Some(0);
+        obj.toughness = Some(0);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        };
+    }
+    apply_oracle_to_object(
+        &mut state,
+        ballista,
+        "Walking Ballista",
+        "Walking Ballista enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.",
+    );
+
+    let player = state
+        .players
+        .iter_mut()
+        .find(|player| player.id == PlayerId(0))
+        .unwrap();
+    for _ in 0..8 {
+        player.mana_pool.add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: ballista,
+            card_id: CardId(9130),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    // CR 704.4: the spell is mid-resolution, paused on the CR 616.1 ordering
+    // choice. The Ballista must NOT have been killed by a 0-toughness SBA —
+    // its entering counters have simply not been placed yet.
+    assert_eq!(
+        state.objects[&ballista].zone,
+        Zone::Battlefield,
+        "Walking Ballista must still be entering (not dead) while the CR 616.1 \
+         replacement-order choice is pending. Got zone {:?}, waiting_for={:?}",
+        state.objects[&ballista].zone,
+        state.waiting_for,
+    );
+
+    // The pause must actually be the CR 616.1 replacement-order choice. Without
+    // this, a future change that auto-orders the two doublers (no choice
+    // surfaced) would still land 9/10 counters with the Ballista alive, so every
+    // assertion below — and the "still entering" one above — would pass vacuously
+    // while the SBA-suppression-during-ReplacementChoice branch went unexercised.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected a CR 616.1 replacement-order choice pending mid-entry, got {:?}",
+        state.waiting_for,
+    );
+
+    // CR 616.1: answer the (possibly repeated) replacement-order choices.
+    let mut guard = 0;
+    while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resolve replacement order choice");
+        guard += 1;
+        assert!(guard < 8, "replacement-order choice did not terminate");
+    }
+
+    // CR 614.1c: counters land before the resolution settles; the Ballista is
+    // a live (4+1)*2 = 10/10 (or 9/9 for the other ordering — either way >0).
+    assert_eq!(
+        state.objects[&ballista].zone,
+        Zone::Battlefield,
+        "Walking Ballista must survive once its entering counters are placed. \
+         counters={:?}",
+        state.objects[&ballista].counters,
+    );
+    let counters = state.objects[&ballista]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or_default();
+    assert!(
+        counters >= 9,
+        "Walking Ballista must enter with the doubled/incremented counters \
+         (9 or 10 depending on CR 616.1 order), got {counters}"
     );
 }
 
@@ -4690,36 +4856,113 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 
     let mut result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     for _ in 0..6 {
-        if matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+        if state.players[0].graveyard.contains(&hill_giant) {
             break;
+        }
+        if matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+            panic!("Disciple should auto-sacrifice the only other creature");
         }
         result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     }
-    match result.waiting_for {
-        WaitingFor::EffectZoneChoice {
-            player,
-            cards,
-            effect_kind,
-            ..
-        } => {
-            assert_eq!(player, PlayerId(0));
-            assert_eq!(effect_kind, EffectKind::Sacrifice);
-            assert!(cards.contains(&hill_giant));
-        }
-        other => panic!("expected Disciple sacrifice choice, got {other:?}"),
-    }
-
-    apply_as_current(
-        &mut state,
-        GameAction::SelectCards {
-            cards: vec![hill_giant],
-        },
-    )
-    .unwrap();
 
     assert_eq!(state.players[0].life, 23);
     assert_eq!(state.players[0].hand.len(), 3);
     assert!(state.players[0].graveyard.contains(&hill_giant));
+}
+
+/// Cluster J1 (headline `/card-test` regression guard): "When this creature
+/// enters, sacrifice **another** creature." must exclude the source. Casting
+/// Disciple of Bolas through the full cast → trigger → stack → apply() → chain
+/// → `sacrifice::resolve` pipeline with exactly one OTHER creature must
+/// sacrifice that other creature and leave Disciple on the battlefield.
+///
+/// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
+/// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
+/// builds its eligible pool via `FilterContext::from_ability` (source excluded
+/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+///
+/// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
+/// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
+/// `recipient_id: None` identically to `from_ability`, so both paths hit the
+/// same `FilterProp::Another` exclusion site with an identical source id. This
+/// one effect-path guard therefore substantiates the whole "sacrifice another"
+/// class (effect + cost forms) — no separate cost-path integration test needed.
+///
+/// The positive Hill-Giant sacrifice plus the +3 life / +3 draw deltas prove
+/// the sacrifice machinery actually ran (non-vacuous), and the paired sibling
+/// test `sacrifice_a_creature_without_another_includes_sole_source` proves the
+/// exclusion is `Another`-driven, not an empty-pool artifact.
+#[test]
+fn disciple_of_bolas_sacrifices_another_creature_not_itself() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The entering creature carries the verbatim Oracle text (parser branch
+    // fidelity — a paraphrase could take a different branch). Mana is elided
+    // (default zero cost) so the test isolates the sacrifice-exclusion seam.
+    let disciple = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Disciple of Bolas",
+            2,
+            1,
+            "When this creature enters, sacrifice another creature. You gain X life and draw X cards, where X is that creature's power.",
+        )
+        .id();
+
+    // Exactly one OTHER creature: the sole eligible sacrifice, so the effect
+    // auto-resolves (no EffectZoneChoice) onto it. Power 3 → X = 3.
+    let hill_giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+
+    // Three library cards so the "draw X" (X = 3) has cards to draw.
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(disciple).resolve();
+
+    // Source excluded: Disciple survives on the battlefield.
+    outcome.assert_zone(&[disciple], Zone::Battlefield);
+    // The OTHER creature was sacrificed (positive, non-vacuous reach-guard).
+    outcome.assert_zone(&[hill_giant], Zone::Graveyard);
+    // X = Hill Giant's power (3): +3 life and 3 cards drawn.
+    outcome.assert_life_delta(P0, 3);
+    outcome.assert_hand_drawn(P0, 3);
+}
+
+/// Cluster J1 (paired sibling reach-guard): the same ETB shape WITHOUT the
+/// `another` qualifier ("sacrifice a creature") DOES include the sole source,
+/// sacrificing the entering creature itself. This proves the exclusion in
+/// `disciple_of_bolas_sacrifices_another_creature_not_itself` is driven by
+/// `FilterProp::Another`, not by a vacuously empty eligible pool.
+///
+/// CR 701.21a: with the source as the only eligible creature, the mandatory
+/// sacrifice auto-resolves onto it.
+#[test]
+fn sacrifice_a_creature_without_another_includes_sole_source() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // No "another" — the source is a legal sacrifice target. It is the ONLY
+    // creature on the battlefield when the ETB resolves.
+    let reaper = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Test Reaper",
+            1,
+            1,
+            "When this creature enters, sacrifice a creature.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(reaper).resolve();
+
+    // Sole eligible creature is the source itself → it sacrifices itself.
+    outcome.assert_zone(&[reaper], Zone::Graveyard);
 }
 
 const SQUADRON_HAWK_ORACLE: &str = "Flying\nWhen this creature enters, you may search your library for up to three cards named Squadron Hawk, reveal them, put them into your hand, then shuffle.";

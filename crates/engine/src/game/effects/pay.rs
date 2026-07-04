@@ -78,7 +78,8 @@ pub fn resolve(
         {
             let per_x = mana_x_shard_count(mana_cost);
             let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
-            let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
+            let max =
+                trigger_event_amount_for_x_payment(state).map_or(max, |amount| max.min(amount));
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: payer,
                 resource: PayableResource::ManaGeneric { per_x },
@@ -303,6 +304,18 @@ fn trigger_event_amount(state: &GameState) -> Option<u32> {
         .as_ref()
         .and_then(crate::game::targeting::extract_amount_from_event)
         .and_then(|amount| u32::try_from(amount.max(0)).ok())
+}
+
+/// CR 107.3i + CR 508.1m: Only event amounts that bound pay-{X} via an explicit
+/// comparator where-X clause (Well of Lost Dreams class) may cap X announcement.
+/// `AttackersDeclared` exposes attacker *count* for "that many" effects, not as
+/// a pay-{X} cap — using it capped Elenda and Azor at X=1 (#4226).
+fn trigger_event_amount_for_x_payment(state: &GameState) -> Option<u32> {
+    let event = state.current_trigger_event.as_ref()?;
+    match event {
+        GameEvent::AttackersDeclared { .. } => None,
+        _ => trigger_event_amount(state),
+    }
 }
 
 #[cfg(test)]
@@ -1851,6 +1864,26 @@ mod tests {
     /// trigger-event-amount cap independently from the X-payable cap, so a
     /// regression that drops the event cap surfaces as max=10 here even when
     /// the basic mana check still passes.
+    #[test]
+    fn trigger_event_amount_for_x_payment_ignores_attackers_declared_count() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(99)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        assert_eq!(
+            trigger_event_amount_for_x_payment(&state),
+            None,
+            "attack-batch attacker count must not cap pay-{{X}} (#4226)"
+        );
+        assert_eq!(
+            trigger_event_amount(&state),
+            Some(1),
+            "extract_amount_from_event still exposes attacker count for other readers"
+        );
+    }
+
     #[test]
     fn pay_x_optional_max_capped_by_event_amount_not_player_mana() {
         use crate::game::effects::resolve_ability_chain;

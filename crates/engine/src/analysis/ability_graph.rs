@@ -972,6 +972,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ManifestDread
         | Effect::Cloak { .. }
         | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
@@ -2689,6 +2690,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         }
     }
     /// A `TriggerDefinition` with the zone-change disambiguator fields set.

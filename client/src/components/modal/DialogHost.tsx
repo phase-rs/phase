@@ -228,7 +228,7 @@ export function PeekRestoreTab({
   const positionClass =
     direction === "right"
       ? "right-3 top-1/2 -translate-y-1/2 h-24 w-9 rounded-2xl"
-      : "bottom-3 left-1/2 -translate-x-1/2 h-9 w-24 rounded-2xl";
+      : "left-3 top-[63%] -translate-y-1/2 h-9 w-9 rounded-2xl";
 
   const iconRotate = direction === "right" ? "rotate-180" : "-rotate-90";
 

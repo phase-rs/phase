@@ -137,4 +137,44 @@ describe("CascadeChoiceModal", () => {
       data: { choice: { type: "Cast" } },
     });
   });
+
+  // CR 608.2g + CR 609.4b: the paid graveyard cast (Quistis Trepe, Tinybones the
+  // Pickpocket) must render PAID-cast copy (NOT the free "without paying" strings)
+  // and dispatch GraveyardPaidCastChoice on accept/decline.
+  it("renders PAID-cast copy and dispatches GraveyardPaidCastChoice actions", () => {
+    setWaitingFor({
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: {
+          type: "GraveyardPaidCast",
+          hit_card: 52,
+          mana_spend_permission: "AnyTypeOrColor",
+        },
+      },
+    });
+
+    render(<CascadeChoiceModal />);
+
+    // (a) PAID-cast copy: the graveyard eyebrow + the pay-its-cost suffix, and
+    // NOT the free "without paying its mana cost" string.
+    expect(screen.getByText("Cast from Graveyard")).toBeInTheDocument();
+    expect(
+      screen.getByText("(pay its mana cost — any type of mana may be spent)"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("(without paying its mana cost)")).not.toBeInTheDocument();
+
+    // (b) accept → Cast, decline → Decline, both as GraveyardPaidCastChoice.
+    fireEvent.click(screen.getByRole("button", { name: /Cast Lightning Bolt/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "GraveyardPaidCastChoice",
+      data: { choice: { type: "Cast" } },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Decline/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "GraveyardPaidCastChoice",
+      data: { choice: { type: "Decline" } },
+    });
+  });
 });

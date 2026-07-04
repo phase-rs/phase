@@ -172,6 +172,11 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    // Pre-choice behold ("choose a creature type and behold N of that type"):
+    // same creature-type picker + ChooseOption dispatch as NamedChoice.
+    case "CostTypeChoice":
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
     case "DamageSourceChoice":
       if (!canActForWaitingState) return null;
       return <DamageSourceModal data={waitingFor.data} />;
@@ -538,6 +543,12 @@ function SearchPartitionModal({
   const tappedText = data.primary_enter_tapped
     ? t("cardChoice.searchPartition.tapped")
     : "";
+  const primaryText = t(
+    `cardChoice.searchPartition.zones.${data.primary_destination}`,
+  );
+  const restText = t(
+    `cardChoice.searchPartition.zones.${data.rest_destination}`,
+  );
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -575,6 +586,8 @@ function SearchPartitionModal({
       subtitle={t("cardChoice.searchPartition.subtitle", {
         count: data.primary_count,
         tapped: tappedText,
+        primary: primaryText,
+        rest: restText,
       })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >

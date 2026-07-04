@@ -375,7 +375,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
             | GameEvent::Specialized { .. }
-            | GameEvent::TurnedFaceUp { .. } => {
+            | GameEvent::TurnedFaceUp { .. }
+            // Turning a permanent face down resets its copiable values to a 2/2
+            // face-down body (Layer 1) and changes its visibility; recompute.
+            | GameEvent::TurnedFaceDown { .. } => {
                 mark_public_state_all_dirty(state);
                 return;
             }
@@ -557,6 +560,7 @@ mod tests {
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
         state.pending_continuation = Some(PendingContinuation::new(Box::new(ability)));
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            enters_modified_if: None,
             player: PlayerId(0),
             cards: vec![ObjectId(5), ObjectId(11)],
             count: 1,

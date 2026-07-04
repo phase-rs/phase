@@ -34,8 +34,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::game::combat::AttackTarget;
-use crate::game::engine::{apply_as_current_for_legality, SimulationProbeGuard};
+use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard};
 use crate::game::functioning_abilities::game_functioning_statics;
+use crate::game::{casting, keywords, turn_control};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, FilterProp, ParitySource,
     ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition,
@@ -45,7 +46,7 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -79,6 +80,15 @@ pub trait CandidateFilter {
 
     /// Return `true` to accept the candidate, `false` to reject.
     fn accept(&self, state: &GameState, candidate: &CandidateAction) -> bool;
+
+    fn accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        _probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        self.accept(state, candidate)
+    }
 }
 
 /// Structural legality check wrapping [`super::cheap_reject_candidate`].
@@ -134,6 +144,33 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_priority_activation(state, &candidate.action) {
             return true;
         }
+        if structurally_valid_priority_cast(state, &candidate.action) {
+            return true;
+        }
+        self.fallback_simulation(state, candidate)
+    }
+
+    fn accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
+            return true;
+        }
+        if structurally_valid_priority_activation(state, &candidate.action) {
+            return true;
+        }
+        if structurally_valid_priority_cast_with_probe(state, &candidate.action, probe) {
+            return true;
+        }
+        self.fallback_simulation(state, candidate)
+    }
+}
+
+impl SimulationFilter {
+    fn fallback_simulation(&self, state: &GameState, candidate: &CandidateAction) -> bool {
         crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
@@ -144,7 +181,7 @@ impl CandidateFilter for SimulationFilter {
         let _probe = SimulationProbeGuard::enter();
         // Legality-only probe (#4479): `sim` is discarded, so skip display derivation
         // (the O(N^2) mana-availability board sweep on go-wide token boards).
-        apply_as_current_for_legality(&mut sim, candidate.action.clone()).is_ok()
+        apply_as_current_for_simulation(&mut sim, candidate.action.clone()).is_ok()
     }
 }
 
@@ -165,6 +202,59 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // same priority activation just to enter target selection and discard the
     // clone.
     crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
+}
+
+// CR 117.1a + CR 601.2: a player may cast a spell when they have priority;
+// `can_cast_object_now` / `effective_spell_cost` below are the engine's
+// structural authorities for the cast — this fast path only avoids
+// re-simulating the full cast to discard the clone.
+fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> bool {
+    structurally_valid_priority_cast_with_probe(state, action, None)
+}
+
+fn structurally_valid_priority_cast_with_probe(
+    state: &GameState,
+    action: &GameAction,
+    probe: Option<&casting::PriorityCastProbe>,
+) -> bool {
+    let (
+        WaitingFor::Priority { player },
+        GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    if !targets.is_empty()
+        || state.priority_player != turn_control::authorized_submitter_for_player(state, *player)
+    {
+        return false;
+    }
+
+    // CR 702.61a: While a spell with split second is on the stack, players
+    // can't cast spells. Keep this explicit so the fast path cannot bypass the
+    // reducer's split-second rejection.
+    if keywords::stack_has_split_second(state) {
+        return false;
+    }
+
+    let Some(obj) = state.objects.get(object_id) else {
+        return false;
+    };
+    if obj.card_id != *card_id
+        || !casting::can_cast_object_now_with_probe(state, *player, *object_id, probe)
+    {
+        return false;
+    }
+
+    casting::effective_spell_cost(state, *player, *object_id).is_some_and(|cost| {
+        casting::can_pay_cost_after_auto_tap_with_probe(state, *player, *object_id, &cost, probe)
+    })
 }
 
 /// A pipeline of filters run in the order they're registered. Candidates pass
@@ -194,6 +284,17 @@ impl FilterPipeline {
         self.filters.iter().all(|f| f.accept(state, candidate))
     }
 
+    pub fn accepts_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
+        self.filters
+            .iter()
+            .all(|f| f.accept_with_probe(state, candidate, probe))
+    }
+
     /// Apply the pipeline to an iterator of candidates.
     ///
     /// Equivalence-class legality memoization: the cheap filters run unchanged
@@ -211,20 +312,32 @@ impl FilterPipeline {
     where
         I: IntoIterator<Item = CandidateAction>,
     {
+        self.apply_with_probe(state, candidates, None)
+    }
+
+    pub fn apply_with_probe<I>(
+        &self,
+        state: &GameState,
+        candidates: I,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> Vec<CandidateAction>
+    where
+        I: IntoIterator<Item = CandidateAction>,
+    {
         let poison = LegalityPoisonGates::compute(state);
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
         candidates
             .into_iter()
             .filter(|c| {
-                if !self.cheap_filters_accept(state, c) {
+                if !self.cheap_filters_accept_with_probe(state, c, probe) {
                     return false;
                 }
                 match legality_equivalence_key(state, &c.action, &poison, &mut interner) {
                     Some(key) => *memo
                         .entry(key)
-                        .or_insert_with(|| self.expensive_verdict(state, c)),
-                    None => self.expensive_verdict(state, c),
+                        .or_insert_with(|| self.expensive_verdict_with_probe(state, c, probe)),
+                    None => self.expensive_verdict_with_probe(state, c, probe),
                 }
             })
             .collect()
@@ -232,20 +345,30 @@ impl FilterPipeline {
 
     /// Run every non-`Expensive` filter (the cheap, per-candidate checks).
     /// First rejection wins, mirroring `accepts()`.
-    fn cheap_filters_accept(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+    fn cheap_filters_accept_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
         self.filters
             .iter()
             .filter(|f| f.cost() != FilterCost::Expensive)
-            .all(|f| f.accept(state, candidate))
+            .all(|f| f.accept_with_probe(state, candidate, probe))
     }
 
     /// The memoizable verdict: the AND of every `Expensive` filter. For the
     /// default pipeline this is exactly `SimulationFilter::accept`.
-    fn expensive_verdict(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+    fn expensive_verdict_with_probe(
+        &self,
+        state: &GameState,
+        candidate: &CandidateAction,
+        probe: Option<&casting::PriorityCastProbe>,
+    ) -> bool {
         self.filters
             .iter()
             .filter(|f| f.cost() == FilterCost::Expensive)
-            .all(|f| f.accept(state, candidate))
+            .all(|f| f.accept_with_probe(state, candidate, probe))
     }
 }
 
@@ -258,8 +381,8 @@ impl FilterPipeline {
 /// purpose of the expensive legality simulation: every field the conservative
 /// SAFE classifiers read is captured here, while pure identity/ordering fields
 /// (`id`, `incarnation`, `timestamp`) and display-derived fields (recomputed
-/// under `PublicFinalizeMode::DeferredDisplay`, which `apply_as_current_for_legality`
-/// uses) are excluded.
+/// under `PublicFinalizeMode::DeferredDisplay`, which the legality probe's
+/// `apply_as_current_for_simulation` uses) are excluded.
 ///
 /// CR 400.7: object identity (`id`/`incarnation`) is intentionally NOT part of
 /// the fingerprint — the whole point is to collapse distinct-id, content-identical
@@ -612,6 +735,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
+        // CR 700.2: modality reads `obj.modal`, an apply()-constant printed-card
+        // field on the candidate — safe to memoize.
+        | FilterProp::Modal
         | FilterProp::IsCommander => true,
 
         // SAFE only when the embedded `QuantityExpr` is memo-safe.
@@ -637,7 +763,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn
+        | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
@@ -1093,7 +1219,7 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::candidate_actions;
-    use crate::types::game_state::GameState;
+    use crate::types::game_state::{CastPaymentMode, CastingVariant, GameState, StackEntryKind};
 
     #[test]
     fn default_pipeline_registered_filters_ordered_by_cost() {
@@ -1164,7 +1290,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1188,10 +1316,159 @@ mod tests {
         }
     }
 
+    fn cand_with_actor(action: GameAction, actor: PlayerId) -> CandidateAction {
+        CandidateAction {
+            action,
+            metadata: ActionMetadata {
+                actor: Some(actor),
+                tactical_class: TacticalClass::Spell,
+            },
+        }
+    }
+
+    fn zero_cost_sorcery_priority_state() -> (GameState, ObjectId, CardId) {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let card_id = CardId(100);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Shortcut Sorcery".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::zero();
+        obj.base_mana_cost = obj.mana_cost.clone();
+        (state, spell, card_id)
+    }
+
     fn dynamic_ref() -> QuantityExpr {
         QuantityExpr::Ref {
             qty: QuantityRef::LifeAboveStarting,
         }
+    }
+
+    /// Priority Auto CastSpell with no targets is accepted structurally and
+    /// avoids the clone-and-apply fallback. Revert the shortcut call or helper
+    /// acceptance ⇒ `state_clone_for_legality == 1`.
+    #[test]
+    fn structurally_valid_priority_cast_short_circuits_auto_targetless_spell() {
+        let (state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(structurally_valid_priority_cast(&state, &action));
+
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_ok(),
+            "the structural shortcut must stay within the clone/apply oracle"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(&state, &cand_with_actor(action, PlayerId(1))));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 0,
+            "structural CastSpell fast path must avoid legality clones; got {clones}"
+        );
+    }
+
+    /// CR 702.61a hostile fixture: a split-second spell on the stack blocks the
+    /// structural cast shortcut, then the clone/apply oracle rejects the cast.
+    /// Revert the explicit split-second guard ⇒ helper accepts and clones stay 0.
+    #[test]
+    fn structurally_valid_priority_cast_rejects_split_second_and_falls_back() {
+        let (mut state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(
+            structurally_valid_priority_cast(&state, &action),
+            "fixture must reach the positive shortcut before split second is added"
+        );
+
+        let split_second_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Krosan Grip".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&split_second_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::SplitSecond);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: split_second_id,
+            source_id: split_second_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(101),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+
+        assert!(!structurally_valid_priority_cast(&state, &action));
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_err(),
+            "clone/apply oracle must also reject casting under split second"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(!SimulationFilter.accept(&state, &cand(action)));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 1,
+            "split-second rejection must fall through to exactly one legality clone; got {clones}"
+        );
+    }
+
+    /// Manual payment mode is outside the conservative shortcut subset. Revert
+    /// the payment-mode guard ⇒ helper accepts and clone count drops to 0.
+    #[test]
+    fn structurally_valid_priority_cast_manual_payment_uses_fallback() {
+        let (state, object_id, card_id) = zero_cost_sorcery_priority_state();
+        let action = GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        };
+
+        assert!(!structurally_valid_priority_cast(&state, &action));
+        let mut oracle = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut oracle, action.clone()).is_ok(),
+            "manual payment is unsupported by the shortcut, not illegal"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(&state, &cand(action)));
+        let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 1,
+            "manual CastSpell must use the clone/apply fallback; got {clones}"
+        );
     }
 
     /// #1: two content-identical sources share ONE legality clone (memo hit).
@@ -1557,7 +1834,7 @@ mod tests {
             }
         ));
         assert!(!filterprop_reads_only_candidate_fp(
-            &FilterProp::AttackedThisTurn
+            &FilterProp::AttackedThisTurn { defender: None }
         ));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::WasKicked));
         assert!(!filterprop_reads_only_candidate_fp(
@@ -1567,10 +1844,13 @@ mod tests {
             prop: Box::new(FilterProp::Tapped)
         }));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::Not {
-            prop: Box::new(FilterProp::AttackedThisTurn)
+            prop: Box::new(FilterProp::AttackedThisTurn { defender: None })
         }));
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::AnyOf {
-            props: vec![FilterProp::Tapped, FilterProp::AttackedThisTurn]
+            props: vec![
+                FilterProp::Tapped,
+                FilterProp::AttackedThisTurn { defender: None }
+            ]
         }));
         // Counters with a dynamic count ⇒ POISON; with a Fixed count ⇒ SAFE.
         assert!(!filterprop_reads_only_candidate_fp(&FilterProp::Counters {
@@ -1615,7 +1895,8 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]));
         assert!(target_filter_all_props_safe(&safe));
         let poison = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedThisTurn]),
+            TypedFilter::creature()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
         );
         assert!(!target_filter_all_props_safe(&poison));
 

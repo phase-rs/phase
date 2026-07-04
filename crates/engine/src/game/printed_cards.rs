@@ -597,6 +597,50 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
     }
 }
 
+/// Snapshot an object's **printed/base** characteristics into a [`BackFaceData`],
+/// deliberately ignoring any live fields that continuous effects (CR 613) may
+/// have altered.
+///
+/// Use this instead of [`snapshot_object_face`] whenever the snapshot is taken
+/// from a permanent already on the battlefield — specifically when turning it
+/// face down via a spell or ability (CR 708.2a). At that point the live fields
+/// may include layer-applied modifications (e.g. a +1/+1 anthem making a 2/2
+/// appear as 3/3). If those inflated values were stored in `back_face`,
+/// [`apply_back_face_to_object`] would write them into both live and base on
+/// restoration (CR 708.8), causing the anthem to reapply from an already-
+/// inflated baseline and produce a permanently-wrong value.
+///
+/// Fields with no base equivalent (`modal`, `additional_cost`, `strive_cost`,
+/// `casting_restrictions`, `casting_options`) are invariant after card creation
+/// and are taken directly from the live object.
+pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
+    BackFaceData {
+        name: obj.base_name.clone(),
+        power: obj.base_power,
+        toughness: obj.base_toughness,
+        loyalty: obj.base_loyalty,
+        defense: obj.base_defense,
+        card_types: obj.base_card_types.clone(),
+        mana_cost: obj.base_mana_cost.clone(),
+        keywords: obj.base_keywords.clone(),
+        abilities: (*obj.base_abilities).clone(),
+        // Share the Arc rather than deep-cloning the Vec — semantically
+        // identical and avoids an allocation on every face-down resolution.
+        trigger_definitions: Arc::clone(&obj.base_trigger_definitions).into(),
+        replacement_definitions: Arc::clone(&obj.base_replacement_definitions).into(),
+        static_definitions: Arc::clone(&obj.base_static_definitions).into(),
+        color: obj.base_color.clone(),
+        printed_ref: obj.base_printed_ref.clone(),
+        // Casting metadata: invariant after card creation, no base equivalent.
+        modal: obj.modal.clone(),
+        additional_cost: obj.additional_cost.clone(),
+        strive_cost: obj.strive_cost.clone(),
+        casting_restrictions: obj.casting_restrictions.clone(),
+        casting_options: obj.casting_options.clone(),
+        layout_kind: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conjure-target effect walker
 //
@@ -853,6 +897,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // `collect_conjure_names_from_face`), so nothing to gather here.
         Effect::DraftFromSpellbook { .. } => {}
         Effect::TurnFaceUp { .. } => {}
+        Effect::TurnFaceDown { .. } => {}
         // Nested-ability carriers — descend.
         Effect::Vote {
             per_choice_effect, ..

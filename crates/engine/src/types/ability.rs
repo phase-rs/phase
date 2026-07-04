@@ -297,7 +297,15 @@ pub enum OpponentMayScope {
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
-    CreatureType,
+    /// CR 205.3m: A choice among creature types. `options`, when non-empty,
+    /// narrows the offered set below the full creature-type list to an explicit
+    /// Oracle-listed candidate set (e.g. A Killer Among Us' "secretly choose
+    /// Human, Merfolk, or Goblin") — mirrors the `Color { excluded }` /
+    /// `CardType { excluded }` restriction axis. Empty ⇒ all creature types
+    /// (Morophon / Changeling), which keeps existing card-data JSON byte-stable.
+    CreatureType {
+        options: Vec<String>,
+    },
     Color {
         /// Colors that cannot be chosen by this prompt.
         ///
@@ -368,6 +376,19 @@ pub enum ChoiceType {
 }
 
 impl ChoiceType {
+    /// Unrestricted creature-type choice (all creature types offered).
+    pub fn creature_type() -> Self {
+        Self::CreatureType {
+            options: Vec::new(),
+        }
+    }
+
+    /// Creature-type choice restricted to an explicit Oracle-listed candidate
+    /// set (CR 205.3m), e.g. "secretly choose Human, Merfolk, or Goblin".
+    pub fn creature_type_from(options: Vec<String>) -> Self {
+        Self::CreatureType { options }
+    }
+
     pub fn color() -> Self {
         Self::Color {
             excluded: Vec::new(),
@@ -417,8 +438,19 @@ impl Serialize for ChoiceType {
         S: Serializer,
     {
         match self {
-            Self::CreatureType => {
-                serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+            // Serialize the unrestricted form as the legacy unit variant
+            // "CreatureType" so existing Morophon/Changeling card-data JSON
+            // stays byte-stable; only emit the struct form when a candidate
+            // restriction is present.
+            Self::CreatureType { options } => {
+                if options.is_empty() {
+                    serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 0, "CreatureType", 1)?;
+                    variant.serialize_field("options", options)?;
+                    variant.end()
+                }
             }
             Self::Color { excluded } => {
                 if excluded.is_empty() {
@@ -513,6 +545,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         #[derive(Deserialize)]
         enum ChoiceTypeData {
+            CreatureType {
+                #[serde(default)]
+                options: Vec<String>,
+            },
             Color {
                 #[serde(default)]
                 excluded: Vec<ManaColor>,
@@ -547,7 +583,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         match ChoiceTypeRepr::deserialize(deserializer)? {
             ChoiceTypeRepr::Unit(value) => match value.as_str() {
-                "CreatureType" => Ok(Self::CreatureType),
+                "CreatureType" => Ok(Self::creature_type()),
                 "Color" => Ok(Self::color()),
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
@@ -578,6 +614,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 )),
             },
             ChoiceTypeRepr::Data(data) => match data {
+                ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
@@ -905,6 +942,14 @@ pub enum ChosenAttribute {
     /// changes zones (CR 400.7), which is exactly the lifetime Koh's grant needs.
     /// Replace-on-rechoose: `RememberCard` removes any prior `Card` before pushing.
     Card(ObjectId),
+    /// CR 607.2d: The chosen seat direction (left/right) for a directional
+    /// "choose left or right" ability linked to a "the [last] chosen direction"
+    /// static (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
+    /// Tactician). Stored on the source's `chosen_attributes` and read by
+    /// `GameObject::chosen_direction()` during the CR 508.1c attacker gate.
+    /// Replace-on-rechoose: the {Left,Right} hijack in `choose.rs` removes any
+    /// prior `Direction` before pushing, so only the "last chosen" survives.
+    Direction(SeatDirection),
 }
 
 impl ChosenAttribute {
@@ -912,7 +957,7 @@ impl ChosenAttribute {
     pub fn choice_type(&self) -> ChoiceType {
         match self {
             Self::Color(_) => ChoiceType::color(),
-            Self::CreatureType(_) => ChoiceType::CreatureType,
+            Self::CreatureType(_) => ChoiceType::creature_type(),
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
@@ -950,6 +995,12 @@ impl ChosenAttribute {
             // spurious object-choice category.
             Self::Card(_) => ChoiceType::Labeled {
                 options: Vec::new(),
+            },
+            // CR 607.2d: The directional choice is a two-option labeled prompt.
+            // The {Left,Right} hijack in `choose.rs` recognises exactly this
+            // option set to persist a typed `Direction` rather than a `Label`.
+            Self::Direction(_) => ChoiceType::Labeled {
+                options: vec!["Left".into(), "Right".into()],
             },
         }
     }
@@ -1006,7 +1057,7 @@ impl ChoiceValue {
                 let color = value.parse::<ManaColor>().ok()?;
                 (!excluded.contains(&color)).then_some(Self::Color(color))
             }
-            ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
+            ChoiceType::CreatureType { .. } => Some(Self::CreatureType(value.to_string())),
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
             }
@@ -1168,22 +1219,34 @@ pub enum CounterSourceRider {
     Destroy,
 }
 
-/// CR 701.6a + CR 614.1a: "put it <zone> instead of into that player's
-/// graveyard" — a replacement redirect on the destination of a countered
-/// *spell* (Memory Lapse, Remand, Spell Crumple). Distinct from
-/// [`CounterSourceRider`], which acts on a countered *ability*'s source
-/// permanent.
+/// CR 614.1a + CR 608.2n: the destination a spell is redirected to when an
+/// "instead" replacement intercepts its move from the stack to a graveyard.
+/// Two producers share this typed destination:
+///   - the countered-spell redirect (Memory Lapse, Remand, Spell Crumple) —
+///     `Effect::Counter.countered_spell_zone`;
+///   - the cast-this-way rider (Torrential Gearhulk → `Exile`; Kylox's
+///     Voltstrider → `Library { Bottom }`) — installed as a per-object
+///     replacement when a `CastFromZone` grant finalizes.
 ///
-/// CR 701.6a says a countered spell is put into its owner's graveyard; CR
-/// 614.1a makes the "instead" clause a replacement that redirects that move to
-/// the named zone. Exile is deliberately excluded — that case is already
-/// handled by the existing graveyard-exile sub-ability rider in
-/// `game::effects::counter` (Force of Negation, No More Lies).
+/// CR 608.2n is the default move this replaces (a resolving instant/sorcery is
+/// put into its owner's graveyard); CR 701.6a is the corresponding default for
+/// a countered spell. CR 614.1a makes the "instead" clause a replacement that
+/// redirects that move to the named destination.
+///
+/// `Exile` is a member of the type because the cast-this-way rider needs it
+/// (Torrential Gearhulk). The COUNTER parser must NOT emit `Exile` into
+/// `countered_spell_zone`, however: exile-on-counter is already handled by the
+/// separate graveyard-exile sub-ability rider in `game::effects::counter`
+/// (Force of Negation, No More Lies), so emitting it here too would
+/// double-exile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum CounteredSpellDestination {
+pub enum SpellStackToGraveyardReplacement {
+    /// "exile it instead" (Torrential Gearhulk cast-this-way rider). Excluded
+    /// from the counter parser — see the type doc.
+    Exile,
     /// "put it on top/bottom of its owner's library" (Memory Lapse,
-    /// Spell Crumple).
+    /// Spell Crumple; Kylox's Voltstrider → bottom).
     Library { position: LibraryPosition },
     /// "return it to its owner's hand" / "put it into its owner's hand"
     /// (Remand).
@@ -2026,6 +2089,15 @@ pub enum RestrictionPlayerScope {
 
 /// A permission granted to a `GameObject` allowing it to be cast under specific conditions.
 /// Stored in `GameObject::casting_permissions`.
+// clippy::large_enum_variant: like `Effect`, this is a central engine enum whose
+// variants legitimately carry large engine payloads directly (`ExileWithAltCost`
+// holds a `ManaCost`, an `Option<ResolutionCastCleanup>`, an
+// `Option<CastPermissionConstraint>`, and the typed graveyard-redirect
+// destination). Boxing one incidental field would not meaningfully shrink the
+// 500+ byte variant; the permissions are short-lived per-object grants, not
+// hot-path bulk collections, so the size is intentional. Mirrors the documented
+// allow on `Effect`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastingPermission {
@@ -2085,11 +2157,26 @@ pub enum CastingPermission {
         /// declines or fails to cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
-        /// CR 614.1a: Torrential Gearhulk / Toshiro class — a `CastFromZone`
-        /// grant whose sub-ability is "if that spell would be put into your
-        /// graveyard, exile it instead." Applied when the granted cast finalizes.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exile_instead_of_graveyard_on_resolve: bool,
+        /// CR 614.1a + CR 608.2n: Torrential Gearhulk / Kylox's Voltstrider
+        /// class — a `CastFromZone` grant whose sub-ability is "if that spell
+        /// would be put into a graveyard, [exile it / put it on the bottom of
+        /// its owner's library / return it to its owner's hand] instead."
+        /// `Some(dest)` installs the destination-correct CR 608.2n redirect
+        /// replacement when the granted cast finalizes; `None` (the common
+        /// case) leaves the resolving spell on its default graveyard path.
+        /// Typed rather than a bool so the rider covers every CR 614.1a
+        /// destination, not just exile. The `alias` + `deserialize_with` accept
+        /// the legacy `exile_instead_of_graveyard_on_resolve: bool` this field
+        /// replaced (`true` → `Some(Exile)`, `false`/absent → `None`), so an
+        /// in-flight saved / reconnected permission serialized before the
+        /// migration still reloads with its exile-on-resolution rider.
+        #[serde(
+            default,
+            alias = "exile_instead_of_graveyard_on_resolve",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_graveyard_replacement_compat"
+        )]
+        graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
         /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class —
         /// a `CastFromZone` grant whose sub-ability is "the creature cast this way
         /// enters with a [counter] counter on it." When `Some(ct)`, the granted
@@ -2101,6 +2188,16 @@ pub enum CastingPermission {
         /// the rider covers any counter the cast-this-way creature enters with.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<CounterType>,
+        /// CR 609.4b: Optional payment permission scoped to this specific grant.
+        /// When `Some(AnyTypeOrColor)`, mana of any type/color may be spent to
+        /// pay this card's cast cost (Quistis Trepe, Tinybones the Pickpocket:
+        /// "mana of any type can be spent to cast that spell"). Read at payment
+        /// time by `casting::player_can_spend_as_any_color_for_optional_spell`,
+        /// keyed on `granted_to == player`. Mirrors
+        /// `PlayFromExile.mana_spend_permission`; `None` (the common case) leaves
+        /// payment unchanged for every other exile/graveyard alt-cost grant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -2302,6 +2399,31 @@ pub struct ResolutionCastCleanup {
     /// cards from the same reveal first (CR 702.60a).
     #[serde(default)]
     pub success_action: ResolutionCastSuccessAction,
+}
+
+/// CR 608.2g + CR 609.4b: how a cast-during-resolution pays.
+///
+/// `Free` is the Cascade/Discover/Ripple/Suspend/free-window shape — the card is
+/// cast without paying its mana cost, so the `ExileWithAltCost` permission zeros
+/// the cost and payment is `Auto`. `FullCost` is the Quistis Trepe / Tinybones
+/// the Pickpocket shape — "you may cast target X card from a graveyard, and mana
+/// of any type can be spent to cast that spell." The caster pays the card's real
+/// printed cost (CR 609.4b: any-type concession affects only *how* the cost is
+/// paid, not the cost itself), so the permission carries `SelfManaCost` and
+/// payment is `Manual` so a mana-payment window opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResolutionCastCost {
+    /// Cast without paying the mana cost (Cascade, Discover, Ripple, Suspend,
+    /// Invoke Calamity's free-cast window). Zero cost, `Auto` payment.
+    Free,
+    /// CR 609.4b: Cast paying the card's live printed cost. The optional
+    /// `mana_spend_permission` rides onto the granted permission so mana of any
+    /// type can be spent off-color (Quistis Trepe, Tinybones the Pickpocket).
+    FullCost {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
+    },
 }
 
 /// CR 608.2g: Disposition of a during-resolution card that is not cast.
@@ -2577,6 +2699,75 @@ pub enum DamageKindFilter {
     NoncombatOnly,
 }
 
+/// CR 120.6 + CR 120.10: Which damage tally a damage-history reference reads —
+/// the total amount dealt (CR 120.6) or only the excess beyond lethal
+/// (CR 120.10). Typed replacement for the former `excess_only: bool` on
+/// `QuantityRef::DamageDealtThisTurn`; a `bool` couldn't name the two channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DamageChannel {
+    /// CR 120.6: Total damage marked (lethal = total marked ≥ toughness). The
+    /// default channel for every quantity/condition that does not restrict to
+    /// overkill.
+    #[default]
+    Total,
+    /// CR 120.10: Only the excess damage dealt beyond lethal/loyalty/defense —
+    /// "excess damage equal to the difference". Used by the "was dealt excess
+    /// damage this way / this turn" condition class.
+    Excess,
+}
+
+/// Serde guard: the `Total` default channel is elided from serialized output,
+/// mirroring the prior `skip_serializing_if = "std::ops::Not::not"` on the bool.
+fn is_total_damage_channel(channel: &DamageChannel) -> bool {
+    matches!(channel, DamageChannel::Total)
+}
+
+/// CR 120.6 + CR 120.10: Compatibility deserializer for the `channel` field that
+/// replaced the former `excess_only: bool` on `QuantityRef::DamageDealtThisTurn`
+/// (and `AbilityCondition::PreviousEffectAmount`). Accepts both the current
+/// `DamageChannel` representation ("Total" / "Excess") and the legacy bool
+/// (`true` → `Excess`, `false` → `Total`), so a game state / scenario serialized
+/// before the migration reloads with the correct channel instead of silently
+/// defaulting to a total-damage check. Paired with `#[serde(alias =
+/// "excess_only")]` on the field, which routes the legacy key's value here.
+fn deserialize_damage_channel_compat<'de, D>(d: D) -> Result<DamageChannel, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = serde_json::Value::deserialize(d)?;
+    if let serde_json::Value::Bool(excess_only) = raw {
+        return Ok(if excess_only {
+            DamageChannel::Excess
+        } else {
+            DamageChannel::Total
+        });
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
+/// CR 608.2n: Compatibility deserializer for the `graveyard_replacement` field
+/// that replaced the former `exile_instead_of_graveyard_on_resolve: bool` on
+/// `CastingPermission::ExileWithAltCost`. Accepts both the current
+/// `Option<SpellStackToGraveyardReplacement>` representation and the legacy bool
+/// (`true` → `Some(Exile)`, the only destination the bool could encode; `false`
+/// → `None`), so an in-flight saved / reconnected permission serialized before
+/// the migration still reloads with its exile-on-resolution rider. Paired with
+/// `#[serde(alias = "exile_instead_of_graveyard_on_resolve")]` on the field.
+fn deserialize_graveyard_replacement_compat<'de, D>(
+    d: D,
+) -> Result<Option<SpellStackToGraveyardReplacement>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = serde_json::Value::deserialize(d)?;
+    if let serde_json::Value::Bool(exile) = raw {
+        return Ok(exile.then_some(SpellStackToGraveyardReplacement::Exile));
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
 /// Controller reference for filter matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControllerRef {
@@ -2673,6 +2864,11 @@ pub enum SharedQuality {
     CardType,
     /// CR 205.3i + CR 305.6: land subtypes, including the five basic land types.
     LandType,
+    /// CR 110.4: the six permanent types only — artifact, battle, creature,
+    /// enchantment, land, planeswalker. Distinct from `CardType` (CR 205.2a),
+    /// which also includes non-permanent types such as Kindred/Tribal; two
+    /// permanents sharing only Kindred do NOT share a permanent type.
+    PermanentType,
 }
 
 /// Relationship required by `FilterProp::SharesQuality`.
@@ -3005,6 +3201,11 @@ pub enum FilterProp {
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
+    /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
+    /// text offers two or more options in a bulleted list). Evaluated against the
+    /// stack object's static printed modality (`obj.modal.is_some()`), a printed
+    /// characteristic present from object creation.
+    Modal,
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
@@ -3111,8 +3312,16 @@ pub enum FilterProp {
         to: Option<Zone>,
     },
     /// CR 508.1a: Creature was declared as an attacker this turn.
-    /// Checks `creatures_attacked_this_turn` tracking set on GameState.
-    AttackedThisTurn,
+    /// `None` matches a board-wide declaration (any defender), checked against
+    /// the `creatures_attacked_this_turn` tracking set on GameState.
+    /// CR 508.6 + CR 508.1b: `Some(defender)` scopes to creatures that attacked a
+    /// specific player, checked against the per-defender
+    /// `creature_attacked_defenders_this_turn` ledger. Mirrors
+    /// `FilterProp::Attacking { defender }`.
+    AttackedThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defender: Option<ControllerRef>,
+    },
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
@@ -4232,6 +4441,17 @@ pub enum QuantityRef {
         kind: PlayerCounterKind,
         scope: CountScope,
     },
+    /// CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: The `kind` player-counter
+    /// total on the controller of the resolving ability's first object target —
+    /// "its controller" anaphoring the controller of the targeted object
+    /// (Corrupted Resolve: "counter target spell if its controller is
+    /// poisoned"; `>= 1` poison == "poisoned" per CR 122.1f). Resolved via
+    /// `ability_utils::parent_target_controller`, mirroring the target-relative
+    /// `TargetObjectManaValue` sibling of `ObjectManaValue`. Kept distinct from
+    /// `PlayerCounter { scope }` — that reads an aggregate over a `CountScope`
+    /// player set (controller/opponents/all), whereas this reads one specific
+    /// target-derived player, an axis the aggregate `CountScope` cannot express.
+    TargetControllerCounter { kind: PlayerCounterKind },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
     /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
@@ -4491,6 +4711,16 @@ pub enum QuantityRef {
     },
     /// CR 710.2: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
+    /// (air/earth/water/fire) the controller has performed this turn — these are
+    /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
+    /// rules that `game::bending::record_bending` records. Reads
+    /// `Player::bending_types_this_turn.len()` (a `HashSet<BendingType>` with
+    /// exactly four possible members). Backs Avatar Aang's "if you've done all
+    /// four this turn" (`>= 4` means every distinct bend type). Controller-scoped,
+    /// mirroring the bare `CrimesCommittedThisTurn` / `DescendedThisTurn` per-turn
+    /// accumulator siblings.
+    BendTypesThisTurn,
     /// CR 119.4: Amount of life gained this turn, scoped by `player` per the
     /// workspace "Parameterize, don't proliferate" principle (Round Π-4 — mirrors
     /// `LifeLostThisTurn`'s Π-3 lift). `Controller` reads
@@ -4582,11 +4812,21 @@ pub enum QuantityRef {
             skip_serializing_if = "is_default_damage_kind"
         )]
         damage_kind: DamageKindFilter,
-        /// CR 120.10: When true, only count records where `excess > 0` —
-        /// i.e. damage that was lethal-overkill. Used by the
-        /// "was dealt excess damage this turn" intervening-if class.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        excess_only: bool,
+        /// CR 120.6 / CR 120.10: `Total` counts every matching record's marked
+        /// damage; `Excess` counts only records where `excess > 0` — i.e. damage
+        /// that was lethal-overkill. Used by the "was dealt excess damage this
+        /// turn" intervening-if class. The `alias` + `deserialize_with` accept
+        /// the legacy `excess_only: bool` this field replaced (`true` →
+        /// `Excess`, `false`/absent → `Total`), so persisted pre-migration game
+        /// states / scenarios reload with the correct channel instead of
+        /// silently defaulting to a total-damage check.
+        #[serde(
+            default,
+            alias = "excess_only",
+            skip_serializing_if = "is_total_damage_channel",
+            deserialize_with = "deserialize_damage_channel_compat"
+        )]
+        channel: DamageChannel,
     },
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
@@ -4861,6 +5101,20 @@ pub enum SeatDirection {
     /// The living player seated immediately to the controller's right — the
     /// previous player in turn order. Backward through `seat_order`.
     Right,
+}
+
+impl SeatDirection {
+    /// CR 607.2d: The single typed authority for mapping a chosen "left"/"right"
+    /// option label to a `SeatDirection`. Used by the {Left,Right} hijack in
+    /// `game/effects/choose.rs` so no call site ever string-matches "Left"
+    /// verbatim. Case-insensitive and whitespace-tolerant.
+    pub fn from_choice_label(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
 }
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
@@ -5482,10 +5736,14 @@ pub enum AttackersDeclaredCountSubject {
         filter: Option<TargetFilter>,
     },
     /// Count attackers whose announced attack target matches a scoped player,
-    /// planeswalker, battle, or combined attack-target class.
+    /// planeswalker, battle, or combined attack-target class. `filter` is the
+    /// optional condition-level type axis (CR 508.1): when `Some(f)`, only
+    /// attackers matching `f` that attack the scoped target are counted.
     AttackTarget {
         controller: ControllerRef,
         attacked: crate::types::triggers::AttackTargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
 }
 
@@ -6277,6 +6535,12 @@ pub enum CastVariantPaid {
     /// emerge cost was paid, instead …" intervening-if / instead clauses
     /// (Adipose Offspring).
     Emerge,
+    /// CR 702.185a: Warp alternative cast cost was paid (the card was cast from
+    /// hand for its warp cost rather than its mana cost). Read by the
+    /// target-scoped "if that creature was cast for its warp cost" rider on
+    /// Full Bore. The warp permanent is exiled at the next end step (same turn),
+    /// so the per-object marker only ever needs to be read on its cast turn.
+    Warp,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -6820,6 +7084,14 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
         action: BeholdCostAction,
+        /// CR 601.2b + CR 701.4a: when `Some`, the player first chooses a value
+        /// of this kind (creature type for Celestial Reunion) as part of paying
+        /// the behold cost. The choice is recorded as a `ChosenAttribute` on the
+        /// spell object; the behold `filter`'s `IsChosenCreatureType` leg then
+        /// scopes "of that type". `None` = the existing fixed-quality behold
+        /// (Monstrous Emergence, Close Encounter).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_choice: Option<ChoiceType>,
     },
     Composite {
         costs: Vec<AbilityCost>,
@@ -8203,7 +8475,7 @@ pub enum Effect {
         /// countered spell (not its source); has no effect when an ability is
         /// countered (an ability is not a card and has no zone — CR 110.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        countered_spell_zone: Option<CounteredSpellDestination>,
+        countered_spell_zone: Option<SpellStackToGraveyardReplacement>,
     },
     /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
     /// the stack matching `target`. Mirrors `Effect::DestroyAll` /
@@ -8461,6 +8733,15 @@ pub enum Effect {
         /// 708.3) with these characteristics. `None` = normal face-up entry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<FaceDownProfile>,
+        /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+        /// MOVED object's characteristics, checked as it would exist on the
+        /// battlefield (before entry, CR 614.12a). `None` = apply the riders
+        /// unconditionally (the common case). `Some(filter)` = apply them only
+        /// when the chosen moved object matches `filter` — e.g. Summoner's
+        /// Grimoire's "If that card is an enchantment card, it enters tapped and
+        /// attacking." The riders never modify a non-matching object's entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_modified_if: Option<TargetFilter>,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -9707,6 +9988,16 @@ pub enum Effect {
         /// casting mechanism). See issue #1520.
         #[serde(default, skip_serializing_if = "CastFromZoneDriver::is_default")]
         driver: CastFromZoneDriver,
+        /// CR 609.4b: Optional payment permission carried by the same effect
+        /// that grants the cast-from-zone permission. When `Some(AnyTypeOrColor)`,
+        /// "mana of any type can be spent to cast that spell" is forwarded onto
+        /// the constructed `ExileWithAltCost` grant (Quistis Trepe, Tinybones the
+        /// Pickpocket) so the concession is scoped to the specific granted cast
+        /// rather than creating a global player permission. Mirrors
+        /// `PlayFromExile.mana_spend_permission`. `None` (the common case) leaves
+        /// payment unchanged for every other cast-from-zone grant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive "free-cast window"
     /// during this spell/ability's resolution: the controller may cast up to
@@ -10172,6 +10463,13 @@ pub enum Effect {
         /// Permanents in scope for the final sacrifice sweep.
         #[serde(default = "default_target_filter_permanent")]
         sacrifice_filter: TargetFilter,
+        /// CR 107.1c + CR 701.21a: When `Some`, the chooser keeps ANY number of
+        /// `choose_filter` permanents whose combined power is at most this cap
+        /// (Slaughter the Strong: "any number of creatures they control with
+        /// total power 4 or less"), instead of one permanent per `categories`
+        /// entry. `categories` is empty in this mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_power_cap: Option<QuantityExpr>,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
@@ -10498,6 +10796,23 @@ pub enum Effect {
     TurnFaceUp {
         #[serde(default = "default_target_filter_exiled_by_source")]
         target: TargetFilter,
+    },
+    /// CR 708.2a + CR 708.2b + CR 712.16: Turn the face-up permanent(s) selected
+    /// by `target` face down via a resolving effect. The permanent becomes the
+    /// body given by `profile` (CR 205.1a) — defaulting to a vanilla 2/2 creature
+    /// when `None` (CR 708.2a sentence 1). "Turn target creature face down. It's a
+    /// 2/2 Cyberman artifact creature." (Cyber Conversion) seeds
+    /// `Some(vanilla_2_2())` at the verb arm; the trailing "It's a 2/2 Cyberman
+    /// artifact creature." `FaceDownProfileSpec` continuation refines it. Inverse
+    /// of [`Effect::TurnFaceUp`]; a distinct game action per CR 701.27b (turning
+    /// face up and turning face down are different game actions). CR 708.2b (a
+    /// face-down permanent can't be turned face down) and CR 712.16 / CR 730.2j
+    /// (double-faced and melded permanents can't be turned face down) are enforced
+    /// as no-ops in the handler.
+    TurnFaceDown {
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<FaceDownProfile>,
     },
     /// CR 500.7: Take an extra turn after this one. The target determines who
     /// takes the extra turn (usually Controller for "take an extra turn").
@@ -11357,6 +11672,21 @@ pub enum VoteTally {
 }
 
 impl TargetFilter {
+    /// Clone this filter with any `Typed` property equal to `prop` removed.
+    /// Used to strip a per-item discriminator leg (e.g. `IsChosenCreatureType`)
+    /// so the residual base filter can be enumerated across candidate values.
+    /// Non-`Typed` shapes are returned unchanged.
+    pub fn without_prop(&self, prop: &FilterProp) -> TargetFilter {
+        match self {
+            TargetFilter::Typed(filter) => {
+                let mut filter = filter.clone();
+                filter.properties.retain(|p| p != prop);
+                TargetFilter::Typed(filter)
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn normalized(self) -> Self {
         match self {
             TargetFilter::Typed(filter) => TargetFilter::Typed(filter.normalized()),
@@ -11727,6 +12057,11 @@ impl Effect {
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
+            // CR 708.2a: "Turn target creature face down" (Cyber Conversion)
+            // declares a real target as the spell is cast; surface it so the
+            // cast-time target slot is built and CR 608.2b re-validates it at
+            // resolution.
+            | Effect::TurnFaceDown { target, .. }
             // CR 709.5f-g: the Room is a real declared target ("target Room you
             // control"); surface it so the cast/trigger-time target slot is
             // built and CR 608.2b re-validates it at resolution.
@@ -12289,6 +12624,7 @@ impl Effect {
             | Effect::Mana { .. }
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::AssembleContraptionsFromRollDifference
@@ -12518,6 +12854,7 @@ impl Effect {
             | Effect::Mana { .. }
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::AssembleContraptionsFromRollDifference
@@ -12746,6 +13083,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ManifestDread => "ManifestDread",
         Effect::Cloak { .. } => "Cloak",
         Effect::TurnFaceUp { .. } => "TurnFaceUp",
+        Effect::TurnFaceDown { .. } => "TurnFaceDown",
         Effect::ExtraTurn { .. } => "ExtraTurn",
         Effect::GrantExtraLoyaltyActivations { .. } => "GrantExtraLoyaltyActivations",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
@@ -13011,6 +13349,7 @@ pub enum EffectKind {
     Reveal,
     Transform,
     TurnFaceUp,
+    TurnFaceDown,
     DayTimeChange,
 }
 
@@ -13225,6 +13564,7 @@ impl From<&Effect> for EffectKind {
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::Cloak { .. } => EffectKind::Cloak,
             Effect::TurnFaceUp { .. } => EffectKind::TurnFaceUp,
+            Effect::TurnFaceDown { .. } => EffectKind::TurnFaceDown,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
             Effect::GrantExtraLoyaltyActivations { .. } => EffectKind::GrantExtraLoyaltyActivations,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
@@ -14469,6 +14809,17 @@ pub enum AbilityCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 505.1 + CR 500.1 + CR 608.2c: "if it is[n't] your [phase/step]" — a
+    /// resolution-time gate on the *current* phase (CR 608.2c reads the whole
+    /// text when the ability resolves), distinct from `CastDuringPhase` which
+    /// reads the casting-time phase snapshot. `phases` is the set of concrete
+    /// `Phase` values that satisfy the named phrase; grouped names like "main
+    /// phase" map to both main phases (CR 505.1 / CR 505.1a) without
+    /// proliferating sibling variants. This variant checks only the phase; the
+    /// "your" possessive (active player = controller, CR 102.1) is composed
+    /// separately via `And([CurrentPhaseIs, IsYourTurn])`, and the "isn't"
+    /// polarity via `Not`.
+    CurrentPhaseIs { phases: Vec<Phase> },
     /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
     /// a specific timing permission this turn.
     CastTimingPermission { permission: CastTimingPermission },
@@ -14519,9 +14870,25 @@ pub enum AbilityCondition {
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
     /// "unless ~ entered this turn"), wrap with `AbilityCondition::Not`.
     SourceEnteredThisTurn,
-    /// CR 702.49 + CR 603.4: True when the source permanent entered via a ninjutsu-family
-    /// activation of the specified variant this turn.
-    CastVariantPaid { variant: CastVariantPaid },
+    /// CR 702.49 + CR 603.4: True when the scoped permanent entered via a
+    /// cast/activation of the specified variant this turn.
+    ///
+    /// `subject` selects WHICH object's `cast_variant_paid` marker is read,
+    /// mirroring `AdditionalCostPaid { subject }`:
+    /// - `Source` (default, CR 113.7) = the resolving ability's own source
+    ///   permanent — every legacy "if its sneak/ninjutsu/surge/… cost was paid"
+    ///   ETB/instead rider.
+    /// - `Target` (CR 115.1) = the first object target's marker — "if that
+    ///   creature was cast for its warp cost" (Full Bore): "that creature"
+    ///   anaphors to the +3/+2 target permanent (CR 608.2c), not the source.
+    CastVariantPaid {
+        variant: CastVariantPaid,
+        #[serde(
+            default = "AbilityCondition::default_subject_source",
+            skip_serializing_if = "AbilityCondition::is_subject_source"
+        )]
+        subject: ObjectScope,
+    },
     /// CR 608.2e + CR 702.49 + CR 702.190a: "Instead" override gated on the source
     /// permanent having entered via a specified cast/activation variant this turn.
     /// Unlike AdditionalCostPaidInstead (which reads SpellContext.additional_cost_paid),
@@ -14535,13 +14902,23 @@ pub enum AbilityCondition {
         comparator: Comparator,
         rhs: QuantityExpr,
     },
-    /// CR 608.2c + CR 120.10: Compares the numeric result tracked from the
-    /// previous instruction in the same resolution, such as excess damage dealt
-    /// this way. Uses the same `last_effect_amount` channel that feeds
-    /// `QuantityRef::PreviousEffectAmount` / `EventContextAmount`.
+    /// CR 608.2c + CR 120.6 + CR 120.10: Compares the numeric result tracked from
+    /// the previous instruction in the same resolution against `rhs`. The
+    /// `channel` selects which resolution-local tally is read:
+    /// - `DamageChannel::Total` (default): the *total* amount (CR 120.6) via
+    ///   `last_effect_amount` — the same channel that feeds
+    ///   `QuantityRef::PreviousEffectAmount` / `EventContextAmount`.
+    /// - `DamageChannel::Excess`: the *excess* amount (CR 120.10) via
+    ///   `last_effect_excess_amount` — damage dealt beyond lethal
+    ///   ("if excess damage was dealt … this way").
     PreviousEffectAmount {
         comparator: Comparator,
         rhs: QuantityExpr,
+        /// CR 120.6 / CR 120.10: which resolution-local channel to compare
+        /// against. Reuses the committed `DamageChannel`; `Total` is serde-elided
+        /// so every existing card is byte-identical.
+        #[serde(default, skip_serializing_if = "is_total_damage_channel")]
+        channel: DamageChannel,
     },
     /// CR 702.178a: The ability functions only while its controller has max speed.
     HasMaxSpeed,
@@ -14568,6 +14945,16 @@ pub enum AbilityCondition {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
+        /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
+        /// declared chain slot `n` (resolved from the flattened root chain via
+        /// `resolve_parent_slot_from_root`) rather than this node's local
+        /// most-recent target. `None` (default) preserves the legacy
+        /// first-object / `TriggeringSource` behavior. Set by the two-target
+        /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
+        /// first-declared fighter (Malamet: "if the creature you control entered
+        /// this turn") reads slot 0 under most-recent-only chain propagation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_slot: Option<usize>,
     },
     /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
     /// at least one *object* target. Guards reflexive-target riders ("If that
@@ -19314,6 +19701,13 @@ mod tests {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::Opponent),
             },
+            FilterProp::AttackedThisTurn { defender: None },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::Opponent),
+            },
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
@@ -19377,6 +19771,34 @@ mod tests {
         assert_eq!(props, deserialized);
     }
 
+    /// CR 508.6: `AttackedThisTurn` parameterization is backward-compatible with
+    /// the old unit variant. `FilterProp` is internally-tagged (`tag = "type"`),
+    /// so `defender: None` serializes to exactly `{"type":"AttackedThisTurn"}` —
+    /// byte-identical to the old unit shape — and that legacy payload still
+    /// deserializes into `{ defender: None }`. `Some(_)` emits and round-trips.
+    /// Mirrors the sibling `Attacking { defender }` serde contract.
+    #[test]
+    fn attacked_this_turn_defender_serde_shape() {
+        // None omits the defender field entirely (skip_serializing_if).
+        let none = FilterProp::AttackedThisTurn { defender: None };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(
+            json, r#"{"type":"AttackedThisTurn"}"#,
+            "None must serialize to the legacy unit shape"
+        );
+        let back_none: FilterProp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back_none, none);
+
+        // Some(_) emits the defender field and round-trips.
+        let some = FilterProp::AttackedThisTurn {
+            defender: Some(ControllerRef::You),
+        };
+        let some_json = serde_json::to_string(&some).unwrap();
+        assert!(some_json.contains("defender"), "Some must emit the field");
+        let back: FilterProp = serde_json::from_str(&some_json).unwrap();
+        assert_eq!(back, some);
+    }
+
     #[test]
     fn resolved_ability_no_hashmap_fields() {
         // Verify ResolvedAbility can be created and round-tripped without any HashMap fields
@@ -19410,6 +19832,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -19493,6 +19916,7 @@ mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -19526,6 +19950,122 @@ mod tests {
             serde_json::from_str::<QuantityRef>(&json).unwrap(),
             some_ref
         );
+    }
+
+    /// CR 120.10: Legacy `excess_only: bool` compatibility — a
+    /// `DamageDealtThisTurn` serialized before the `channel: DamageChannel`
+    /// migration must reload with the correct channel via the `excess_only`
+    /// serde alias + compat deserializer, not silently default to `Total`.
+    #[test]
+    fn damage_channel_reads_legacy_excess_only_bool() {
+        // Build the modern value (channel Total, elided) to get a valid
+        // source/target JSON shape, then inject the legacy `excess_only` key.
+        let modern_total = QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::Any),
+            aggregate: default_damage_aggregate(),
+            group_by: None,
+            damage_kind: default_damage_kind(),
+            channel: DamageChannel::Total,
+        };
+        let mut v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&modern_total).unwrap()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("excess_only".to_string(), serde_json::Value::Bool(true));
+        let back: QuantityRef = serde_json::from_value(v).unwrap();
+        assert!(
+            matches!(
+                back,
+                QuantityRef::DamageDealtThisTurn {
+                    channel: DamageChannel::Excess,
+                    ..
+                }
+            ),
+            "legacy excess_only:true must map to DamageChannel::Excess, got {back:?}"
+        );
+
+        // `excess_only:false` maps to Total (the elided default).
+        let mut v_false: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&modern_total).unwrap()).unwrap();
+        v_false
+            .as_object_mut()
+            .unwrap()
+            .insert("excess_only".to_string(), serde_json::Value::Bool(false));
+        assert!(matches!(
+            serde_json::from_value::<QuantityRef>(v_false).unwrap(),
+            QuantityRef::DamageDealtThisTurn {
+                channel: DamageChannel::Total,
+                ..
+            }
+        ));
+
+        // Modern representation still round-trips.
+        let modern_excess = QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::Any),
+            aggregate: default_damage_aggregate(),
+            group_by: None,
+            damage_kind: default_damage_kind(),
+            channel: DamageChannel::Excess,
+        };
+        let json = serde_json::to_string(&modern_excess).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).unwrap(),
+            modern_excess
+        );
+    }
+
+    /// CR 608.2n: Legacy `exile_instead_of_graveyard_on_resolve: bool`
+    /// compatibility — an `ExileWithAltCost` permission serialized before the
+    /// `graveyard_replacement` migration must reload `true` as `Some(Exile)` via
+    /// the serde alias + compat deserializer, not lose its exile-on-resolution
+    /// rider.
+    #[test]
+    fn exile_with_alt_cost_reads_legacy_exile_on_resolve_bool() {
+        let modern = CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            mana_spend_permission: None,
+        };
+        let mut v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&modern).unwrap()).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "exile_instead_of_graveyard_on_resolve".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let back: CastingPermission = serde_json::from_value(v).unwrap();
+        assert!(
+            matches!(
+                back,
+                CastingPermission::ExileWithAltCost {
+                    graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
+                    ..
+                }
+            ),
+            "legacy exile_instead_of_graveyard_on_resolve:true must map to Some(Exile), got {back:?}"
+        );
+
+        // `false` reloads as `None` (no rider), matching the pre-migration bool.
+        let mut v_false: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&modern).unwrap()).unwrap();
+        v_false.as_object_mut().unwrap().insert(
+            "exile_instead_of_graveyard_on_resolve".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(matches!(
+            serde_json::from_value::<CastingPermission>(v_false).unwrap(),
+            CastingPermission::ExileWithAltCost {
+                graveyard_replacement: None,
+                ..
+            }
+        ));
     }
 
     /// CR 106.1 + CR 202.2c: the dynamic-color `AnyCombinationOfObjectColors`
@@ -19637,6 +20177,7 @@ mod tests {
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         }
     }
 

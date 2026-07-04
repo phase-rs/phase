@@ -250,6 +250,36 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("sums raw power for Slaughter keep sets so negative-power creatures lower the total", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepWithinTotalPowerChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        cap: 4,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+    const objects = {
+      10: { id: 10, power: 5 },
+      11: { id: 11, power: -1 },
+    } as unknown as Record<number, GameObject>;
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.selection).toEqual({ type: "totalPowerAtMost", power: 4 });
+    // Raw sum mirrors the engine's CR 208.3 total: 5 + (-1) = 4, not a
+    // positive-clamped 6 that would wrongly disable confirm.
+    expect(boardChoiceSelectedPower(choice, [10, 11], objects)).toBe(4);
+    expect(canConfirmBoardChoice(choice, [10, 11], objects)).toBe(true);
+    // Keeping only the 5-power creature exceeds the cap of 4.
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
+  });
+
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
     const station = getBoardChoiceView({
       type: "StationTarget",

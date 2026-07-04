@@ -465,6 +465,7 @@ mod tests {
         let cond = AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
+            channel: crate::types::ability::DamageChannel::Total,
         };
         let dummy = ResolvedAbility::new(
             Effect::Unimplemented {
@@ -523,6 +524,7 @@ mod tests {
         .condition(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::LE,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Total,
         });
         let ability = ResolvedAbility::new(
             Effect::RollDie {
@@ -595,6 +597,7 @@ mod tests {
         .condition(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::LE,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Total,
         });
         let ability = ResolvedAbility::new(
             Effect::RollDie {
