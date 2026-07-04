@@ -43,6 +43,8 @@ mod redundancy_avoidance;
 pub mod registry;
 mod sacrifice_land_protection;
 mod sacrifice_value;
+mod self_cost;
+mod self_cost_value;
 mod self_protection_classify;
 mod separate_piles_timing;
 mod spellskite_priority;
@@ -55,6 +57,8 @@ mod tempo_curve;
 mod tokens_wide;
 mod tribal_lord_priority;
 pub(crate) mod tutor;
+mod x_cast_gate;
+mod x_reference;
 mod x_value;
 
 #[cfg(test)]

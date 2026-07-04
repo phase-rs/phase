@@ -1246,6 +1246,20 @@ pub fn candidate_actions_broad_with_probe(
             choice_type,
             source_id,
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
+        // per FEASIBLE creature type (options already exclude unpayable types).
+        WaitingFor::CostTypeChoice {
+            player,
+            options,
+            choice_type,
+            pending_cast,
+        } => named_choice_actions(
+            state,
+            *player,
+            options,
+            choice_type,
+            Some(pending_cast.object_id),
+        ),
         // Alchemy spellbook draft: one candidate per card in the spellbook list.
         WaitingFor::SpellbookDraft {
             player, options, ..

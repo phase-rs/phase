@@ -1862,6 +1862,78 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 614.1c + CR 608.2c: `Effect::ChangeZone.conditional_enter_with_counters`
+    /// gates entry-time counters on the moved object's type ("if you put an artifact
+    /// onto the battlefield this way, put two +1/+1 counters on it" — Oviya). The
+    /// artifact matches the `Typed(Artifact)` filter and enters with 2 counters; a
+    /// non-artifact creature put the SAME way matches nothing and enters with 0.
+    /// Drives the real `resolve()` seam (change_zone.rs single-object move →
+    /// `enter_with_counters_for_object`). REVERT: removing the filter gate makes the
+    /// non-artifact arm receive 2 counters, flipping the negative assertion.
+    #[test]
+    fn conditional_enter_with_counters_gates_on_moved_object_type() {
+        fn put_with_artifact_gate(core: CoreType) -> u32 {
+            let mut state = GameState::new_two_player(42);
+            let entering = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Card".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&entering)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core);
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        CounterType::Plus1Plus1,
+                        QuantityExpr::Fixed { value: 2 },
+                    )],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![TargetRef::Object(entering)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(state.battlefield.contains(&entering));
+            state.objects[&entering]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        }
+
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Artifact),
+            2,
+            "artifact put this way enters with two +1/+1 counters"
+        );
+        assert_eq!(
+            put_with_artifact_gate(CoreType::Creature),
+            0,
+            "non-artifact creature put the same way enters with zero counters (REVERT flips this)"
+        );
+    }
+
     /// CR 614.1c: A permanent's "enters with" replacement static only applies
     /// if it was already functioning before the permanent entered. A creature
     /// entering from hand must not see its own newly-functioning static after

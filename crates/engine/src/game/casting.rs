@@ -14252,6 +14252,20 @@ pub fn handle_cancel_cast(
 ) {
     state.cancelled_casts.push(pending.object_id);
 
+    // CR 601.2 + CR 733.1: Backing out of a cast reverses every choice and
+    // payment made during it ("the entire action is reversed"). A pre-cost
+    // behold "choose a creature type" (Celestial Reunion) records the chosen
+    // type as a `ChosenAttribute::CreatureType` on the spell object
+    // (`casting_costs::handle_cost_type_choice`). If it survived the rewind, the
+    // `already_chosen` guard in the behold cost dispatch
+    // (`casting_costs::pay_additional_cost_with_source`) would skip the type
+    // prompt on the next cast attempt and silently reuse the stale type — so
+    // remove it here and let a re-cast re-prompt from a clean slate.
+    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+    }
+
     let convoked_creatures = if pending.convoked_creatures.is_empty() {
         state
             .objects

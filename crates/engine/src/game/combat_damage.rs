@@ -42,11 +42,19 @@ fn process_combat_damage_triggers(
     state: &mut GameState,
     damage_events: &[GameEvent],
     all_events: &mut Vec<GameEvent>,
+    include_phase_event: bool,
 ) {
     // Step 1: Collect triggers from damage events while creatures are still alive.
     // CR 603.2: Triggers fire at the moment the event occurs — process_triggers
     // scans state.battlefield, so this must run before SBAs remove dying objects.
-    triggers::process_triggers(state, damage_events);
+    let mut before_priority_events = Vec::new();
+    if include_phase_event {
+        before_priority_events.push(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::CombatDamage,
+        });
+    }
+    before_priority_events.extend_from_slice(damage_events);
+    let mut pending = triggers::collect_triggers_for_batch(state, &before_priority_events);
 
     // Steps 2-4: SBA/trigger loop per CR 704.3.
     // SBAs may generate events (ZoneChanged for dying creatures) that need trigger
@@ -58,11 +66,30 @@ fn process_combat_damage_triggers(
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
             let new_events: Vec<_> = all_events[events_before..].to_vec();
-            triggers::process_triggers(state, &new_events);
+            before_priority_events.extend_from_slice(&new_events);
+            pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
         } else {
             break;
         }
     }
+
+    if matches!(
+        state.waiting_for,
+        crate::types::game_state::WaitingFor::GameOver { .. }
+    ) {
+        return;
+    }
+    // CR 800.4a: If combat-damage SBAs eliminated a player before this
+    // collect-only batch is put on the stack, drop triggers controlled by that
+    // player before constructing the APNAP ordering pass.
+    pending.retain(|ctx| crate::game::players::is_alive(state, ctx.pending.controller));
+
+    triggers::process_collected_triggers_with_delayed_phase_events(
+        state,
+        pending,
+        &before_priority_events,
+        all_events,
+    );
 }
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
@@ -119,7 +146,7 @@ pub fn resolve_combat_damage(
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
-        process_combat_damage_triggers(state, &damage_events, events);
+        process_combat_damage_triggers(state, &damage_events, events, true);
 
         // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
         // controller trigger-ordering prompt, surface it now — before the regular
@@ -169,7 +196,12 @@ pub fn resolve_combat_damage(
         c.damage_step_index = None;
     }
 
-    process_combat_damage_triggers(state, &damage_events, events);
+    process_combat_damage_triggers(
+        state,
+        &damage_events,
+        events,
+        !combat.first_strike_done && !has_first_or_double,
+    );
     None
 }
 

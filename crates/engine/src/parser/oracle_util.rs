@@ -1217,6 +1217,32 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
     None
 }
 
+/// CR 205.3m creature-only subtype vocabulary, loaded from the committed
+/// `oracle-subtypes.json` (creature subtypes only — before the noncreature
+/// merge that `ORACLE_SUBTYPES` applies). Sorted longest-first so multi-word
+/// types (e.g. "Time Lord") match before shorter prefixes.
+static CREATURE_ONLY_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let mut creature: Vec<String> =
+        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+            .expect("oracle-subtypes.json well-formed");
+    creature.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    creature
+});
+
+/// Try to match a *creature* subtype (CR 205.3m) at the start of `text`.
+/// Returns `(canonical_name, bytes_consumed)` or `None`. Unlike `parse_subtype`,
+/// which also matches noncreature subtypes (Aura, Saga, Equipment, …), this is
+/// restricted to creature types — the correct vocabulary for "secretly choose
+/// <T1>, <T2>, or <T3>" candidate enumeration.
+pub fn parse_creature_subtype(text: &str) -> Option<(String, usize)> {
+    for subtype in CREATURE_ONLY_SUBTYPES.iter() {
+        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
 /// Whether an English noun pluralizes by replacing a trailing "-y" with "-ies":
 /// nouns ending in consonant + "y" (e.g. "Mercenary" → "Mercenaries"). Nouns
 /// ending in vowel + "y" take a plain "-s" ("Monkey" → "Monkeys") and are
