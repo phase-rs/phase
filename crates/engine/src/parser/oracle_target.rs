@@ -3869,6 +3869,30 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .parse(trimmed_outer)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed_outer);
+
+    // CR 506.5: "attacking alone" is a combat status distinct from merely
+    // attacking a particular defender; runtime evaluation already lives on
+    // FilterProp::AttackingAlone.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("attacking alone").parse(trimmed) {
+        let rest_trim = rest.trim_start();
+        if alt((
+            tag::<_, _, OracleError<'_>>("if "),
+            tag::<_, _, OracleError<'_>>("unless "),
+            tag::<_, _, OracleError<'_>>("and/or "),
+            tag::<_, _, OracleError<'_>>("or "),
+        ))
+        .parse(rest_trim)
+        .is_err()
+        {
+            match rest.chars().next() {
+                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
+                    return Some((FilterProp::AttackingAlone, text.len() - rest.len()));
+                }
+                _ => {}
+            }
+        }
+    }
+
     for (pattern, defender) in [
         (
             "attacking you or a planeswalker you control",
@@ -7264,6 +7288,34 @@ mod tests {
         assert!(typed.properties.contains(&FilterProp::Attacking {
             defender: Some(ControllerRef::You),
         }));
+    }
+
+    /// CR 506.5: "attacking alone" is a targetable combat-status predicate on
+    /// the candidate creature, including relative-clause wording.
+    #[test]
+    fn parse_target_creature_attacking_alone() {
+        let (filter, remainder) = parse_target("target creature that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
+    }
+
+    /// CR 506.5 + CR 109.4: controller suffixes compose with the attacking-alone
+    /// relative clause instead of dropping the combat-status predicate.
+    #[test]
+    fn parse_target_creature_you_control_attacking_alone() {
+        let (filter, remainder) =
+            parse_target("target creature you control that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
     }
 
     /// Stalking Leonin: "attacking you if it's controlled by..." must not treat
