@@ -4344,6 +4344,39 @@ fn pay_additional_cost_with_source(
                 events,
             );
         }
+        AbilityCost::KeywordCostOfCastSpell { keyword } => {
+            // CR 118.9 + CR 702.62a: pay the cast spell's borrowed keyword cost as
+            // mana on the LINGERING branch — an
+            // `ExileWithAltAbilityCost { cost: KeywordCostOfCastSpell }` grant
+            // produced when a keyword-cost rider attaches to a non-hand-origin
+            // cast clause (CR 611.2). The Face of Boe takes the during-resolution
+            // branch (the `ExileWithAltCost` override in casting.rs) and never
+            // reaches here, so there is no double charge; this arm serves the same
+            // variant's lingering class and is required for match exhaustiveness.
+            let Some(cost) =
+                super::keywords::effective_keyword_mana_cost(state, pending.object_id, keyword)
+            else {
+                // CR 118.9: `effective_keyword_mana_cost` returns `None` only as
+                // the documented defensive refusal that surfaces a misparse
+                // (see `keywords::effective_keyword_mana_cost`). Defaulting to
+                // `{0}` (a free cast) inverts the contract and silently miscosted
+                // the spell. Abort instead, matching the during-resolution path's
+                // refusal semantics in `cast_from_zone::complete_hand_pick_cast_from_zone`.
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot resolve keyword cost for this spell; cast aborted".to_string(),
+                ));
+            };
+            let combined = super::restrictions::add_mana_cost(&pending.cost, &cost);
+            return finish_pending_cost_or_cast(
+                state,
+                player,
+                PendingCast {
+                    cost: combined,
+                    ..pending
+                },
+                events,
+            );
+        }
         AbilityCost::Sacrifice(cost) => {
             let target = &cost.target;
             let SacrificeRequirement::Count { count } = cost.requirement else {
@@ -7095,7 +7128,10 @@ fn auto_tap_mana_sources_inner(
         .unwrap_or_else(|| cost.clone());
 
     let (shards, generic) = match &residual {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => return,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => return,
         ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
         ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
     };
@@ -9089,6 +9125,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target)],
             spell,
@@ -9369,6 +9406,7 @@ mod tests {
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             source,
@@ -9727,6 +9765,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             spell,
@@ -15904,6 +15943,7 @@ its replicate cost was paid.)\nDraw a card.";
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         });
         let spell_id = builder.id();
         let card_id = scenario.state.objects[&spell_id].card_id;
@@ -17279,5 +17319,63 @@ its replicate cost was paid.)\nDraw a card.";
                 )),
             );
         assert_eq!(max_pay_life_x(&state, PlayerId(0)), 0);
+    }
+
+    /// CR 118.9: A lingering `ExileWithAltAbilityCost { cost: KeywordCostOfCastSpell }`
+    /// permission whose target card cannot provide the requested keyword cost must
+    /// abort the cast (return `ActionNotAllowed`) rather than silently defaulting to
+    /// a `{0}` free cast. Regression for the `unwrap_or_else(ManaCost::zero)` bug
+    /// fixed in `pay_additional_cost`'s `KeywordCostOfCastSpell` arm.
+    #[test]
+    fn keyword_cost_of_cast_spell_aborts_when_keyword_cost_unavailable() {
+        use crate::types::ability::{CastingPermission, ResolvedAbility};
+        use crate::types::keywords::KeywordKind;
+
+        let mut state = GameState::new_two_player(1);
+        let card_id = CardId(42);
+        // The card has no Flashback keyword, so `effective_keyword_mana_cost` returns `None`.
+        let obj_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "No-Flashback Spell".to_string(),
+            Zone::Exile,
+        );
+        // Stamp an ExileWithAltAbilityCost permission carrying KeywordCostOfCastSpell{Flashback}.
+        // This simulates a lingering grant whose keyword cost cannot be resolved.
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::ExileWithAltAbilityCost {
+                cost: AbilityCost::KeywordCostOfCastSpell {
+                    keyword: KeywordKind::Flashback,
+                },
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+            });
+
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "keyword cost regression".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            obj_id,
+            PlayerId(0),
+        );
+        let pending = PendingCast::new(obj_id, card_id, ability, ManaCost::zero());
+        let cost = AbilityCost::KeywordCostOfCastSpell {
+            keyword: KeywordKind::Flashback,
+        };
+        let mut events = Vec::new();
+
+        let result = pay_additional_cost(&mut state, PlayerId(0), cost, pending, &mut events);
+
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "lingering KeywordCostOfCastSpell with unresolvable keyword cost must abort, not free-cast; got {result:?}"
+        );
     }
 }

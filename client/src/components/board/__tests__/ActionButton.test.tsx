@@ -7,6 +7,12 @@ import { useGameStore } from "../../../stores/gameStore";
 import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
+import {
+  buildGameState,
+  buildPlayers,
+  buildPriorityWaitingFor,
+  buildStackEntry,
+} from "../../../test/factories/gameStateFactory.ts";
 import { ActionButton } from "../ActionButton";
 
 vi.mock("../../../game/dispatch.ts", () => ({
@@ -25,43 +31,27 @@ function blockerPrompt(): WaitingFor {
   };
 }
 
+function priorityPrompt(player = 0): WaitingFor {
+  return buildPriorityWaitingFor({ data: { player } });
+}
+
+function spellStackEntry(controller = 0) {
+  return buildStackEntry({
+    id: 1,
+    source_id: 1,
+    controller,
+    kind: { type: "Spell", data: { card_id: 1 } },
+  });
+}
+
 function createGameState(waitingFor: WaitingFor): GameState {
-  return {
+  return buildGameState({
     turn_number: 4,
     active_player: 1,
     phase: "DeclareBlockers",
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 2,
-      },
-      {
-        id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 2,
-      },
-    ],
+    players: buildPlayers([{ id: 0, turns_taken: 2 }, { id: 1, turns_taken: 2 }]),
     priority_player: 0,
-    objects: {},
     next_object_id: 201,
-    battlefield: [],
-    stack: [],
-    exile: [],
     rng_seed: 42,
     combat: {
       attackers: [{ object_id: 200, defending_player: 0, attack_target: { type: "Player", data: 0 } }],
@@ -76,15 +66,8 @@ function createGameState(waitingFor: WaitingFor): GameState {
       regular_damage_done: false,
     },
     waiting_for: waitingFor,
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
     auto_pass: { 0: { type: "UntilEndOfTurn" } },
-  };
+  });
 }
 
 describe("ActionButton", () => {
@@ -121,22 +104,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
-        ...createGameState({
-          type: "Priority",
-          data: { player: 0 },
-        }),
+        ...createGameState(priorityPrompt()),
         turn_decision_controller: 1,
         active_player: 0,
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
     useMultiplayerStore.setState({ activePlayerId: 1, actionPending: false });
@@ -150,22 +123,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
-        ...createGameState({
-          type: "Priority",
-          data: { player: 0 },
-        }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
       isResolvingAll: true,
     });
@@ -182,19 +145,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "local",
       gameState: {
-        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
 
@@ -208,19 +164,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "ai",
       gameState: {
-        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
 
@@ -236,19 +185,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "draft-match",
       gameState: {
-        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
     useMultiplayerDraftStore.setState({ matchPairing: { type: "Bot" } as never });
@@ -263,19 +205,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "draft-match",
       gameState: {
-        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        ...createGameState(priorityPrompt()),
         phase: "PostCombatMain",
         auto_pass: {},
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 0,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry()],
       },
-      waitingFor: { type: "Priority", data: { player: 0 } },
+      waitingFor: priorityPrompt(),
       legalActions: [],
     });
     useMultiplayerDraftStore.setState({ matchPairing: { type: "HumanHost" } as never });
@@ -290,19 +225,12 @@ describe("ActionButton", () => {
     useGameStore.setState({
       gameMode: "online",
       gameState: {
-        ...createGameState({ type: "Priority", data: { player: 1 } }),
+        ...createGameState(priorityPrompt(1)),
         phase: "PostCombatMain",
         auto_pass: { 0: { type: "UntilStackEmpty", initial_stack_len: 1 } },
-        stack: [
-          {
-            id: 1,
-            source_id: 1,
-            controller: 1,
-            kind: { type: "Spell", data: { card_id: 1 } },
-          },
-        ],
+        stack: [spellStackEntry(1)],
       },
-      waitingFor: { type: "Priority", data: { player: 1 } },
+      waitingFor: priorityPrompt(1),
       legalActions: [],
       isResolvingAll: false,
     });

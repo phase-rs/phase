@@ -1586,6 +1586,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
@@ -1699,6 +1700,7 @@
       "numberRange": "Wähle eine Zahl",
       "labeled": "Triff eine Wahl",
       "keyword": "Wähle eine Fähigkeit",
+      "counterKind": "Wähle eine Marke",
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",

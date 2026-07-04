@@ -371,21 +371,19 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
 /// Equipment is never an attacker, so the static never fires, and the keyword
 /// would land on the Equipment rather than the host.
 ///
-/// Returns a `Vec` so that any conjunct of the effect predicate which
-/// `push_grant_clause_modifications` cannot model (e.g. "must be blocked by a
-/// Dalek if able") is surfaced as a sibling `Effect::Unimplemented` residual,
-/// rather than being silently dropped. The residual makes coverage mark the card
-/// partially unsupported (`is_static_supported`) and the swallow check defer
-/// (`any_ability_has_unimplemented`) — an honest signal independent of the
-/// whole-card `"condition":{` suppression that the supported static's gate would
-/// otherwise trip in `detect_condition_if`.
-///
-/// DEFER: typed "must be blocked by <filter> if able" requires parameterizing
-/// the `MustBeBlocked`/`MustBeBlockedByAll` requirement family with a blocker
-/// filter — /add-engine-variant Stage-2 REFUSE_WITH_REFACTOR (~80 sites). Until
-/// then the dropped conjunct rides as an `Effect::Unimplemented` residual. An
-/// `Unrecognized`-condition companion is NOT used: it would suppress
-/// `detect_condition_if` (cond_markers include `"condition":{`) AND be
+/// Returns a `Vec` so that each conjunct of the effect predicate is modeled
+/// independently: the P/T + keyword grants merge into one gated `Continuous`
+/// static, recognized combat requirements ("must be blocked if able", "is
+/// goaded") become gated rule-statics, and the FILTERED "must be blocked by a
+/// Dalek if able" conjunct lowers to the typed `MustBeBlocked { by: Some(filter)
+/// }` requirement gated on the same combat condition (CR 509.1c). Only a
+/// conjunct that none of these recognize is surfaced as a sibling
+/// `Effect::Unimplemented` residual rather than being silently dropped — an
+/// honest coverage signal (`is_static_supported` / `any_ability_has_unimplemented`)
+/// independent of the whole-card `"condition":{` suppression that the supported
+/// static's gate would otherwise trip in `detect_condition_if`. An
+/// `Unrecognized`-condition companion is NOT used for residuals: it would
+/// suppress `detect_condition_if` (cond_markers include `"condition":{`) AND be
 /// runtime-active (`layers.rs` evaluates `Unrecognized => true`). CR 509.1c.
 pub(crate) fn try_parse_inverted_attached_combat_grant(
     split: &InvertedSplit,
@@ -469,8 +467,8 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         // if able", "attacks each combat if able", "is goaded"). Recover it via the
         // rule-static predicate combinator and emit a sibling rule-static gated on the
         // same combat condition — modeled, not an `Unimplemented` residual. (The
-        // FILTERED "must be blocked by a Dalek if able" form is NOT recognized by the
-        // combinator, so it correctly falls through to the residual below.)
+        // FILTERED "must be blocked by a Dalek if able" form is handled by the typed
+        // `MustBeBlocked { by }` branch below, not this bare-form combinator.)
         let residual_lower = residual_text.to_lowercase();
         if let Ok((rest, predicate)) =
             all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
@@ -482,24 +480,29 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
             continue;
         }
 
+        // CR 509.1c: the FILTERED "must be blocked by <quality> if able" conjunct
+        // (Ace's Baseball Bat: "must be blocked by a Dalek if able") lowers to the
+        // typed `MustBeBlocked { by: Some(filter) }` requirement, gated on the same
+        // combat condition as the grant (so it inherits the "as long as ~ is
+        // attacking" gate). Modeled, not an `Unimplemented` residual.
+        if let Some(filter) = parse_must_be_blocked_by_filter(&residual_lower) {
+            defs.push(
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                    .affected(affected.clone())
+                    .condition(gate.clone())
+                    .description(residual_text.clone()),
+            );
+            continue;
+        }
+
         // CR 509.1c: surface the still-unmodeled conjunct as an `Effect::Unimplemented`
         // residual carried in a `GrantAbility` modification so coverage flags it and
         // the swallow check defers (see fn-level note). The stable category key
         // groups the gap in coverage; the raw conjunct text is the diagnostic.
-        defs.push(
-            StaticDefinition::continuous()
-                .affected(affected.clone())
-                .modifications(vec![ContinuousModification::GrantAbility {
-                    definition: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        crate::types::ability::Effect::unimplemented(
-                            "attached_grant_unmodeled_conjunct",
-                            residual_text.clone(),
-                        ),
-                    )),
-                }])
-                .description(residual_text),
-        );
+        defs.push(attached_grant_unmodeled_conjunct_residual(
+            affected.clone(),
+            &residual_text,
+        ));
     }
 
     defs
@@ -541,50 +544,81 @@ pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<
     Some(filter)
 }
 
-pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+/// CR 113.6b: Whether `filter` scopes to cards you own/control in `zone` — the
+/// zone a granted cast keyword functions from. Generalized from the
+/// graveyard-only predicate so the same shape validates hand grants (foretell,
+/// miracle) against `Zone::Hand`.
+pub(crate) fn target_filter_is_your_zone(filter: &TargetFilter, zone: Zone) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::You)
-                && tf.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::InZone {
-                            zone: Zone::Graveyard
-                        }
-                    )
-                })
+                && tf
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone))
         }
-        TargetFilter::Or { filters } => filters.iter().all(target_filter_is_your_graveyard),
+        TargetFilter::Or { filters } => filters.iter().all(|f| target_filter_is_your_zone(f, zone)),
         _ => false,
     }
 }
 
+/// Thin wrapper preserving the graveyard-specific call sites (no churn) —
+/// delegates to the generalized `target_filter_is_your_zone`.
+pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+    target_filter_is_your_zone(filter, Zone::Graveyard)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraveyardGrantedKeywordKind {
+pub(crate) enum GrantedCastKeywordKind {
     Flashback,
     Escape,
     Mayhem,
     Scavenge,
     Encore,
+    /// CR 702.143a: Foretell functions from hand (Dream Devourer grant).
+    Foretell,
+    /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
+    Miracle,
 }
 
-impl GraveyardGrantedKeywordKind {
+impl GrantedCastKeywordKind {
     pub(crate) fn matches_keyword(self, keyword: &Keyword) -> bool {
         match self {
-            GraveyardGrantedKeywordKind::Flashback => {
+            GrantedCastKeywordKind::Flashback => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Flashback
             }
-            GraveyardGrantedKeywordKind::Escape => {
+            GrantedCastKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
             // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
-            GraveyardGrantedKeywordKind::Mayhem => {
+            GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
             // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
             // keywords share `KeywordKind::Unknown`, so match the variant directly.
-            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
-            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            // CR 702.143a / CR 702.94a: hand-zone cast keywords.
+            GrantedCastKeywordKind::Foretell => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Foretell
+            }
+            GrantedCastKeywordKind::Miracle => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Miracle
+            }
+        }
+    }
+
+    /// CR 113.6b: The zone this granted cast keyword functions from. The gate in
+    /// `keyword_grant.rs` uses it to decline zone mismatches (foretell-in-graveyard,
+    /// flashback-in-hand).
+    pub(crate) fn grant_zone(self) -> Zone {
+        match self {
+            GrantedCastKeywordKind::Flashback
+            | GrantedCastKeywordKind::Escape
+            | GrantedCastKeywordKind::Mayhem
+            | GrantedCastKeywordKind::Scavenge
+            | GrantedCastKeywordKind::Encore => Zone::Graveyard,
+            GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
 }
@@ -1062,6 +1096,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // non-static prose to the single-sentence fallback below.
     if let Some(defs) = parse_multi_sentence_statics(&stripped) {
         return defs;
+    }
+
+    // CR 116.2d: "ignore this effect" actions from static abilities are special
+    // actions. Until the engine models that priority-time action, the static
+    // parser must fail closed instead of exporting the lock while dropping the
+    // opt-out sentence.
+    if nom_primitives::scan_contains(&lower, "ignore this effect until end of turn") {
+        return Vec::new();
     }
 
     // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on

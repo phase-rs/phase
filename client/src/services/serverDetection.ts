@@ -1,5 +1,9 @@
 import { isTauri } from "./sidecar";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
+import {
+  DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
+} from "../config/multiplayerServer";
 
 const DEFAULT_PORT = 9374;
 
@@ -8,20 +12,26 @@ const DEFAULT_PORT = 9374;
 export type FlagCode = "us";
 
 export interface ServerPreset {
-  label: string;
+  labelKey: string;
   url: string;
-  flag: FlagCode;
+  flag?: FlagCode;
 }
 
 /**
- * User-pickable canonical regions. The official deployment is a single global
- * lobby, so there is intentionally one entry — additional regional lobbies would
- * fragment the matchmaking pool, defeating the broker's purpose. Self-hosted
- * servers are entered via the custom-URL field, not here. See
- * .planning/lobby-failover-federation-plan.md.
+ * User-pickable canonical endpoints. The official deployment is a single global
+ * lobby; a self-hosted build may prepend its configured default so the picker
+ * clearly shows where this static bundle connects by default. Additional
+ * one-off self-hosted servers are still entered through the custom URL field.
  */
 export const SERVER_PRESETS: ServerPreset[] = [
-  { label: "Official", url: "wss://lobby.phase-rs.dev/ws", flag: "us" },
+  ...(DEFAULT_MULTIPLAYER_SERVER_URL === OFFICIAL_MULTIPLAYER_SERVER_URL
+    ? []
+    : [{ labelKey: "serverPicker.selfHosted", url: DEFAULT_MULTIPLAYER_SERVER_URL }]),
+  {
+    labelKey: "serverPicker.official",
+    url: OFFICIAL_MULTIPLAYER_SERVER_URL,
+    flag: "us",
+  },
 ];
 
 /** The default region's URL — first entry in {@link SERVER_PRESETS}. */

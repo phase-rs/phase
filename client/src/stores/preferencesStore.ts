@@ -94,6 +94,7 @@ export type StackDockSide = "left" | "right";
  *  a single thin row (small avatar + name + life) that trades the breakdown for
  *  vertical real-estate. Player-toggleable from the rail. */
 export type OpponentHudDensity = "comfortable" | "compact";
+export type MultiplayerBoardLayout = "focused" | "split";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -294,6 +295,7 @@ function buildDefaultPreferences(): PreferencesState {
     cardPreviewHoverDelayMs: 0,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
+    multiplayerBoardLayout: "focused",
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     aiArchetypeFilter: "Any",
@@ -307,6 +309,7 @@ function buildDefaultPreferences(): PreferencesState {
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
+    telemetryEnabled: true,
   };
 }
 
@@ -377,6 +380,8 @@ interface PreferencesState {
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
+  /** Multiplayer board presentation: one focused opponent, or all opponent seats. */
+  multiplayerBoardLayout: MultiplayerBoardLayout;
   aiSeats: AiSeatPref[];
   /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
    *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
@@ -396,6 +401,11 @@ interface PreferencesState {
   /** Persisted board layout (grid bands + per-widget offsets + active preset).
    *  See {@link FlexLayoutConfig}. Edited only in Flex Layout mode. */
   flexLayout: FlexLayoutConfig;
+  /** Whether anonymous, identity-free crash & usage telemetry may be sent.
+   *  Default on. Gates every send at enqueue time so a mid-session toggle takes
+   *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
+   *  regardless. See `services/telemetry.ts`. */
+  telemetryEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -405,6 +415,7 @@ interface PreferencesActions {
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
+  setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -490,6 +501,8 @@ interface PreferencesActions {
   applyFlexPreset: (config: FlexLayoutConfig) => void;
   /** Reset the layout to the default preset (clears all offsets). */
   resetFlexLayout: () => void;
+  /** Toggle anonymous crash & usage telemetry. */
+  setTelemetryEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -537,6 +550,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
       setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
+      setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -742,10 +756,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         })),
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
+      setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 20,
+      version: 22,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -785,6 +800,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
       //          "auto" (the prior threshold-driven collapse) via the shallow
       //          merge, so existing users see no behavior change.
+      // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
+      //          "focused", preserving the current focused-opponent layout.
+      // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
+      //          identity-free crash & usage telemetry) via the shallow merge —
+      //          no explicit migration block needed (see flexLayout precedent).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -919,6 +939,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
                 : s,
             ),
           };
+        }
+
+        if (version < 21) {
+          migrated = { ...migrated, multiplayerBoardLayout: "focused" };
         }
 
         return migrated;

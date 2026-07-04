@@ -13,13 +13,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
+    EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -121,6 +121,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1c: MustBeBlocked carries an optional blocker `TargetFilter`
+            // (None = any blocker; Some = "must be blocked by a <quality>"). The
+            // None shape is no longer registry-keyed (the variant is now
+            // parameterized with a non-Hash TargetFilter); runtime enforcement is
+            // direct-match in combat.rs declare-blockers validation (mirrors
+            // CantBeBlockedBy).
+            | StaticMode::MustBeBlocked { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -901,6 +908,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let inner_tf = TypedFilter::default().properties(vec![(**prop).clone()]);
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
+            // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
+            FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
@@ -1833,6 +1842,9 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
                     .join(", ")
             );
         }
+        // CR 608.2d + CR 122.1: "choose a counter on it" — the option list is
+        // enumerated at resolution, so the coverage label stays generic.
+        ChoiceType::CounterKind { .. } => return "counter kind".to_string(),
     }
     .into()
 }
@@ -2029,6 +2041,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::EachDealsDamageEqualToPower { sources, recipient } => {
             d.push(("sources".into(), fmt_target(sources)));
             d.push(("recipient".into(), fmt_target(recipient)));
+        }
+        Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } => {
+            d.push(("sources".into(), fmt_target(sources)));
+            d.push(("amount".into(), fmt_quantity(amount)));
+            d.push((
+                "recipient".into(),
+                match recipient {
+                    EachDamageRecipient::Shared(filter) => fmt_target(filter),
+                    EachDamageRecipient::EachController => "its controller".into(),
+                },
+            ));
         }
         Effect::SearchOutsideGame {
             filter,
@@ -2799,6 +2826,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 crate::types::ability::effect_variant_name(replacement_effect).to_string(),
             ));
         }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            d.push((
+                "replacement_effect".into(),
+                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+            ));
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
@@ -2829,6 +2862,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+        }
+        Effect::ChooseCounterKind { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PutChosenCounter { target, count } => {
+            d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -3011,6 +3051,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             after,
             followed_by,
             count,
+            attacker_restriction,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
@@ -3020,6 +3061,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), format!("{count:?}")));
+            }
+            if let Some(restriction) = attacker_restriction {
+                d.push((
+                    "only these can attack".into(),
+                    fmt_target(restriction),
+                ));
             }
         }
         Effect::Double {
@@ -3147,6 +3194,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
@@ -3738,6 +3786,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("set land type {}", land_type.as_subtype_str())
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
+        ContinuousModification::SetChosenName => "set chosen name".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -9870,6 +9919,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         assert!(unimplemented_mechanics(&obj).is_empty());
@@ -10457,10 +10507,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlocked { by: None },
                     affected: None,
                     modifications: vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
+                        mode: StaticMode::MustBeBlocked { by: None },
                     }],
                     condition: None,
                     per_player_condition: None,
@@ -11322,6 +11372,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
 

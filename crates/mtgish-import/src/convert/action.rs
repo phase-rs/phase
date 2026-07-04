@@ -6,6 +6,8 @@
 //! long tail (token creation, replacement effects, modal/distributed effects)
 //! lands phase by phase.
 
+use std::collections::BTreeSet;
+
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
@@ -16,7 +18,7 @@ use engine::types::ability::{
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -397,6 +399,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Behold { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        // CR 118.9: the borrowed keyword cost is read at runtime from the cast
+        // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
@@ -1314,6 +1319,7 @@ fn convert_targeted_distributed(
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }],
                 multi_target,
                 distribute: DistributionUnit::Damage,
@@ -2237,6 +2243,10 @@ fn convert_action_vec_with_bindings(
     actions: &[Action],
     inherited: &VariableBindings,
 ) -> ConvResult<Vec<Effect>> {
+    if let Some(lowered) = try_lower_choose_color_or_colorless_sequence(actions, inherited) {
+        return lowered;
+    }
+
     let mut out = Vec::with_capacity(actions.len());
     let mut bindings = inherited.clone();
     for a in actions {
@@ -2252,6 +2262,335 @@ fn convert_action_vec_with_bindings(
         }
     }
     Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConcreteColorOrColorlessChoice {
+    Color(ManaColor),
+    Colorless,
+}
+
+impl ConcreteColorOrColorlessChoice {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Color(ManaColor::White) => "White",
+            Self::Color(ManaColor::Blue) => "Blue",
+            Self::Color(ManaColor::Black) => "Black",
+            Self::Color(ManaColor::Red) => "Red",
+            Self::Color(ManaColor::Green) => "Green",
+            Self::Colorless => "Colorless",
+        }
+    }
+
+    fn protection_target(self) -> engine::types::keywords::ProtectionTarget {
+        match self {
+            Self::Color(color) => engine::types::keywords::ProtectionTarget::Color(color),
+            Self::Colorless => {
+                engine::types::keywords::ProtectionTarget::Quality("colorless".into())
+            }
+        }
+    }
+
+    fn hexproof_filter(self) -> engine::types::keywords::HexproofFilter {
+        match self {
+            Self::Color(color) => engine::types::keywords::HexproofFilter::Color(color),
+            Self::Colorless => engine::types::keywords::HexproofFilter::Quality("colorless".into()),
+        }
+    }
+}
+
+fn try_lower_choose_color_or_colorless_sequence(
+    actions: &[Action],
+    bindings: &VariableBindings,
+) -> Option<ConvResult<Vec<Effect>>> {
+    let [Action::ChooseAColorOrColorless(choice), tail @ ..] = actions else {
+        return None;
+    };
+    if tail.is_empty() {
+        return None;
+    }
+    Some(lower_choose_color_or_colorless_sequence(
+        choice, tail, bindings,
+    ))
+}
+
+fn lower_choose_color_or_colorless_sequence(
+    choice: &crate::schema::types::ChoosableColor,
+    tail: &[Action],
+    bindings: &VariableBindings,
+) -> ConvResult<Vec<Effect>> {
+    let base_effects = convert_action_vec_with_bindings(tail, bindings)?;
+    let choices = concrete_color_or_colorless_choices(choice)?;
+
+    let mut saw_chosen_ref = false;
+    let mut branches = Vec::with_capacity(choices.len());
+    for concrete_choice in choices {
+        let mut branch_effects = base_effects.clone();
+        saw_chosen_ref |=
+            rewrite_color_or_colorless_choice_refs_in_effects(&mut branch_effects, concrete_choice)
+                > 0;
+        let unresolved_refs = unresolved_chosen_color_refs_in_effects(&branch_effects)?;
+        if !unresolved_refs.is_empty() {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ActionList/ChooseAColorOrColorless",
+                needed_variant: format!(
+                    "full branch lowering for chosen-color refs ({})",
+                    unresolved_refs.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        branches.push(
+            crate::convert::build_ability_chain(AbilityKind::Spell, None, branch_effects)?
+                .description(concrete_choice.description().to_string()),
+        );
+    }
+
+    if !saw_chosen_ref {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "ActionList/ChooseAColorOrColorless",
+            path: String::new(),
+            detail: "tail actions never read the chosen color".into(),
+        });
+    }
+
+    Ok(vec![Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches,
+    }])
+}
+
+fn concrete_color_or_colorless_choices(
+    choice: &crate::schema::types::ChoosableColor,
+) -> ConvResult<Vec<ConcreteColorOrColorlessChoice>> {
+    let choice_type = filter_mod::choice_type_for_choosable_color(choice);
+    let ChoiceType::Color { excluded } = choice_type else {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Action::ChooseAColorOrColorless",
+            path: String::new(),
+            detail: format!("expected color choice, got {choice_type:?}"),
+        });
+    };
+
+    let mut out = Vec::with_capacity(ManaColor::ALL.len() + 1);
+    out.push(ConcreteColorOrColorlessChoice::Colorless);
+    out.extend(
+        ManaColor::ALL
+            .iter()
+            .copied()
+            .filter(|color| !excluded.contains(color))
+            .map(ConcreteColorOrColorlessChoice::Color),
+    );
+    Ok(out)
+}
+
+/// Every engine serde tag that represents a runtime "the chosen color"
+/// reference. Once `ChooseAColorOrColorless` is lowered into concrete
+/// `ChooseOneOf` branches, no sentinel in this catalog may remain anywhere
+/// in the branch effect tree — the choose action that would bind it is gone.
+///
+/// Catalog source (re-run `rg '\bChosenColor\b|AddChosenColor|IsChosenColor|ChosenColorIs' crates/engine/src/types/`):
+/// - `ContinuousModification::AddChosenColor` (`ability.rs:17415`)
+/// - `ProtectionTarget::ChosenColor` / `HexproofFilter::ChosenColor` (`keywords.rs:403,415`)
+/// - `DevotionColors::ChosenColor` / `ManaProduction::ChosenColor { .. }` (`ability.rs:1288,1373`)
+/// - `ColorPredicate::IsChosenColor` (`ability.rs:3140`)
+/// - `ChosenColorIs { .. }` (`ability.rs:5788`)
+///
+/// The scan inspects both serde object **keys** and string **values** so it is
+/// independent of whether the carrying enum is internally tagged
+/// (`{"type":"ChosenColor"}`) or externally tagged (`{"ChosenColor":{..}}`).
+/// `unresolved_chosen_color_scan_is_exhaustive_against_known_engine_variants`
+/// pins the catalog to the engine surface.
+const CHOSEN_COLOR_SENTINELS: &[(&str, &str)] = &[
+    ("AddChosenColor", "AddChosenColor"),
+    ("ChosenColor", "ChosenColor"),
+    ("ChosenColorIs", "ChosenColorIs"),
+    ("IsChosenColor", "IsChosenColor"),
+];
+
+fn classify_chosen_color_sentinel(tag: &str) -> Option<&'static str> {
+    CHOSEN_COLOR_SENTINELS
+        .iter()
+        .find(|(needle, _)| *needle == tag)
+        .map(|(_, unresolved)| *unresolved)
+}
+
+/// Fail closed after `ChooseAColorOrColorless` branch expansion: once the
+/// choose action is lowered away, no engine "chosen color" sentinel may remain
+/// anywhere in the branch effect tree. We scan the serialized effect graph so
+/// newly introduced chosen-color seams also trip the guard until explicitly
+/// rewritten.
+fn unresolved_chosen_color_refs_in_effects(
+    effects: &[Effect],
+) -> ConvResult<BTreeSet<&'static str>> {
+    let value = serde_json::to_value(effects).map_err(|err| ConversionGap::MalformedIdiom {
+        idiom: "ActionList/ChooseAColorOrColorless",
+        path: String::new(),
+        detail: format!("failed to inspect converted branch effects: {err}"),
+    })?;
+    let mut refs = BTreeSet::new();
+    collect_unresolved_chosen_color_refs_in_value(&value, &mut refs);
+    Ok(refs)
+}
+
+fn collect_unresolved_chosen_color_refs_in_value(
+    value: &serde_json::Value,
+    refs: &mut BTreeSet<&'static str>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_unresolved_chosen_color_refs_in_value(item, refs);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                if let Some(unresolved) = classify_chosen_color_sentinel(key) {
+                    refs.insert(unresolved);
+                }
+                collect_unresolved_chosen_color_refs_in_value(item, refs);
+            }
+        }
+        serde_json::Value::String(tag) => {
+            if let Some(unresolved) = classify_chosen_color_sentinel(tag) {
+                refs.insert(unresolved);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_effects(
+    effects: &mut [Effect],
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    effects
+        .iter_mut()
+        .map(|effect| rewrite_color_or_colorless_choice_refs_in_effect(effect, concrete_choice))
+        .sum()
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_effect(
+    effect: &mut Effect,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter_mut()
+            .map(|definition| {
+                rewrite_color_or_colorless_choice_refs_in_static_definition(
+                    definition,
+                    concrete_choice,
+                )
+            })
+            .sum(),
+        Effect::ChooseOneOf { branches, .. } => branches
+            .iter_mut()
+            .map(|branch| {
+                rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                    branch,
+                    concrete_choice,
+                )
+            })
+            .sum(),
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            rewrite_color_or_colorless_choice_refs_in_ability_definition(effect, concrete_choice)
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            let static_count: usize = statics
+                .iter_mut()
+                .map(|definition| {
+                    rewrite_color_or_colorless_choice_refs_in_static_definition(
+                        definition,
+                        concrete_choice,
+                    )
+                })
+                .sum();
+            let trigger_count: usize = triggers
+                .iter_mut()
+                .filter_map(|trigger| trigger.execute.as_mut())
+                .map(|execute| {
+                    rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                        execute,
+                        concrete_choice,
+                    )
+                })
+                .sum();
+            static_count + trigger_count
+        }
+        _ => 0,
+    }
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_ability_definition(
+    ability: &mut AbilityDefinition,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    let mut rewrites =
+        rewrite_color_or_colorless_choice_refs_in_effect(ability.effect.as_mut(), concrete_choice);
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        rewrites +=
+            rewrite_color_or_colorless_choice_refs_in_ability_definition(sub, concrete_choice);
+    }
+    if let Some(otherwise) = ability.else_ability.as_mut() {
+        rewrites += rewrite_color_or_colorless_choice_refs_in_ability_definition(
+            otherwise,
+            concrete_choice,
+        );
+    }
+    rewrites
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_static_definition(
+    definition: &mut StaticDefinition,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    definition
+        .modifications
+        .iter_mut()
+        .map(|modification| {
+            rewrite_color_or_colorless_choice_refs_in_modification(modification, concrete_choice)
+        })
+        .sum()
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_modification(
+    modification: &mut ContinuousModification,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    match modification {
+        ContinuousModification::AddKeyword { keyword } => match keyword {
+            engine::types::keywords::Keyword::Protection(
+                engine::types::keywords::ProtectionTarget::ChosenColor,
+            ) => {
+                *keyword = engine::types::keywords::Keyword::Protection(
+                    concrete_choice.protection_target(),
+                );
+                1
+            }
+            engine::types::keywords::Keyword::HexproofFrom(
+                engine::types::keywords::HexproofFilter::ChosenColor,
+            ) => {
+                *keyword = engine::types::keywords::Keyword::HexproofFrom(
+                    concrete_choice.hexproof_filter(),
+                );
+                1
+            }
+            _ => 0,
+        },
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_mut()
+            .map(|execute| {
+                rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                    execute,
+                    concrete_choice,
+                )
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn actions_are_noop(actions: &[Action]) -> bool {
@@ -2507,6 +2846,7 @@ fn spell_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2536,6 +2876,7 @@ fn graveyard_card_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2580,6 +2921,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         }),
         Permanent::Ref_TargetPermanent
         | Permanent::Ref_TargetPermanent1
@@ -2587,6 +2929,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::Target),
+            excess: None,
         }),
         Permanent::ThatEnteringPermanent
         | Permanent::Trigger_ThatArtifact
@@ -2598,6 +2941,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::TriggeringSource),
+            excess: None,
         }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "Effect::DealDamage.damage_source",
@@ -2726,6 +3070,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
         // CR 120.1 + CR 603.7c + CR 603.10a: "When this dies, [it] deals N
         // damage to <recipient>." The damage source is the dying permanent,
@@ -2736,6 +3081,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
 
         Action::DestroyPermanent(p) => Effect::Destroy {
@@ -6819,16 +7165,18 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
-        CardInGraveyard, Cards, CardtypeVariable, Color, ColorList, Comparison, Condition, Cost,
-        CounterType, CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources,
-        ManaSymbol, PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType,
+        CardInGraveyard, Cards, CardtypeVariable, ChoosableColor, Color, ColorList, Comparison,
+        Condition, Cost, CounterType, CreatableToken, CreatureTokenSubtypes, CreatureTokenType,
+        DamageSources, Expiration, LayerEffect, ManaProduce, ManaSymbol, PTXValue, Permanent,
+        Permanents, Protectable, ProtectableColor, ReplacementActionWouldEnter, Rule, SubType,
         TokenCopyEffects, TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, ChoiceType, Comparator, ControllerRef, Effect, FilterProp, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityKind, ChoiceType, Comparator, ContinuousModification, ControllerRef, Effect,
+        FilterProp, PlayerFilter, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
+    use engine::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
     use engine::types::mana::ManaColor;
 
     // Issue #4201 follow-up — Turnabout's "choose artifact, creature, or
@@ -6974,6 +7322,207 @@ mod tests {
                 ]),),
             }
         );
+    }
+
+    #[test]
+    fn choose_a_color_or_colorless_lowers_to_concrete_choose_one_of_branches() {
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::CreatePermanentLayerEffectUntil(
+                Box::new(Permanent::ThisPermanent),
+                vec![LayerEffect::AddAbility(vec![Rule::Protection(
+                    Protectable::FromColor(ProtectableColor::TheChosenColor),
+                )])],
+                Expiration::UntilEndOfTurn,
+            ),
+            Action::DrawACard,
+        ]))
+        .unwrap();
+
+        let [Effect::ChooseOneOf { chooser, branches }] = effects.as_slice() else {
+            panic!("expected single ChooseOneOf effect, got {effects:?}");
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 6, "colorless + five colors");
+
+        let colorless_branch = &branches[0];
+        assert_eq!(
+            colorless_branch.description.as_deref(),
+            Some("Colorless"),
+            "branch labels must preserve the concrete color choice for UI prompts"
+        );
+        match colorless_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Quality(
+                            "colorless".to_string(),
+                        )),
+                    }
+                )));
+            }
+            other => panic!("expected colorless branch grant, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                colorless_branch
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| sub.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "branch must preserve follow-on effects"
+        );
+
+        let white_branch = &branches[1];
+        assert_eq!(white_branch.description.as_deref(), Some("White"));
+        match white_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+                    }
+                )));
+            }
+            other => panic!("expected white branch grant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_a_color_or_colorless_strict_fails_unresolved_chosen_color_tail() {
+        let err = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::AddMana(ManaProduce::ManaOfTheChosenColor),
+        ]))
+        .unwrap_err();
+
+        match err {
+            ConversionGap::EnginePrerequisiteMissing {
+                engine_type,
+                needed_variant,
+            } => {
+                assert_eq!(engine_type, "ActionList/ChooseAColorOrColorless");
+                assert!(
+                    needed_variant.contains("ChosenColor"),
+                    "expected unresolved chosen-color detail, got {needed_variant}"
+                );
+            }
+            other => panic!("expected strict-fail for unresolved chosen color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unresolved_chosen_color_scan_catches_sentinels_in_keys_and_values() {
+        // Internally-tagged shape: `{"type": "ChosenColor"}` (the engine
+        // default for unit variants). The pre-fix scan caught this because it
+        // walked string values.
+        let internally_tagged = serde_json::json!({ "type": "ChosenColor" });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&internally_tagged, &mut refs);
+        assert!(
+            refs.contains("ChosenColor"),
+            "internally-tagged ChosenColor value must be caught: {refs:?}"
+        );
+
+        // Externally-tagged shape: `{"ChosenColor": { .. }}` — the
+        // representation struct variants (e.g. `ManaProduction::ChosenColor`)
+        // can take. The pre-fix scan missed this because it only walked
+        // `map.values()`, never keys.
+        let externally_tagged = serde_json::json!({ "ChosenColor": { "count": 1 } });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&externally_tagged, &mut refs);
+        assert!(
+            refs.contains("ChosenColor"),
+            "externally-tagged ChosenColor key must be caught (struct-variant regression): {refs:?}"
+        );
+
+        // Every catalogued sentinel is caught in both key and value positions.
+        for (tag, unresolved) in CHOSEN_COLOR_SENTINELS {
+            for value in [
+                serde_json::json!({ "type": tag }),
+                serde_json::json!({ *tag: null }),
+            ] {
+                let mut refs = BTreeSet::new();
+                collect_unresolved_chosen_color_refs_in_value(&value, &mut refs);
+                assert!(
+                    refs.contains(*unresolved),
+                    "sentinel `{tag}` must resolve to `{unresolved}`: {refs:?}"
+                );
+            }
+        }
+
+        // Non-chosen-color data passes through untouched.
+        let clean = serde_json::json!({ "type": "DealDamage", "amount": 3 });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&clean, &mut refs);
+        assert!(
+            refs.is_empty(),
+            "non-chosen-color data must not trip the scan: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn choose_a_color_or_colorless_lowers_hexproof_from_chosen_color() {
+        // Regression for the HexproofFrom seam: `convert_hexproof_filter` must
+        // accept `TheChosenColor` and the branch rewriter must rewrite it per
+        // concrete branch (previously the arm was unreachable because the
+        // converter rejected TheChosenColor before rewriting could run).
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::CreatePermanentLayerEffectUntil(
+                Box::new(Permanent::ThisPermanent),
+                vec![LayerEffect::AddAbility(vec![Rule::HexproofFrom(
+                    Protectable::FromColor(ProtectableColor::TheChosenColor),
+                )])],
+                Expiration::UntilEndOfTurn,
+            ),
+        ]))
+        .unwrap();
+
+        let [Effect::ChooseOneOf { branches, .. }] = effects.as_slice() else {
+            panic!("expected single ChooseOneOf effect, got {effects:?}");
+        };
+        assert_eq!(branches.len(), 6, "colorless + five colors");
+
+        let colorless_branch = &branches[0];
+        assert_eq!(
+            colorless_branch.description.as_deref(),
+            Some("Colorless"),
+            "first branch is the colorless choice"
+        );
+        match colorless_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::Quality(
+                            "colorless".to_string(),
+                        )),
+                    }
+                )));
+            }
+            other => panic!("expected colorless hexproof grant, got {other:?}"),
+        }
+
+        let white_branch = &branches[1];
+        assert_eq!(white_branch.description.as_deref(), Some("White"));
+        match white_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::White)),
+                    }
+                )));
+            }
+            other => panic!("expected white hexproof grant, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7624,6 +8173,7 @@ mod tests {
             amount,
             target,
             damage_source,
+            excess: _,
         } = effect
         else {
             panic!("expected DealDamage, got {effect:?}");

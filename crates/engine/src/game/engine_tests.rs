@@ -17,6 +17,7 @@ use crate::types::format::FormatConfig;
 use crate::types::game_state::CastingVariant;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
 
 /// Create a simple test ability definition.
@@ -94,6 +95,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             damage_source: None,
+            excess: None,
         },
         vec![],
         source_id,
@@ -333,6 +335,7 @@ fn make_damage_ability(amount: i32, cost: Option<AbilityCost>) -> AbilityDefinit
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     );
     if let Some(c) = cost {
@@ -7887,4 +7890,104 @@ fn reorder_hand_succeeds_while_opponent_holds_priority() {
     );
     // Priority hasn't moved — reorder doesn't transition WaitingFor.
     assert_eq!(state.priority_player, PlayerId(1));
+}
+
+/// CR 305.1 + CR 116.2a + CR 401.5: A `OncePerTurn` `TopOfLibraryCastPermission`
+/// with `play_mode: Play` must consume its per-turn slot when a land is played
+/// from the library top (land play is a special action per CR 305.1/CR 116.2a;
+/// CR 401.5 governs top-of-library visibility during the action), and a second
+/// `PlayLand` from the same permission source must be rejected.
+#[test]
+fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+
+    let perm_src = create_object(
+        &mut state,
+        CardId(9200),
+        player,
+        "Permission Source (test)".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: crate::types::ability::CardPlayMode::Play,
+            frequency: CastFrequency::OncePerTurn,
+            alt_cost: None,
+        })
+        .affected(TargetFilter::Any);
+        let obj = state.objects.get_mut(&perm_src).unwrap();
+        obj.static_definitions.push(def.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+
+    let land1 = create_object(
+        &mut state,
+        CardId(9201),
+        player,
+        "Forest A".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land1)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_back(land1);
+    }
+
+    let land2 = create_object(
+        &mut state,
+        CardId(9202),
+        player,
+        "Forest B".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land2)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_front(land2);
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land2,
+            card_id: CardId(9202),
+        },
+    )
+    .expect("first top-of-library land play must succeed");
+
+    assert!(
+        state.battlefield.contains(&land2),
+        "land2 must be on the battlefield after the first play"
+    );
+    assert!(
+        state
+            .top_of_library_cast_permissions_used
+            .contains(&perm_src),
+        "the OncePerTurn slot must be recorded after the land is moved"
+    );
+
+    let second = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land1,
+            card_id: CardId(9201),
+        },
+    );
+    assert!(
+        second.is_err(),
+        "second top-of-library land play under the same OncePerTurn source must be rejected"
+    );
 }

@@ -9,12 +9,12 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -48,9 +48,11 @@ pub mod cast_copy_of_card;
 pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
+pub mod chaos_ensues;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
+pub mod choose_counter_kind;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
 pub mod choose_objects_into_tracked_set;
@@ -68,6 +70,7 @@ pub mod counters;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
+pub mod create_planeswalk_replacement;
 pub mod create_token_copy_from_pool;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -88,6 +91,7 @@ pub mod endure;
 pub mod energy;
 pub mod epic;
 pub mod exile_resolving_spell;
+pub mod put_chosen_counter;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
 // `epic.rs` stays implementation-only).
 #[cfg(test)]
@@ -2955,6 +2959,9 @@ pub fn resolve_effect(
         Effect::EachDealsDamageEqualToPower { .. } => {
             deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
         }
+        Effect::EachSourceDealsDamage { .. } => {
+            deal_damage::resolve_each_source_deals_damage(state, ability, events)
+        }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
@@ -3075,6 +3082,8 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
+        Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Unsuspect { .. } => suspect::resolve_unsuspect(state, ability, events),
@@ -3117,6 +3126,9 @@ pub fn resolve_effect(
         }
         Effect::CreateDrawReplacement { .. } => {
             create_draw_replacement::resolve(state, ability, events)
+        }
+        Effect::CreatePlaneswalkReplacement { .. } => {
+            create_planeswalk_replacement::resolve(state, ability, events)
         }
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
@@ -3228,6 +3240,7 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
+        Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
@@ -3251,6 +3264,18 @@ pub fn resolve_effect(
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
+            // Diagnostics: record the source card so the telemetry `game_summary`
+            // surface can report which cards hit an unimplemented effect this game.
+            // Oracle id when available; object name fallback covers tokens/emblems
+            // (`printed_ref == None`).
+            if let Some(obj) = state.objects.get(&ability.source_id) {
+                let id = obj
+                    .printed_ref
+                    .as_ref()
+                    .map(|p| p.oracle_id.clone())
+                    .unwrap_or_else(|| obj.name.clone());
+                state.unimplemented_oracle_ids.insert(id);
+            }
             Ok(())
         }
     }
@@ -4232,6 +4257,29 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
     has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
 }
 
+/// CR 608.2d: "A player can't choose an impossible option." An optional effect
+/// whose only reachable outcome is a no-op must not be offered as a "you may"
+/// prompt at all. Currently the sole such class is `Effect::PutChosenCounter`
+/// reached after a `ChooseCounterKind` whose 0-kind branch fired: the iterated
+/// permanent had no counters, so no `ChosenAttribute::Counter` was persisted onto
+/// the source and "put an additional counter of that kind" has no "that kind" to
+/// add. The Caves of Androzani II/III iterates over EVERY non-Saga permanent, so
+/// without this guard the controller is flooded with impossible yes/no prompts
+/// for lands and counterless creatures. Suppressing the prompt lets the effect
+/// resolve as its defined no-op instead (CR 122.6).
+fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::PutChosenCounter { .. } => {
+            !state.objects.get(&ability.source_id).is_some_and(|src| {
+                src.chosen_attributes
+                    .iter()
+                    .any(|attr| matches!(attr, ChosenAttribute::Counter(_)))
+            })
+        }
+        _ => false,
+    }
+}
+
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
@@ -4958,6 +5006,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // from "whenever an opponent draws a card, they lose 2 life").
         Effect::LoseLife {
             target: Some(ref filter),
+            ..
+        } => filter,
+        // CR 120.1 + CR 603.2: `EachSourceDealsDamage`'s `Shared` recipient may be
+        // an event-context ref (`TriggeringSource` — Sarkhan; `ParentTarget` —
+        // Missy) that auto-resolves from the current trigger event at resolution.
+        // `EachController` and the deferred per-source recipients carry no
+        // event-context target.
+        Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(ref filter),
             ..
         } => filter,
         _ => return None,
@@ -5989,6 +6046,7 @@ fn resolve_chain_body(
         && !has_kind_driven_repeat(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
         && !is_repeated_optional_payment(ability)
+        && !optional_effect_is_infeasible(state, ability)
     {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
@@ -8817,6 +8875,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         assert!(is_known_effect(&known));
 
@@ -8932,6 +8991,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SourceChosenPlayer,
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             source,
@@ -9044,6 +9104,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         assert!(!effect_has_iteration_bound_recipient(&damage));
     }
@@ -9063,6 +9124,62 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve_effect(&mut state, &ability, &mut events);
         assert!(result.is_ok());
+    }
+
+    /// Telemetry `game_summary` surface: resolving an `Effect::Unimplemented`
+    /// records the source card's oracle id in `unimplemented_oracle_ids`
+    /// (name fallback for tokens/emblems with no `printed_ref`), and dedups on
+    /// repeated resolution. Diagnostics plumbing only — no rules behavior.
+    #[test]
+    fn unimplemented_effect_records_source_in_game_summary() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card object with a printed oracle id.
+        let mut card = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Fancy Card".to_string(),
+            Zone::Stack,
+        );
+        card.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "oracle-abc-123".to_string(),
+            face_name: "Fancy Card".to_string(),
+        });
+        state.objects.insert(ObjectId(7), card);
+
+        // Token object with no printed_ref — must fall back to the name.
+        let token = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(0),
+            PlayerId(0),
+            "Goblin Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(8), token);
+
+        let unimplemented = |source: ObjectId| {
+            ResolvedAbility::new(
+                Effect::unimplemented("SomeEffect", "some fragment"),
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let mut events = Vec::new();
+
+        // Oracle-id path: resolves and records the oracle id.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("oracle-abc-123"));
+
+        // Dedup: a second resolution of the same source adds no new entry.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert_eq!(state.unimplemented_oracle_ids.len(), 1);
+
+        // Name-fallback path: a token with no printed_ref records its name.
+        resolve_effect(&mut state, &unimplemented(ObjectId(8)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("Goblin Token"));
+        assert_eq!(state.unimplemented_oracle_ids.len(), 2);
     }
 
     fn optional_gain_life(
@@ -10291,6 +10408,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -10748,6 +10866,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -10758,6 +10877,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -10798,6 +10918,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -11798,6 +11919,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(battle_id)],
             ObjectId(100),
@@ -13219,6 +13341,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -13232,6 +13355,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -13264,6 +13388,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -13276,6 +13401,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -13307,6 +13433,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -13322,6 +13449,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -13381,6 +13509,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -13401,6 +13530,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -13461,6 +13591,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -18134,6 +18265,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -18151,6 +18283,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),

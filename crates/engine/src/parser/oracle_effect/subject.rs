@@ -17,8 +17,9 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    Duration, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -1173,11 +1174,13 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
+                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
+                    by: None,
+                })
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None },
+                }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
             },
@@ -4844,6 +4847,163 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     })
 }
 
+/// CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
+/// to <recipient>" — every matching object is its OWN damage source. Produces
+/// `Effect::EachSourceDealsDamage` so per-source iteration survives, instead of the
+/// generic `strip_subject_clause` path which flattens the source class into a
+/// single ability-sourced `DealDamage`.
+///
+/// Dispatched in `parse_effect_clause_inner` immediately after the
+/// `EachDealsDamageEqualToPower` intercept, ahead of every `strip_subject_clause`
+/// site, so all nested contexts (trigger bodies, `ChooseOneOf` branches,
+/// `sub_ability` chains) are caught.
+pub(super) fn try_parse_each_source_deals_damage(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // CR 120.1: require a genuine UNIVERSAL/class quantifier subject ("each <X>").
+    // This is what makes every match its own damage source. It deliberately
+    // EXCLUDES singular anaphoric/targeted subjects that denote ONE source — "that
+    // creature" (TriggeringSource), "it"/"this creature" (SelfRef), "enchanted
+    // creature" (AttachedTo), "target creature you control" (a chosen target) — all
+    // of which `parse_subject_application` would otherwise hand back as a bare
+    // `Typed` class filter, wrongly broadcasting one source's damage across the
+    // whole class.
+    if tag::<_, _, OracleError<'_>>("each ")
+        .parse(lower.as_str())
+        .is_err()
+    {
+        return None;
+    }
+    // CR 608.2c: split subject vs predicate at the "deals"/"deal" verb. "attach"
+    // is not a PREDICATE_VERB, so "each Aura attached to a creature deals …" splits
+    // at "deals", not at "attached".
+    let verb_start = find_predicate_start(text)?;
+    let subject = text[..verb_start].trim();
+    let predicate = text[verb_start..].trim();
+    let predicate_lower = predicate.to_lowercase();
+
+    // CR 120.1: the damage verb must be the clause's MAIN verb — the predicate
+    // begins with "deals"/"deal". `find_predicate_start` splits at the FIRST
+    // predicate verb, so a granted ability ("each creature you control gains
+    // \"{T}: This creature deals 1 damage…\"" — Stensia) splits at "gains" and is
+    // declined here, never mistaking the quoted "deals" for the main action.
+    if alt((
+        tag::<_, _, OracleError<'_>>("deals "),
+        tag::<_, _, OracleError<'_>>("deal "),
+    ))
+    .parse(predicate_lower.as_str())
+    .is_err()
+    {
+        return None;
+    }
+
+    // The recipient phrase: everything after the "deals N damage to " marker.
+    let recipient_phrase = damage_recipient_phrase(&predicate_lower);
+
+    // CR 303.4 (DEFERRED §9): "...to the creature/permanent it's attached to" — a
+    // per-attachment host recipient not yet modeled. Fail CLOSED to an honest
+    // `Unimplemented` BEFORE the subject-parse requirement, so the clause never
+    // mis-deals regardless of how the attachment subject parses (Aura Barbs clause
+    // 2). Clause 1 ("its controller") does not match this phrase.
+    if recipient_phrase.is_some_and(is_attached_host_recipient) {
+        return Some(super::parsed_clause(Effect::unimplemented(
+            "each_source_attached_damage",
+            text,
+        )));
+    }
+
+    // Require a usable non-player object-class source. Player-shaped subjects
+    // ("each player", "each opponent") and anaphoric "each of those …"
+    // (`ParentTarget`) fall through to their own handling.
+    let sources = parse_subject_application(subject, ctx)?.affected;
+    if !is_object_class_source(&sources) {
+        return None;
+    }
+
+    // Delegate the predicate to the shared damage parser so the amount and the
+    // recipient anaphora (`ParentTarget`, `TriggeringSource`, `Any`) resolve
+    // identically to the `DealDamage` the misparse produced — no re-implementation.
+    let (amount, target, damage_source) =
+        match super::lower::try_parse_damage(&predicate_lower, predicate, ctx)? {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+                ..
+            } => (amount, target, damage_source),
+            _ => return None,
+        };
+    // The source set comes from the filter, never a `Target` damage source.
+    if damage_source.is_some() {
+        return None;
+    }
+    // CR 120.1: only a FIXED, source-INDEPENDENT amount. The amount is resolved
+    // ONCE (uniform across the batch), so a per-source dynamic amount ("equal to
+    // its power", "equal to its mana value") would be wrong — that filter-source
+    // own-power class is deferred (see §1/§9).
+    if !matches!(amount, QuantityExpr::Fixed { .. }) {
+        return None;
+    }
+
+    // CR 109.4 + CR 120.3a: "its controller" is a per-source recipient. Every other
+    // recipient is the shared announced/context target produced above.
+    let recipient = if recipient_phrase.is_some_and(is_its_controller_recipient) {
+        EachDamageRecipient::EachController
+    } else {
+        EachDamageRecipient::Shared(target)
+    };
+
+    Some(super::parsed_clause(Effect::EachSourceDealsDamage {
+        sources,
+        amount,
+        recipient,
+    }))
+}
+
+/// Return the recipient phrase of a "deals N damage to <recipient>" predicate —
+/// the slice after the `" damage to "` marker, trimmed of a trailing period.
+fn damage_recipient_phrase(predicate_lower: &str) -> Option<&str> {
+    let (_rest, (_before, after)) =
+        nom_primitives::split_once_on(predicate_lower, " damage to ").ok()?;
+    Some(after.trim_end_matches('.').trim())
+}
+
+/// CR 109.4 + CR 120.3a: the recipient phrase is exactly "its controller".
+fn is_its_controller_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(tag::<_, _, OracleError<'_>>("its controller"))
+        .parse(recipient_phrase)
+        .is_ok()
+}
+
+/// CR 303.4 (DEFERRED §9): the recipient phrase is "the creature/permanent it's
+/// attached to" (straight + typographic apostrophe), an unmodeled per-attachment
+/// host recipient.
+fn is_attached_host_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("the creature it's attached to"),
+        tag("the creature it\u{2019}s attached to"),
+        tag("the permanent it's attached to"),
+        tag("the permanent it\u{2019}s attached to"),
+    )))
+    .parse(recipient_phrase)
+    .is_ok()
+}
+
+/// CR 120.1: True when `filter` selects game OBJECTS by type/subtype (a valid
+/// `EachSourceDealsDamage` source class), not players.
+fn is_object_class_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty() && filters.iter().all(is_object_class_source)
+        }
+        TargetFilter::Not { filter } => is_object_class_source(filter),
+        _ => false,
+    }
+}
+
 /// CR 115.1d: Parse the leading source-count quantifier of the team-up damage
 /// line and return the remaining text plus the `MultiTargetSpec` it encodes.
 /// "up to two" → 0..=2, "one or two" → 1..=2, "two" → exactly 2.
@@ -5426,6 +5586,193 @@ mod tests {
             )),
             "expected RemoveType(Creature), got {:?}",
             static_abilities[0].modifications
+        );
+    }
+
+    // CR 120.1 + CR 608.2c: "each <object class> [you control] deals N damage to
+    // <recipient>" parses to `EachSourceDealsDamage` (per-source iteration), NOT a
+    // single ability-sourced `DealDamage`. Building-block tests, one per cluster
+    // recipient shape, fed the full clause text via `parse_effect`.
+    #[test]
+    fn each_source_deals_damage_parent_target_recipient() {
+        // Missy branch[0] / Case of the Gateway Express: "that <recipient>" bound to
+        // a parent target → Shared(ParentTarget).
+        let effect = super::super::parse_effect(
+            "each artifact creature you control deals 1 damage to that opponent",
+        );
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(matches!(sources, TargetFilter::Typed(_)), "got {sources:?}");
+        assert_eq!(amount, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::ParentTarget)
+        );
+    }
+
+    #[test]
+    fn each_source_deals_damage_triggering_source_recipient() {
+        // Sarkhan the Masterless: "that creature" = the attacker that triggered the
+        // ability → Shared(TriggeringSource).
+        let effect =
+            super::super::parse_effect("each Dragon you control deals 1 damage to that creature");
+        let Effect::EachSourceDealsDamage { recipient, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::TriggeringSource)
+        );
+    }
+
+    #[test]
+    fn each_source_deals_damage_any_target_recipient() {
+        // Princess Snowfall: "any target" → Shared(Any).
+        let effect =
+            super::super::parse_effect("each Dwarf you control deals 1 damage to any target");
+        let Effect::EachSourceDealsDamage { recipient, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(recipient, EachDamageRecipient::Shared(TargetFilter::Any));
+    }
+
+    #[test]
+    fn each_source_deals_damage_each_controller_recipient() {
+        // Rakdos Charm mode 3: "its controller" → EachController (per-source).
+        let effect = super::super::parse_effect("each creature deals 1 damage to its controller");
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(matches!(sources, TargetFilter::Typed(_)), "got {sources:?}");
+        assert_eq!(amount, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(recipient, EachDamageRecipient::EachController);
+    }
+
+    #[test]
+    fn each_enchantment_deals_to_its_controller_each_controller() {
+        // Aura Barbs clause 1, exact text → EachController with amount 2.
+        let effect =
+            super::super::parse_effect("each enchantment deals 2 damage to its controller");
+        let Effect::EachSourceDealsDamage {
+            amount, recipient, ..
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(recipient, EachDamageRecipient::EachController);
+    }
+
+    // CR 303.4 (DEFERRED §9): the per-attachment host recipient is not yet modeled —
+    // the clause must fail CLOSED to `Unimplemented` (replacing today's live
+    // `DealDamage{Fixed 2, ParentTarget}` misparse). Asserts the §6 step-1 reorder
+    // fires BEFORE the subject-parse requirement (Aura Barbs clause 2).
+    #[test]
+    fn each_aura_attached_damage_defers_to_unimplemented() {
+        let effect = super::super::parse_effect(
+            "each Aura attached to a creature deals 2 damage to the creature it's attached to",
+        );
+        assert!(
+            matches!(effect, Effect::Unimplemented { .. }),
+            "expected Unimplemented, got {effect:?}"
+        );
+    }
+
+    // Negative: a player-shaped subject must NOT be captured — it falls through so
+    // "each player ..." keeps its existing per-player handling.
+    #[test]
+    fn each_player_subject_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("each player draws a card");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "player subject wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a self-source broadcast ("~ deals N damage to each creature",
+    // DamageAll) is NOT a per-source class — it must fall through.
+    #[test]
+    fn self_source_damage_each_creature_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("~ deals 1 damage to each creature");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "self-source broadcast wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a SINGULAR anaphoric source ("that creature" = TriggeringSource,
+    // Flametongue Kavu Avatar) denotes ONE source, not a class — must NOT be
+    // captured (it would wrongly broadcast across all creatures).
+    #[test]
+    fn singular_that_creature_source_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("that creature deals 1 damage to target creature");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "singular anaphoric source wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: an Aura's "enchanted creature deals 1 damage to its owner" (Enslave)
+    // is a single AttachedTo source — must NOT be captured as a class.
+    #[test]
+    fn enchanted_creature_source_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("enchanted creature deals 1 damage to its owner");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "enchanted-creature source wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: damage nested inside a GRANTED ability ("each creature you control
+    // gains '{T}: This creature deals 1 damage to target player...'", Stensia) is
+    // not a direct per-source damage — the predicate's main verb is "gains", so it
+    // must NOT be captured.
+    #[test]
+    fn granted_ability_damage_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each creature you control gains \"{T}: This creature deals 1 damage to target player or planeswalker\" until end of turn",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "granted-ability damage wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a per-source DYNAMIC amount ("each creature you control deals damage
+    // equal to its power") is the deferred filter-source own-power class — the
+    // single uniform resolve would be wrong, so it must NOT be captured.
+    #[test]
+    fn each_source_own_power_amount_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each creature you control deals damage equal to its power to any target",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "per-source dynamic amount wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: the targeted own-power team-up shape still routes to
+    // `EachDealsDamageEqualToPower`, never `EachSourceDealsDamage`.
+    #[test]
+    fn each_power_team_up_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "up to two target creatures you control each deal damage equal to their power to another target creature",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "own-power team-up wrongly captured: {effect:?}"
         );
     }
 

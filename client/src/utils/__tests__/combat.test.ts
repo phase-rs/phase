@@ -1,52 +1,33 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, GameState, ObjectId } from "../../adapter/types";
+import type { GameObject, ObjectId } from "../../adapter/types";
+import {
+  buildGameObjectWithCoreTypes,
+  buildObjectMap,
+} from "../../test/factories/gameObjectFactory";
+import { buildGameState } from "../../test/factories/gameStateFactory";
 import { evenSplit, groupAttackers } from "../combat";
 
 function makeObject(overrides: Partial<GameObject> & { id: ObjectId }): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Creature"], {
     card_id: 100,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Goblin",
     power: 1,
     toughness: 1,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Red"],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
     base_color: ["Red"],
-    timestamp: 1,
-    entered_battlefield_turn: 1,
     ...overrides,
-  };
+  });
 }
 
 function makeState(
   objects: GameObject[],
   ringBearer?: Record<string, ObjectId | null>,
-): GameState {
-  const map: Record<string, GameObject> = {};
-  for (const obj of objects) map[obj.id] = obj;
-  return { objects: map, ring_bearer: ringBearer } as unknown as GameState;
+) {
+  return buildGameState({ objects: buildObjectMap(...objects), ring_bearer: ringBearer });
 }
 
 describe("evenSplit", () => {

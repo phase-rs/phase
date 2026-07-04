@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import type { GameState } from "../../adapter/types";
+import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
@@ -44,7 +44,15 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,
       playerToken: "token-123",
-      state: { derived: { planechase: { can_roll: true } } } as unknown as GameState,
+      state: buildGameState({
+        derived: {
+          planechase: {
+            can_roll: true,
+            current_roll_cost: { type: "NoCost" },
+            planar_deck_count: 1,
+          },
+        },
+      }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
     },
@@ -52,7 +60,16 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       type: "reconnect_ack",
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,
-      state: { derived: { planechase: { active_plane: 7 } } } as unknown as GameState,
+      state: buildGameState({
+        derived: {
+          planechase: {
+            active_plane: 7,
+            can_roll: false,
+            current_roll_cost: { type: "NoCost" },
+            planar_deck_count: 1,
+          },
+        },
+      }),
       legalActions: [{ type: "RollPlanarDie" }],
     },
   ];
@@ -100,7 +117,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       wireProtocolVersion: 3,
       assignedPlayerId: 1,
       playerToken: "token-123",
-      state: {} as GameState,
+      state: buildGameState(),
       events: [],
       legalActions: [],
     })).toThrow(/Wire protocol mismatch/);

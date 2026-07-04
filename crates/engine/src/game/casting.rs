@@ -1060,7 +1060,13 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
     let Some(obj) = state.objects.get(&object_id) else {
         return false;
     };
-    if obj.owner != player || obj.zone != Zone::Hand || foretell_cost(obj).is_none() {
+    // CR 702.143a + CR 113.6b: honor both a printed foretell keyword and one
+    // GRANTED to a hand card (Dream Devourer). `effective_foretell_cost` reads
+    // the off-zone characteristic layer, so a granted foretell is foretellable.
+    if obj.owner != player
+        || obj.zone != Zone::Hand
+        || super::keywords::effective_foretell_cost(state, object_id).is_none()
+    {
         return false;
     }
 
@@ -1083,7 +1089,7 @@ pub fn handle_foretell(
         ));
     }
 
-    let foretell_cost = {
+    {
         let obj = state
             .objects
             .get(&object_id)
@@ -1093,10 +1099,15 @@ pub fn handle_foretell(
                 "Card is not in your hand".to_string(),
             ));
         }
-        foretell_cost(obj).ok_or_else(|| {
-            EngineError::ActionNotAllowed("Card does not have foretell".to_string())
-        })?
-    };
+    }
+    // CR 702.143a + CR 601.2f + CR 113.6b: the granted/printed foretell cost,
+    // concretized against the card's own mana cost (Dream Devourer's
+    // `SelfManaCostReduced { 2 }` → MV−2) at the foretell stamp point, so the
+    // later cast-from-exile path reads a concrete `ManaCost::Cost`, never an
+    // unresolved placeholder. `effective_foretell_cost` already routes through
+    // `resolve_keyword_mana_cost` (single authority).
+    let foretell_cost = super::keywords::effective_foretell_cost(state, object_id)
+        .ok_or_else(|| EngineError::ActionNotAllowed("Card does not have foretell".to_string()))?;
 
     pay_unless_cost(
         state,
@@ -3599,6 +3610,7 @@ fn prepare_spell_cast(
         player,
         object_id,
         None,
+        None,
         CastingMode::Actual,
     )
 }
@@ -3612,6 +3624,7 @@ fn prepare_spell_cast_for_display(
         state,
         player,
         object_id,
+        None,
         None,
         CastingMode::Display,
     )
@@ -3631,6 +3644,7 @@ fn prepare_spell_cast_with_variant_override(
         player,
         object_id,
         variant_override,
+        None,
         CastingMode::Actual,
     )
 }
@@ -3937,6 +3951,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     player: PlayerId,
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
+    latched_alt_cost: Option<crate::types::mana::ManaCost>,
     mode: CastingMode,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
@@ -4641,17 +4656,14 @@ fn prepare_spell_cast_with_variant_override_inner(
     let exile_alt_cost_free = alt_cost_from_exile
         .as_ref()
         .is_some_and(ManaCost::is_without_paying_mana);
-    // CR 702.94a: Miracle alternative cost — consult `effective_spell_keywords`
-    // so hand-granted miracle (Molecule Man) is honored at cast time, not only
-    // at offer enqueue. Only honored when the caller explicitly opted into the
-    // Miracle variant via the reveal prompt.
+    // CR 702.94a + CR 603.11 + CR 608.2g: the miracle triggered ability GRANTS the
+    // cast during its resolution at the cost latched when the offer was enqueued
+    // (draw.rs concretized it, e.g. Aminatou's SelfManaCostReduced{4} -> MV-4). The
+    // granting source may have left the battlefield between reveal-accept and trigger
+    // resolution (CR 608.2b last-known-information), so live keywords are NOT
+    // authoritative. This is the single cost authority for a miracle cast.
     let miracle_cost = if casting_variant == CastingVariant::Miracle {
-        effective_spell_keywords(state, player, object_id)
-            .iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
-                _ => None,
-            })
+        latched_alt_cost.clone()
     } else {
         None
     };
@@ -4939,7 +4951,8 @@ fn prepare_spell_cast_with_variant_override_inner(
                     };
                 }
                 crate::types::mana::ManaCost::SelfManaCost
-                | crate::types::mana::ManaCost::SelfManaValue => {
+                | crate::types::mana::ManaCost::SelfManaValue
+                | crate::types::mana::ManaCost::SelfManaCostReduced { .. } => {
                     // Self-referential placeholders should have been resolved before
                     // reaching here; treat as no-op for commander tax purposes.
                 }
@@ -5276,7 +5289,9 @@ pub(super) fn apply_cost_modifiers_to_base(
                         generic: tax,
                     };
                 }
-                ManaCost::SelfManaCost | ManaCost::SelfManaValue => {}
+                ManaCost::SelfManaCost
+                | ManaCost::SelfManaValue
+                | ManaCost::SelfManaCostReduced { .. } => {}
             }
         }
     }
@@ -6077,7 +6092,9 @@ fn apply_cost_floor_inner(
             ManaCost::NoCost => {
                 *mana_cost = ManaCost::generic(delta);
             }
-            ManaCost::SelfManaCost | ManaCost::SelfManaValue => {}
+            ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => {}
         }
     }
 }
@@ -8146,15 +8163,19 @@ pub fn handle_cast_spell_for_free_with_payment_mode(
 }
 
 /// CR 702.94a + CR 603.11: Cast a spell from hand via its Miracle alternative
-/// mana cost after the player accepted the reveal prompt. Validates:
-/// - `object_id` matches `card_id` and is in the caster's hand.
-/// - The card still has `Keyword::Miracle(cost)` (layer effects between queue
-///   and accept may have removed it — in that case the cast fails cleanly).
+/// mana cost after the player accepted the reveal prompt. Validates only that
+/// `object_id` matches `card_id` and is a hand card owned by the caster
+/// (CR 601.2a legality) — it does NOT re-check live Miracle presence, because
+/// the cast is granted by the resolving miracle triggered ability (CR 608.2g),
+/// whose granting source may have already left (CR 608.2b).
 ///
-/// Builds a `CastingVariant::Miracle` override and routes through the shared
-/// casting pipeline; `prepare_spell_cast_with_variant_override` substitutes
-/// the miracle cost for the printed mana cost via the `Keyword::Miracle`
-/// payload it discovers on the object.
+/// NOTE: this thin wrapper forwards `latched_cost = None` and currently has no
+/// callers. The real cast path (`engine.rs` on a `CastOfferKind::Miracle`
+/// offer) calls `handle_cast_spell_as_miracle_with_payment_mode` directly with
+/// the concrete cost latched at offer-enqueue. Any new caller that needs the
+/// miracle cost substituted MUST use that entry point and pass the latched
+/// cost — routing a miracle cast through this `None` wrapper would leave
+/// `miracle_cost` unset.
 pub fn handle_cast_spell_as_miracle(
     state: &mut GameState,
     player: PlayerId,
@@ -8168,6 +8189,7 @@ pub fn handle_cast_spell_as_miracle(
         object_id,
         card_id,
         CastPaymentMode::Auto,
+        None,
         events,
     )
 }
@@ -8178,6 +8200,7 @@ pub fn handle_cast_spell_as_miracle_with_payment_mode(
     object_id: ObjectId,
     card_id: CardId,
     payment_mode: CastPaymentMode,
+    latched_cost: Option<crate::types::mana::ManaCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let obj = state
@@ -8195,22 +8218,19 @@ pub fn handle_cast_spell_as_miracle_with_payment_mode(
             "CastSpellAsMiracle requires a hand card owned by the caster".to_string(),
         ));
     }
-    // CR 702.94a: The keyword must still be present — it can have been removed
-    // by layers / replacement effects between offer time and accept time.
-    if !super::keywords::object_has_effective_keyword_kind(
-        state,
-        object_id,
-        crate::types::keywords::KeywordKind::Miracle,
-    ) {
-        return Err(EngineError::ActionNotAllowed(
-            "Card no longer has miracle".to_string(),
-        ));
-    }
-    let mut prepared = prepare_spell_cast_with_variant_override(
+    // CR 702.94a + CR 603.11 + CR 608.2g: the `CastOfferKind::Miracle` offer only
+    // exists because the miracle triggered ability resolved and granted this cast
+    // during resolution at the latched cost. We must NOT re-check live miracle
+    // presence: CR 608.2b (last-known-information) governs a granting source
+    // (e.g. Aminatou) that has since left the battlefield, so the keyword may no
+    // longer be visible on the object even though the cast permission is valid.
+    let mut prepared = prepare_spell_cast_with_variant_override_inner(
         state,
         player,
         object_id,
         Some(CastingVariant::Miracle),
+        latched_cost,
+        CastingMode::Actual,
     )?;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
@@ -8282,10 +8302,12 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
-    /// CR 608.2g + CR 609.4b: whether the during-resolution cast is free
-    /// (Cascade/Discover/Suspend, `Auto`) or pays the card's real printed cost
-    /// (Quistis Trepe / Tinybones the Pickpocket, `Manual` with an optional
-    /// any-type-mana concession).
+    /// CR 608.2g + CR 609.4b + CR 118.9: whether the during-resolution cast
+    /// is free (Cascade/Discover/Suspend, `Auto`), pays the card's real
+    /// printed cost (Quistis Trepe / Tinybones the Pickpocket, `Manual` with
+    /// an optional any-type-mana concession), or pays an explicit alternative
+    /// mana cost borrowed from a keyword (The Face of Boe's suspend cost,
+    /// `Manual` at that keyword's mana cost).
     pub(super) cost: crate::types::ability::ResolutionCastCost,
 }
 
@@ -8302,7 +8324,9 @@ pub(super) struct ResolutionCastRequest {
 /// zeroes the cost and continues on `Auto` (Cascade/Discover/Suspend);
 /// `FullCost` charges the card's live printed cost (`SelfManaCost`), forwards the
 /// any-type-mana concession onto the grant, and pauses on `Manual` payment so the
-/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b). The
+/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b);
+/// `AlternativeMana { cost }` stamps an explicit keyword-borrowed mana cost and
+/// drains the pool on `Auto` payment at that cost (The Face of Boe — CR 118.9). The
 /// returned `WaitingFor` falls through
 /// `run_post_action_pipeline` normally, which fires the hit's own cast-triggers
 /// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
@@ -8331,11 +8355,14 @@ pub(super) fn initiate_cast_during_resolution(
         graveyard_replacement,
         cost,
     } = request;
-    // CR 608.2g + CR 609.4b: resolve the payment shape once. `Free` zeroes the
-    // cost and auto-pays (Cascade/Discover/Suspend). `FullCost` charges the
-    // card's live printed cost (`SelfManaCost`) and pauses for manual payment so
-    // the caster can spend mana; the any-type concession, when present, rides the
-    // grant (Quistis Trepe, Tinybones the Pickpocket).
+    // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
+    // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
+    // `FullCost` charges the card's live printed cost (`SelfManaCost`) and
+    // pauses for manual payment so the caster can spend mana; the any-type
+    // concession, when present, rides the grant (Quistis Trepe, Tinybones the
+    // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
+    // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
+    // manual payment at that cost rather than the card's printed cost.
     let (perm_cost, mana_spend_permission, payment_mode) = match cost {
         crate::types::ability::ResolutionCastCost::Free => {
             (ManaCost::zero(), None, CastPaymentMode::Auto)
@@ -8349,6 +8376,15 @@ pub(super) fn initiate_cast_during_resolution(
             mana_spend_permission,
             CastPaymentMode::Manual,
         ),
+        // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
+        // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
+        // directly — not `SelfManaCost` — so the permission carries the exact
+        // keyword cost. `Auto` payment drains the pool for the keyword cost
+        // automatically during resolution, matching Suspend's last-counter cast
+        // semantics (the triggering player's pool already has the mana).
+        crate::types::ability::ResolutionCastCost::AlternativeMana { cost: alt_cost } => {
+            (alt_cost, None, CastPaymentMode::Auto)
+        }
     };
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
@@ -10591,7 +10627,10 @@ fn reduce_harmonize_cost_for_creature_power(cost: &ManaCost, power: u32) -> Mana
             shards: shards.clone(),
             generic: generic.saturating_sub(power),
         },
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => cost.clone(),
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => cost.clone(),
     }
 }
 
@@ -11380,7 +11419,8 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
     let (residual_shards, residual_generic) = match &residual {
         crate::types::mana::ManaCost::NoCost
         | crate::types::mana::ManaCost::SelfManaCost
-        | crate::types::mana::ManaCost::SelfManaValue => return true,
+        | crate::types::mana::ManaCost::SelfManaValue
+        | crate::types::mana::ManaCost::SelfManaCostReduced { .. } => return true,
         crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
     };
 

@@ -5957,6 +5957,83 @@ fn static_control_creature_with_power_le() {
     ));
 }
 
+/// CR 509.1b: An anaphoric "it can't be blocked" conjunct riding in a compound
+/// equipped-creature grant ("has ward {1}, it can't be blocked" — Psychic Paper)
+/// must reach the single restriction authority despite the leading "it " anaphor,
+/// so the can't-be-blocked restriction is not silently dropped. Building-block
+/// test: the sibling ward keyword stays intact and the bare restriction lands.
+#[test]
+fn parse_continuous_modifications_anaphoric_cant_be_blocked_conjunct() {
+    let mods = parse_continuous_modifications("has ward {1}, it can't be blocked");
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(_)
+            }
+        )),
+        "ward conjunct preserved, got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked
+            }
+        )),
+        "anaphoric can't-be-blocked conjunct must not be dropped, got {mods:?}"
+    );
+}
+
+/// CR 612.8: "its name is the last chosen name" sets the recipient's name to the
+/// granting source's chosen card name (Layer 3) — emits `SetChosenName`.
+#[test]
+fn parse_continuous_modifications_its_name_is_last_chosen_name() {
+    let mods = parse_continuous_modifications("its name is the last chosen name");
+    assert_eq!(mods, vec![ContinuousModification::SetChosenName]);
+}
+
+/// CR 205.1a + CR 613.1d: "its creature type is the last chosen creature type"
+/// replaces the recipient's creature subtypes with the chosen creature type
+/// (Layer 4) — remove-all then add-chosen, in that emission order.
+#[test]
+fn parse_continuous_modifications_its_creature_type_is_last_chosen() {
+    let mods = parse_continuous_modifications("its creature type is the last chosen creature type");
+    assert_eq!(
+        mods,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType
+            },
+        ]
+    );
+}
+
+/// CR 612.8 + CR 205.1a: The combined Psychic Paper clause "its name and creature
+/// type are the last chosen name and creature type" emits all three
+/// modifications, with the creature-type remove-all preceding its add-chosen.
+#[test]
+fn parse_continuous_modifications_its_name_and_creature_type_last_chosen() {
+    let mods = parse_continuous_modifications(
+        "its name and creature type are the last chosen name and creature type",
+    );
+    assert_eq!(
+        mods,
+        vec![
+            ContinuousModification::SetChosenName,
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType
+            },
+        ]
+    );
+}
+
 #[test]
 fn static_lands_you_control_have() {
     let def = parse_static_line("Lands you control have 'Forests'.").unwrap();
@@ -6680,7 +6757,7 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 3 }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[1].affected, defs[0].affected);
 }
 
@@ -7225,7 +7302,7 @@ fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 3 }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[2].mode, StaticMode::Goaded);
     assert_eq!(defs[1].affected, defs[0].affected);
     assert_eq!(defs[2].affected, defs[0].affected);
@@ -7253,18 +7330,29 @@ fn is_unimplemented_residual(def: &StaticDefinition, needle: &str) -> bool {
     })
 }
 
-/// CR 508.1a + CR 611.3a + CR 613.1f: "As long as equipped creature is
+/// CR 508.1a + CR 611.3a + CR 509.1c: "As long as equipped creature is
 /// attacking, it has first strike and must be blocked by a Dalek if able."
-/// (Ace's Baseball Bat). The first-strike grant must land on the EquippedBy
-/// creature gated on the recipient being attacking — NOT on SelfRef with
-/// SourceIsAttacking — and the unmodeled "must be blocked by a Dalek if able"
-/// lure must surface as an `Effect::Unimplemented` residual, not be dropped.
+/// (Ace's Baseball Bat). The first-strike grant lands on the EquippedBy creature
+/// gated on the recipient being attacking — NOT on SelfRef with
+/// SourceIsAttacking — and the "must be blocked by a Dalek if able" lure lowers
+/// to the typed `MustBeBlocked { by: Some(Dalek) }` requirement gated on the
+/// same combat condition (no Unimplemented residual).
 #[test]
 fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host() {
     let defs = parse_static_line_multi(
         "As long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.",
     );
-    assert_eq!(defs.len(), 2, "expected supported + residual, got {defs:?}");
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected first-strike grant + typed MustBeBlocked, got {defs:?}"
+    );
+
+    let attacking_gate = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+        ),
+    };
 
     // Supported static: first strike on the host, gated on the host attacking.
     assert_eq!(defs[0].mode, StaticMode::Continuous);
@@ -7274,27 +7362,24 @@ fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host(
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::FirstStrike,
         }));
-    assert_eq!(
-        defs[0].condition,
-        Some(StaticCondition::RecipientMatchesFilter {
-            filter: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
-            ),
-        }),
-    );
+    assert_eq!(defs[0].condition, Some(attacking_gate.clone()));
     // Must NOT regress to the wrong subject/condition.
     assert_ne!(defs[0].affected, Some(TargetFilter::SelfRef));
     assert_ne!(defs[0].condition, Some(StaticCondition::SourceIsAttacking));
 
-    // Residual static surfaces the dropped lure.
+    // CR 509.1c: the lure is the typed MustBeBlocked { by: Some(Dalek) }, gated
+    // on the same attacking condition, affecting the equipped creature.
+    let dalek = crate::parser::oracle_target::parse_type_phrase("a dalek").0;
+    assert_ne!(dalek, TargetFilter::Any, "Dalek subtype must be recognized");
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: Some(dalek) });
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert_eq!(defs[1].condition, Some(attacking_gate));
+    // The lure is modeled, NOT an Unimplemented residual.
     assert!(
-        is_unimplemented_residual(&defs[1], "must be blocked by a"),
-        "lure must surface as an Unimplemented residual, got {:?}",
+        !is_unimplemented_residual(&defs[1], "must be blocked by a"),
+        "lure must be modeled, got Unimplemented residual {:?}",
         defs[1]
     );
-    // The lure must NOT be modeled as a (bare) MustBeBlocked mode.
-    assert_ne!(defs[1].mode, StaticMode::MustBeBlocked);
 }
 
 /// CR 611.3a: the Aura analog binds the gate to the EnchantedBy host.
@@ -7366,7 +7451,7 @@ fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::FirstStrike,
         }));
-    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
     // The requirement is also gated on the combat condition (CR 611.3a).
     assert_eq!(
@@ -7392,7 +7477,7 @@ fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
         "As long as equipped creature is attacking, it must be blocked if able.",
     );
     assert_eq!(defs.len(), 1, "pure requirement, got {defs:?}");
-    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
     assert_eq!(
         defs[0].condition,
@@ -7430,14 +7515,19 @@ fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
 
 /// CR 509.1c: the un-gated direct attached-subject grant lure (Slayer's Cleaver:
 /// "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.")
-/// surfaces the filtered lure as an Unimplemented residual. The first def carries
-/// the P/T grant and no condition; the residual carries no condition either.
+/// models the filtered lure as the typed `MustBeBlocked { by: Some(Eldrazi) }`.
+/// The first def carries the P/T grant and no condition; the requirement carries
+/// no condition either (this is the unconditional, non-"as long as" form).
 #[test]
-fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
+fn slayers_cleaver_lure_conjunct_models_typed_must_be_blocked() {
     let defs = parse_static_line_multi(
         "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.",
     );
-    assert_eq!(defs.len(), 2, "P/T grant + residual, got {defs:?}");
+    assert_eq!(
+        defs.len(),
+        2,
+        "P/T grant + typed MustBeBlocked, got {defs:?}"
+    );
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
@@ -7446,37 +7536,147 @@ fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
         .modifications
         .contains(&ContinuousModification::AddToughness { value: 1 }));
     assert_eq!(defs[0].condition, None);
-    assert!(
-        is_unimplemented_residual(&defs[1], "must be blocked by an"),
-        "lure must surface as an Unimplemented residual, got {:?}",
-        defs[1]
+
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    assert_ne!(
+        eldrazi,
+        TargetFilter::Any,
+        "Eldrazi subtype must be recognized"
+    );
+    assert_eq!(
+        defs[1].mode,
+        StaticMode::MustBeBlocked { by: Some(eldrazi) }
     );
     assert_eq!(defs[1].condition, None);
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert!(
+        !is_unimplemented_residual(&defs[1], "must be blocked by an"),
+        "lure must be modeled, got Unimplemented residual {:?}",
+        defs[1]
+    );
 }
 
 /// CR 509.1c: a direct attached-subject filtered lure with no continuous grant
-/// sibling is still an explicit unsupported residual, not a silent drop.
+/// sibling is fully modeled as the typed `MustBeBlocked { by: Some(Eldrazi) }`.
 #[test]
-fn attached_subject_pure_filtered_lure_surfaces_as_unimplemented_residual() {
+fn attached_subject_pure_filtered_lure_models_typed_must_be_blocked() {
     let defs = parse_static_line_multi("Equipped creature must be blocked by an Eldrazi if able.");
-    assert_eq!(defs.len(), 1, "pure filtered lure residual, got {defs:?}");
-    assert!(
-        is_unimplemented_residual(&defs[0], "must be blocked by an"),
-        "filtered lure must surface as an Unimplemented residual, got {:?}",
-        defs[0]
+    assert_eq!(
+        defs.len(),
+        1,
+        "pure filtered lure → one static, got {defs:?}"
+    );
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::MustBeBlocked { by: Some(eldrazi) }
     );
     assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(
+        !is_unimplemented_residual(&defs[0], "must be blocked by an"),
+        "filtered lure must be modeled, got Unimplemented residual {:?}",
+        defs[0]
+    );
 }
 
-/// Building-block: the filtered-lure detector recognizes ONLY the by-filter form,
-/// never the bare form (which is a modeled requirement).
+/// Building-block: `parse_must_be_blocked_by_quality` captures ONLY the filtered
+/// "must be blocked by <quality> if able" form (returning the inner quality
+/// span); the bare "must be blocked if able" form has no "by " and must NOT
+/// match. `parse_must_be_blocked_by_filter` lowers the captured quality into the
+/// blocker `TargetFilter` for the two known subtypes.
 #[test]
-fn must_be_blocked_by_filter_lure_detector_excludes_bare_form() {
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by a Dalek if able").is_ok());
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by an Eldrazi if able").is_ok());
-    // Bare form has no "by <filter>" — must NOT match.
-    assert!(parse_must_be_blocked_by_filter_lure("must be blocked if able").is_err());
+fn parse_must_be_blocked_by_filter_building_block() {
+    // Detector: filtered form matches, bare form does not.
+    assert!(parse_must_be_blocked_by_quality("must be blocked by a Dalek if able").is_ok());
+    assert!(parse_must_be_blocked_by_quality("must be blocked by an Eldrazi if able").is_ok());
+    assert!(parse_must_be_blocked_by_quality("must be blocked if able").is_err());
+
+    // Filter lowering for both known subtypes (case-insensitive canonicalization).
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked by a Dalek if able"),
+        Some(crate::parser::oracle_target::parse_type_phrase("a dalek").0),
+    );
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked by an Eldrazi if able"),
+        Some(crate::parser::oracle_target::parse_type_phrase("an eldrazi").0),
+    );
+    // Bare form yields no filter.
+    assert_eq!(
+        parse_must_be_blocked_by_filter("must be blocked if able"),
+        None,
+    );
+}
+
+/// Building-block (CR 509.1c): `extract_must_be_blocked_by_conjunct` distinguishes
+/// an ABSENT filtered lure (`None`) from a PRESENT one, classifying whether its
+/// quality is recognized vs. unrecognized. The Unrecognized arm carries the
+/// reconstructed conjunct so the un-gated attached-grant path surfaces a residual
+/// diagnostic instead of silently dropping the requirement.
+#[test]
+fn extract_must_be_blocked_by_conjunct_classifies_quality() {
+    // Absent / bare form → None (no filtered lure present).
+    assert!(extract_must_be_blocked_by_conjunct("equipped creature gets +1/+1").is_none());
+    assert!(extract_must_be_blocked_by_conjunct("must be blocked if able").is_none());
+
+    // Recognized quality → Recognized(filter).
+    assert!(matches!(
+        extract_must_be_blocked_by_conjunct("must be blocked by an Eldrazi if able"),
+        Some(MustBeBlockedByConjunct::Recognized(_)),
+    ));
+
+    // Guard: the fixture quality is genuinely unrecognized — it constrains no
+    // blocker, so the lowering helper rejects it (returns no filter). NOTE:
+    // `parse_type_phrase` yields an empty `Typed` (not `TargetFilter::Any`) here.
+    assert!(parse_must_be_blocked_by_filter("must be blocked by a splorf if able").is_none());
+    // Unrecognized quality → Unrecognized(diagnostic), NOT collapsed to None.
+    let conjunct = extract_must_be_blocked_by_conjunct("must be blocked by a Splorf if able");
+    assert!(
+        matches!(
+            &conjunct,
+            Some(MustBeBlockedByConjunct::Unrecognized(text))
+                // allow-noncombinator: test assertion verifying diagnostic text content, not parsing dispatch
+                if text.contains("must be blocked by a splorf if able")
+        ),
+        "expected an Unrecognized diagnostic conjunct, never None",
+    );
+}
+
+/// CR 509.1c (regression): the un-gated direct attached-subject path must NOT
+/// silently drop a filtered "must be blocked by <quality> if able" lure whose
+/// quality is UNRECOGNIZED. The P/T grant is modeled and the unrecognized lure
+/// surfaces as a sibling `Unimplemented` residual (coverage-visible), mirroring
+/// the gated path — the requirement never vanishes, and it is never weakened to a
+/// typed `MustBeBlocked { by: Some(<unconstrained filter>) }`.
+#[test]
+fn unrecognized_lure_conjunct_surfaces_unimplemented_residual() {
+    // Guard: the fixture quality is genuinely unrecognized — it constrains no
+    // blocker, so the lowering helper rejects it (returns no filter).
+    assert!(parse_must_be_blocked_by_filter("must be blocked by a splorf if able").is_none());
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +3/+1 and must be blocked by a Splorf if able.",
+    );
+    // The P/T grant is still modeled.
+    assert!(
+        defs.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 })),
+        "P/T grant must be modeled, got {defs:?}"
+    );
+    // The lure is surfaced as an Unimplemented residual, not dropped.
+    assert!(
+        defs.iter()
+            .any(|d| is_unimplemented_residual(d, "must be blocked by a")),
+        "unrecognized lure must surface an Unimplemented residual, got {defs:?}"
+    );
+    // It must NOT be modeled as a typed MustBeBlocked — an unrecognized quality
+    // would carry only an unconstrained filter ("any blocker"), so no typed
+    // MustBeBlocked { by: Some(..) } may appear.
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&d.mode, StaticMode::MustBeBlocked { by: Some(_) })),
+        "unrecognized quality must not be modeled as typed MustBeBlocked, got {defs:?}"
+    );
 }
 
 /// Building-block (Step 3 backstop): `parse_static_condition` for combat state
@@ -8332,8 +8532,29 @@ fn parse_compound_static_kaito_animation() {
 fn static_must_be_blocked_if_able() {
     // CR 509.1b: "must be blocked if able"
     let def = parse_static_line("Darksteel Myr must be blocked if able.").unwrap();
-    assert_eq!(def.mode, StaticMode::MustBeBlocked);
+    assert_eq!(def.mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 509.1c (regression): the STANDALONE self-ref "must be blocked [by
+/// <quality>] if able" dispatch must classify the optional blocker quality
+/// exactly like the attached-grant paths — the requirement is never silently
+/// weakened to the bare "any blocker" (`by: None`) form when a quality is
+/// present but unrecognized.
+#[test]
+fn static_must_be_blocked_standalone_quality_classification() {
+    // Recognized quality → typed `MustBeBlocked { by: Some(filter) }`.
+    let recognized =
+        parse_static_line("This creature must be blocked by an Eldrazi if able.").unwrap();
+    assert!(matches!(
+        recognized.mode,
+        StaticMode::MustBeBlocked { by: Some(_) }
+    ));
+    assert_eq!(recognized.affected, Some(TargetFilter::SelfRef));
+
+    // Unrecognized quality → line left Unimplemented (`None`), NOT weakened to a
+    // bare `MustBeBlocked { by: None }` that would force a block by ANY creature.
+    assert!(parse_static_line("This creature must be blocked by a Splorf if able.").is_none());
 }
 
 #[test]
@@ -9735,7 +9956,7 @@ fn graveyard_keyword_grant_clause_flashback() {
         "Each instant and sorcery card in your graveyard has flashback.",
     )
     .expect("should parse flashback grant clause");
-    assert_eq!(kind, GraveyardGrantedKeywordKind::Flashback);
+    assert_eq!(kind, GrantedCastKeywordKind::Flashback);
     match filter {
         TargetFilter::Or { filters } => {
             assert_eq!(filters.len(), 2);
@@ -9758,7 +9979,7 @@ fn graveyard_keyword_grant_clause_escape() {
     let (filter, kind, _) =
         try_parse_graveyard_keyword_grant_clause("Each nonland card in your graveyard has escape.")
             .expect("should parse escape grant clause");
-    assert_eq!(kind, GraveyardGrantedKeywordKind::Escape);
+    assert_eq!(kind, GrantedCastKeywordKind::Escape);
     let TargetFilter::Typed(tf) = filter else {
         panic!("expected typed graveyard filter");
     };
@@ -9840,7 +10061,7 @@ fn graveyard_keyword_grant_clause_non_lesson_instant_sorcery() {
         "Each non-Lesson instant and sorcery card in your graveyard has flashback.",
     )
     .expect("non-Lesson instant/sorcery graveyard flashback");
-    assert_eq!(kind, GraveyardGrantedKeywordKind::Flashback);
+    assert_eq!(kind, GrantedCastKeywordKind::Flashback);
     let has_non_lesson = |tf: &TypedFilter| {
         tf.type_filters.iter().any(|f| {
             matches!(
@@ -18526,6 +18747,34 @@ fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
 }
 
 #[test]
+fn static_ignore_this_effect_special_action_fails_closed() {
+    let supported_head = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated.",
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| def.mode == StaticMode::CantAttackOrBlock),
+        "head restriction should still parse, got {supported_head:?}"
+    );
+    assert!(
+        supported_head
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::CantBeActivated { .. })),
+        "head activation lock should still parse, got {supported_head:?}"
+    );
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't attack or block, and its activated abilities can't be activated. \
+         Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn.",
+    );
+    assert!(
+        defs.is_empty(),
+        "unimplemented ignore-this-effect special action must fail closed, got {defs:?}"
+    );
+}
+
+#[test]
 fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
     let def = parse_static_line("Enchanted creatures you control get +2/+2.").unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -20602,6 +20851,174 @@ fn top_of_library_cast_permission_rejects_other_anchors() {
         "cast that card without paying its mana cost.",
     )
     .is_none());
+}
+
+/// Assert a filter is the historic-land-or-historic-card disjunction that both
+/// the permission `affected` and the reflexive trigger `valid_card` must carry.
+fn assert_historic_land_or_card_disjunction(filter: &TargetFilter) {
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over historic land / historic card branches, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Land)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected historic Land branch, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.properties.contains(&FilterProp::Historic)
+        ),
+        "expected historic Card branch, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 601.2a: Building-block lock for the Step-1 ordering fix — a once-per-turn
+/// disjunctive top-of-library permission must keep BOTH branches (the historic
+/// spell branch is no longer clipped) AND inherit `OncePerTurn` frequency.
+#[test]
+fn top_of_library_cast_permission_once_per_turn_disjunctive() {
+    let text = "Once each turn, you may play a historic land or cast a historic spell from the top of your library.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("once-per-turn disjunctive permission must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ref alt_cost,
+        } => {
+            assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::OncePerTurn);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    let affected = def.affected.expect("affected filter set");
+    assert_historic_land_or_card_disjunction(&affected);
+}
+
+/// CR 207.2c + CR 601.1a + CR 603.12: The Fourth Doctor — the full card must
+/// parse with no Unimplemented ability, the look-at-top static, the
+/// once-per-turn disjunctive top-of-library permission, and exactly one
+/// `TriggerMode::Unknown` gap marker for the reflexive "When you do" rider.
+///
+/// The rider is deferred (honest unsupported gap) rather than emitted as a
+/// rules-incorrect `PlayCard` trigger: a global PlayCard trigger cannot
+/// distinguish which permission authorized each play (CR 603.12 provenance
+/// limitation), so it would fire even when a different top-of-library
+/// permission authorized the play. The Unknown trigger keeps the gap visible
+/// in coverage until the casting/land-play pipeline gains provenance tracking.
+#[test]
+fn the_fourth_doctor_full_card_parse() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::triggers::TriggerMode;
+
+    let text = "You may look at the top card of your library any time.\n\
+                Would You Like A...? — Once each turn, you may play a historic land or cast a \
+                historic spell from the top of your library. When you do, create a Food token. \
+                (Artifacts, legendaries, and Sagas are historic.)";
+    let parsed = parse_oracle_text(
+        text,
+        "The Fourth Doctor",
+        &[],
+        &["Creature".to_string()],
+        &["Time Lord".to_string(), "Doctor".to_string()],
+    );
+
+    // No activation/spell ability should fall through to Unimplemented.
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })),
+        "no ability should be Unimplemented, got {:?}",
+        parsed.abilities
+    );
+
+    // Line 1: look-at-top static.
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::MayLookAtTopOfLibrary)),
+        "expected MayLookAtTopOfLibrary static, got {:?}",
+        parsed.statics
+    );
+
+    // Line 2: the once-per-turn disjunctive top-of-library permission.
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::TopOfLibraryCastPermission { .. }))
+        .expect("expected a TopOfLibraryCastPermission static");
+    match &permission.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            alt_cost,
+        } => {
+            assert_eq!(*play_mode, CardPlayMode::Play);
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    let affected = permission
+        .affected
+        .clone()
+        .expect("permission affected set");
+    assert_historic_land_or_card_disjunction(&affected);
+
+    // The reflexive "When you do" rider is an honest TriggerMode::Unknown gap —
+    // the rider cannot be correctly scoped until the engine records permission
+    // provenance (CR 603.12). Coverage will show this gap; a follow-up can
+    // promote it to a real trigger once the provenance seam exists.
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected exactly one trigger (Unknown gap marker for rider), got {:?}",
+        parsed.triggers
+    );
+    let trigger = &parsed.triggers[0];
+    assert!(
+        matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "expected TriggerMode::Unknown (deferred rider gap), got {:?}",
+        trigger.mode
+    );
+}
+
+/// Regression: a riderless top-of-library permission (Realmwalker class) must
+/// still produce the static through the full `parse_oracle_text` pipeline with
+/// NO spurious reflexive `PlayCard` trigger — the new rider handler self-
+/// declines when there is no "When you do, …" clause.
+#[test]
+fn riderless_top_of_library_permission_emits_no_reflexive_trigger() {
+    use crate::parser::oracle::parse_oracle_text;
+    let text = "You may cast creature spells of the chosen type from the top of your library.";
+    let parsed = parse_oracle_text(text, "Realmwalker", &[], &["Creature".to_string()], &[]);
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::TopOfLibraryCastPermission { .. })),
+        "expected the permission static, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.triggers.is_empty(),
+        "riderless permission must not synthesize a trigger, got {:?}",
+        parsed.triggers
+    );
 }
 
 /// CR 702.170f: Fblthp L4 — "You may plot nonland cards from the top of your
@@ -23492,5 +23909,219 @@ fn enchanted_permanent_is_ongoing_grants_supertype() {
                 })),
         "expected AddSupertype(Ongoing), got {:?}",
         defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
+    );
+}
+
+// --- Granted hand-zone alt-cost keyword tests (Dream Devourer foretell,
+// Aminatou miracle; CR 702.143a / CR 702.94a / CR 601.2f / CR 113.6b) ---
+
+/// G2: "nonland card in your hand without foretell" must route the "without
+/// foretell" suffix to the discriminant-level `WithoutKeywordKind{Foretell}`
+/// (so a granted, cost-bearing foretell instance is excluded), NOT the
+/// exact-payload `WithoutKeyword{Foretell(_)}` which would never match a
+/// granted instance. It must also carry `InZone{Hand}`.
+#[test]
+fn without_foretell_routes_to_keyword_kind_not_concrete() {
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(
+        "nonland card in your hand without foretell",
+    );
+    assert!(
+        remainder.trim().is_empty(),
+        "subject must fully consume (keyword_grant gate requires it), residue: {remainder:?}"
+    );
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::WithoutKeywordKind {
+            value: KeywordKind::Foretell
+        }),
+        "expected WithoutKeywordKind{{Foretell}}, got {:?}",
+        tf.properties
+    );
+    assert!(
+        !tf.properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })),
+        "must NOT emit exact-payload WithoutKeyword (never matches a granted instance): {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }),
+        "expected InZone{{Hand}}, got {:?}",
+        tf.properties
+    );
+}
+
+/// G4: Dream Devourer's two-sentence text parses (via the production entry
+/// `parse_oracle_text`) to a continuous grant of
+/// `Keyword::Foretell(SelfManaCostReduced { 2 })` over a hand filter. The
+/// `SelfManaCostReduced { 2 }` (NOT a concrete `Cost`) is the parse-time
+/// placeholder; runtime resolution concretizes it to MV-2.
+#[test]
+fn dream_devourer_grants_foretell_self_mana_cost_reduced_2() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.",
+        "Dream Devourer",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Foretell(_)
+                    }
+                )
+            })
+        })
+        .expect("Dream Devourer must emit an AddKeyword(Foretell) grant");
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }),
+            }
+        )),
+        "expected Foretell(SelfManaCostReduced {{ 2 }}), got {:?}",
+        def.modifications
+    );
+    let TargetFilter::Typed(tf) = def.affected.as_ref().expect("affected filter") else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }),
+        "grant filter must scope to hand: {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::WithoutKeywordKind {
+            value: KeywordKind::Foretell
+        }),
+        "grant filter must exclude cards that already have foretell: {:?}",
+        tf.properties
+    );
+}
+
+/// G4: Aminatou, Veil Piercer grants miracle to enchantment cards in hand with
+/// `SelfManaCostReduced { 4 }`. No "without" clause -- the filter carries no
+/// `WithoutKeywordKind`.
+#[test]
+fn aminatou_grants_miracle_self_mana_cost_reduced_4() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Each enchantment card in your hand has miracle. Its miracle cost is equal to its mana cost reduced by {4}.",
+        "Aminatou, Veil Piercer",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Miracle(_)
+                    }
+                )
+            })
+        })
+        .expect("Aminatou must emit an AddKeyword(Miracle) grant");
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Miracle(ManaCost::SelfManaCostReduced { reduction: 4 }),
+            }
+        )),
+        "expected Miracle(SelfManaCostReduced {{ 4 }}), got {:?}",
+        def.modifications
+    );
+    let TargetFilter::Typed(tf) = def.affected.as_ref().expect("affected filter") else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Enchantment)
+            && tf
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Hand }),
+        "expected enchantment-in-hand filter, got {tf:?}"
+    );
+}
+
+/// G5 regression: "the flashback cost is equal to its mana cost" (no "reduced
+/// by") stays `SelfManaCost`, never `SelfManaCostReduced { 0 }` -- the reduction
+/// suffix is optional and its absence leaves the placeholder untouched.
+#[test]
+fn flashback_continuation_without_reduction_stays_self_mana_cost() {
+    let keyword = crate::parser::oracle::parse_graveyard_keyword_continuation(
+        "The flashback cost is equal to its mana cost.",
+        GrantedCastKeywordKind::Flashback,
+    )
+    .expect("flashback continuation must parse");
+    assert!(
+        matches!(
+            keyword,
+            Keyword::Flashback(crate::types::keywords::FlashbackCost::Mana(
+                ManaCost::SelfManaCost
+            ))
+        ),
+        "expected Flashback(SelfManaCost), got {keyword:?}"
+    );
+}
+
+/// G5 regression: a bare foretell continuation with no reduction suffix yields
+/// `SelfManaCost`, NOT `SelfManaCostReduced { 0 }`.
+#[test]
+fn foretell_continuation_without_reduction_stays_self_mana_cost() {
+    let keyword = crate::parser::oracle::parse_graveyard_keyword_continuation(
+        "Its foretell cost is equal to its mana cost.",
+        GrantedCastKeywordKind::Foretell,
+    )
+    .expect("foretell continuation must parse");
+    assert!(
+        matches!(keyword, Keyword::Foretell(ManaCost::SelfManaCost)),
+        "expected Foretell(SelfManaCost), got {keyword:?}"
+    );
+}
+
+/// G6 negative: a foretell grant whose subject is a GRAVEYARD filter is
+/// declined (`grant_zone` for foretell is Hand). Symmetrically, a flashback
+/// grant over a HAND filter is declined (flashback functions from graveyard).
+/// The scavenge-in-graveyard and miracle-in-hand control cases are accepted.
+#[test]
+fn granted_cast_keyword_zone_gate_declines_mismatches() {
+    assert!(
+        try_parse_graveyard_keyword_grant_clause(
+            "Each nonland card in your graveyard has foretell."
+        )
+        .is_none(),
+        "foretell functions from hand -- a graveyard subject must be declined"
+    );
+    assert!(
+        try_parse_graveyard_keyword_grant_clause("Each instant card in your hand has flashback.")
+            .is_none(),
+        "flashback functions from graveyard -- a hand subject must be declined"
+    );
+    assert!(
+        try_parse_graveyard_keyword_grant_clause(
+            "Each creature card in your graveyard has scavenge."
+        )
+        .is_some(),
+        "scavenge functions from graveyard -- a graveyard subject must be accepted"
+    );
+    assert!(
+        try_parse_graveyard_keyword_grant_clause("Each enchantment card in your hand has miracle.")
+            .is_some(),
+        "miracle functions from hand -- a hand subject must be accepted"
     );
 }

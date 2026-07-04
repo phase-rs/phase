@@ -58,6 +58,7 @@ fn damage_ability(source_id: ObjectId, controller: PlayerId, target: TargetRef) 
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![target],
         source_id,

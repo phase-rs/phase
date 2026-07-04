@@ -61,6 +61,11 @@
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
     "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "multiplayerBoardLayout": "Diseño de tablero multijugador",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Oponente enfocado",
+      "split": "Mesa dividida"
+    },
     "cardPreviewDelay": "Retardo al pasar el cursor",
     "cardPreviewDelayInstant": "Instantáneo",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -179,7 +184,9 @@
     "importedWithPreferences_one": "Se importó {{count}} mazo y las preferencias.",
     "importedWithPreferences_other": "Se importaron {{count}} mazos y las preferencias.",
     "skippedMalformed_one": "Se omitió {{count}} entrada con formato incorrecto.",
-    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto."
+    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto.",
+    "telemetry": "Enviar informes anónimos de fallos y uso",
+    "telemetryDescription": "Ayuda a corregir fallos y priorizar la compatibilidad de cartas. Sin cuenta ni datos personales, solo recuentos de errores y resúmenes de partida."
   },
   "resetAll": {
     "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",

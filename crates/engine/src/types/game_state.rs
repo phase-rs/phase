@@ -4154,7 +4154,7 @@ pub enum WaitingFor {
         /// `state.last_vote_ballots`. Append-only; the lifecycle matches
         /// `last_zone_changed_ids` (cleared at chain depth 0).
         #[serde(default)]
-        ballots: im::Vector<(PlayerId, u8)>,
+        ballots: im::Vector<(PlayerId, u32)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -4176,16 +4176,39 @@ pub enum WaitingFor {
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
         /// CR 701.38a: How the completed tally maps to effects (the
-        /// strict-majority/tie outcome of `Threshold` is card-defined, not a
+        /// top-tally/tie outcome of `TopVotes` is card-defined, not a
         /// CR subrule). Carried on the WaitingFor (not re-derived from the
         /// source ability) so the final `resolve_tally` can branch between
-        /// per-vote fan-out (`VoteTally::PerVote`) and single-outcome
-        /// Will-of-the-council resolution (`VoteTally::Threshold`) once the
-        /// voter queue empties.
+        /// per-vote fan-out (`VoteTally::PerVote`) and Will-of-the-council
+        /// winner resolution (`VoteTally::TopVotes`) once the voter queue
+        /// empties. `TopVotes` itself resolves either a single winner
+        /// (`TieResolution::Breaker`) or every tied winner
+        /// (`TieResolution::AllTied`, multi-outcome).
         /// Defaults to `PerVote` so pre-existing serialized vote states
         /// deserialize unchanged.
         #[serde(default)]
         tally_mode: super::ability::VoteTally,
+        /// CR 701.38b: For object-pool votes (`VoteSubject::Objects` —
+        /// Council's Judgment, Prime Minister's Cabinet Room), the candidate
+        /// objects enumerated at resolution. Parallel to `options` /
+        /// `option_labels`: a ballot `(PlayerId, u8)` indexes into this vector.
+        /// Empty for named votes; ballots there carry the `options` index.
+        #[serde(default)]
+        candidate_objects: im::Vector<ObjectId>,
+        /// CR 701.38b + CR 608.2c: For object-pool votes, the per-winner
+        /// outcome template (e.g. single-target Exile). `resolve_top_votes_tally`
+        /// resolves it once per winning object with that object injected as the
+        /// single target. `None` for named votes (which use `per_choice_effect`).
+        #[serde(default)]
+        outcome_template: Option<Box<super::ability::AbilityDefinition>>,
+        /// Card-defined: whether this vote is public (`Open`) or secret
+        /// (`Secret` — Truth or Consequences). Under `Secret`, per-ballot
+        /// `VoteCast` events are suppressed and `filter_state_for_viewer`
+        /// scrubs running tallies/ballots until the simultaneous reveal.
+        /// Defaults to `Open` so pre-existing serialized states deserialize
+        /// unchanged.
+        #[serde(default)]
+        visibility: super::ability::VoteVisibility,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -5303,12 +5326,16 @@ pub enum CastingVariant {
     /// paying the spell's mana cost. Unlike Sneak, Web-slinging grants no
     /// special timing permission and has no enter-attacking placement rule.
     WebSlinging { returned_creature: ObjectId },
-    /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
-    /// the card as the first card drawn this turn. The granting keyword carries
-    /// the miracle mana cost, which `prepare_spell_cast_with_variant_override`
-    /// substitutes for the printed mana cost. The keyword's `ManaCost` payload
-    /// is read at preparation time rather than stored here because
-    /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
+    /// CR 702.94a + CR 608.2g: Cast from hand via Miracle's alternative cost after
+    /// revealing the card as the first card drawn this turn. This is a UNIT variant;
+    /// the concrete miracle cost is NOT re-read from live keywords at cast time.
+    /// Instead it is latched at offer-enqueue on `CastOfferKind::Miracle.cost` (a
+    /// concrete `ManaCost::Cost` resolved by `draw.rs`) and threaded through
+    /// `handle_cast_spell_as_miracle_with_payment_mode` →
+    /// `prepare_spell_cast_with_variant_override_inner(latched_alt_cost)`. This
+    /// preserves the offered cost even if the granting source (e.g. Aminatou) has
+    /// left the battlefield between reveal-accept and trigger resolution
+    /// (CR 608.2b last-known-information).
     Miracle,
     /// CR 702.35a: Cast from exile via Madness after the discard replacement
     /// exiled the card and its madness triggered ability resolved.
@@ -6324,6 +6351,21 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
+    /// attacker restriction (Last Night Together / Bumi), only creatures matching
+    /// this filter may be declared as attackers. Set on entering that
+    /// BeginCombat, cleared at end of combat (CR 511.3). `None` during ordinary
+    /// (unrestricted) combats.
+    #[serde(default)]
+    pub current_combat_attacker_restriction: Option<TargetFilter>,
+    /// CR 611.2c: The source `ObjectId` of the effect that imposed
+    /// `current_combat_attacker_restriction`. Propagated from `ExtraPhase` so
+    /// `passes_combat_attacker_restriction` can build a correct `FilterContext`
+    /// for source-relative restriction predicates. `None` when there is no
+    /// active restriction.
+    #[serde(default)]
+    pub current_combat_attacker_restriction_source: Option<ObjectId>,
+
     // N-player support
     #[serde(default)]
     pub seat_order: Vec<PlayerId>,
@@ -6402,6 +6444,23 @@ pub struct GameState {
     /// relied on this same exclusion implicitly; it is now explicit.)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+
+    /// Oracle ids (fallback: object names) of cards whose abilities hit
+    /// `Effect::Unimplemented` at resolution this game. Diagnostics only —
+    /// records *runtime resolution hits*, is game-scoped, and survives zone
+    /// changes. This is distinct from the per-object `unimplemented_mechanics`
+    /// (`game/coverage.rs`), which is a static parse-coverage projection; this
+    /// accumulator is the telemetry `game_summary` surface. Not a duplication.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources`): this is
+    /// diagnostics/annotation state, not rules state for equality. CR 104.4b /
+    /// CR 732.2a loop detection compares two states reached at different times;
+    /// a populated live state must still compare equal to snapshots taken
+    /// before the unimplemented effect resolved, or loop detection yields false
+    /// negatives.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unimplemented_oracle_ids: BTreeSet<String>,
 
     /// CR 732.2a: per-game runtime gate for the live combo (infinite-loop) detector.
     /// Default `Off` = exact pre-combo-detector behavior. This is the hot-path flag the
@@ -7149,7 +7208,7 @@ pub struct GameState {
     /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
     /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
     #[serde(default)]
-    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+    pub last_vote_ballots: im::Vector<(PlayerId, u32)>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
@@ -7555,6 +7614,20 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
+    /// that creature's controller instead") across a damage replacement *choice*
+    /// pause. The resume in `handle_replacement_choice` rebuilds the
+    /// `DamageContext` from the source (which cannot re-derive an effect rider),
+    /// so it restores this onto the ctx to keep redirecting the excess. `None`
+    /// for every parked event that is not an excess-redirect damage hit.
+    #[serde(default)]
+    pub excess_recipient: Option<crate::types::ability::ExcessRecipient>,
+    /// CR 702.15b: the deferred lifelink bonus carried by a redirect leg (the
+    /// earlier creature leg's lethal). Preserved across the redirect leg's own
+    /// damage-replacement choice pause so the combined lifelink total is still
+    /// gained on resume. `0` for every parked event that is not such a leg.
+    #[serde(default)]
+    pub lifelink_bonus: u32,
     /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
     /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with more than one eligible land surfaces a
@@ -7684,12 +7757,26 @@ pub struct ScheduledTurnControl {
 /// LIFO ordering ("the most recently created phase will occur first") is
 /// preserved by scanning `extra_phases` from the end (`rposition`) for the
 /// first matching anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtraPhase {
     /// The phase after which this extra phase is inserted (CR 500.8).
     pub anchor: Phase,
     /// The phase to insert.
     pub phase: Phase,
+    /// CR 508.1c: Attacker restriction active while this scheduled combat phase
+    /// is current (concretized at resolution to `TrackedSet` / `Typed` /
+    /// `SpecificObject`). `None` for ordinary extra phases. Carried here so the
+    /// restriction activates exactly when (and only when) this phase begins.
+    #[serde(default)]
+    pub attacker_restriction: Option<TargetFilter>,
+    /// CR 611.2c: The source `ObjectId` of the effect that imposed this
+    /// attacker restriction. Used to build a correct `FilterContext` at
+    /// evaluation time so source-relative restriction predicates (e.g.,
+    /// "creatures that share a color with this card") resolve against the actual
+    /// scheduling spell rather than a dummy sentinel. `None` for unrestricted
+    /// extra phases.
+    #[serde(default)]
+    pub attacker_restriction_source: Option<ObjectId>,
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
@@ -7984,6 +8071,8 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            current_combat_attacker_restriction: None,
+            current_combat_attacker_restriction_source: None,
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),
@@ -8154,6 +8243,7 @@ impl GameState {
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
+            unimplemented_oracle_ids: BTreeSet::new(),
             loop_detection: LoopDetectionMode::Off,
         }
     }
@@ -8528,6 +8618,10 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.current_combat_attacker_restriction
+                == other.current_combat_attacker_restriction
+            && self.current_combat_attacker_restriction_source
+                == other.current_combat_attacker_restriction_source
             && self.seat_order == other.seat_order
             && self.format_config == other.format_config
             && self.eliminated_players == other.eliminated_players
@@ -8766,6 +8860,37 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "the PR-0/PR-2 modulo path must exclude unbounded_resources"
+        );
+    }
+
+    /// Loop-equality guard for the telemetry accumulator: `unimplemented_oracle_ids`
+    /// is diagnostics/annotation state, NOT rules state for equality. Two states
+    /// identical except one has recorded an unimplemented-effect hit MUST compare
+    /// EQUAL through the loop comparators. Otherwise a populated live state would
+    /// stop matching the pre-hit ring snapshots and CR 104.4b / CR 732.2a loop
+    /// detection would yield false negatives.
+    ///
+    /// REVERT-PROBE: add `&& self.unimplemented_oracle_ids == other.unimplemented_oracle_ids`
+    /// to the manual `impl PartialEq for GameState` → both assertions below fail.
+    #[test]
+    fn unimplemented_oracle_ids_excluded_from_loop_equality() {
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.unimplemented_oracle_ids
+            .insert("oracle-abc-123".to_string());
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.unimplemented_oracle_ids, b.unimplemented_oracle_ids,
+            "fixture must actually differ in unimplemented_oracle_ids"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude unimplemented_oracle_ids (diagnostics state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude unimplemented_oracle_ids"
         );
     }
 

@@ -72,6 +72,30 @@ fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style "that permanent or player"
+/// is a non-target damage recipient bound to the raw `DamageDealt.target`.
+/// Keep this local to single-source DealDamage lowering so generic event-context
+/// refs and EachTarget/EachSource damage stay object-only.
+fn parse_damage_event_target_recipient<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    if !ctx.in_trigger {
+        return None;
+    }
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        value(
+            TargetFilter::EventTarget,
+            alt((
+                tag::<_, _, OracleError<'_>>("that permanent or player"),
+                tag("that permanent or a player"),
+            )),
+        )
+        .parse(i)
+    })
+}
+
 /// CR 608.2c: True when an ability's primary effect acts on the ability's own
 /// source permanent (`TargetFilter::SelfRef`). Self-targeting "If <self status>,
 /// A on it. Otherwise, B it." abilities (Repeat Offender) lower the "if" body's
@@ -3274,7 +3298,6 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
         // puts the temporary token on top/bottom of a library ("… put it on the
         // bottom of its owner's library at the beginning of the next end step")
@@ -3298,6 +3321,19 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ) {
                 *target = TargetFilter::LastCreated;
             }
+        }
+        Effect::ChangeZone { target, origin, .. }
+            if matches!(
+                target,
+                TargetFilter::ParentTarget
+                    | TargetFilter::TriggeringSource
+                    | TargetFilter::TrackedSet { .. }
+            ) =>
+        {
+            // CR 603.7c: In the gated post-token scope, both singular
+            // anaphors and plural "those tokens" refer to the token(s) just
+            // created and must still be in the battlefield zone at cleanup.
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
         }
         _ => {}
     }
@@ -3323,7 +3359,6 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c (issue #4601 review): a delayed cleanup that puts the
         // temporary token on top/bottom of a library ("… put it on the bottom
         // of its owner's library at the beginning of the next end step") has the
@@ -3333,8 +3368,22 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         {
             *target = TargetFilter::LastCreated;
         }
+        Effect::ChangeZone { target, origin, .. } if matches!(target, TargetFilter::SelfRef) => {
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
+        }
         _ => {}
     }
+}
+
+fn rewrite_change_zone_cleanup_to_last_created(
+    target: &mut TargetFilter,
+    origin: &mut Option<Zone>,
+) {
+    *target = TargetFilter::LastCreated;
+    // CR 603.7c: A delayed triggered ability affects a referenced object only
+    // if that object remains in the zone it is expected to be in when the
+    // delayed trigger resolves.
+    origin.get_or_insert(Zone::Battlefield);
 }
 
 /// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
@@ -3583,7 +3632,8 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
                 {
                     return (None, text.to_string());
                 }
-                if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                let mut copy_ctx = ParseContext::default();
+                if parse_for_each_object_copy_parts(text, &lower, &mut copy_ctx).is_some() {
                     return (None, text.to_string());
                 }
                 // CR 606.3: The Chain Veil's "For each planeswalker you control,
@@ -5262,7 +5312,7 @@ fn parse_each_of_up_to_damage_target<'a>(
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
 const MULTI_TARGET_VERBS: &[&str] = &[
-    "exile", "tap", "untap", "goad", "return", "destroy", "choose",
+    "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
 
 pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
@@ -6149,6 +6199,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
             amount,
             target,
             damage_source: None,
+            excess: None,
         },
         duration: None,
         sub_ability: None,
@@ -6462,6 +6513,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target: TargetFilter::ParentTarget,
                             damage_source: Some(DamageSource::Target),
+                            excess: None,
                         },
                         "",
                     ));
@@ -6477,6 +6529,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                                 amount: qty,
                                 target,
                                 damage_source: None,
+                                excess: None,
                             },
                             remainder,
                         ));
@@ -6534,8 +6587,21 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target: TargetFilter::SourceChosenPlayer,
                             damage_source: None,
+                            excess: None,
                         },
                         "",
+                    ));
+                } else if let Some((target, ecr_rem)) =
+                    parse_damage_event_target_recipient(target_phrase, ctx)
+                {
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        ecr_rem,
                     ));
                 } else if let Some((target, ecr_rem)) =
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
@@ -6548,6 +6614,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target,
                             damage_source: None,
+                            excess: None,
                         },
                         ecr_rem,
                     ));
@@ -6566,6 +6633,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target,
                             damage_source: None,
+                            excess: None,
                         },
                         "",
                     ));
@@ -6684,6 +6752,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     amount: amount.clone(),
                     target,
                     damage_source: None,
+                    excess: None,
                 },
                 rem,
             ));
@@ -6757,6 +6826,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target: TargetFilter::ParentTarget,
                 damage_source: Some(DamageSource::Target),
+                excess: None,
             },
             "",
         ));
@@ -6770,8 +6840,25 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount: amount.clone(),
                 target: TargetFilter::SourceChosenPlayer,
                 damage_source: None,
+                excess: None,
             },
             "",
+        ));
+    }
+
+    // CR 115.10a + CR 120.1 + CR 120.3: Check Ghyrson-style mixed event
+    // recipients before generic event-context references. This is DealDamage
+    // local because `EventTarget` may be a player only for the raw damage
+    // recipient carried by DamageDealt.
+    if let Some((target, ecr_rem)) = parse_damage_event_target_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            ecr_rem,
         ));
     }
 
@@ -6783,6 +6870,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount: amount.clone(),
                 target,
                 damage_source: None,
+                excess: None,
             },
             ecr_rem,
         ));
@@ -6796,6 +6884,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -6814,6 +6903,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -6827,6 +6917,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             amount,
             target,
             damage_source: None,
+            excess: None,
         },
         rem,
     ))
@@ -6916,6 +7007,7 @@ fn try_parse_each_source_power_damage<'a>(
             amount: qty,
             target,
             damage_source: Some(DamageSource::EachTarget),
+            excess: None,
         },
         rem,
     ))
@@ -7951,6 +8043,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -8046,6 +8139,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -8157,6 +8251,9 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
+        // CR 118.9: the borrowed keyword cost is read at runtime from the cast
+        // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }
