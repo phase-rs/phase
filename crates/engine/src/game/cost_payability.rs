@@ -626,6 +626,11 @@ impl AbilityCost {
             // the activation-time 601.2b gate doesn't reject the wrapper
             // unseen — actual payability is decided post-expansion.
             AbilityCost::PerCounter { .. } => true,
+            // CR 118.9 + CR 601.2g: a borrowed keyword cost resolves to a concrete
+            // `ManaCost` at cast time; like `Mana`/`ManaDynamic`, mana
+            // affordability is decided by the separate mana-payment step, not this
+            // choice-of-object gate.
+            AbilityCost::KeywordCostOfCastSpell { .. } => true,
         }
     }
 }

@@ -397,6 +397,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Behold { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        // CR 118.9: the borrowed keyword cost is read at runtime from the cast
+        // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
