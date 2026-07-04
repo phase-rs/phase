@@ -97,6 +97,36 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
     );
 }
 
+fn has_not_your_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
+    restrictions.iter().any(|restriction| {
+        matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition })
+            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+        )
+    })
+}
+
+#[test]
+fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+    let r = parse(
+        "{T}: Add {C}{C}. Activate only during an opponent's turn.",
+        "Lavinia, Foil to Conspiracy",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        restrictions
+    );
+}
+
 /// The static half of M.O.D.O.K. ("Designed Only for Killing — Creatures your
 /// opponents control get -1/-1") already parses on its own ability-word label;
 /// this guards that the activated-ability fix above doesn't regress it.
@@ -6854,7 +6884,7 @@ fn parses_return_forest_cost_untap_activated_ability() {
 /// restriction, instead of dropping the whole sentence to Unimplemented.
 #[test]
 fn any_player_may_activate_but_only_records_timing_restriction() {
-    let activation_restrictions_for = |text: &str, name: &str| {
+    let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Artifact"], &[]);
         assert!(
             parsed
@@ -6869,14 +6899,15 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
             .into_iter()
             .find(|ability| !ability.activation_restrictions.is_empty())
             .expect("expected an activated ability with restrictions")
-            .activation_restrictions
     };
 
     // "as a sorcery" form (Endbringer's Revel / Scandalmonger / Task Mage Assembly).
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only as a sorcery.",
         "Test Any-Player Sorcery",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::AsSorcery),
         "expected AsSorcery, got {:?}",
@@ -6884,10 +6915,12 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their turn" form (Volrath's Dungeon) → the activator's turn.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their turn.",
         "Test Any-Player Turn",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
@@ -6895,21 +6928,37 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their upkeep" form maps to the activator's upkeep restriction.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their upkeep.",
         "Test Any-Player Upkeep",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourUpkeep),
         "expected DuringYourUpkeep, got {:?}",
         restrictions
     );
 
+    let activation = activation_for(
+        "{T}: Draw a card. Any player may activate this ability but only during an opponent's turn.",
+        "Test Any-Player Opponent Turn",
+    );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        restrictions
+    );
+
     // "if <condition>" form (Lightning Storm) keeps the parsed condition gate.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only if ~ is on the stack.",
         "Test Any-Player Condition",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.iter().any(|restriction| matches!(
             restriction,
@@ -6928,6 +6977,14 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
 fn opponents_may_activate_but_only_records_timing_restriction() {
     let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "expected no unimplemented fallback, got {:?}",
+            parsed.abilities
+        );
         parsed
             .abilities
             .into_iter()
@@ -6959,6 +7016,45 @@ fn opponents_may_activate_but_only_records_timing_restriction() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
         during_turn.activation_restrictions
+    );
+
+    let opponent_turn = activation_for(
+        "{1}: Draw a card. Only your opponents may activate this ability and only during an opponent's turn.",
+        "Test Opponent Opponent Turn",
+    );
+    assert_eq!(opponent_turn.activator_filter, Some(PlayerFilter::Opponent));
+    assert!(
+        has_not_your_turn_activation_restriction(&opponent_turn.activation_restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        opponent_turn.activation_restrictions
+    );
+}
+
+#[test]
+fn quoted_sentence_before_activate_only_keeps_timing_restriction() {
+    let r = parse(
+        "{T}: Add {W}.\n{1}{W}, {T}, Sacrifice ~: Create a 1/1 colorless Pilot creature token with \"~ saddles Mounts and crews Vehicles as though its power were 2 greater.\" Activate only as a sorcery.",
+        "Country Roads",
+        &[],
+        &["Land"],
+        &[],
+    );
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Create a 1/1 colorless Pilot"))
+        })
+        .expect("expected token-making activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected quoted-text suffix to preserve AsSorcery, got {:?}",
+        activation.activation_restrictions
     );
 }
 
