@@ -44,7 +44,7 @@ use crate::game::game_object::GameObject;
 use crate::game::layers::evaluate_condition;
 use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
 use crate::types::game_state::GameState;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 /// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
@@ -219,6 +219,21 @@ pub fn any_functioning_static_mode(
     predicate: impl Fn(&StaticMode) -> bool,
 ) -> bool {
     game_functioning_statics(state).any(|(_, def)| predicate(&def.mode))
+}
+
+/// O(1) existence query over FUNCTIONING statics: "does any functioning static have
+/// mode discriminant `kind`?" Reads the [`GameState::static_mode_presence`] cache, which
+/// is rebuilt wholesale from `game_functioning_statics` by the layers pipeline
+/// (`layers::refresh_static_mode_presence`), so it has IDENTICAL scoping to
+/// `game_functioning_statics`: condition unevaluated (CR 604.1 / CR 613.1 — this is a
+/// conservative superset, exactly like `any_functioning_static_mode`); phased-out
+/// permanents excluded (CR 702.26b); command-zone statics included per-def opt-in only
+/// (CR 114.4 / CR 113.6b). A `true` result is a superset gate — callers MUST fall through
+/// to their exact per-object check; a `false` result is precise post-flush and lets the
+/// caller short-circuit the O(battlefield) scan. This is the Unit 2/3 migration target for
+/// discriminant-only scan gates.
+pub fn static_kind_present(state: &GameState, kind: StaticModeKind) -> bool {
+    state.static_mode_presence.contains(kind)
 }
 
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.

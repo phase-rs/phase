@@ -11,15 +11,14 @@
 //! moves directly into its owner's graveyard — sacrifice is not destruction
 //! and bypasses regenerate / indestructible.
 
-use engine::game::game_object::GameObject;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 use super::effect_classify::{effect_polarity, EffectPolarity};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::self_cost::count_death_triggers_on_board;
 use super::strategy_helpers::sacrifice_cost;
 use crate::features::aristocrats::{ability_is_sacrifice_outlet, is_free_outlet_ability};
 use crate::features::DeckFeatures;
@@ -166,26 +165,6 @@ fn cheapest_sacrificeable_cost(ctx: &PolicyContext<'_>) -> f64 {
             .then(|| sacrifice_cost(ctx.state, id, ctx.penalties()))
         })
         .fold(f64::INFINITY, f64::min)
-}
-
-/// Count AI-controlled death-trigger payoff objects currently on the battlefield.
-/// Uses `death_trigger_names` as an identity-lookup list — the structural
-/// classification already happened at deck-build time in `aristocrats::detect`.
-fn count_death_triggers_on_board(
-    state: &GameState,
-    player: PlayerId,
-    death_trigger_names: &[String],
-) -> usize {
-    if death_trigger_names.is_empty() {
-        return 0;
-    }
-    state
-        .battlefield
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .filter(|obj: &&GameObject| obj.controller == player && obj.zone == Zone::Battlefield)
-        .filter(|obj| death_trigger_names.iter().any(|name| name == &obj.name))
-        .count()
 }
 
 #[cfg(test)]
@@ -375,6 +354,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = FreeOutletActivationPolicy.verdict(&ctx);
@@ -420,6 +400,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = FreeOutletActivationPolicy.verdict(&ctx);
@@ -462,6 +443,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = FreeOutletActivationPolicy.verdict(&ctx);
@@ -496,6 +478,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdict = FreeOutletActivationPolicy.verdict(&ctx);

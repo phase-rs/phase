@@ -264,6 +264,25 @@ pub(super) fn apply_attack_enlist(
     Ok(())
 }
 
+fn process_declaration_triggers_with_delayed_phase(
+    state: &mut GameState,
+    trigger_events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let waiting_before = state.waiting_for.clone();
+    let mut batch_events = vec![GameEvent::PhaseChanged { phase: state.phase }];
+    batch_events.extend_from_slice(trigger_events);
+    let outcome = triggers::process_triggers_with_delayed_phase_events(
+        state,
+        &batch_events,
+        &batch_events,
+        events,
+    );
+    outcome.prompt.filter(|prompt| {
+        matches!(prompt, WaitingFor::OrderTriggers { .. }) || *prompt != waiting_before
+    })
+}
+
 /// Post-declaration tail of `handle_declare_attackers`, shared with the exert
 /// prompt resumption: process attack/exert triggers, then route to trigger
 /// ordering, pending trigger-target selection, the no-attackers end-of-combat
@@ -279,9 +298,18 @@ pub(super) fn finish_declare_attackers(
     // declaration events.
     let deferred = std::mem::take(&mut state.pending_attack_trigger_events);
     if deferred.is_empty() {
-        triggers::process_triggers(state, events);
+        let trigger_events = events.clone();
+        if let Some(prompt) =
+            process_declaration_triggers_with_delayed_phase(state, &trigger_events, events)
+        {
+            return Ok(prompt);
+        }
     } else {
-        triggers::process_triggers(state, &deferred);
+        if let Some(prompt) =
+            process_declaration_triggers_with_delayed_phase(state, &deferred, events)
+        {
+            return Ok(prompt);
+        }
     }
     // CR 603.3b (#531): if process_triggers paused on OrderTriggers (the active
     // player has 2+ simultaneous triggers awaiting their ordering choice),
@@ -458,7 +486,12 @@ fn resume_declare_attackers(
     super::combat::declare_attackers_with_bands(state, attacks, bands, events)
         .map_err(EngineError::InvalidAction)?;
 
-    triggers::process_triggers(state, events);
+    let trigger_events = events.clone();
+    if let Some(prompt) =
+        process_declaration_triggers_with_delayed_phase(state, &trigger_events, events)
+    {
+        return Ok(prompt);
+    }
     // CR 603.3b (#531): process_triggers may have paused on OrderTriggers
     // for a player with 2+ simultaneous triggers. Propagate that prompt
     // instead of overwriting it with Priority below.
@@ -794,7 +827,12 @@ pub(super) fn handle_empty_attackers(
 ) -> Result<WaitingFor, EngineError> {
     super::combat::declare_attackers(state, &[], events).map_err(EngineError::InvalidAction)?;
 
-    triggers::process_triggers(state, events);
+    let trigger_events = events.clone();
+    if let Some(prompt) =
+        process_declaration_triggers_with_delayed_phase(state, &trigger_events, events)
+    {
+        return Ok(prompt);
+    }
     // CR 603.3b (#531): if process_triggers paused on OrderTriggers (the
     // active player has 2+ simultaneous triggers awaiting their ordering
     // choice), surface that prompt instead of overwriting it with Priority.
@@ -850,7 +888,11 @@ fn next_blocker_or_finish_declaration(
         .as_mut()
         .map(|combat| std::mem::take(&mut combat.pending_blocker_declaration_events))
         .unwrap_or_default();
-    triggers::process_triggers(state, &blocker_events);
+    if let Some(prompt) =
+        process_declaration_triggers_with_delayed_phase(state, &blocker_events, _events)
+    {
+        return Ok(prompt);
+    }
     // CR 603.3b (#531): if process_triggers paused on OrderTriggers (the
     // active player has 2+ simultaneous triggers awaiting their ordering
     // choice), surface that prompt instead of overwriting it with Priority.

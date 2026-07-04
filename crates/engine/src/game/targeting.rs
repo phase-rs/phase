@@ -244,6 +244,12 @@ fn find_legal_targets_with_context(
         }
     }
 
+    // Target-invariant player-scoped hexproof bypass (CR 702.11b, Detection Tower):
+    // hoisted ONCE per enumeration and threaded into every `can_target` call below, so the
+    // O(battlefield) player-scoped scan runs once rather than once per candidate target.
+    let source_ignores_hexproof =
+        crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
+
     let explicit_zones = extract_explicit_zones(filter);
 
     if !explicit_zones.is_empty() {
@@ -257,7 +263,13 @@ fn find_legal_targets_with_context(
                                 Some(o) => o,
                                 None => continue,
                             };
-                            if can_target(obj, source_controller, source_id, state) {
+                            if can_target(
+                                obj,
+                                source_controller,
+                                source_id,
+                                source_ignores_hexproof,
+                                state,
+                            ) {
                                 targets.push(TargetRef::Object(obj_id));
                             }
                         }
@@ -350,7 +362,13 @@ fn find_legal_targets_with_context(
                     Some(o) => o,
                     None => continue,
                 };
-                if can_target(obj, source_controller, source_id, state) {
+                if can_target(
+                    obj,
+                    source_controller,
+                    source_id,
+                    source_ignores_hexproof,
+                    state,
+                ) {
                     targets.push(TargetRef::Object(obj_id));
                 }
             }
@@ -380,6 +398,12 @@ fn has_legal_target_with_context(
         });
     }
 
+    // Target-invariant player-scoped hexproof bypass (CR 702.11b) hoisted ONCE per
+    // enumeration and threaded into every `can_target` below (mirrors
+    // `find_legal_targets_with_context`).
+    let source_ignores_hexproof =
+        crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
+
     let explicit_zones = extract_explicit_zones(filter);
     if !explicit_zones.is_empty() {
         if explicit_zones.contains(&Zone::Battlefield) {
@@ -388,7 +412,13 @@ fn has_legal_target_with_context(
                     let Some(obj) = state.objects.get(&obj_id) else {
                         continue;
                     };
-                    if can_target(obj, source_controller, source_id, state) {
+                    if can_target(
+                        obj,
+                        source_controller,
+                        source_id,
+                        source_ignores_hexproof,
+                        state,
+                    ) {
                         return true;
                     }
                 }
@@ -409,7 +439,13 @@ fn has_legal_target_with_context(
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
-            if can_target(obj, source_controller, source_id, state) {
+            if can_target(
+                obj,
+                source_controller,
+                source_id,
+                source_ignores_hexproof,
+                state,
+            ) {
                 return true;
             }
         }
@@ -691,18 +727,7 @@ pub fn resolved_targets(
     // `resolving_stack_entry`; the live stack lookup covers target resolution
     // before the entry is popped.
     if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
-        let root = state
-            .resolving_stack_entry
-            .as_ref()
-            .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
-            .or_else(|| {
-                state.stack.iter().find(|entry| {
-                    entry.id == ability.source_id || entry.source_id == ability.source_id
-                })
-            })
-            .and_then(|entry| entry.ability())
-            .unwrap_or(ability);
-        return super::ability_utils::flatten_targets_in_chain(root);
+        return parent_chain_targets_from_root(state, ability);
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -717,6 +742,46 @@ pub fn resolved_targets(
         return vec![target];
     }
     ability.targets.clone()
+}
+
+/// CR 608.2c: The full flattened target chain from the resolving root stack
+/// entry, so a `ParentTargetSlot { index }` anaphor can index a specific earlier
+/// declared slot even after the current node's local `targets` were replaced by
+/// chain propagation (`resolve_chain_body`'s most-recent-parent clone). This is
+/// the single authority for the root-entry lookup — previously inlined in
+/// `resolved_targets` — reused by the counter resolver so the stack walk is not
+/// duplicated. During normal resolution the root stack entry has already been
+/// popped and is exposed through `resolving_stack_entry`; the live `stack`
+/// lookup covers target resolution before the entry is popped.
+pub(crate) fn parent_chain_targets_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let root = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+        .or_else(|| {
+            state
+                .stack
+                .iter()
+                .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+        })
+        .and_then(|entry| entry.ability())
+        .unwrap_or(ability);
+    super::ability_utils::flatten_targets_in_chain(root)
+}
+
+/// CR 608.2c: Resolve a single earlier target slot by its declared `index` from
+/// the flattened chain root. `None` when the index is out of range.
+pub(crate) fn resolve_parent_slot_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    index: usize,
+) -> Option<TargetRef> {
+    parent_chain_targets_from_root(state, ability)
+        .into_iter()
+        .nth(index)
 }
 
 fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
@@ -1558,6 +1623,12 @@ fn add_zone_targets(
     let source_controller = target_ctx
         .source_controller
         .expect("target enumeration context must include a source controller");
+    // Target-invariant player-scoped hexproof bypass (CR 702.11b) hoisted ONCE per
+    // enumeration. Only the `require_full_targeting` arm consults `can_target`, so the scan
+    // is skipped entirely when full targeting isn't required (the else-arm uses only the
+    // per-object `is_protected_from`).
+    let source_ignores_hexproof = require_full_targeting
+        && crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
     for obj_id in object_ids {
         if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
             let obj = match state.objects.get(&obj_id) {
@@ -1565,7 +1636,13 @@ fn add_zone_targets(
                 None => continue,
             };
             if require_full_targeting {
-                if can_target(obj, source_controller, source_id, state) {
+                if can_target(
+                    obj,
+                    source_controller,
+                    source_id,
+                    source_ignores_hexproof,
+                    state,
+                ) {
                     targets.push(TargetRef::Object(obj_id));
                 }
             } else if !is_protected_from(obj, source_id, state) {
@@ -1583,6 +1660,10 @@ fn add_stack_spells(
     target_ctx: &super::filter::FilterContext,
     targets: &mut Vec<TargetRef>,
 ) {
+    // Target-invariant player-scoped hexproof bypass (CR 702.11b) hoisted ONCE per
+    // enumeration and threaded into every `can_target` below.
+    let source_ignores_hexproof =
+        crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
     for entry in &state.stack {
         // CR 601.2c: A spell choosing stack targets during its own cast cannot
         // select itself — targeting the counterspell removes only the counter
@@ -1599,7 +1680,13 @@ fn add_stack_spells(
             Some(o) => o,
             None => continue,
         };
-        if can_target(obj, source_controller, source_id, state) {
+        if can_target(
+            obj,
+            source_controller,
+            source_id,
+            source_ignores_hexproof,
+            state,
+        ) {
             targets.push(TargetRef::Object(entry.id));
         }
     }
@@ -1841,6 +1928,7 @@ fn can_target(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
     source_id: ObjectId,
+    source_ignores_hexproof: bool,
     state: &GameState,
 ) -> bool {
     // CR 702.18a: Shroud prevents targeting by any player.
@@ -1850,14 +1938,16 @@ fn can_target(
     // CR 702.11b: An "ignore hexproof" effect bypasses Hexproof / Hexproof from
     // [quality] only — never Shroud. Two distinct scopings:
     //   - player-scoped (Detection Tower): the targeting source's controller may
-    //     target any permanent "as though it didn't have hexproof";
+    //     target any permanent "as though it didn't have hexproof". This half is
+    //     target-invariant, so callers hoist it ONCE per enumeration and thread the
+    //     result in as `source_ignores_hexproof`.
     //   - object-scoped (Nowhere to Run): specific permanents matching a static's
     //     `affected` filter may be targeted as though they had no hexproof, by
     //     ANY player — the card carries no "you control" qualifier on the spells
-    //     or abilities, which is the multiplayer-correct reading.
-    let ignores_hexproof =
-        crate::game::static_abilities::player_ignores_hexproof(state, source_controller)
-            || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
+    //     or abilities, which is the multiplayer-correct reading. This half is
+    //     per-object and stays inside the loop.
+    let ignores_hexproof = source_ignores_hexproof
+        || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
     // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
@@ -1876,6 +1966,7 @@ fn can_target(
             }
         }
     }
+    // Per-object (depends on `obj`) — correctly NOT hoisted out of the enumeration loop.
     if is_protected_from(obj, source_id, state) {
         return false;
     }
@@ -1887,6 +1978,7 @@ fn can_target(
     // — see `static_mode_needs_grant_propagation`). The opponent-scoped variant
     // ("... your opponents control") is parsed as `Keyword::Hexproof` instead, so
     // it is handled by the Hexproof branch above rather than here.
+    // Per-object (reads `obj`'s own static definitions) — correctly NOT hoisted.
     if super::functioning_abilities::active_static_definitions(state, obj)
         .any(|def| matches!(def.mode, crate::types::statics::StaticMode::CantBeTargeted))
     {
@@ -2348,6 +2440,7 @@ mod tests {
             state.objects.get(&c1).unwrap(),
             PlayerId(0),
             source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
             &state
         ));
 
@@ -2366,6 +2459,7 @@ mod tests {
             state.objects.get(&c1).unwrap(),
             PlayerId(0),
             source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
             &state
         ));
     }
@@ -2477,6 +2571,7 @@ mod tests {
                 state.objects.get(&p1_creature).unwrap(),
                 PlayerId(2),
                 p2_source,
+                crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(2)),
                 &state
             ),
             "scoped IgnoreHexproof must let a third player target the static controller's opponent's creature"
@@ -2489,6 +2584,7 @@ mod tests {
                 state.objects.get(&p0_creature).unwrap(),
                 PlayerId(1),
                 p1_source,
+                crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(1)),
                 &state
             ),
             "the static controller's own creature is outside the bypass scope and keeps hexproof"
@@ -2576,6 +2672,7 @@ mod tests {
             state.objects.get(&target).unwrap(),
             PlayerId(2),
             source,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(2)),
             &state,
         );
         assert!(
@@ -2594,6 +2691,7 @@ mod tests {
             state.objects.get(&target).unwrap(),
             PlayerId(2),
             source,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(2)),
             &state,
         );
         assert!(
@@ -3739,7 +3837,13 @@ mod tests {
 
         // Player 0 (opponent) targeting c1 with a red source — should fail
         let obj = state.objects.get(&c1).unwrap();
-        assert!(!can_target(obj, PlayerId(0), source_id, &state));
+        assert!(!can_target(
+            obj,
+            PlayerId(0),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     #[test]
@@ -3772,7 +3876,13 @@ mod tests {
 
         // Player 0 targeting c1 with a blue source — should succeed
         let obj = state.objects.get(&c1).unwrap();
-        assert!(can_target(obj, PlayerId(0), source_id, &state));
+        assert!(can_target(
+            obj,
+            PlayerId(0),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     #[test]
@@ -3805,7 +3915,13 @@ mod tests {
 
         // Controller targeting own creature — should succeed regardless
         let obj = state.objects.get(&c1).unwrap();
-        assert!(can_target(obj, PlayerId(1), source_id, &state));
+        assert!(can_target(
+            obj,
+            PlayerId(1),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(1)),
+            &state
+        ));
     }
 
     #[test]
@@ -3837,7 +3953,13 @@ mod tests {
             .push(CoreType::Artifact);
 
         let obj = state.objects.get(&c1).unwrap();
-        assert!(!can_target(obj, PlayerId(0), source_id, &state));
+        assert!(!can_target(
+            obj,
+            PlayerId(0),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     #[test]
@@ -3870,7 +3992,13 @@ mod tests {
             .push(ManaColor::Red);
 
         let obj = state.objects.get(&c1).unwrap();
-        assert!(!can_target(obj, PlayerId(0), source_id, &state));
+        assert!(!can_target(
+            obj,
+            PlayerId(0),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
 
         // Multicolored source — NOT blocked by "hexproof from monocolored"
         let multi_id = create_object(
@@ -3886,7 +4014,13 @@ mod tests {
             multi.color.push(ManaColor::Blue);
         }
         let obj = state.objects.get(&c1).unwrap();
-        assert!(can_target(obj, PlayerId(0), multi_id, &state));
+        assert!(can_target(
+            obj,
+            PlayerId(0),
+            multi_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     #[test]
@@ -3917,7 +4051,13 @@ mod tests {
             .push(CoreType::Instant);
 
         let obj = state.objects.get(&c1).unwrap();
-        assert!(!can_target(obj, PlayerId(0), source_id, &state));
+        assert!(!can_target(
+            obj,
+            PlayerId(0),
+            source_id,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     #[test]
@@ -3962,8 +4102,20 @@ mod tests {
             };
 
         let obj = state.objects.get(&c1).unwrap();
-        assert!(!can_target(obj, PlayerId(0), low_mv_source, &state));
-        assert!(can_target(obj, PlayerId(0), high_mv_source, &state));
+        assert!(!can_target(
+            obj,
+            PlayerId(0),
+            low_mv_source,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
+        assert!(can_target(
+            obj,
+            PlayerId(0),
+            high_mv_source,
+            crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+            &state
+        ));
     }
 
     /// CR 702.16b + CR 702.16j: A player with protection from everything
@@ -4548,5 +4700,139 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
+    }
+
+    // ── StaticModePresence hexproof scan-gate tests (Verification Matrix A/B/C) ──
+
+    /// Test A — token-storm counter guard. On a ~1000-token board with zero functioning
+    /// `IgnoreHexproof` statics, a full target enumeration must run ZERO whole-battlefield
+    /// static scans (the profiler-confirmed O(targets × battlefield) hang). Non-vacuous
+    /// anchor: every token is still returned as a legal target.
+    #[test]
+    fn token_storm_target_enumeration_does_no_static_full_scans() {
+        let mut state = GameState::new_two_player(42);
+        const TOKENS: usize = 1000;
+        let mut token_ids = Vec::with_capacity(TOKENS);
+        for i in 0..TOKENS {
+            let id = create_object(
+                &mut state,
+                CardId(1000 + i as u64),
+                PlayerId(1),
+                format!("Token{i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            token_ids.push(id);
+        }
+        // Full layers flush makes the presence index PRECISE (IgnoreHexproof absent => the
+        // gates short-circuit before any full scan).
+        crate::game::layers::evaluate_layers(&mut state);
+
+        crate::game::perf_counters::reset();
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let counters = crate::game::perf_counters::snapshot();
+
+        // (1) Counter guard — reverting the presence gate makes this non-zero.
+        assert_eq!(
+            counters.static_full_scans, 0,
+            "token-storm target enumeration must not run any whole-battlefield static scan"
+        );
+        // (2) Standalone correctness anchor — every token is a legal target.
+        assert_eq!(targets.len(), TOKENS, "every token must be a legal target");
+        assert!(targets.contains(&TargetRef::Object(token_ids[0])));
+        assert!(targets.contains(&TargetRef::Object(token_ids[TOKENS - 1])));
+    }
+
+    /// Test B — positive control (multi-authority). With BOTH a player-scoped
+    /// (`affected = None`, Detection Tower) and an object-scoped (`affected = Some`,
+    /// Nowhere to Run) `IgnoreHexproof` static present, a hexproof creature IS targetable.
+    /// Proves the presence gate does not suppress a real grant (the index reports present,
+    /// so the exact scan runs). Test C shares this fixture minus the statics as the
+    /// reach-guard.
+    #[test]
+    fn multi_authority_ignore_hexproof_keeps_hexproof_creature_targetable() {
+        use crate::types::ability::{ControllerRef, StaticDefinition};
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        // Player-scoped IgnoreHexproof (Detection Tower form), controlled by P0.
+        let tower = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Detection Tower".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&tower).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        // Object-scoped IgnoreHexproof (Nowhere to Run form), controlled by P0.
+        let nowhere = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Nowhere to Run".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&nowhere).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::IgnoreHexproof).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                )),
+            ]
+            .into();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert!(
+            find_legal_targets(&state, &creature_filter(), PlayerId(0), tower)
+                .contains(&TargetRef::Object(c1)),
+            "hexproof creature must stay targetable when IgnoreHexproof authorities are present"
+        );
+    }
+
+    /// Test C — hexproof negative + controller positive (reach-guard for Test B). With NO
+    /// `IgnoreHexproof` static (precise presence = false), an opponent CANNOT target a
+    /// hexproof creature, but the creature's own controller CAN (CR 702.11b — hexproof only
+    /// blocks opponents). The negative assertion is the revert guard for the hoisted
+    /// `source_ignores_hexproof` threading.
+    #[test]
+    fn hexproof_blocks_opponent_but_not_controller_with_precise_presence() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+        crate::game::layers::evaluate_layers(&mut state);
+        // Precise presence: IgnoreHexproof absent.
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                crate::types::statics::StaticModeKind::IgnoreHexproof
+            ),
+            "no IgnoreHexproof static means presence is precisely false"
+        );
+        // (neg) P0 (opponent of P1) cannot target P1's hexproof creature.
+        assert!(
+            !find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99))
+                .contains(&TargetRef::Object(c1)),
+            "hexproof blocks the opponent"
+        );
+        // (pos) P1 (its own controller) CAN target it.
+        assert!(
+            find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99))
+                .contains(&TargetRef::Object(c1)),
+            "hexproof does not block the controller (CR 702.11b)"
+        );
     }
 }
