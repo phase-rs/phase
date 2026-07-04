@@ -16498,6 +16498,27 @@ fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
     }
 }
 
+fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(tf)
+            if !tf
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })) =>
+        {
+            tf.properties.push(FilterProp::InZone { zone: Zone::Exile });
+        }
+        TargetFilter::Typed(_) => {}
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for inner in filters {
+                ensure_exile_zone_on_cast_target(inner);
+            }
+        }
+        TargetFilter::Not { filter } => ensure_exile_zone_on_cast_target(filter),
+        _ => {}
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
 /// (card|cards) exiled this way"` anchor and lift its optional typed leg
 /// into a `TargetFilter`.
@@ -16529,7 +16550,7 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
 
     // Try disjunctive typed leg first ("instant or sorcery cards"); fall
     // back to parse_type_phrase ("nonland cards", "creature cards").
-    let typed_filter = parse_cast_type_disjunction(after_article)
+    let mut typed_filter = parse_cast_type_disjunction(after_article)
         .map(TargetFilter::Typed)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
 
@@ -16543,9 +16564,11 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
 
     Some(if !meaningful {
         TargetFilter::ExiledBySource
-    } else if typed_filter.references_exiled_by_source() {
-        typed_filter.normalized()
     } else {
+        ensure_exile_zone_on_cast_target(&mut typed_filter);
+        if typed_filter.references_exiled_by_source() {
+            return Some(typed_filter.normalized());
+        }
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
@@ -17047,14 +17070,13 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     // anywhere in `rest` (post-"cast " prefix) is structurally diagnostic of
     // the per-resolution exile-set anaphor.
     if scan_contains_phrase(rest, "from among those nonland cards") {
+        let mut nonland_card_filter = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        );
+        ensure_exile_zone_on_cast_target(&mut nonland_card_filter);
         return Some(Effect::CastFromZone {
             target: TargetFilter::And {
-                filters: vec![
-                    TargetFilter::ExiledBySource,
-                    TargetFilter::Typed(
-                        TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
-                    ),
-                ],
+                filters: vec![TargetFilter::ExiledBySource, nonland_card_filter],
             },
             without_paying_mana_cost: without_paying,
             mode,

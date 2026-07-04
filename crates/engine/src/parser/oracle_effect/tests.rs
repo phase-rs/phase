@@ -33802,6 +33802,14 @@ fn cast_from_among_those_nonland_cards_binds_to_exiled_by_source_and_nonland() {
         "expected Non(Land), got {:?}",
         typed.type_filters
     );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })),
+        "expected cast target to be explicitly in exile, got {:?}",
+        typed.properties
+    );
 }
 
 /// CR 610.3 + CR 608.2c + CR 118.9: Etali, Primal Conqueror's ETB cast
@@ -33848,6 +33856,14 @@ fn cast_from_among_the_nonland_cards_exiled_this_way_binds_to_exiled_by_source_a
             .any(|f| matches!(f, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
         "expected Non(Land), got {:?}",
         typed.type_filters
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })),
+        "expected cast target to be explicitly in exile, got {:?}",
+        typed.properties
     );
 }
 
