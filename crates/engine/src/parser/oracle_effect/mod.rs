@@ -16488,15 +16488,15 @@ fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
 
 fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
     match filter {
-        TargetFilter::Typed(tf) => {
+        TargetFilter::Typed(tf)
             if !tf
                 .properties
                 .iter()
-                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile }))
-            {
-                tf.properties.push(FilterProp::InZone { zone: Zone::Exile });
-            }
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })) =>
+        {
+            tf.properties.push(FilterProp::InZone { zone: Zone::Exile });
         }
+        TargetFilter::Typed(_) => {}
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             for inner in filters {
                 ensure_exile_zone_on_cast_target(inner);
