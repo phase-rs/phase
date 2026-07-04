@@ -203,15 +203,15 @@ pub fn room_effects(
             simple(treasure_token(), source_id, controller),
             vec![],
         ),
-        // 3: Storeroom — "Put a +1/+1 counter on target creature you control"
+        // 3: Storeroom — "Put a +1/+1 counter on target creature"
+        // (any creature; the Oracle text is unrestricted, matching the sibling
+        // counter-rooms Undercity "Forge" / "Throne of the Dead Three").
         (DungeonId::LostMineOfPhandelver, 3) => (
             simple(
                 Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(1),
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
                 },
                 source_id,
                 controller,
@@ -237,7 +237,9 @@ pub fn room_effects(
             )));
             (lose, vec![])
         }
-        // 5: Fungi Cavern — "Target creature gets -4/-0 until end of turn"
+        // 5: Fungi Cavern — "Target creature gets -4/-0 until your next turn"
+        // CR 514.2 + CR 611.2a: the debuff persists until the *beginning* of the
+        // controller's next turn, not just end of turn.
         (DungeonId::LostMineOfPhandelver, 5) => (
             ResolvedAbility::new(
                 Effect::Pump {
@@ -249,7 +251,9 @@ pub fn room_effects(
                 source_id,
                 controller,
             )
-            .duration(Duration::UntilEndOfTurn),
+            .duration(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
             vec![],
         ),
         // 6: Temple of Dumathoin — "Draw a card"
@@ -316,14 +320,12 @@ pub fn room_effects(
             });
             (ability, vec![])
         }
-        // 4: Lost Level — "Destroy target creature of an opponent's choice"
+        // 4: Lost Level — "Scry 2"
         (DungeonId::DungeonOfTheMadMage, 4) => (
             simple(
-                Effect::Unimplemented {
-                    name: "Room: Lost Level".to_string(),
-                    description: Some(
-                        "Destroy target creature of an opponent's choice".to_string(),
-                    ),
+                Effect::Scry {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
                 },
                 source_id,
                 controller,
@@ -415,48 +417,68 @@ pub fn room_effects(
             ability.player_scope = Some(PlayerFilter::All);
             (ability, vec![])
         }
-        // 1: Veils of Fear — "Each player sacrifices a creature"
+        // 1: Veils of Fear — "Each player loses 2 life unless they discard a card."
+        // CR 118.12a: a punisher — each player either discards a card or loses
+        // 2 life. Parsed from the Oracle text so the base life loss, the
+        // each-player scope, and the unless-discard payment all come from the
+        // shared punisher parser (the payer binds to the per-iteration
+        // ScopedPlayer). The room was wrongly implemented as "each player
+        // sacrifices a creature".
         (DungeonId::TombOfAnnihilation, 1) => {
-            let mut ability = simple(
-                Effect::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: QuantityExpr::Fixed { value: 1 },
-                    min_count: 0,
-                },
-                source_id,
-                controller,
-            );
-            ability.player_scope = Some(PlayerFilter::All);
-            (ability, vec![])
+            const ORACLE: &str = "Each player loses 2 life unless they discard a card.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
         }
-        // 2: Oubliette — "Discard a card"
-        (DungeonId::TombOfAnnihilation, 2) => (
-            simple(
+        // 2: Oubliette — "Discard a card and sacrifice a creature, an artifact,
+        //    and a land."
+        // CR 701.9a (discard) + CR 701.21a (sacrifice: the controller sacrifices
+        // permanents they control). The controller discards a card, then
+        // sacrifices one creature, one artifact, and one land, chained in
+        // printed order via sub_ability. Each sacrifice is a count of one with
+        // min_count 0 so it resolves to zero when the controller has no
+        // permanent of that type (CR 701.21a: you can only sacrifice what you
+        // control).
+        (DungeonId::TombOfAnnihilation, 2) => {
+            let sac = |filter: TypedFilter| Effect::Sacrifice {
+                target: TargetFilter::Typed(filter),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            };
+            let sac_land = simple(sac(TypedFilter::land()), source_id, controller);
+            let sac_artifact =
+                simple(sac(TypedFilter::new(TypeFilter::Artifact)), source_id, controller)
+                    .sub_ability(sac_land);
+            let sac_creature = simple(sac(TypedFilter::creature()), source_id, controller)
+                .sub_ability(sac_artifact);
+            let discard = simple(
                 Effect::DiscardCard {
                     count: 1,
                     target: TargetFilter::Any,
                 },
                 source_id,
                 controller,
-            ),
-            vec![],
-        ),
-        // 3: Sandfall Cell — "You lose 2 life and create a 2/2 black Zombie creature token"
+            )
+            .sub_ability(sac_creature);
+            (discard, vec![])
+        }
+        // 3: Sandfall Cell — "Each player loses 2 life unless they sacrifice a
+        //    creature, artifact, or land of their choice."
+        // CR 118.12a: a punisher — each player either sacrifices a creature,
+        // artifact, or land, or loses 2 life. Parsed from the Oracle text so the
+        // base life loss, the each-player scope, and the unless-sacrifice
+        // payment all come from the shared punisher parser (the payer binds to
+        // the per-iteration ScopedPlayer). The room was wrongly implemented as
+        // "you lose 2 life and create a 2/2 black Zombie token" — a fabricated
+        // effect that appears nowhere on the card.
         (DungeonId::TombOfAnnihilation, 3) => {
-            let mut lose = simple(
-                Effect::LoseLife { amount: fixed(2), target: None },
-                source_id,
-                controller,
-            );
-            lose.sub_ability = Some(Box::new(simple(
-                creature_token("Zombie", 2, 2, &["Zombie"], &[ManaColor::Black], &[], 1),
-                source_id,
-                controller,
-            )));
-            (lose, vec![])
+            const ORACLE: &str =
+                "Each player loses 2 life unless they sacrifice a creature, artifact, or land of their choice.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
         }
         // 4: Cradle of the Death God — "Create The Atropal, a legendary 4/4 black God Horror
-        //    creature token"
+        //    creature token with deathtouch."
+        // CR 702.2a: Deathtouch is a static ability granted to the token.
         (DungeonId::TombOfAnnihilation, 4) => (
             simple(
                 Effect::Token {
@@ -469,7 +491,7 @@ pub fn room_effects(
                         "Horror".to_string(),
                     ],
                     colors: vec![ManaColor::Black],
-                    keywords: vec![],
+                    keywords: vec![Keyword::Deathtouch],
                     tapped: false,
                     count: fixed(1),
                     owner: TargetFilter::Controller,
@@ -1497,6 +1519,65 @@ mod tests {
         assert!(next_rooms(DungeonId::LostMineOfPhandelver, 6).is_empty());
     }
 
+    /// Oracle fidelity: Lost Mine of Phandelver "Storeroom" is "Put a +1/+1
+    /// counter on target creature" — ANY creature, no controller restriction
+    /// (matching the sibling unrestricted counter-rooms). Revert-probe: the old
+    /// `.controller(You)` sets `tf.controller = Some(You)`.
+    #[test]
+    fn lost_mine_storeroom_targets_any_creature() {
+        let (ability, _) =
+            room_effects(DungeonId::LostMineOfPhandelver, 3, ObjectId(1), PlayerId(0));
+        match &ability.effect {
+            Effect::PutCounter {
+                target: TargetFilter::Typed(tf),
+                counter_type,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert!(
+                    tf.controller.is_none(),
+                    "Storeroom targets ANY creature (Oracle: 'target creature'), got controller {:?}",
+                    tf.controller
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
+    /// Oracle fidelity: Lost Mine of Phandelver "Fungi Cavern" is "-4/-0 until
+    /// your next turn" (CR 514.2 + CR 611.2a) — the debuff persists to the
+    /// controller's next turn, not just end of turn. Revert-probe: the old
+    /// `Duration::UntilEndOfTurn`.
+    #[test]
+    fn lost_mine_fungi_cavern_lasts_until_your_next_turn() {
+        let (ability, _) =
+            room_effects(DungeonId::LostMineOfPhandelver, 5, ObjectId(1), PlayerId(0));
+        assert_eq!(
+            ability.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
+            "Fungi Cavern's -4/-0 lasts until your next turn, not end of turn"
+        );
+    }
+
+    /// Oracle fidelity: Dungeon of the Mad Mage "Lost Level" is "Scry 2". It was
+    /// stubbed as `Effect::Unimplemented` with fabricated text ("Destroy target
+    /// creature of an opponent's choice"), so venturing into it did nothing.
+    /// Revert-probe: the old stub is not `Effect::Scry`.
+    #[test]
+    fn mad_mage_lost_level_is_scry_two() {
+        let (ability, _) =
+            room_effects(DungeonId::DungeonOfTheMadMage, 4, ObjectId(1), PlayerId(0));
+        match &ability.effect {
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            } => {}
+            other => panic!("expected 'Scry 2' targeting the controller, got {other:?}"),
+        }
+    }
+
     #[test]
     fn available_dungeons_normal_vs_specific() {
         let normal = available_dungeons(VentureSource::Normal);
@@ -1623,6 +1704,46 @@ mod tests {
     #[test]
     fn room_effects_undercity_throne_of_dead_three() {
         assert_throne_room_chain(&undercity_effect(8));
+    }
+
+    fn tomb_effect(room: u8) -> ResolvedAbility {
+        room_effects(
+            DungeonId::TombOfAnnihilation,
+            room,
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .0
+    }
+
+    /// Oracle fidelity: Tomb of Annihilation "Cradle of the Death God" creates
+    /// The Atropal, a legendary 4/4 black God Horror creature token *with
+    /// deathtouch* (CR 702.2a). The token was created with no keywords, dropping
+    /// the deathtouch. Revert-probe: the old `keywords: vec![]` has no Deathtouch.
+    #[test]
+    fn tomb_cradle_atropal_has_deathtouch() {
+        let ability = tomb_effect(4);
+        match &ability.effect {
+            Effect::Token {
+                name,
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(4),
+                keywords,
+                supertypes,
+                ..
+            } => {
+                assert_eq!(name, "The Atropal");
+                assert!(
+                    keywords.contains(&Keyword::Deathtouch),
+                    "The Atropal is created with deathtouch, got keywords {keywords:?}"
+                );
+                assert!(
+                    supertypes.contains(&Supertype::Legendary),
+                    "The Atropal is legendary"
+                );
+            }
+            other => panic!("expected a 4/4 Atropal Token, got {other:?}"),
+        }
     }
 
     fn mad_mage_effect(room: u8) -> ResolvedAbility {

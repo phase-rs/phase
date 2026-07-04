@@ -16,6 +16,7 @@ combo-verify = "run --profile tool --features combo-verify --bin combo-verify --
 scrape-feeds = "run --release -p feed-scraper --"
 tune-ai = "run --release --features tune --bin ai-tune --"
 ai-gate = "run --bin ai-gate --"
+ai-perf-gate = "run --bin ai-perf-gate --"
 engine-inventory = "run --quiet -p engine-inventory-gen"
 
 [env]

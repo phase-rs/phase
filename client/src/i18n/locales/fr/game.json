@@ -77,7 +77,8 @@
     "priorityTooltip": "Passez la priorité. Si la pile est vide, cela avance dans la fenêtre de priorité actuelle. Raccourci : Espace.",
     "pass": "Passer",
     "passToEndTooltip": "Passage automatique jusqu'à l'étape de fin sauf si un choix, un arrêt ou le Contrôle total interrompt. Raccourci : Entrée.",
-    "autoPassing": "Passage automatique jusqu'à l'étape de fin..."
+    "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
+    "resolvingStack": "Résolution de la pile..."
   },
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
@@ -179,6 +180,10 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Choisir",
+    "fanConfirm": "Confirmer ({{count}})",
+    "viewAttachments_one": "Voir la carte attachée",
+    "viewAttachments_other": "Voir {{count}} cartes attachées",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
