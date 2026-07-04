@@ -150,6 +150,16 @@ pub fn effective_total_toxic_value(state: &GameState, object_id: ObjectId) -> u3
         .sum()
 }
 
+/// CR 702.52a: Effective Dredge value for a card, preserving the keyword's
+/// parameter while honoring off-zone characteristic grants.
+pub fn effective_dredge_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Dredge)?;
+    match keyword {
+        Keyword::Dredge(value) => Some(value),
+        _ => None,
+    }
+}
+
 /// CR 702.187b: Effective Mayhem alt-cost for a card in the graveyard, honoring
 /// off-zone characteristic grants (e.g. Green Goblin's "Each nonland card in
 /// your graveyard has mayhem. The mayhem cost is equal to its mana cost.") in

@@ -4,7 +4,7 @@ use engine::ai_support::{
 };
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
-use engine::types::ability::{AbilityDefinition, Effect, TargetRef};
+use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::{GameState, PendingCast, WaitingFor};
@@ -57,7 +57,11 @@ impl CopyValuePolicy {
                 .any(|e| matches!(e, Effect::CopyTokenOf { .. })) =>
             {
                 let source_id = ctx.source_object().map(|source| source.id);
-                score_copy_token_target(ctx.state, ctx.ai_player, source_id, *target_id)
+                let strips = ctx
+                    .effects()
+                    .iter()
+                    .any(|e| copy_effect_strips_legendary(e));
+                score_copy_token_target(ctx.state, ctx.ai_player, source_id, *target_id, strips)
             }
             _ => 0.0,
         }
@@ -100,13 +104,47 @@ fn evaluate_legend_keep_permanent(state: &GameState, keep: ObjectId, object: &Ga
     (object.mana_cost.mana_value() as f64).min(6.0)
 }
 
+/// CR 707.9 + CR 205.4a: A copy inherits the copied object's supertypes
+/// (including Legendary) unless the copy effect includes an "except" clause that
+/// strips it (Miirym, Sentinel Wyrm / Helm of the Host: "except the token isn't
+/// legendary" → `RemoveSupertype { Legendary }`). Core-type modifications
+/// (`RemoveType`, `SetCardTypes`; CR 205.1a) act on card *types*, not
+/// supertypes, so they can never remove Legendary — a `RemoveSupertype {
+/// Legendary }` in `additional_modifications` is the sole legend-strip. Handles
+/// both the token-copy (`CopyTokenOf`) and enters-as-copy (`BecomeCopy`) forms,
+/// which share the field.
+pub(crate) fn copy_effect_strips_legendary(effect: &Effect) -> bool {
+    let mods = match effect {
+        Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        }
+        | Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => additional_modifications,
+        _ => return false,
+    };
+    mods.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )
+    })
+}
+
 /// Penalties for copy effects that would trigger a wasteful legend-rule loop
-/// (issue #2438 — Saheeli copying her own commander).
+/// (issue #2438 — Saheeli copying her own commander). `strips_legendary` is the
+/// copy effect's typed decision (from `copy_effect_strips_legendary`): a copy
+/// that makes its token non-legendary creates no legend-rule collision.
 pub(crate) fn copy_target_penalties(
     state: &GameState,
     ai_player: PlayerId,
     source_id: Option<ObjectId>,
     target: &GameObject,
+    strips_legendary: bool,
 ) -> f64 {
     let mut penalty = 0.0;
 
@@ -118,17 +156,15 @@ pub(crate) fn copy_target_penalties(
         penalty += 40.0;
     }
 
+    // CR 704.5j: copying your own legendary CREATES a same-name legend-rule
+    // collision (the copy is the duplicate that forces one into the graveyard).
+    // Penalize unless the copy makes the token non-legendary
+    // (`RemoveSupertype { Legendary }`) or the legend rule is switched off for
+    // the target (Mirror Gallery / Sakashima, `legend_rule_exempt`).
     if target.controller == ai_player
         && target.card_types.supertypes.contains(&Supertype::Legendary)
-        && state.battlefield.iter().any(|&id| {
-            id != target.id
-                && state.objects.get(&id).is_some_and(|other| {
-                    other.controller == ai_player
-                        && other.card_types.supertypes.contains(&Supertype::Legendary)
-                        && other.name == target.name
-                })
-                && !engine::game::sba::legend_rule_exempt(state, id)
-        })
+        && !strips_legendary
+        && !engine::game::sba::legend_rule_exempt(state, target.id)
     {
         penalty += 35.0;
     }
@@ -141,12 +177,13 @@ fn score_copy_token_target(
     ai_player: PlayerId,
     source_id: Option<ObjectId>,
     target_id: ObjectId,
+    strips_legendary: bool,
 ) -> f64 {
     let Some(target) = state.objects.get(&target_id) else {
         return -10.0;
     };
     let base = evaluate_creature(state, target_id);
-    let penalty = copy_target_penalties(state, ai_player, source_id, target);
+    let penalty = copy_target_penalties(state, ai_player, source_id, target, strips_legendary);
     base - penalty
 }
 
@@ -277,7 +314,8 @@ fn score_target_choice(
         copy_bonus += 0.06;
     }
 
-    copy_penalty += copy_target_penalties(state, ai_player, Some(source_id), target)
+    let strips = copy_effect_strips_legendary(&effect_def.effect);
+    copy_penalty += copy_target_penalties(state, ai_player, Some(source_id), target, strips)
         * COPY_SPELL_LOOP_PENALTY_SCALE;
 
     if base_creature_value < 3.0 {
@@ -365,13 +403,14 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityKind, ContinuousModification, CopyManaValueLimit, Effect, QuantityExpr,
-        ReplacementDefinition, TargetFilter,
+        ReplacementDefinition, StaticDefinition, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::PendingCast;
     use engine::types::identifiers::CardId;
     use engine::types::mana::{ManaCost, ManaCostShard};
     use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::StaticMode;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -491,6 +530,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_two = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -506,6 +546,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_zero > score_two);
@@ -560,6 +601,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_three = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -575,6 +617,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_three > score_zero);
@@ -612,6 +655,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
         let score_large = CopyValuePolicy.score(&PolicyContext {
             state: &state,
@@ -629,6 +673,7 @@ mod tests {
             config: &crate::config::AiConfig::default(),
             context: &crate::context::AiContext::empty(&crate::eval::EvalWeightSet::default()),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         });
 
         assert!(score_large > score_small);
@@ -669,7 +714,7 @@ mod tests {
             obj.is_commander = true;
         }
 
-        let score = score_copy_token_target(&state, PlayerId(0), Some(saheeli), saheeli);
+        let score = score_copy_token_target(&state, PlayerId(0), Some(saheeli), saheeli, false);
         assert!(
             score < -50.0,
             "self-commander copy must be strongly penalised, got {score}"
@@ -694,12 +739,123 @@ mod tests {
             obj.is_commander = true;
         }
 
-        let unknown_source_score = score_copy_token_target(&state, PlayerId(0), None, saheeli);
+        let unknown_source_score =
+            score_copy_token_target(&state, PlayerId(0), None, saheeli, false);
         let self_source_score =
-            score_copy_token_target(&state, PlayerId(0), Some(saheeli), saheeli);
+            score_copy_token_target(&state, PlayerId(0), Some(saheeli), saheeli, false);
         assert!(
             unknown_source_score > self_source_score + 45.0,
             "unknown source must not be treated as self-copy: unknown={unknown_source_score}, self={self_source_score}"
+        );
+    }
+
+    fn legendary_creature(state: &mut GameState, card_id: u64, name: &str) -> ObjectId {
+        let id = add_creature(state, card_id, PlayerId(0), name, 3, 3, 4);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        id
+    }
+
+    /// Mirror Gallery: a global `LegendRuleDoesntApply` static that exempts every
+    /// legendary permanent from the legend rule (CR 704.5j).
+    fn add_mirror_gallery(state: &mut GameState) {
+        let id = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Mirror Gallery".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = StaticDefinition::new(StaticMode::LegendRuleDoesntApply);
+        def.affected = None;
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+    }
+
+    #[test]
+    fn copy_own_lone_legendary_is_penalised() {
+        // Step 4: copying your own legendary CREATES a same-name legend-rule
+        // collision (the copy is the duplicate), so a lone own legendary — with NO
+        // pre-existing same-name duplicate on the battlefield — must be penalised.
+        // The old same-name-duplicate branch returned 0 here; reverting to it
+        // flips this assertion.
+        let mut state = make_state();
+        let target_id = legendary_creature(&mut state, 1, "Adeline, Resplendent Cathar");
+        let target = &state.objects[&target_id];
+        let penalty = copy_target_penalties(&state, PlayerId(0), None, target, false);
+        assert!(
+            penalty >= 35.0,
+            "own legendary copy must be penalised even with no pre-existing duplicate, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn legendary_strip_copy_not_penalised() {
+        // Hostile fixture (i): a legend-stripping copy (Miirym: "except the token
+        // isn't legendary" → strips_legendary=true) creates a non-legendary token,
+        // so no collision → no legendary penalty.
+        let mut state = make_state();
+        let target_id = legendary_creature(&mut state, 1, "Adeline, Resplendent Cathar");
+        let target = &state.objects[&target_id];
+        let penalty = copy_target_penalties(&state, PlayerId(0), None, target, true);
+        assert_eq!(
+            penalty, 0.0,
+            "legend-stripping copy of own legendary must not be penalised, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn legend_exempt_copy_not_penalised() {
+        // Hostile fixture (iii): Mirror Gallery switches off the legend rule, so a
+        // duplicate legendary is legal → no penalty (`legend_rule_exempt`).
+        let mut state = make_state();
+        add_mirror_gallery(&mut state);
+        let target_id = legendary_creature(&mut state, 1, "Adeline, Resplendent Cathar");
+        let target = &state.objects[&target_id];
+        let penalty = copy_target_penalties(&state, PlayerId(0), None, target, false);
+        assert_eq!(
+            penalty, 0.0,
+            "legend-rule-exempt legendary (Mirror Gallery) must not be penalised, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn own_nonlegendary_copy_not_penalised() {
+        // Reach-guard: a non-legendary own target has no legend-rule concern → 0.
+        let mut state = make_state();
+        let target_id = add_creature(&mut state, 1, PlayerId(0), "Grizzly Bears", 2, 2, 2);
+        let target = &state.objects[&target_id];
+        let penalty = copy_target_penalties(&state, PlayerId(0), None, target, false);
+        assert_eq!(
+            penalty, 0.0,
+            "own non-legendary copy target must not be penalised, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn own_nonlegendary_copy_target_outscores_own_legendary() {
+        // Hostile fixture (ii): given an own legendary and an own non-legendary of
+        // equal stats, the non-legendary target must outscore the legendary one
+        // (which eats the +35 legend-rule-collision penalty). A non-legendary copy
+        // merely outscores — the legendary is never hard-rejected.
+        let mut state = make_state();
+        let legendary = legendary_creature(&mut state, 1, "Adeline, Resplendent Cathar");
+        let vanilla = add_creature(&mut state, 2, PlayerId(0), "Adeline's Understudy", 3, 3, 4);
+
+        let legendary_score = score_copy_token_target(&state, PlayerId(0), None, legendary, false);
+        let vanilla_score = score_copy_token_target(&state, PlayerId(0), None, vanilla, false);
+        assert!(
+            vanilla_score > legendary_score,
+            "own non-legendary copy target must outscore own legendary: vanilla={vanilla_score}, legendary={legendary_score}"
         );
     }
 

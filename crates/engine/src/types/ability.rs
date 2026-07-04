@@ -297,7 +297,15 @@ pub enum OpponentMayScope {
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
-    CreatureType,
+    /// CR 205.3m: A choice among creature types. `options`, when non-empty,
+    /// narrows the offered set below the full creature-type list to an explicit
+    /// Oracle-listed candidate set (e.g. A Killer Among Us' "secretly choose
+    /// Human, Merfolk, or Goblin") — mirrors the `Color { excluded }` /
+    /// `CardType { excluded }` restriction axis. Empty ⇒ all creature types
+    /// (Morophon / Changeling), which keeps existing card-data JSON byte-stable.
+    CreatureType {
+        options: Vec<String>,
+    },
     Color {
         /// Colors that cannot be chosen by this prompt.
         ///
@@ -368,6 +376,19 @@ pub enum ChoiceType {
 }
 
 impl ChoiceType {
+    /// Unrestricted creature-type choice (all creature types offered).
+    pub fn creature_type() -> Self {
+        Self::CreatureType {
+            options: Vec::new(),
+        }
+    }
+
+    /// Creature-type choice restricted to an explicit Oracle-listed candidate
+    /// set (CR 205.3m), e.g. "secretly choose Human, Merfolk, or Goblin".
+    pub fn creature_type_from(options: Vec<String>) -> Self {
+        Self::CreatureType { options }
+    }
+
     pub fn color() -> Self {
         Self::Color {
             excluded: Vec::new(),
@@ -417,8 +438,19 @@ impl Serialize for ChoiceType {
         S: Serializer,
     {
         match self {
-            Self::CreatureType => {
-                serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+            // Serialize the unrestricted form as the legacy unit variant
+            // "CreatureType" so existing Morophon/Changeling card-data JSON
+            // stays byte-stable; only emit the struct form when a candidate
+            // restriction is present.
+            Self::CreatureType { options } => {
+                if options.is_empty() {
+                    serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 0, "CreatureType", 1)?;
+                    variant.serialize_field("options", options)?;
+                    variant.end()
+                }
             }
             Self::Color { excluded } => {
                 if excluded.is_empty() {
@@ -513,6 +545,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         #[derive(Deserialize)]
         enum ChoiceTypeData {
+            CreatureType {
+                #[serde(default)]
+                options: Vec<String>,
+            },
             Color {
                 #[serde(default)]
                 excluded: Vec<ManaColor>,
@@ -547,7 +583,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
 
         match ChoiceTypeRepr::deserialize(deserializer)? {
             ChoiceTypeRepr::Unit(value) => match value.as_str() {
-                "CreatureType" => Ok(Self::CreatureType),
+                "CreatureType" => Ok(Self::creature_type()),
                 "Color" => Ok(Self::color()),
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
@@ -578,6 +614,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 )),
             },
             ChoiceTypeRepr::Data(data) => match data {
+                ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
@@ -905,6 +942,14 @@ pub enum ChosenAttribute {
     /// changes zones (CR 400.7), which is exactly the lifetime Koh's grant needs.
     /// Replace-on-rechoose: `RememberCard` removes any prior `Card` before pushing.
     Card(ObjectId),
+    /// CR 607.2d: The chosen seat direction (left/right) for a directional
+    /// "choose left or right" ability linked to a "the [last] chosen direction"
+    /// static (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
+    /// Tactician). Stored on the source's `chosen_attributes` and read by
+    /// `GameObject::chosen_direction()` during the CR 508.1c attacker gate.
+    /// Replace-on-rechoose: the {Left,Right} hijack in `choose.rs` removes any
+    /// prior `Direction` before pushing, so only the "last chosen" survives.
+    Direction(SeatDirection),
 }
 
 impl ChosenAttribute {
@@ -912,7 +957,7 @@ impl ChosenAttribute {
     pub fn choice_type(&self) -> ChoiceType {
         match self {
             Self::Color(_) => ChoiceType::color(),
-            Self::CreatureType(_) => ChoiceType::CreatureType,
+            Self::CreatureType(_) => ChoiceType::creature_type(),
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
@@ -950,6 +995,12 @@ impl ChosenAttribute {
             // spurious object-choice category.
             Self::Card(_) => ChoiceType::Labeled {
                 options: Vec::new(),
+            },
+            // CR 607.2d: The directional choice is a two-option labeled prompt.
+            // The {Left,Right} hijack in `choose.rs` recognises exactly this
+            // option set to persist a typed `Direction` rather than a `Label`.
+            Self::Direction(_) => ChoiceType::Labeled {
+                options: vec!["Left".into(), "Right".into()],
             },
         }
     }
@@ -1006,7 +1057,7 @@ impl ChoiceValue {
                 let color = value.parse::<ManaColor>().ok()?;
                 (!excluded.contains(&color)).then_some(Self::Color(color))
             }
-            ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
+            ChoiceType::CreatureType { .. } => Some(Self::CreatureType(value.to_string())),
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
             }
@@ -3158,6 +3209,11 @@ pub enum FilterProp {
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
+    /// CR 700.2: Matches a spell/ability on the stack that is modal (its printed
+    /// text offers two or more options in a bulleted list). Evaluated against the
+    /// stack object's static printed modality (`obj.modal.is_some()`), a printed
+    /// characteristic present from object creation.
+    Modal,
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
@@ -3264,8 +3320,16 @@ pub enum FilterProp {
         to: Option<Zone>,
     },
     /// CR 508.1a: Creature was declared as an attacker this turn.
-    /// Checks `creatures_attacked_this_turn` tracking set on GameState.
-    AttackedThisTurn,
+    /// `None` matches a board-wide declaration (any defender), checked against
+    /// the `creatures_attacked_this_turn` tracking set on GameState.
+    /// CR 508.6 + CR 508.1b: `Some(defender)` scopes to creatures that attacked a
+    /// specific player, checked against the per-defender
+    /// `creature_attacked_defenders_this_turn` ledger. Mirrors
+    /// `FilterProp::Attacking { defender }`.
+    AttackedThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defender: Option<ControllerRef>,
+    },
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
@@ -4385,6 +4449,17 @@ pub enum QuantityRef {
         kind: PlayerCounterKind,
         scope: CountScope,
     },
+    /// CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: The `kind` player-counter
+    /// total on the controller of the resolving ability's first object target —
+    /// "its controller" anaphoring the controller of the targeted object
+    /// (Corrupted Resolve: "counter target spell if its controller is
+    /// poisoned"; `>= 1` poison == "poisoned" per CR 122.1f). Resolved via
+    /// `ability_utils::parent_target_controller`, mirroring the target-relative
+    /// `TargetObjectManaValue` sibling of `ObjectManaValue`. Kept distinct from
+    /// `PlayerCounter { scope }` — that reads an aggregate over a `CountScope`
+    /// player set (controller/opponents/all), whereas this reads one specific
+    /// target-derived player, an axis the aggregate `CountScope` cannot express.
+    TargetControllerCounter { kind: PlayerCounterKind },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
     /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
@@ -4644,6 +4719,16 @@ pub enum QuantityRef {
     },
     /// CR 710.2: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
+    /// (air/earth/water/fire) the controller has performed this turn — these are
+    /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
+    /// rules that `game::bending::record_bending` records. Reads
+    /// `Player::bending_types_this_turn.len()` (a `HashSet<BendingType>` with
+    /// exactly four possible members). Backs Avatar Aang's "if you've done all
+    /// four this turn" (`>= 4` means every distinct bend type). Controller-scoped,
+    /// mirroring the bare `CrimesCommittedThisTurn` / `DescendedThisTurn` per-turn
+    /// accumulator siblings.
+    BendTypesThisTurn,
     /// CR 119.4: Amount of life gained this turn, scoped by `player` per the
     /// workspace "Parameterize, don't proliferate" principle (Round Π-4 — mirrors
     /// `LifeLostThisTurn`'s Π-3 lift). `Controller` reads
@@ -5024,6 +5109,20 @@ pub enum SeatDirection {
     /// The living player seated immediately to the controller's right — the
     /// previous player in turn order. Backward through `seat_order`.
     Right,
+}
+
+impl SeatDirection {
+    /// CR 607.2d: The single typed authority for mapping a chosen "left"/"right"
+    /// option label to a `SeatDirection`. Used by the {Left,Right} hijack in
+    /// `game/effects/choose.rs` so no call site ever string-matches "Left"
+    /// verbatim. Case-insensitive and whitespace-tolerant.
+    pub fn from_choice_label(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
 }
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
@@ -5645,10 +5744,14 @@ pub enum AttackersDeclaredCountSubject {
         filter: Option<TargetFilter>,
     },
     /// Count attackers whose announced attack target matches a scoped player,
-    /// planeswalker, battle, or combined attack-target class.
+    /// planeswalker, battle, or combined attack-target class. `filter` is the
+    /// optional condition-level type axis (CR 508.1): when `Some(f)`, only
+    /// attackers matching `f` that attack the scoped target are counted.
     AttackTarget {
         controller: ControllerRef,
         attacked: crate::types::triggers::AttackTargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
 }
 
@@ -6989,6 +7092,14 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
         action: BeholdCostAction,
+        /// CR 601.2b + CR 701.4a: when `Some`, the player first chooses a value
+        /// of this kind (creature type for Celestial Reunion) as part of paying
+        /// the behold cost. The choice is recorded as a `ChosenAttribute` on the
+        /// spell object; the behold `filter`'s `IsChosenCreatureType` leg then
+        /// scopes "of that type". `None` = the existing fixed-quality behold
+        /// (Monstrous Emergence, Close Encounter).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_choice: Option<ChoiceType>,
     },
     Composite {
         costs: Vec<AbilityCost>,
@@ -11593,6 +11704,21 @@ pub enum VoteTally {
 }
 
 impl TargetFilter {
+    /// Clone this filter with any `Typed` property equal to `prop` removed.
+    /// Used to strip a per-item discriminator leg (e.g. `IsChosenCreatureType`)
+    /// so the residual base filter can be enumerated across candidate values.
+    /// Non-`Typed` shapes are returned unchanged.
+    pub fn without_prop(&self, prop: &FilterProp) -> TargetFilter {
+        match self {
+            TargetFilter::Typed(filter) => {
+                let mut filter = filter.clone();
+                filter.properties.retain(|p| p != prop);
+                TargetFilter::Typed(filter)
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn normalized(self) -> Self {
         match self {
             TargetFilter::Typed(filter) => TargetFilter::Typed(filter.normalized()),
@@ -14851,6 +14977,16 @@ pub enum AbilityCondition {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
+        /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
+        /// declared chain slot `n` (resolved from the flattened root chain via
+        /// `resolve_parent_slot_from_root`) rather than this node's local
+        /// most-recent target. `None` (default) preserves the legacy
+        /// first-object / `TriggeringSource` behavior. Set by the two-target
+        /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
+        /// first-declared fighter (Malamet: "if the creature you control entered
+        /// this turn") reads slot 0 under most-recent-only chain propagation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_slot: Option<usize>,
     },
     /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
     /// at least one *object* target. Guards reflexive-target riders ("If that
@@ -19597,6 +19733,13 @@ mod tests {
             FilterProp::Attacking {
                 defender: Some(ControllerRef::Opponent),
             },
+            FilterProp::AttackedThisTurn { defender: None },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::Opponent),
+            },
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
@@ -19658,6 +19801,34 @@ mod tests {
         let json = serde_json::to_string(&props).unwrap();
         let deserialized: Vec<FilterProp> = serde_json::from_str(&json).unwrap();
         assert_eq!(props, deserialized);
+    }
+
+    /// CR 508.6: `AttackedThisTurn` parameterization is backward-compatible with
+    /// the old unit variant. `FilterProp` is internally-tagged (`tag = "type"`),
+    /// so `defender: None` serializes to exactly `{"type":"AttackedThisTurn"}` —
+    /// byte-identical to the old unit shape — and that legacy payload still
+    /// deserializes into `{ defender: None }`. `Some(_)` emits and round-trips.
+    /// Mirrors the sibling `Attacking { defender }` serde contract.
+    #[test]
+    fn attacked_this_turn_defender_serde_shape() {
+        // None omits the defender field entirely (skip_serializing_if).
+        let none = FilterProp::AttackedThisTurn { defender: None };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(
+            json, r#"{"type":"AttackedThisTurn"}"#,
+            "None must serialize to the legacy unit shape"
+        );
+        let back_none: FilterProp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back_none, none);
+
+        // Some(_) emits the defender field and round-trips.
+        let some = FilterProp::AttackedThisTurn {
+            defender: Some(ControllerRef::You),
+        };
+        let some_json = serde_json::to_string(&some).unwrap();
+        assert!(some_json.contains("defender"), "Some must emit the field");
+        let back: FilterProp = serde_json::from_str(&some_json).unwrap();
+        assert_eq!(back, some);
     }
 
     #[test]

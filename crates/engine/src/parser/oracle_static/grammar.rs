@@ -6,7 +6,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerFilter;
-use nom::character::complete::{digit1, one_of};
+use nom::character::complete::{alphanumeric1, digit1, one_of};
 use nom::combinator::{all_consuming, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair};
 
@@ -990,9 +990,27 @@ pub(crate) fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
     })
 }
 
-pub(crate) fn parse_legendary_supertype_grant(lower: &str) -> Option<()> {
+/// CR 205.4a + CR 205.4b: recognize a "... is <supertype>" grant riding on an
+/// attached-subject predicate body and return the granted supertype. Supertypes
+/// are additive (CR 205.4b) and are never card types. Generalizes the former
+/// legendary-only recognizer to every CR 205.4a supertype via
+/// [`nom_target::parse_supertype_word`] (Legendary/Basic/Snow), so Glittering
+/// Frost ("Enchanted land is snow.") and In Bolas's Clutches ("Enchanted
+/// permanent is legendary.") both flow through this ONE seam:
+/// `parse_continuous_modifications` pushes `AddSupertype { supertype }` for the
+/// returned supertype.
+///
+/// Scans at word boundaries so the grant is still found when it is one conjunct
+/// of a compound aura predicate ("... is legendary, gets +1/+1, and has
+/// flying"). `parse_supertype_word` consumes no trailing boundary by contract,
+/// so the `peek(not(alphanumeric1))` guard rejects a longer word that merely
+/// starts with a supertype (e.g. "snow" in "snowman").
+pub(crate) fn parse_supertype_grant(lower: &str) -> Option<Supertype> {
     nom_primitives::scan_at_word_boundaries(lower, |input| {
-        value((), tag::<_, _, OracleError<'_>>("is legendary")).parse(input)
+        let (rest, _) = tag::<_, _, OracleError<'_>>("is ").parse(input)?;
+        let (rest, supertype) = nom_target::parse_supertype_word(rest)?;
+        peek(not(alphanumeric1::<_, OracleError<'_>>)).parse(rest)?;
+        Ok((rest, supertype))
     })
 }
 

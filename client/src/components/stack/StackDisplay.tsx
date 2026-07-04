@@ -32,6 +32,9 @@ function getPendingCastObjectId(
 ): ObjectId | null {
   if (!waitingFor) return null;
   switch (waitingFor.type) {
+    // These cast-flow prompts all carry the casting spell in `pending_cast`, so
+    // the stack keeps its "Casting" badge while the prompt is up. CostTypeChoice
+    // is Celestial Reunion's pre-cost "choose a creature type" (CR 601.2b).
     case "TargetSelection":
     case "ModeChoice":
     case "OptionalCostChoice":
@@ -39,6 +42,7 @@ function getPendingCastObjectId(
     case "BlightChoice":
     case "HarmonizeTapChoice":
     case "ChooseXValue":
+    case "CostTypeChoice":
       return waitingFor.data.pending_cast.object_id;
     // CR 601.2b: PayCost carries its pending cast inside `resume` (only the
     // spell-cast resume; mana-ability cost payment has no pending cast).

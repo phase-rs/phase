@@ -349,6 +349,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOn { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -383,6 +384,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -606,6 +608,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -634,6 +637,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -790,6 +794,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
         | QuantityRef::Intensity { .. }
@@ -818,6 +823,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
@@ -1576,6 +1582,27 @@ fn resolve_ref(
                 .sum();
             i32::try_from(total).unwrap_or(i32::MAX)
         }
+        // CR 122.1f + CR 109.4 + CR 115.1 + CR 608.2c: the `kind` player-counter
+        // total on the controller of the first object target — "its controller
+        // is poisoned" (Corrupted Resolve). Needs the resolving `ability` to
+        // reach `ability.targets`, so it lives here rather than in the
+        // player-iteration helpers. Missing target / controller reads as 0.
+        QuantityRef::TargetControllerCounter { kind } => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .map_or(0, |pid| match kind {
+                // CR 810.10a + CR 810.10d: in Two-Headed Giant a player is
+                // "poisoned" through their team's shared poison total, so poison
+                // reads the team sum. CR 810.5: poison and life are the only
+                // shared resources — other player counters stay individual.
+                crate::types::player::PlayerCounterKind::Poison => {
+                    u32_to_i32_saturating(crate::game::players::team_poison_total(state, pid))
+                }
+                _ => state
+                    .players
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map_or(0, |p| u32_to_i32_saturating(p.player_counter(kind))),
+            }),
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
@@ -2541,6 +2568,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
+        // CR 701.65b/701.66b/701.67c/702.189b: distinct bend types the controller
+        // performed this turn — reads the tracked `HashSet<BendingType>` cardinality.
+        QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
+            usize_to_i32_saturating(p.bending_types_this_turn.len())
+        }),
         // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -5042,6 +5074,7 @@ mod tests {
             chosen_attributes: Vec::new(),
             counters: HashMap::new(),
             tapped: false,
+            is_suspected: false,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -10717,6 +10750,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
         state.current_trigger_event =
@@ -10778,6 +10812,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let power = resolve_quantity_with_targets(
@@ -10924,6 +10959,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -11001,6 +11037,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         assert!(
@@ -11077,6 +11114,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         assert!(
@@ -11139,6 +11177,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11198,6 +11237,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11250,6 +11290,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11313,6 +11354,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11353,6 +11395,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -11972,6 +12015,7 @@ mod tests {
                     counters: Default::default(),
                     chosen_attributes: vec![],
                     tapped: false,
+                    is_suspected: false,
                 },
             );
             state.exile_links.push(ExileLink {

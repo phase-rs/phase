@@ -72,7 +72,7 @@ fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
 fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
     // Longest-match-first ordering within shared prefixes (e.g. "fourteen" before "four").
     // Split into multiple alt groups to stay within nom's 21-element tuple limit.
-    alt((
+    let (rest, matched) = alt((
         value(100u32, tag("one hundred")),
         parse_hyphenated_english_number,
         parse_english_tens,
@@ -101,7 +101,22 @@ fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
         value(1, tag("one")),
         parse_article_number,
     )))
-    .parse(input)
+    .parse(input)?;
+
+    // Require a word boundary after the number word so a cardinal isn't matched
+    // inside a longer word ("sixth" → "six", "tenfold" → "ten", "nineteenth" →
+    // "nineteen"). This mirrors the boundary guard `parse_article_number` already
+    // applies to "a"/"an"; the multi-character number words previously lacked it
+    // because the `oracle_util::parse_number` wrapper only guards matches of ≤2
+    // characters. A following ASCII alphanumeric means the token continues, so
+    // the match was a spurious substring.
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+        _ => Ok((rest, matched)),
+    }
 }
 
 fn parse_english_tens(input: &str) -> OracleResult<'_, u32> {
@@ -869,6 +884,86 @@ where
     None
 }
 
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
+/// together with the byte offset where that match began.
+pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_last_at_word_boundaries_with_offset`] but only retains matches
+/// whose offset passes `accept_offset`.
+pub fn scan_last_valid_at_word_boundaries_with_offset<'a, O, F, P>(
+    text: &'a str,
+    mut combinator: F,
+    mut accept_offset: P,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+    P: FnMut(usize) -> bool,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            if accept_offset(offset) {
+                last = Some((offset, val, rest));
+            }
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// Like [`scan_at_word_boundaries`] but returns the **last** successful match.
+///
+/// Use for terminal riders ("... if <condition>", "... as long as <condition>")
+/// where an earlier `as if` phrase must not steal the gate.
+pub fn scan_last_at_word_boundaries<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut last = None;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            last = Some((val, rest));
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    last
+}
+
 /// Check whether `phrase` appears at any word boundary in `text`.
 ///
 /// More precise than `str::contains()` — matches complete phrases at word
@@ -1098,6 +1193,43 @@ mod tests {
         assert_eq!(parse_number("one hundred").unwrap().1, 100);
     }
 
+    /// A cardinal number word must not be matched inside a longer word (e.g.
+    /// the ordinal "sixth" or "tenfold"). The multi-character words previously
+    /// lacked the word-boundary guard that `parse_article_number` applies to
+    /// "a"/"an", and the `oracle_util::parse_number` wrapper only guarded
+    /// matches of ≤2 characters — so "sixth" parsed as 6, "tenth" as 10, etc.
+    #[test]
+    fn test_parse_english_number_requires_word_boundary() {
+        // Longer words that merely start with a cardinal must NOT parse.
+        for embedded in [
+            "sixth",
+            "tenth",
+            "tenfold",
+            "threefold",
+            "nineteenth",
+            "fourteener",
+        ] {
+            assert!(
+                parse_number(embedded).is_err(),
+                "{embedded:?} must not parse as an embedded cardinal"
+            );
+        }
+        // Genuine cardinals with a trailing boundary still parse, remainder intact.
+        assert_eq!(parse_number("six cards").unwrap(), (" cards", 6));
+        assert_eq!(parse_number("ten").unwrap(), ("", 10));
+        assert_eq!(
+            parse_number("nineteen creatures").unwrap(),
+            (" creatures", 19)
+        );
+        assert_eq!(
+            parse_number("three, then draw").unwrap(),
+            (", then draw", 3)
+        );
+        // Distinct number words that merely share a prefix are unaffected.
+        assert_eq!(parse_number("sixteen").unwrap(), ("", 16));
+        assert_eq!(parse_number("sixty").unwrap(), ("", 60));
+    }
+
     /// `parse_strict_counter_type` accepts recognized counter tokens (keyword
     /// counters, named counters) and rejects unknown tokens — unlike
     /// `parse_counter_type_typed`, which maps anything to `CounterType::Generic`.
@@ -1185,6 +1317,44 @@ mod tests {
         let result = scan_preceded("the creature enters", |i| {
             tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_picks_terminal_if_gate() {
+        let (_, tail) = scan_last_at_word_boundaries(
+            "you may cast as if they had flash if you control a zombie",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "you control a zombie");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_picks_terminal_if_gate() {
+        let (_, _, tail) = scan_last_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule if ten or more lands are on the battlefield",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        )
+        .expect("terminal if gate");
+        assert_eq!(tail, "ten or more lands are on the battlefield");
+    }
+
+    #[test]
+    fn test_scan_last_at_word_boundaries_with_offset_skips_as_if() {
+        let result = scan_last_valid_at_word_boundaries_with_offset(
+            "you can't play lands as if there were no rule",
+            |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+            |if_offset| {
+                let Some(start) = if_offset.checked_sub(3) else {
+                    return true;
+                };
+                !"you can't play lands as if there were no rule".is_char_boundary(start)
+                    || tag::<_, _, OracleError<'_>>("as ")
+                        .parse(&"you can't play lands as if there were no rule"[start..if_offset])
+                        .is_err()
+            },
+        );
         assert!(result.is_none());
     }
 

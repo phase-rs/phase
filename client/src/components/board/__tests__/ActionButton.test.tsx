@@ -1,8 +1,10 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
+import { dispatchAction, dispatchResolveAll } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import { useUiStore } from "../../../stores/uiStore";
 import { ActionButton } from "../ActionButton";
@@ -101,6 +103,7 @@ describe("ActionButton", () => {
       combatClickHandler: null,
     });
     useMultiplayerStore.setState({ actionPending: false });
+    useMultiplayerDraftStore.setState({ matchPairing: null });
   });
 
   afterEach(() => {
@@ -173,6 +176,144 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
+    useGameStore.setState({
+      gameMode: "local",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
+  it("builds the AI seat list for Resolve All when the other seats are AI-driven", () => {
+    useGameStore.setState({
+      gameMode: "ai",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
+      { playerId: 1, difficulty: "Medium" },
+    ]);
+  });
+
+  it("uses the live controller's bot seat binding for a Bot draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "Bot" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [DRAFT_BOT_AI_SEAT]);
+  });
+
+  it("claims no AI seats for a vs-human draft match", () => {
+    useGameStore.setState({
+      gameMode: "draft-match",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 0 } }),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 0,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 0 } },
+      legalActions: [],
+    });
+    useMultiplayerDraftStore.setState({ matchPairing: { type: "HumanHost" } as never });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
+  it("surfaces an armed UntilStackEmpty session with a cancel affordance while an opponent holds priority", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState({ type: "Priority", data: { player: 1 } }),
+        phase: "PostCombatMain",
+        auto_pass: { 0: { type: "UntilStackEmpty", initial_stack_len: 1 } },
+        stack: [
+          {
+            id: 1,
+            source_id: 1,
+            controller: 1,
+            kind: { type: "Spell", data: { card_id: 1 } },
+          },
+        ],
+      },
+      waitingFor: { type: "Priority", data: { player: 1 } },
+      legalActions: [],
+      isResolvingAll: false,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    const cancel = screen.getByRole("button", { name: "Resolving Stack..." });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

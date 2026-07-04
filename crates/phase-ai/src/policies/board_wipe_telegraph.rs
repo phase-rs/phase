@@ -269,6 +269,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = BoardWipeTelegraphPolicy.score(&ctx);
@@ -352,6 +353,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = BoardWipeTelegraphPolicy.score(&ctx);
@@ -448,6 +450,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let base_score = BoardWipeTelegraphPolicy.score(&base_ctx);
 
@@ -473,6 +476,7 @@ mod tests {
             config: &config,
             context: &context_with_tokens,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let amp_score = BoardWipeTelegraphPolicy.score(&amp_ctx);
 

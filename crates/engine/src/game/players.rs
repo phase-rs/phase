@@ -80,6 +80,31 @@ pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirectio
     }
 }
 
+/// CR 102.2 + CR 508.1c: The nearest *opponent* in the given seating direction,
+/// skipping living teammates. In a free-for-all every other seat is an opponent
+/// so this equals [`neighbor`], but in team formats (Two-Headed Giant, CR 810)
+/// an adjacent teammate is not the "nearest opponent" — the walk continues past
+/// them to the first living opponent in that direction.
+///
+/// Walks the seat ring one living player at a time via [`neighbor`]; returns
+/// `None` only if the walk returns to `controller` without finding an opponent
+/// (e.g. `controller` is the sole living player). Termination is guaranteed:
+/// each step advances deterministically around the finite living-seat ring.
+pub fn nearest_opponent(
+    state: &GameState,
+    controller: PlayerId,
+    direction: SeatDirection,
+) -> Option<PlayerId> {
+    let mut candidate = neighbor(state, controller, direction);
+    while candidate != controller {
+        if is_opponent(state, controller, candidate) {
+            return Some(candidate);
+        }
+        candidate = neighbor(state, candidate, direction);
+    }
+    None
+}
+
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
 ///
 /// Returns all living players not on the given player's team, in seat order.
@@ -357,6 +382,61 @@ mod tests {
             p.is_eliminated = true;
         }
         state.eliminated_players.push(player);
+    }
+
+    // --- nearest_opponent ---
+
+    #[test]
+    fn nearest_opponent_equals_neighbor_in_free_for_all() {
+        // Individual seats: every other player is an opponent, so the nearest
+        // opponent is just the adjacent seat.
+        let state = make_state(4, FormatConfig::free_for_all());
+        for dir in [SeatDirection::Left, SeatDirection::Right] {
+            assert_eq!(
+                nearest_opponent(&state, PlayerId(0), dir),
+                Some(neighbor(&state, PlayerId(0), dir)),
+                "free-for-all nearest opponent is the adjacent seat ({dir:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_opponent_skips_teammate_in_two_headed_giant() {
+        // 2HG: teams {P0,P1} and {P2,P3}, seat order [P0,P1,P2,P3]. P0's left
+        // neighbor P1 is a TEAMMATE; the nearest opponent to the left is P2.
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(
+            !is_opponent(&state, PlayerId(0), PlayerId(1)),
+            "P1 is P0's teammate in 2HG"
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1),
+            "the adjacent left seat is the teammate"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            Some(PlayerId(2)),
+            "nearest opponent skips the teammate to the first opponent P2"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Right),
+            Some(PlayerId(3)),
+            "to the right, P3 is the first opponent"
+        );
+    }
+
+    #[test]
+    fn nearest_opponent_none_when_sole_survivor() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+            eliminate(&mut state, p);
+        }
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            None,
+            "no living opponent in any direction → None"
+        );
     }
 
     // --- is_alive ---
