@@ -361,6 +361,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Unsuspect { .. }
         | Effect::VentureInto { .. }
         | Effect::VentureIntoDungeon
+        | Effect::SwapChosenLabels { .. }
         | Effect::Vote { .. }
         | Effect::WinTheGame { .. } => EffectPolarity::Contextual,
     }

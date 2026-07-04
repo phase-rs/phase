@@ -1331,7 +1331,10 @@ impl ManaCost {
                 shards: shards.clone(),
                 generic: generic.saturating_sub(reduction.mana_value()),
             },
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => self.clone(),
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => self.clone(),
         }
     }
 
