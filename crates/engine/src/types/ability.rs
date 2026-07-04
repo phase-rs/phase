@@ -8051,6 +8051,11 @@ pub struct DamageContextSnapshot {
     /// resume so remaining post-replacement damage still redirects correctly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excess_recipient: Option<ExcessRecipient>,
+    /// CR 702.15b: lifelink already-dealt bonus deferred from an earlier leg of a
+    /// CR 120.4a-modified event, carried across a redirect leg's replacement pause
+    /// so the combined lifelink total is still gained on resume.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub lifelink_bonus: u32,
 }
 
 /// A single conjured card entry: card source + quantity.

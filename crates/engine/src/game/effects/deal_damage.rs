@@ -39,6 +39,14 @@ pub(crate) struct DamageContext {
     /// `Effect::DealDamage { excess }`. `None` for combat damage and for every
     /// path that does not parse this rider.
     pub(crate) excess_recipient: Option<ExcessRecipient>,
+    /// CR 702.15b + CR 120.4a: lifelink already-dealt bonus deferred from an
+    /// earlier leg of the same CR 120.4a-modified damage event. When the excess is
+    /// redirected, the creature leg gains no lifelink itself; instead the redirect
+    /// leg carries `lifelink_bonus = <creature lethal>` and gains the combined
+    /// total (its own dealt + the bonus) when it resolves — inline OR after its own
+    /// replacement pause+resume (the bonus is threaded through the snapshot and
+    /// `PendingReplacement`). `0` on every ordinary damage leg.
+    pub(crate) lifelink_bonus: u32,
 }
 
 fn player_context_target(
@@ -134,6 +142,9 @@ impl DamageContext {
             combat_damage_poison: keywords::effective_total_toxic_value(state, source_id),
             // CR 120.4a: attached later in `resolve()` from the effect's rider.
             excess_recipient: None,
+            // CR 702.15b: set only on a redirect leg; from_source rebuilds the base
+            // context, so the resume restores the bonus from the parked record.
+            lifelink_bonus: 0,
         })
     }
 
@@ -152,6 +163,7 @@ impl DamageContext {
             combat_damage_poison: 0,
             // CR 120.4a: no excess redirect on the source-gone fallback path.
             excess_recipient: None,
+            lifelink_bonus: 0,
         }
     }
 }
@@ -169,6 +181,9 @@ impl From<DamageContextSnapshot> for DamageContext {
             combat_damage_poison: snapshot.combat_damage_poison,
             // CR 120.4a: restore the excess-redirect rider on resume.
             excess_recipient: snapshot.excess_recipient,
+            // CR 702.15b: restore the deferred lifelink bonus so a redirect leg
+            // resumed from a snapshot still gains the combined total.
+            lifelink_bonus: snapshot.lifelink_bonus,
         }
     }
 }
@@ -186,6 +201,8 @@ impl From<&DamageContext> for DamageContextSnapshot {
             combat_damage_poison: ctx.combat_damage_poison,
             // CR 120.4a: preserve the excess-redirect rider into the snapshot.
             excess_recipient: ctx.excess_recipient,
+            // CR 702.15b: preserve the deferred lifelink bonus into the snapshot.
+            lifelink_bonus: ctx.lifelink_bonus,
         }
     }
 }
@@ -351,12 +368,14 @@ pub(crate) fn apply_damage_to_target(
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }
-            // CR 120.4a: stash the excess-redirect rider on the parked replacement
-            // so the resume (`handle_replacement_choice`, which rebuilds the ctx
-            // from the source and cannot re-derive the effect rider) still
-            // redirects the excess to the creature's controller.
+            // CR 120.4a + CR 702.15b: stash the excess-redirect rider and the
+            // deferred lifelink bonus on the parked replacement so the resume
+            // (`handle_replacement_choice`, which rebuilds the ctx from the source
+            // and cannot re-derive either) still redirects the excess and gains the
+            // combined lifelink for a paused redirect leg.
             if let Some(pending) = state.pending_replacement.as_mut() {
                 pending.excess_recipient = ctx.excess_recipient;
+                pending.lifelink_bonus = ctx.lifelink_bonus;
             }
             Ok(DamageResult::NeedsChoice)
         }
@@ -705,39 +724,35 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    // CR 120.4a: redirect the excess to the damaged permanent's controller.
-    // `excess` is the amount past what would be lethal / past loyalty / past
-    // defense, accounting for marked damage (CR 120.6), deathtouch (CR 702.2c),
-    // and multi-type greatest amount (CR 120.10). The permanent above was already
-    // reduced to its lethal portion (`primary_amount`), so this deals the excess
-    // *instead* — the two together sum to `actual_amount`, never more. Redirect
-    // only for object targets carrying the rider.
-    // CR 120.4a treats the redirect as ONE modified damage event, not two, so the
-    // redirect leg does NOT gain lifelink on its own — lifelink for the whole event
-    // is gained once below for the total actually dealt. `redirect_dealt` captures
-    // how much the redirect actually landed (a prevention/replacement may reduce it).
-    let mut redirect_dealt = 0u32;
+    // CR 120.4a treats the redirect as ONE modified damage event. The excess is
+    // dealt to the controller by a redirect leg that carries `lifelink_bonus` (this
+    // creature's lethal `primary_amount`) plus the source's real lifelink, so THAT
+    // leg gains the COMBINED lifelink (its own dealt + the bonus) when it resolves —
+    // inline OR after its own replacement pause+resume (the bonus is threaded through
+    // the snapshot / PendingReplacement). `redirected` records that the excess and
+    // this leg's lifelink were handed off, so the creature leg gains nothing here.
+    let mut redirected = false;
     if let (Some(ExcessRecipient::TargetController), TargetRef::Object(obj_id)) =
         (ctx.excess_recipient, t)
     {
         if redirect_excess > 0 {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
-                // CR 120.7: the source of the redirected damage is the same object
-                // that dealt the primary damage, so reuse `ctx` (same source_id,
-                // controller, keywords). `excess_recipient: None` is a re-entrancy
-                // guard; `has_lifelink: false` defers lifelink to the single combined
-                // gain below so a life-gain replacement choice on the redirected leg
-                // cannot split or drop the source's lifelink.
+                // CR 120.7: same source object as the primary damage (source_id /
+                // controller / keywords reused). `excess_recipient: None` is a
+                // re-entrancy guard; `lifelink_bonus: primary_amount` hands this
+                // creature leg's lethal to the redirect leg so the combined lifelink
+                // is gained even if the redirected damage itself pauses on a
+                // replacement choice.
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
-                    has_lifelink: false,
+                    lifelink_bonus: primary_amount,
                     ..*ctx
                 };
+                redirected = true;
                 // Route through the same non-combat single-target pipeline the
                 // primary player-damage path uses (gate + CR 614/615 replacement).
-                // A replacement pause here (e.g. a life-loss replacement on the
-                // controller) propagates NeedsChoice; the primary damage has
-                // already been fully applied, so no double-application occurs.
+                // A pause here propagates NeedsChoice; the redirect leg carries
+                // `lifelink_bonus`, so the combined lifelink is still gained on resume.
                 match apply_damage_to_target(
                     state,
                     &redirect_ctx,
@@ -746,33 +761,37 @@ pub(crate) fn apply_damage_after_replacement(
                     false,
                     events,
                 ) {
-                    Ok(DamageResult::Applied(dealt)) => redirect_dealt = dealt,
+                    Ok(DamageResult::Applied(_)) => {}
                     Ok(DamageResult::NeedsChoice) => return DamageResult::NeedsChoice,
                     // A redirect gate failure must not corrupt the primary result;
-                    // treat it as no redirect applied (primary damage stands).
-                    Err(_) => {}
+                    // fall through so the source still gains lifelink for the lethal
+                    // portion it actually dealt (the excess was simply not redirected).
+                    Err(_) => redirected = false,
                 }
             }
         }
     }
 
-    // CR 702.15b / CR 120.3f: Lifelink — the source's controller gains life equal to
-    // the total damage this single (CR 120.4a-modified) event actually dealt: the
-    // creature's lethal `primary_amount` plus whatever the redirect actually dealt to
-    // the controller. Gained ONCE, as the last step, so (a) a life-gain replacement
-    // pause here cannot drop any lifelink portion — both damage legs are already
-    // applied — and (b) a prevented redirect (`redirect_dealt == 0`) gains nothing for
-    // the excess. Without the rider `primary_amount == actual_amount` and
-    // `redirect_dealt == 0`, so this is the ordinary lifelink gain.
-    let lifelink_amount = primary_amount + redirect_dealt;
-    if ctx.has_lifelink
-        && lifelink_amount > 0
-        && super::life::apply_life_gain(state, ctx.controller, lifelink_amount, events).is_err()
-    {
-        // CR 614.7: Life gain replacement needs player choice. All damage (primary
-        // and redirected) has already been dealt; only this final combined lifelink
-        // gain is deferred to the choice.
-        return DamageResult::NeedsChoice;
+    // CR 702.15b / CR 120.3f: Lifelink — the source's controller gains life for the
+    // damage THIS leg actually dealt (`primary_amount`, the lethal portion after any
+    // rider reduction) plus any `lifelink_bonus` deferred from an earlier leg of the
+    // same CR 120.4a-modified event. Skipped when the excess and this leg's lifelink
+    // were handed to the redirect leg (which gains the combined total instead). For a
+    // redirect leg this fires with `primary_amount` = the excess it dealt and
+    // `lifelink_bonus` = the creature's lethal, so it gains the combined total —
+    // inline or on resume; a prevented redirect leg deals 0 and gains only the
+    // deferred lethal bonus. Without the rider `lifelink_bonus == 0`, the ordinary
+    // gain.
+    if !redirected {
+        let lifelink_amount = primary_amount + ctx.lifelink_bonus;
+        if ctx.has_lifelink
+            && lifelink_amount > 0
+            && super::life::apply_life_gain(state, ctx.controller, lifelink_amount, events).is_err()
+        {
+            // CR 614.7: Life-gain replacement needs a player choice. All damage has
+            // already been dealt; only this final lifelink gain is deferred.
+            return DamageResult::NeedsChoice;
+        }
     }
 
     DamageResult::Applied(actual_amount)

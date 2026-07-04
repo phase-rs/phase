@@ -6409,6 +6409,7 @@ fn pipeline_loop(
                     // CR 120.4a: set by `apply_damage_to_target` right after this
                     // park returns NeedsChoice (the ctx rider isn't known here).
                     excess_recipient: None,
+                    lifelink_bonus: 0,
                     // CR 614.12a: first park of this choice — no MayCost has been
                     // paid yet. Set only when re-parking after a paused accept.
                     may_cost_paid: false,
@@ -6445,6 +6446,7 @@ fn pipeline_loop(
                 // CR 120.4a: set by `apply_damage_to_target` right after this park
                 // returns NeedsChoice (the ctx rider isn't known here).
                 excess_recipient: None,
+                lifelink_bonus: 0,
                 // CR 614.12a: distinct-replacement choices carry no MayCost.
                 may_cost_paid: false,
                 may_cost_remaining: None,
@@ -6659,6 +6661,7 @@ fn continue_replacement_impl(
                     // permanent-entry accept, never a damage hit, so no excess
                     // rider applies here.
                     excess_recipient: None,
+                    lifelink_bonus: 0,
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                 });
@@ -8887,6 +8890,7 @@ mod tests {
             is_optional: true,
             library_placement: None,
             excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -8969,6 +8973,7 @@ mod tests {
             is_optional: false,
             library_placement: None,
             excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -11821,6 +11826,7 @@ mod tests {
             is_optional: false,
             library_placement: None,
             excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });

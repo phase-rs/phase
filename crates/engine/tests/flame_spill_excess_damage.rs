@@ -11,8 +11,9 @@
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, DamageContextSnapshot, Effect, ExcessRecipient, QuantityExpr,
-    QuantityRef, ReplacementDefinition, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, DamageContextSnapshot, Effect, ExcessRecipient,
+    PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -294,6 +295,101 @@ fn t13_lifelink_replacement_choice_resolves_full_combined_total() {
     );
 }
 
+/// T14 — CR 120.4a + CR 615 + CR 702.15b: the combined lifelink must survive the
+/// REDIRECTED DAMAGE itself pausing on a replacement choice (distinct from T13's
+/// life-gain pause). P1 controls an optional "prevent the next 1 damage to you"
+/// shield, so the redirected excess damage to P1 pauses. Driving through the choice
+/// (declining the shield), the redirected damage lands and — via the parked
+/// `lifelink_bonus` restored on resume — the source's controller still gains the
+/// full combined lifelink (creature lethal 2 + redirect 2 = 4). Before the parked
+/// continuation, the resume rebuilt context from the source and dropped the gain.
+#[test]
+fn t14_lifelink_redirect_damage_replacement_choice_resolves_full_total() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Victim", 2, 2).id();
+    {
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(1))
+            .mode(ReplacementMode::Optional { decline: None })
+            .description("You may prevent the next 1 damage to you.".to_string());
+        // Apply to damage dealt to the shield's controller (P1) as a player.
+        shield.valid_player = Some(ReplacementPlayerScope::You);
+        scenario
+            .add_creature(P1, "Shieldbearer", 0, 3)
+            .with_replacement_definition(shield);
+    }
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Flame Spill", false, FLAME_SPILL);
+        b.with_mana_cost(ManaCost::generic(0))
+            .with_keyword(Keyword::Lifelink);
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let p0_before = runner.state().players[0].life;
+    let p1_before = runner.state().players[1].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free lifelink Flame Spill must be accepted");
+
+    let mut saw_choice = false;
+    for _ in 0..32 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(creature)],
+                })
+                .map(|_| ())
+                .expect("targeting the creature must succeed"),
+            WaitingFor::ReplacementChoice { .. } => {
+                saw_choice = true;
+                // Decline the prevention shield (index 1 of an Optional with no
+                // decline branch), so the redirected damage resolves through.
+                runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .map(|_| ())
+                    .expect("declining the prevention shield must resolve the choice");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("unexpected prompt while resolving lifelink Flame Spill: {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_choice,
+        "the redirected damage must surface the prevention replacement choice"
+    );
+    // The shield prevents 1 of the 2 redirected damage, so P1 loses 1.
+    assert_eq!(
+        runner.state().players[1].life - p1_before,
+        -1,
+        "P1 takes the redirected excess minus the 1 prevented"
+    );
+    // The combined lifelink is gained on resume after the redirected-DAMAGE
+    // replacement choice, via the parked `lifelink_bonus`: creature lethal 2 +
+    // redirect ACTUALLY dealt 1 (1 prevented) = 3. Before the parked continuation
+    // the resume rebuilt context from the source and dropped this gain entirely.
+    assert_eq!(
+        runner.state().players[0].life - p0_before,
+        3,
+        "P0 gains the combined lifelink for the damage actually dealt (2 lethal + 1 redirect), not dropped"
+    );
+}
+
 /// Collect every effect in an ability's `sub_ability` chain.
 fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     out.push(&def.effect);
@@ -391,6 +487,7 @@ fn t9_snapshot_carries_excess_recipient_across_resume() {
         has_infect: false,
         combat_damage_poison: 0,
         excess_recipient: Some(ExcessRecipient::TargetController),
+        lifelink_bonus: 3,
     };
     let json = serde_json::to_string(&snap).expect("snapshot serializes");
     let back: DamageContextSnapshot = serde_json::from_str(&json).expect("snapshot deserializes");
@@ -398,5 +495,9 @@ fn t9_snapshot_carries_excess_recipient_across_resume() {
         back.excess_recipient,
         Some(ExcessRecipient::TargetController),
         "the excess-redirect rider must survive the snapshot round-trip"
+    );
+    assert_eq!(
+        back.lifelink_bonus, 3,
+        "the deferred lifelink bonus must survive the snapshot round-trip"
     );
 }
