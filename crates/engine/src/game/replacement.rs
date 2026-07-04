@@ -7681,6 +7681,10 @@ mod tests {
                 vec![ReplacementEvent::ProduceMana],
             ),
             (
+                ProposedEvent::planeswalk(PlayerId(0)),
+                vec![ReplacementEvent::Planeswalk],
+            ),
+            (
                 ProposedEvent::Sacrifice {
                     object_id: ObjectId(1),
                     player_id: PlayerId(0),
