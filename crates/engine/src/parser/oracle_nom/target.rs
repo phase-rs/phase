@@ -6,8 +6,8 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{oracle_err, OracleError, OracleResult};
@@ -368,7 +368,16 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(TargetFilter::TriggeringSource, tag("that spell")),
         value(TargetFilter::TriggeringSource, tag("that creature")),
-        value(TargetFilter::TriggeringSource, tag("that permanent")),
+        value(
+            TargetFilter::TriggeringSource,
+            terminated(
+                tag("that permanent"),
+                not(preceded(
+                    tag(" "),
+                    alt((tag("or player"), tag("or a player"))),
+                )),
+            ),
+        ),
         value(TargetFilter::TriggeringSource, tag("that card")),
         parse_attacking_player_event_ref,
         // CR 506.3d: "that opponent" before the shorter "that player" arm.
@@ -992,6 +1001,13 @@ mod tests {
         let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
         assert_eq!(rest8, ".");
         assert_eq!(f8, TargetFilter::DefendingPlayer);
+
+        let (rest9, f9) = parse_event_context_ref("that permanent").unwrap();
+        assert_eq!(rest9, "");
+        assert_eq!(f9, TargetFilter::TriggeringSource);
+
+        assert!(parse_event_context_ref("that permanent or player").is_err());
+        assert!(parse_event_context_ref("that permanent or a player").is_err());
     }
 
     #[test]

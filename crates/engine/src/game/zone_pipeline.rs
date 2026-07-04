@@ -1681,6 +1681,13 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.cast_cost_paid_object = link.cast_cost_paid_object;
             }
         }
+        // CR 707.10f + CR 608.3f: The is_copy→is_token flip for a resolving
+        // permanent-spell copy now happens UPSTREAM in `stack.rs::resolve_top`,
+        // at the top of the `dest == Zone::Battlefield` block — BEFORE the
+        // ProposedEvent is built, before `replace_event` matches the ZoneChange,
+        // and before the zone-change record snapshots is_token. That is the sole
+        // path a copy (only ever created on the stack by `Effect::CastCopyOfCard`)
+        // reaches the battlefield, so no un-flipped copy can arrive here.
         if to == Zone::Battlefield || from == Zone::Battlefield {
             crate::game::layers::mark_layers_full(state);
         }

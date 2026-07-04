@@ -228,5 +228,10 @@
     "settings": "Paramètres",
     "languageSettings": "Langue ({{lang}}) — ouvrir les paramètres",
     "languageTitle": "Langue : {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Une erreur est survenue",
+    "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
+    "reload": "Recharger"
   }
 }

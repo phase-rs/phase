@@ -874,6 +874,12 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         Effect::CreateDrawReplacement { replacement_effect } => {
             walk_effect(replacement_effect, out)
         }
+        // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
+        // Point in Time: chaos ensues). Walk it so any conjure name it carries is
+        // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            walk_effect(replacement_effect, out)
+        }
         // Heist exiles a card from an opponent's library at random; it does not
         // name a conjure card, so there is no static face to preload.
         Effect::Heist { .. } | Effect::HeistExile => {}
@@ -1006,6 +1012,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // CR 120.1: leaf effect — the source/recipient filters carry no nested
         // ability or effect to walk.
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -1120,6 +1127,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -1192,6 +1200,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // ContinuousModifications, never conjured card names.
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize
+        // CR 608.2d + CR 122.1: counter-kind choice / consume carry no conjure names.
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

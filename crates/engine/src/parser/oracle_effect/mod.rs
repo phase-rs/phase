@@ -21,9 +21,10 @@ pub(crate) use lower::{
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
     apply_where_x_to_filter, extract_bounded_target_multi_target,
-    extract_exact_target_multi_target, parse_dynamic_counter_suffix_body,
-    parse_multi_target_count_expr, parse_where_x_quantity_expression, strip_exact_target_prefix,
-    strip_optional_target_prefix, try_parse_pump,
+    extract_exact_target_multi_target, extract_optional_target_multi_target,
+    parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
+    parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
+    try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -73,7 +74,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
-    parse_for_each_object_filter_clause,
+    parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_target, parse_target_with_ctx,
@@ -140,8 +141,8 @@ use self::sequence::{
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
-    try_parse_each_deals_damage_equal_to_power, try_parse_subject_predicate_ast,
-    try_parse_targeted_controller_gain_life,
+    try_parse_each_deals_damage_equal_to_power, try_parse_each_source_deals_damage,
+    try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::ParseContext;
@@ -1355,7 +1356,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
     })
 }
 
-fn parse_optional_period_and_end(input: &str) -> Option<()> {
+pub(crate) fn parse_optional_period_and_end(input: &str) -> Option<()> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
         .ok()?;
@@ -5106,6 +5107,14 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
             unless_pay_deferred,
         );
     }
+    let original_lower = text.to_lowercase();
+    if let Some(mut clause) = try_parse_for_each_copy_token_source(text, &original_lower, ctx) {
+        peel_ctx.apply_optional(&mut clause.optional);
+        if clause.condition.is_none() {
+            clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
+        }
+        return attach_unless_slots(clause, None, unless_pay_deferred);
+    }
     if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
@@ -5113,7 +5122,6 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
         }
         return attach_unless_slots(clause, None, unless_pay_deferred);
     }
-    let original_lower = text.to_lowercase();
     if scan_contains_phrase(&original_lower, "this turn")
         || scan_contains_phrase(&original_lower, "until ")
         || scan_contains_phrase(&original_lower, "remain exiled")
@@ -5178,23 +5186,18 @@ fn try_parse_for_each_copy_token_source(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    let (source_filter, body) = parse_for_each_object_copy_parts(text, lower)?;
-    let body_lower = body.to_lowercase();
+    let (source_filter, body_effect) = parse_for_each_object_copy_parts(text, lower, ctx)?;
     let Effect::CopyTokenOf {
-        target,
         enters_attacking,
         tapped,
         count,
         extra_keywords,
         additional_modifications,
         ..
-    } = token::try_parse_token(&body_lower, body, ctx)?
+    } = body_effect
     else {
         return None;
     };
-    if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
-        return None;
-    }
     Some(parsed_clause(Effect::CopyTokenOf {
         target: TargetFilter::None,
         owner: TargetFilter::Controller,
@@ -5205,6 +5208,55 @@ fn try_parse_for_each_copy_token_source(
         extra_keywords,
         additional_modifications,
     }))
+}
+
+/// Parse the residual of a "choose ..." head as a bare battlefield-object
+/// selection filter: a `Typed` filter with NO controller/zone constraint and no
+/// leading "target", consuming the entire input. Returns `None` otherwise — the
+/// parser IS the detector, so a controller-scoped ("a creature you control"),
+/// targeting ("target creature"), zone ("a card in your graveyard"), or named
+/// ("a color") choice is rejected here and routed to its own seam.
+fn parse_choose_object_selection_filter(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    let text = text.trim();
+    let lower = text.to_ascii_lowercase();
+    // CR 601.2c: reject targeting ("choose target ...") — announced at cast.
+    if tag::<_, _, OracleError<'_>>("target")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return None;
+    }
+    let (filter, rem) = parse_target_with_ctx(text, ctx);
+    if !rem.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(ref tf) = filter else {
+        return None;
+    };
+    if tf.controller.is_some() || tf.type_filters.is_empty() {
+        return None;
+    }
+    // `Effect::ChooseObjectsIntoTrackedSet` scans the BATTLEFIELD, so reject
+    // zone-scoped selections ("cards in each graveyard") and the bare `Card`
+    // type (which denotes a card in a zone, not a battlefield permanent).
+    if tf
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }))
+    {
+        return None;
+    }
+    if tf
+        .type_filters
+        .iter()
+        .any(|t| matches!(t, TypeFilter::Card))
+    {
+        return None;
+    }
+    Some(filter)
 }
 
 /// CR 603.7e + CR 118.1: Detect the compound clause
@@ -5320,39 +5372,54 @@ fn try_parse_choose_and_pay_per_object(
     Some(clause)
 }
 
-fn parse_for_each_object_copy_parts<'a>(
-    text: &'a str,
+fn parse_for_each_object_copy_parts(
+    text: &str,
     lower: &str,
-) -> Option<(TargetFilter, &'a str)> {
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, Effect)> {
+    let text = strip_leading_sequence_connector(text).trim();
+    let lower = strip_leading_sequence_connector(lower).trim();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("for each ")
         .parse(lower)
         .ok()?;
     let clause_start = lower.len() - after_prefix.len();
-    let (after_clause, clause_lower) = take_until::<_, _, OracleError<'_>>(", ")
-        .parse(after_prefix)
-        .ok()?;
-    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
-        .parse(after_clause)
-        .ok()?;
-    if !is_copy_token_anaphor_body(body_lower.trim()) {
-        return None;
-    }
-    let clause = &lower[clause_start..clause_start + clause_lower.len()];
-    let source_filter = parse_for_each_object_filter_clause(clause)?;
-    let body_start = text.len() - body_lower.len();
-    Some((source_filter, text[body_start..].trim()))
-}
+    let mut search_lower = after_prefix;
+    let mut search_offset = 0usize;
 
-fn is_copy_token_anaphor_body(input: &str) -> bool {
-    let parsed = |i| -> OracleResult<'_, ()> {
-        let (i, _) = token::parse_copy_token_entry_modifiers(i)?;
-        let i = i.trim_start();
-        let (i, _) = tag("it").parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    parsed(input).is_ok()
+    loop {
+        let (body_lower, clause_lower) =
+            terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", "))
+                .parse(search_lower)
+                .ok()?;
+        let clause_end = clause_start + search_offset + clause_lower.len();
+        let clause = &lower[clause_start..clause_end];
+        let body_start = text.len() - body_lower.len();
+        let body = text[body_start..].trim();
+        let candidate_ctx = ctx.clone();
+
+        if let Some(source_filter) =
+            parse_for_each_object_filter_clause_with_context(clause, &candidate_ctx)
+        {
+            let mut body_ctx = candidate_ctx.clone();
+            if let Some(effect) = token::try_parse_token(body_lower, body, &mut body_ctx) {
+                if matches!(
+                    &effect,
+                    Effect::CopyTokenOf {
+                        target: TargetFilter::ParentTarget
+                            | TargetFilter::SelfRef
+                            | TargetFilter::TriggeringSource,
+                        ..
+                    }
+                ) {
+                    *ctx = candidate_ctx;
+                    return Some((source_filter, effect));
+                }
+            }
+        }
+
+        search_offset = after_prefix.len() - body_lower.len();
+        search_lower = body_lower;
+    }
 }
 
 /// CR 608.2c + CR 109.4: "Choose a [second|third|...] player to <verb>" —
@@ -5848,6 +5915,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         }
     }
 
+    // CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
+    // to <recipient>" — every matching object is its own damage source. Intercept
+    // BEFORE the generic subject-stripping sites (mod.rs `9705`/`9735`,
+    // `subject.rs:178` via `try_parse_subject_predicate_ast`) flatten the source
+    // class into a single ability-sourced `DealDamage`. Returns the supported
+    // `EachSourceDealsDamage` clause, or a fail-closed `Unimplemented` for the
+    // deferred attachment-host recipient (Aura Barbs clause 2).
+    if let Some(clause) = try_parse_each_source_deals_damage(text, ctx) {
+        return clause;
+    }
+
     // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits
     // where the subject carried over from the previous clause.
     // E.g., "draws seven cards" → "draw seven cards" (from "Each player discards
@@ -5887,6 +5965,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
+    // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
+    // replacement chain — BEFORE the leading-"if" strip further down would peel
+    // the condition clause and hand only "chaos ensues instead" to the imperative
+    // dispatch (which cannot recover the replacement semantics).
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_planar_die_planeswalk_replacement(&lower)
+    {
         return parsed_clause(effect);
     }
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
@@ -6996,6 +7084,37 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
     }
 
     let lower = tp.lower;
+
+    // Explicit target form: "Target creature perpetually gets -2/-0."
+    // `parse_target` owns the target/filter grammar; this arm only recognizes the
+    // perpetual P/T tail and rejects compound grants so mixed forms stay honest.
+    if peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(lower)
+        .is_ok()
+    {
+        let (target, after_target) = parse_target(lower);
+        if !matches!(target, TargetFilter::Any) {
+            let (rest, _) = space1::<_, OracleError<'_>>(after_target).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(rest)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            let (rest, (power_delta, toughness_delta)) =
+                nom_primitives::parse_pt_modifier(rest).ok()?;
+            return tail_done(rest).then_some(Effect::ApplyPerpetual {
+                target,
+                modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            });
+        }
+    }
 
     // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
@@ -8645,6 +8764,16 @@ fn try_parse_next_matches_until(input: &str) -> Option<UntilCondition> {
     let filter = if filter_text == "nonland" {
         TargetFilter::Typed(
             TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        )
+    } else if let Ok(("", supertype)) = super::oracle_nom::target::parse_supertype_word(filter_text)
+    {
+        // CR 205.4a: A bare supertype adjective ("legendary"/"basic"/"snow")
+        // remaining after " card" is stripped describes a supertype-only card
+        // filter (e.g. "until you exile a legendary card"). `parse_target` only
+        // recognises supertypes as an adjective prefix before a noun, so build
+        // the supertype-scoped card filter directly from the shared combinator.
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::HasSupertype { value: supertype }]),
         )
     } else {
         // Delegate to existing target parsing for other filter types
@@ -11603,7 +11732,8 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
     {
         clause.multi_target = extract_exact_target_multi_target(text)
-            .or_else(|| extract_bounded_target_multi_target(text));
+            .or_else(|| extract_bounded_target_multi_target(text))
+            .or_else(|| extract_optional_target_multi_target(text));
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
@@ -20321,6 +20451,183 @@ fn try_parse_conditional_protection_grant_ability(
     Some(def)
 }
 
+/// CR 608.2c: After a "Choose up to N X" head that publishes the chosen objects
+/// into the resolution chain's tracked set, a following "affect all OTHER X"
+/// clause means "X not among those chosen this way" — not "X other than the
+/// ability source". Rewrite `FilterProp::Another` → `Not(InTrackedSet(0))` in
+/// the mass-move filters of the head's sub-ability chain (Day of the Doctor IV:
+/// "Choose up to three Doctors. You may exile all other creatures."). Gated on
+/// the head being `ChooseObjectsIntoTrackedSet` so ordinary source-relative
+/// "all other creatures" (Good King Mog, etc.) is untouched.
+fn rewrite_choose_tracked_set_exclusion(def: &mut AbilityDefinition) {
+    // The generic dispatcher lifts "up to N" cardinality into `multi_target` and
+    // leaves the residual "choose <plural type>" head as `Unimplemented`.
+    // Reconstruct it as a first-class selection head here, reusing that
+    // already-extracted cardinality (the parser-as-detector path in
+    // `try_parse_choose_objects_into_tracked_set` handles the un-stripped case).
+    maybe_convert_choose_head_into_tracked_set(def);
+    if !matches!(*def.effect, Effect::ChooseObjectsIntoTrackedSet { .. }) {
+        return;
+    }
+    let mut node = def.sub_ability.as_deref_mut();
+    while let Some(sub) = node {
+        rewrite_mass_move_another_to_tracked_set(&mut sub.effect);
+        node = sub.sub_ability.as_deref_mut();
+    }
+}
+
+/// CR 608.2c + CR 608.2d + CR 714.2: Convert an `Unimplemented { name: "choose"
+/// }` head whose "up to N" cardinality was already lifted into `multi_target`
+/// (Day of the Doctor IV: "Choose up to three Doctors") into a first-class
+/// `Effect::ChooseObjectsIntoTrackedSet`.
+///
+/// Conversion is gated on the exact "choose up to N X, then affect all OTHER X"
+/// class: a following sub-ability must be a mass-move (`ChangeZoneAll` /
+/// `DestroyAll`) whose target filter carries `FilterProp::Another` ("all other
+/// creatures"), which the subsequent rewrite turns into
+/// `Not(InTrackedSet)`. This deliberately does NOT fire for other bare "choose
+/// N X" shapes — e.g. "Choose up to one creature. Destroy the rest." (a
+/// `TrackedSet`-anaphor complement the runtime models differently) or "Choose
+/// three cards in each graveyard" (a zone selection) — so those honest
+/// `Unimplemented` heads are left untouched rather than mis-converted.
+fn maybe_convert_choose_head_into_tracked_set(def: &mut AbilityDefinition) {
+    let description = match &*def.effect {
+        Effect::Unimplemented { name, description } if name == "choose" => description.clone(),
+        _ => return,
+    };
+    let Some(description) = description else {
+        return;
+    };
+    let Some(spec) = def.multi_target.clone() else {
+        return;
+    };
+    // CR 608.2c: only the "all other X" class (Another in a sub mass-move) is
+    // fully modeled by this conversion + rewrite.
+    if !sub_chain_has_mass_move_with_another(def) {
+        return;
+    }
+    let desc_lower = description.to_ascii_lowercase();
+    let Some((_, after_choose)) = nom_on_lower(&description, &desc_lower, |input| {
+        value((), tag("choose ")).parse(input)
+    }) else {
+        return;
+    };
+    let mut ctx = ParseContext::default();
+    let Some(filter) = parse_choose_object_selection_filter(after_choose, &mut ctx) else {
+        return;
+    };
+    let (min, max) = multi_target_spec_min_max(&spec);
+    *def.effect = Effect::ChooseObjectsIntoTrackedSet {
+        chooser: TargetFilter::Controller,
+        filter,
+        min,
+        max,
+    };
+    def.multi_target = None;
+}
+
+/// Reduce a `MultiTargetSpec` to the concrete `(min, max)` cardinality
+/// `Effect::ChooseObjectsIntoTrackedSet` expects. Dynamic min collapses to 0 and
+/// dynamic/unlimited max collapses to `None` ("any number").
+fn multi_target_spec_min_max(spec: &MultiTargetSpec) -> (u32, Option<u32>) {
+    let min = match &spec.min {
+        QuantityExpr::Fixed { value } => (*value).max(0) as u32,
+        _ => 0,
+    };
+    let max = match &spec.max {
+        Some(QuantityExpr::Fixed { value }) => Some((*value).max(0) as u32),
+        _ => None,
+    };
+    (min, max)
+}
+
+/// True when the sub-ability chain of `def` contains a mass-move
+/// (`ChangeZoneAll` / `DestroyAll`) whose target filter carries
+/// `FilterProp::Another` — the "affect all other X" signature of the
+/// choose-into-tracked-set class.
+fn sub_chain_has_mass_move_with_another(def: &AbilityDefinition) -> bool {
+    let mut node = def.sub_ability.as_deref();
+    while let Some(sub) = node {
+        let target = match &*sub.effect {
+            Effect::ChangeZoneAll { target, .. } | Effect::DestroyAll { target, .. } => {
+                Some(target)
+            }
+            _ => None,
+        };
+        if target.is_some_and(target_filter_has_another) {
+            return true;
+        }
+        node = sub.sub_ability.as_deref();
+    }
+    false
+}
+
+fn target_filter_has_another(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(filter_prop_has_another),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_another)
+        }
+        TargetFilter::Not { filter } => target_filter_has_another(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_has_another(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Another => true,
+        FilterProp::Not { prop } => filter_prop_has_another(prop),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_has_another),
+        _ => false,
+    }
+}
+
+/// Replace `FilterProp::Another` with `Not(InTrackedSet(sentinel))` in the
+/// mass-move ("all other X") target filter of an exile/destroy-all effect.
+fn rewrite_mass_move_another_to_tracked_set(effect: &mut Effect) {
+    let target = match effect {
+        Effect::ChangeZoneAll { target, .. } | Effect::DestroyAll { target, .. } => target,
+        _ => return,
+    };
+    rewrite_target_filter_another_to_tracked_set(target);
+}
+
+fn rewrite_target_filter_another_to_tracked_set(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            for prop in &mut tf.properties {
+                rewrite_filter_prop_another_to_tracked_set(prop);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters {
+                rewrite_target_filter_another_to_tracked_set(f);
+            }
+        }
+        TargetFilter::Not { filter } => rewrite_target_filter_another_to_tracked_set(filter),
+        _ => {}
+    }
+}
+
+fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
+    match prop {
+        FilterProp::Another => {
+            *prop = FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                }),
+            };
+        }
+        FilterProp::Not { prop } => rewrite_filter_prop_another_to_tracked_set(prop),
+        FilterProp::AnyOf { props } => {
+            for p in props {
+                rewrite_filter_prop_another_to_tracked_set(p);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) =
         try_parse_conditional_protection_grant_ability(text, kind, &mut ParseContext::default())
@@ -20349,6 +20656,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir);
     sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
+    rewrite_choose_tracked_set_exclusion(&mut def);
     fold_additional_combat_attacker_restriction(&mut def);
     def
 }
@@ -20386,6 +20694,7 @@ pub(crate) fn parse_effect_chain_with_context(
     let mut def = lower_effect_chain_ir(&ir);
     sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
+    rewrite_choose_tracked_set_exclusion(&mut def);
     fold_additional_combat_attacker_restriction(&mut def);
     def
 }
@@ -22649,6 +22958,11 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
+            // trigger context so non-target event anaphors ("that permanent or
+            // player" on Ghyrson) bind to the triggering event instead of being
+            // reparsed as ordinary target phrases.
+            in_trigger: ctx.in_trigger,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -24405,7 +24719,7 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     }
     // CR 118.12a: "unless [target's controller] has [~] deal N damage to them"
     // (Molten Influence and other counter spells with damage alternatives).
-    if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless) {
+    if let Some((cost, _)) = parse_unless_have_deal_damage_cost(after_unless) {
         return Some(cost);
     }
     // CR 118.12a + CR 121.3a: "unless its controller has you draw a card"
@@ -24547,15 +24861,33 @@ fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
 }
 
 /// CR 118.12a: "unless [that object's|its] controller has [~] deal N damage to
-/// them" (Blazing Salvo, Lava Blister, Molten Influence) — the controller may
-/// take the damage instead of the primary effect.
-fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature's controller has "),
-        tag("its controller has "),
-        tag("that permanent's controller has "),
-        tag("that land's controller has "),
-        tag("that spell's controller has "),
+/// them" (Blazing Salvo, Lava Blister, Molten Influence) or "unless that player
+/// has [~] deal N damage to them" (Skullscorch) — the payer may take the
+/// damage instead of the primary effect.
+fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<(AbilityCost, TargetFilter)> {
+    let (rest, payer) = alt((
+        value(
+            TargetFilter::ParentTargetController,
+            tag::<_, _, OracleError<'_>>("that creature's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("its controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that permanent's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that land's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that spell's controller has "),
+        ),
+        value(TargetFilter::Player, tag("that player has ")),
+        value(TargetFilter::Player, tag("that opponent has ")),
     ))
     .parse(after_unless)
     .ok()?;
@@ -24566,14 +24898,17 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
     let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
     parse_deal_damage_to_them_tail(tail)?;
-    Some(AbilityCost::EffectCost {
-        effect: Box::new(Effect::DealDamage {
-            amount,
-            target: TargetFilter::Player,
-            damage_source: None,
-            excess: None,
-        }),
-    })
+    Some((
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::DealDamage {
+                amount,
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+        },
+        payer,
+    ))
 }
 
 /// CR 118.12a + CR 121.3a: "unless [that object's|its] controller has you draw
@@ -24664,15 +24999,9 @@ fn extract_resolution_unless_pay_modifier(
                 );
             }
         }
-        if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+        if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::ParentTargetController,
-                }),
-            );
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
         if let Some(cost) = parse_unless_have_you_draw_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();

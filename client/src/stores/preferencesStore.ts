@@ -309,6 +309,7 @@ function buildDefaultPreferences(): PreferencesState {
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
+    telemetryEnabled: true,
   };
 }
 
@@ -400,6 +401,11 @@ interface PreferencesState {
   /** Persisted board layout (grid bands + per-widget offsets + active preset).
    *  See {@link FlexLayoutConfig}. Edited only in Flex Layout mode. */
   flexLayout: FlexLayoutConfig;
+  /** Whether anonymous, identity-free crash & usage telemetry may be sent.
+   *  Default on. Gates every send at enqueue time so a mid-session toggle takes
+   *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
+   *  regardless. See `services/telemetry.ts`. */
+  telemetryEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -495,6 +501,8 @@ interface PreferencesActions {
   applyFlexPreset: (config: FlexLayoutConfig) => void;
   /** Reset the layout to the default preset (clears all offsets). */
   resetFlexLayout: () => void;
+  /** Toggle anonymous crash & usage telemetry. */
+  setTelemetryEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -748,10 +756,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         })),
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
+      setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 21,
+      version: 22,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -793,6 +802,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          merge, so existing users see no behavior change.
       // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
       //          "focused", preserving the current focused-opponent layout.
+      // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
+      //          identity-free crash & usage telemetry) via the shallow merge —
+      //          no explicit migration block needed (see flexLayout precedent).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

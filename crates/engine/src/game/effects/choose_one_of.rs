@@ -411,6 +411,52 @@ mod tests {
     }
 
     #[test]
+    fn explicit_branch_descriptions_reach_waiting_for_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let colorless = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .description("Colorless".to_string());
+        let white = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .description("White".to_string());
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![colorless, white],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                branch_descriptions,
+                ..
+            } => {
+                assert_eq!(
+                    branch_descriptions,
+                    &vec!["Colorless".to_string(), "White".to_string()]
+                );
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn chosen_player_chooser_prompts_chosen_opponent() {
         // CR 608.2c + CR 109.4: A `ChooseOneOf` whose chooser is
         // `PlayerFilter::ChosenPlayer { index: 0 }` must prompt the player

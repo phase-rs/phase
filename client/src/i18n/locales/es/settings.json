@@ -184,7 +184,9 @@
     "importedWithPreferences_one": "Se importó {{count}} mazo y las preferencias.",
     "importedWithPreferences_other": "Se importaron {{count}} mazos y las preferencias.",
     "skippedMalformed_one": "Se omitió {{count}} entrada con formato incorrecto.",
-    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto."
+    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto.",
+    "telemetry": "Enviar informes anónimos de fallos y uso",
+    "telemetryDescription": "Ayuda a corregir fallos y priorizar la compatibilidad de cartas. Sin cuenta ni datos personales, solo recuentos de errores y resúmenes de partida."
   },
   "resetAll": {
     "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",

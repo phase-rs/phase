@@ -545,6 +545,8 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
     match quality {
+        // CR 105.2c: An object with no colors is colorless.
+        "colorless" => source.color.is_empty(),
         "monocolored" => source.color.len() == 1,
         "multicolored" => source.color.len() > 1,
         _ => false,
@@ -2406,6 +2408,51 @@ mod tests {
                     } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
                 ))),
             "Ninjutsu should be grouped under the hand object for frontend playability"
+        );
+    }
+
+    #[test]
+    fn source_matches_quality_colorless_tracks_zero_color_sources() {
+        let mut colorless = make_obj();
+        let mut white = make_obj();
+        white.color.push(ManaColor::White);
+
+        assert!(
+            source_matches_quality(&colorless, "colorless"),
+            "objects with no colors must satisfy the colorless quality"
+        );
+        assert!(
+            !source_matches_quality(&white, "colorless"),
+            "colored objects must not satisfy the colorless quality"
+        );
+
+        colorless.color.push(ManaColor::Blue);
+        assert!(
+            !source_matches_quality(&colorless, "colorless"),
+            "once an object gains a color, the colorless quality must stop matching"
+        );
+    }
+
+    #[test]
+    fn protection_from_colorless_prevents_only_colorless_sources() {
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Quality(
+                "colorless".to_string(),
+            )));
+
+        let colorless_source = make_obj();
+        let mut green_source = make_obj();
+        green_source.color.push(ManaColor::Green);
+
+        assert!(
+            protection_prevents_from(&protected, &colorless_source),
+            "protection from colorless must stop a source with no colors"
+        );
+        assert!(
+            !protection_prevents_from(&protected, &green_source),
+            "protection from colorless must not stop a colored source"
         );
     }
 
