@@ -10,11 +10,11 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -48,6 +48,7 @@ pub mod cast_copy_of_card;
 pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
+pub mod chaos_ensues;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
@@ -69,6 +70,7 @@ pub mod counters;
 pub mod create_damage_replacement;
 pub mod create_draw_replacement;
 pub mod create_emblem;
+pub mod create_planeswalk_replacement;
 pub mod create_token_copy_from_pool;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -2957,6 +2959,9 @@ pub fn resolve_effect(
         Effect::EachDealsDamageEqualToPower { .. } => {
             deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
         }
+        Effect::EachSourceDealsDamage { .. } => {
+            deal_damage::resolve_each_source_deals_damage(state, ability, events)
+        }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
@@ -3122,6 +3127,9 @@ pub fn resolve_effect(
         Effect::CreateDrawReplacement { .. } => {
             create_draw_replacement::resolve(state, ability, events)
         }
+        Effect::CreatePlaneswalkReplacement { .. } => {
+            create_planeswalk_replacement::resolve(state, ability, events)
+        }
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
@@ -3232,6 +3240,7 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
+        Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
@@ -4985,6 +4994,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // from "whenever an opponent draws a card, they lose 2 life").
         Effect::LoseLife {
             target: Some(ref filter),
+            ..
+        } => filter,
+        // CR 120.1 + CR 603.2: `EachSourceDealsDamage`'s `Shared` recipient may be
+        // an event-context ref (`TriggeringSource` — Sarkhan; `ParentTarget` —
+        // Missy) that auto-resolves from the current trigger event at resolution.
+        // `EachController` and the deferred per-source recipients carry no
+        // event-context target.
+        Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(ref filter),
             ..
         } => filter,
         _ => return None,

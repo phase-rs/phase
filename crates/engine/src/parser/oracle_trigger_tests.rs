@@ -11024,6 +11024,43 @@ fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap
 }
 
 #[test]
+fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
+    // CR 312.5 + CR 614.1a + CR 901.9c: the full production parser must carry
+    // the encounter trigger, duration shell, and planar-die replacement payload
+    // together for Fixed Point in Time.
+    let parsed = parse_oracle_text(
+        "When you encounter Fixed Point in Time, until your next turn, if a player would planeswalk as a result of rolling the planar die, chaos ensues instead.",
+        "Fixed Point in Time",
+        &[],
+        &["Phenomenon".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::PlaneswalkedTo)
+        .expect("Fixed Point in Time encounter trigger must parse");
+
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("Fixed Point in Time trigger must execute");
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    match execute.effect.as_ref() {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            assert!(matches!(replacement_effect.as_ref(), Effect::ChaosEnsues));
+        }
+        other => panic!("expected CreatePlaneswalkReplacement, got {other:?}"),
+    }
+}
+
+#[test]
 fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
     // CR 312.5 / CR 701.31d: every arrival/encounter phrasing in the class
     // maps to PlaneswalkedTo with the controller target filter — including

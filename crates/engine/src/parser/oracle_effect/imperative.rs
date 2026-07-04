@@ -7837,6 +7837,23 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 311.7 / CR 901.9b: "chaos ensues" as a standalone resolving instruction
+    // — the active plane's "whenever chaos ensues" ability triggers. Whole-phrase
+    // imperative with no target; anchored nom production mirroring the "end the
+    // turn" / "end the combat phase" parses so unrelated clauses cannot
+    // accidentally match it. Makes `parse_effect("chaos ensues") ==
+    // Effect::ChaosEnsues`, which the planar-die planeswalk-replacement parser
+    // (Fixed Point in Time) consumes as its substitute.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("chaos ensues"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —

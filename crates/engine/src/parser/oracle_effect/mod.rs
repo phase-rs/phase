@@ -140,8 +140,8 @@ use self::sequence::{
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
-    try_parse_each_deals_damage_equal_to_power, try_parse_subject_predicate_ast,
-    try_parse_targeted_controller_gain_life,
+    try_parse_each_deals_damage_equal_to_power, try_parse_each_source_deals_damage,
+    try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::ParseContext;
@@ -1355,7 +1355,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
     })
 }
 
-fn parse_optional_period_and_end(input: &str) -> Option<()> {
+pub(crate) fn parse_optional_period_and_end(input: &str) -> Option<()> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
         .ok()?;
@@ -5968,6 +5968,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         }
     }
 
+    // CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
+    // to <recipient>" — every matching object is its own damage source. Intercept
+    // BEFORE the generic subject-stripping sites (mod.rs `9705`/`9735`,
+    // `subject.rs:178` via `try_parse_subject_predicate_ast`) flatten the source
+    // class into a single ability-sourced `DealDamage`. Returns the supported
+    // `EachSourceDealsDamage` clause, or a fail-closed `Unimplemented` for the
+    // deferred attachment-host recipient (Aura Barbs clause 2).
+    if let Some(clause) = try_parse_each_source_deals_damage(text, ctx) {
+        return clause;
+    }
+
     // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits
     // where the subject carried over from the previous clause.
     // E.g., "draws seven cards" → "draw seven cards" (from "Each player discards
@@ -6007,6 +6018,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
+    // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
+    // replacement chain — BEFORE the leading-"if" strip further down would peel
+    // the condition clause and hand only "chaos ensues instead" to the imperative
+    // dispatch (which cannot recover the replacement semantics).
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_planar_die_planeswalk_replacement(&lower)
+    {
         return parsed_clause(effect);
     }
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]

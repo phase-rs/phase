@@ -652,7 +652,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         // ----- DAMAGE family (CR 120.1 / CR 704.5a) -----
         Effect::DealDamage { amount, .. }
         | Effect::DamageAll { amount, .. }
-        | Effect::DamageEachPlayer { amount, .. } => {
+        | Effect::DamageEachPlayer { amount, .. }
+        // CR 120.1: filter-sourced fixed-amount damage — fixed magnitude seed
+        // (distinct from the unbounded own-power `EachDealsDamageEqualToPower`).
+        | Effect::EachSourceDealsDamage { amount, .. } => {
             let (a, mag) = count_seed(amount);
             b.add_damage(a, mag);
         }
@@ -922,6 +925,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
@@ -933,6 +937,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::ChaosEnsues
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }

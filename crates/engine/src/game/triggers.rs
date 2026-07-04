@@ -7369,8 +7369,15 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
     // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
     // class).
+    // CR 120.1 + CR 115.1: `EachSourceDealsDamage` with a `Shared(Any)` recipient
+    // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
+    // is the same "any target" player-chosen slot as `DealDamage` — surface it so
+    // the cast/trigger-time target slot is built.
     if effect.target_filter() == Some(&TargetFilter::Any)
-        && !matches!(effect, Effect::DealDamage { .. })
+        && !matches!(
+            effect,
+            Effect::DealDamage { .. } | Effect::EachSourceDealsDamage { .. }
+        )
     {
         return None;
     }
@@ -7401,10 +7408,11 @@ pub mod tests {
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
-        Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        EachDamageRecipient, Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter,
+        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -11150,6 +11158,142 @@ pub mod tests {
                 .contains(&TargetRef::Player(PlayerId(1))),
             "opponent must be a legal target, got {:?}",
             slots[0].legal_targets
+        );
+    }
+
+    /// CR 115.1 + CR 120.1 + CR 603.3d: A trigger whose body is
+    /// `EachSourceDealsDamage { Shared(Any) }` must use the production target
+    /// selection path for "any target"; after the target is chosen, each matching
+    /// source deals damage to that one announced recipient.
+    #[test]
+    fn each_source_deals_damage_shared_any_trigger_selects_and_resolves_recipient() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let source_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Dwarf A".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Dwarf B".to_string(),
+            Zone::Battlefield,
+        );
+        for source in [source_a, source_b] {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dwarf".to_string());
+            obj.power = Some(2);
+            obj.base_power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let recipient = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.base_power = Some(0);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Princess Snowfall".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&trigger_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::EachSourceDealsDamage {
+                            sources: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Subtype("Dwarf".to_string())],
+                                controller: Some(ControllerRef::You),
+                                properties: vec![],
+                            }),
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+                        },
+                    ))
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                trigger_source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("target selection should build")
+            .expect("trigger should require target selection");
+        let WaitingFor::TriggerTargetSelection { target_slots, .. } = &waiting else {
+            panic!("expected trigger target selection, got {waiting:?}");
+        };
+        assert_eq!(
+            target_slots.len(),
+            1,
+            "Shared(Any) must surface exactly one announced recipient slot"
+        );
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(recipient)),
+            "chosen recipient must be legal for any-target damage"
+        );
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            },
+        )
+        .expect("choosing the any-target recipient should succeed");
+
+        let mut safety_bound = 20;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("pass priority");
+            safety_bound -= 1;
+        }
+
+        assert_eq!(
+            state.objects[&recipient].damage_marked, 2,
+            "two Dwarf sources each deal 1 damage to the chosen recipient"
         );
     }
 
