@@ -73,7 +73,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
-    parse_for_each_object_filter_clause,
+    parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_target, parse_target_with_ctx,
@@ -5106,6 +5106,14 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
             unless_pay_deferred,
         );
     }
+    let original_lower = text.to_lowercase();
+    if let Some(mut clause) = try_parse_for_each_copy_token_source(text, &original_lower, ctx) {
+        peel_ctx.apply_optional(&mut clause.optional);
+        if clause.condition.is_none() {
+            clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
+        }
+        return attach_unless_slots(clause, None, unless_pay_deferred);
+    }
     if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
@@ -5113,7 +5121,6 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
         }
         return attach_unless_slots(clause, None, unless_pay_deferred);
     }
-    let original_lower = text.to_lowercase();
     if scan_contains_phrase(&original_lower, "this turn")
         || scan_contains_phrase(&original_lower, "until ")
         || scan_contains_phrase(&original_lower, "remain exiled")
@@ -5178,23 +5185,18 @@ fn try_parse_for_each_copy_token_source(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    let (source_filter, body) = parse_for_each_object_copy_parts(text, lower)?;
-    let body_lower = body.to_lowercase();
+    let (source_filter, body_effect) = parse_for_each_object_copy_parts(text, lower, ctx)?;
     let Effect::CopyTokenOf {
-        target,
         enters_attacking,
         tapped,
         count,
         extra_keywords,
         additional_modifications,
         ..
-    } = token::try_parse_token(&body_lower, body, ctx)?
+    } = body_effect
     else {
         return None;
     };
-    if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
-        return None;
-    }
     Some(parsed_clause(Effect::CopyTokenOf {
         target: TargetFilter::None,
         owner: TargetFilter::Controller,
@@ -5369,39 +5371,54 @@ fn try_parse_choose_and_pay_per_object(
     Some(clause)
 }
 
-fn parse_for_each_object_copy_parts<'a>(
-    text: &'a str,
+fn parse_for_each_object_copy_parts(
+    text: &str,
     lower: &str,
-) -> Option<(TargetFilter, &'a str)> {
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, Effect)> {
+    let text = strip_leading_sequence_connector(text).trim();
+    let lower = strip_leading_sequence_connector(lower).trim();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("for each ")
         .parse(lower)
         .ok()?;
     let clause_start = lower.len() - after_prefix.len();
-    let (after_clause, clause_lower) = take_until::<_, _, OracleError<'_>>(", ")
-        .parse(after_prefix)
-        .ok()?;
-    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
-        .parse(after_clause)
-        .ok()?;
-    if !is_copy_token_anaphor_body(body_lower.trim()) {
-        return None;
-    }
-    let clause = &lower[clause_start..clause_start + clause_lower.len()];
-    let source_filter = parse_for_each_object_filter_clause(clause)?;
-    let body_start = text.len() - body_lower.len();
-    Some((source_filter, text[body_start..].trim()))
-}
+    let mut search_lower = after_prefix;
+    let mut search_offset = 0usize;
 
-fn is_copy_token_anaphor_body(input: &str) -> bool {
-    let parsed = |i| -> OracleResult<'_, ()> {
-        let (i, _) = token::parse_copy_token_entry_modifiers(i)?;
-        let i = i.trim_start();
-        let (i, _) = tag("it").parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    parsed(input).is_ok()
+    loop {
+        let (body_lower, clause_lower) =
+            terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", "))
+                .parse(search_lower)
+                .ok()?;
+        let clause_end = clause_start + search_offset + clause_lower.len();
+        let clause = &lower[clause_start..clause_end];
+        let body_start = text.len() - body_lower.len();
+        let body = text[body_start..].trim();
+        let candidate_ctx = ctx.clone();
+
+        if let Some(source_filter) =
+            parse_for_each_object_filter_clause_with_context(clause, &candidate_ctx)
+        {
+            let mut body_ctx = candidate_ctx.clone();
+            if let Some(effect) = token::try_parse_token(body_lower, body, &mut body_ctx) {
+                if matches!(
+                    &effect,
+                    Effect::CopyTokenOf {
+                        target: TargetFilter::ParentTarget
+                            | TargetFilter::SelfRef
+                            | TargetFilter::TriggeringSource,
+                        ..
+                    }
+                ) {
+                    *ctx = candidate_ctx;
+                    return Some((source_filter, effect));
+                }
+            }
+        }
+
+        search_offset = after_prefix.len() - body_lower.len();
+        search_lower = body_lower;
+    }
 }
 
 /// CR 608.2c + CR 109.4: "Choose a [second|third|...] player to <verb>" —
