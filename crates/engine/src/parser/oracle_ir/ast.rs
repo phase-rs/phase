@@ -4,11 +4,10 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, CounteredSpellDestination, DoorLockOp, Duration, Effect, FaceDownProfile,
-    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter,
+    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
