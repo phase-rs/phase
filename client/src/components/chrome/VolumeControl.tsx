@@ -119,18 +119,18 @@ export function VolumeControl({ variant }: VolumeControlProps) {
     return (
       <div
         ref={containerRef}
-        className="flex h-9 items-center overflow-hidden rounded-lg bg-gray-800/80 transition-all duration-200"
-        style={{ width: expanded ? 176 : 36 }}
+        className="flex h-7 items-center overflow-hidden rounded-md bg-white/6 transition-all duration-200"
+        style={{ width: expanded ? 168 : 28 }}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
         <button
           onClick={handleToggleMute}
-          className="flex h-9 w-9 shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-200"
+          className="flex h-7 w-7 shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-200"
           aria-label={masterMuted ? t("volume.unmute") : t("volume.mute")}
           title={masterMuted ? t("volume.unmute") : t("volume.mute")}
         >
-          <Icon className="h-5 w-5" />
+          <Icon className="h-4 w-4" />
         </button>
         <div
           className="flex items-center gap-2 pr-3 transition-opacity duration-200"

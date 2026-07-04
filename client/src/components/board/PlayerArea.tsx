@@ -426,7 +426,7 @@ export function PlayerArea({
     : splitOverview
       ? "justify-start py-0.5"
       : isCompactHeight ? "justify-end py-0" : "justify-end py-1";
-  const mirroredCreatureAlign = splitOverview ? "items-start" : "items-end";
+  const mirroredCreatureAlign = "items-end";
 
   return (
     <div

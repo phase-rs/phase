@@ -164,7 +164,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         <ManaCostPips
           cost={displayCost}
           isReduced={false}
-          size={isCompactHeight ? "xs" : "md"}
+          size={isCompactHeight ? "2xs" : "xs"}
           className="absolute right-[4%] top-[2%]"
         />
       )}

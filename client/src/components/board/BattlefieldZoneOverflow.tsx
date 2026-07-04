@@ -174,10 +174,10 @@ export function BattlefieldZoneOverflow({
 // Fixed, readable card size for the scrollable creature grid. Big enough to
 // read P/T, keywords, and counters; the parent scrolls the overflow.
 const CREATURE_GRID_VARS: CSSProperties = {
-  "--art-crop-w": "5.6rem",
-  "--art-crop-h": "4.2rem",
-  "--card-w": "3.85rem",
-  "--card-h": "5.4rem",
+  "--art-crop-w": "clamp(5.6rem, 4.4vw, 7.4rem)",
+  "--art-crop-h": "clamp(4.2rem, 3.3vw, 5.55rem)",
+  "--card-w": "clamp(3.85rem, 3.05vw, 5.15rem)",
+  "--card-h": "clamp(5.4rem, 4.25vw, 7.2rem)",
 } as CSSProperties;
 
 interface CreatureOverviewProps {
