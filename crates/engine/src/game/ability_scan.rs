@@ -73,10 +73,10 @@
 //! plus a `..`-free destructure so a future field forces re-audit.
 
 use crate::types::ability::{
-    AbilityCondition, ControllerRef, CountScope, Duration, Effect, ModalChoice, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ReplacementCondition, ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition,
+    AbilityCondition, ControllerRef, CountScope, Duration, Effect, GuessSubject, ModalChoice,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition, TargetChoiceTiming,
+    TargetFilter, TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -339,6 +339,12 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(sources));
             acc = acc.or(scan_target_filter(recipient));
+            acc
+        }
+        Effect::OpponentGuess { guesser, subject } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_controller_ref(guesser));
+            acc = acc.or(scan_guess_subject(subject));
             acc
         }
         Effect::Draw { count, target } => {
@@ -2230,6 +2236,22 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
     }
 }
 
+fn scan_guess_subject(x: &GuessSubject) -> Axes {
+    match x {
+        GuessSubject::CommittedChoice { choice_type: _ } => Axes::NONE,
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_quantity_expr(lhs));
+            acc = acc.or(scan_quantity_expr(rhs));
+            acc
+        }
+    }
+}
+
 fn scan_target_filter(x: &TargetFilter) -> Axes {
     match x {
         TargetFilter::None => Axes::NONE,
@@ -3266,6 +3288,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
