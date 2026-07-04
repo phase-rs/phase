@@ -965,6 +965,7 @@ mod tests {
                             amount: engine::types::ability::QuantityExpr::Fixed { value: damage },
                             target: TargetFilter::Any,
                             damage_source: None,
+                            excess: None,
                         },
                         Vec::new(),
                         ObjectId(900),

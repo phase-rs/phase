@@ -25156,6 +25156,7 @@ mod absorb_synthesis_tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target)],
             source,

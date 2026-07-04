@@ -164,10 +164,12 @@ pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
     match (base, extra) {
         (ManaCost::NoCost, other)
         | (ManaCost::SelfManaCost, other)
-        | (ManaCost::SelfManaValue, other) => other.clone(),
+        | (ManaCost::SelfManaValue, other)
+        | (ManaCost::SelfManaCostReduced { .. }, other) => other.clone(),
         (other, ManaCost::NoCost)
         | (other, ManaCost::SelfManaCost)
-        | (other, ManaCost::SelfManaValue) => other.clone(),
+        | (other, ManaCost::SelfManaValue)
+        | (other, ManaCost::SelfManaCostReduced { .. }) => other.clone(),
         (
             ManaCost::Cost {
                 shards: base_shards,

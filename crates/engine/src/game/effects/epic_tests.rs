@@ -29,6 +29,7 @@ fn deal_damage_to_target_player() -> Effect {
         amount: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Player,
         damage_source: None,
+        excess: None,
     }
 }
 
