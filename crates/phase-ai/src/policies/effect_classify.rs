@@ -229,6 +229,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChangeSpeed { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ChangeZoneAll { .. }
+        | Effect::ChaosEnsues
         | Effect::Choose { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
@@ -255,6 +256,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateDrawReplacement { .. }
         | Effect::CreateEmblem { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::DamageEachPlayer { .. }
         | Effect::Detain { .. }
