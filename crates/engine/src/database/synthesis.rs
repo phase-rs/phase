@@ -439,34 +439,137 @@ impl KeywordTriggerInstaller {
     }
 }
 
+/// CR 305.6: A land with a basic land type has the matching intrinsic
+/// "{T}: Add [mana symbol]" mana ability. Card data groups multiple same-cost
+/// basic-land mana rows into one color-choice producer.
 pub fn synthesize_basic_land_mana(face: &mut CardFace) {
-    let land_mana: Vec<(&str, ManaColor)> = vec![
+    let colors: Vec<ManaColor> = [
         ("Plains", ManaColor::White),
         ("Island", ManaColor::Blue),
         ("Swamp", ManaColor::Black),
         ("Mountain", ManaColor::Red),
         ("Forest", ManaColor::Green),
-    ];
+    ]
+    .into_iter()
+    .filter_map(|(subtype, color)| {
+        face.card_type
+            .subtypes
+            .iter()
+            .any(|s| s == subtype)
+            .then_some(color)
+    })
+    .collect();
 
-    for (subtype, color) in land_mana {
-        if face.card_type.subtypes.iter().any(|s| s == subtype) {
-            face.abilities.push(
-                AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::Mana {
-                        produced: ManaProduction::Fixed {
-                            colors: vec![color],
-                            contribution: ManaContribution::Base,
-                        },
-                        restrictions: vec![],
-                        grants: vec![],
-                        expiry: None,
-                        target: None,
-                    },
-                )
-                .cost(AbilityCost::Tap),
-            );
+    if colors.is_empty() {
+        return;
+    }
+
+    let produced = if colors.len() == 1 {
+        ManaProduction::Fixed {
+            colors: vec![colors[0]],
+            contribution: ManaContribution::Base,
         }
+    } else {
+        ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: colors,
+            contribution: ManaContribution::Base,
+        }
+    };
+
+    face.abilities.push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap),
+    );
+}
+
+#[cfg(test)]
+mod basic_land_mana_synthesis_tests {
+    use super::*;
+
+    fn land_face(subtypes: &[&str]) -> CardFace {
+        CardFace {
+            card_type: CardType {
+                core_types: vec![CoreType::Land],
+                subtypes: subtypes
+                    .iter()
+                    .map(|subtype| (*subtype).to_string())
+                    .collect(),
+                ..CardType::default()
+            },
+            ..CardFace::default()
+        }
+    }
+
+    fn synthesized_mana(face: &CardFace) -> &ManaProduction {
+        assert_eq!(face.abilities.len(), 1);
+        let ability = &face.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.cost, Some(AbilityCost::Tap));
+
+        let Effect::Mana { produced, .. } = ability.effect.as_ref() else {
+            panic!(
+                "expected synthesized mana ability, got {:?}",
+                ability.effect
+            );
+        };
+        produced
+    }
+
+    #[test]
+    fn single_basic_land_subtype_stays_fixed_mana() {
+        let mut face = land_face(&["Forest"]);
+
+        synthesize_basic_land_mana(&mut face);
+
+        assert_eq!(
+            synthesized_mana(&face),
+            &ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }
+        );
+    }
+
+    #[test]
+    fn dual_basic_land_subtypes_synthesize_one_color_choice() {
+        let mut face = land_face(&["Mountain", "Forest"]);
+
+        synthesize_basic_land_mana(&mut face);
+
+        assert_eq!(
+            synthesized_mana(&face),
+            &ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: vec![ManaColor::Red, ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }
+        );
+    }
+
+    #[test]
+    fn triple_basic_land_subtypes_synthesize_one_color_choice() {
+        let mut face = land_face(&["Island", "Swamp", "Forest"]);
+
+        synthesize_basic_land_mana(&mut face);
+
+        assert_eq!(
+            synthesized_mana(&face),
+            &ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: vec![ManaColor::Blue, ManaColor::Black, ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }
+        );
     }
 }
 
