@@ -513,7 +513,10 @@ pub fn can_pay_for_spell(
     let max_life_payments = permissions.max_life;
     let life_colors = permissions.life_colors;
     match cost {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => true,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => true,
         ManaCost::Cost { shards, generic } => {
             // Clone pool to simulate payment
             let mut sim = pool.clone();
@@ -751,7 +754,10 @@ pub(crate) fn reduce_cost_by_pool(
     demand: Option<&ColorDemand>,
 ) -> ManaCost {
     let (shards, generic) = match cost {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => return cost.clone(),
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => return cost.clone(),
         ManaCost::Cost { shards, generic } => (shards, *generic),
     };
 
@@ -932,9 +938,10 @@ pub fn pay_cost_with_demand_and_choices(
     pins: &[ManaPipId],
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     match cost {
-        ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => {
-            Ok((Vec::new(), Vec::new()))
-        }
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => Ok((Vec::new(), Vec::new())),
         ManaCost::Cost { shards, generic } => {
             let mut spent = Vec::new();
             let mut life_payments = Vec::new();

@@ -1803,10 +1803,14 @@ mod tests {
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::Upkeep,
             phase: Phase::Upkeep,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         });
 
         let v = ResourceVector::snapshot(&state);

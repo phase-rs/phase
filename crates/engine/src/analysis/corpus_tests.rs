@@ -565,6 +565,7 @@ fn pinger_scenario(amount: i32) -> (GameScenario, ObjectId) {
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     );
     let pinger = scenario

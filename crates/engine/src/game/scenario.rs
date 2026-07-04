@@ -477,6 +477,7 @@ impl GameScenario {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
