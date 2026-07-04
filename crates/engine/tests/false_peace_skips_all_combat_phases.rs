@@ -122,6 +122,8 @@ fn extra_combat_phase_on_bound_turn_is_also_skipped() {
     state.extra_phases.push(ExtraPhase {
         anchor: Phase::EndCombat,
         phase: Phase::BeginCombat,
+        attacker_restriction: None,
+        attacker_restriction_source: None,
     });
 
     // Single segment drives the whole combat cascade including the extra combat.

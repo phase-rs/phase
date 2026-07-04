@@ -6163,6 +6163,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
             amount,
             target,
             damage_source: None,
+            excess: None,
         },
         duration: None,
         sub_ability: None,
@@ -6476,6 +6477,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target: TargetFilter::ParentTarget,
                             damage_source: Some(DamageSource::Target),
+                            excess: None,
                         },
                         "",
                     ));
@@ -6491,6 +6493,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                                 amount: qty,
                                 target,
                                 damage_source: None,
+                                excess: None,
                             },
                             remainder,
                         ));
@@ -6548,6 +6551,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target: TargetFilter::SourceChosenPlayer,
                             damage_source: None,
+                            excess: None,
                         },
                         "",
                     ));
@@ -6562,6 +6566,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target,
                             damage_source: None,
+                            excess: None,
                         },
                         ecr_rem,
                     ));
@@ -6580,6 +6585,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target,
                             damage_source: None,
+                            excess: None,
                         },
                         "",
                     ));
@@ -6698,6 +6704,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     amount: amount.clone(),
                     target,
                     damage_source: None,
+                    excess: None,
                 },
                 rem,
             ));
@@ -6771,6 +6778,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target: TargetFilter::ParentTarget,
                 damage_source: Some(DamageSource::Target),
+                excess: None,
             },
             "",
         ));
@@ -6784,6 +6792,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount: amount.clone(),
                 target: TargetFilter::SourceChosenPlayer,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -6797,6 +6806,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount: amount.clone(),
                 target,
                 damage_source: None,
+                excess: None,
             },
             ecr_rem,
         ));
@@ -6810,6 +6820,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -6828,6 +6839,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -6841,6 +6853,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             amount,
             target,
             damage_source: None,
+            excess: None,
         },
         rem,
     ))
@@ -6930,6 +6943,7 @@ fn try_parse_each_source_power_damage<'a>(
             amount: qty,
             target,
             damage_source: Some(DamageSource::EachTarget),
+            excess: None,
         },
         rem,
     ))
@@ -7966,6 +7980,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -8062,6 +8077,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }

@@ -6,6 +6,7 @@ import type {
   PlayerId,
   WaitingFor,
 } from "../adapter/types";
+import type { MultiplayerBoardLayout } from "../stores/preferencesStore";
 import {
   groupByName,
   partitionByType,
@@ -56,6 +57,41 @@ export function getSeatCount(gameState: GameState | null): number {
 
 export function isOneOnOne(gameState: GameState | null): boolean {
   return getSeatCount(gameState) === 2;
+}
+
+export function isSplitBoardActive(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+): boolean {
+  return layout === "split" && seatCount > 2;
+}
+
+export function shouldRenderFocusedOpponentTopRow(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+): boolean {
+  return !isSplitBoardActive(layout, seatCount);
+}
+
+export function getVisibleBoardPlayerIds(
+  gameState: GameState | null,
+  viewerId: PlayerId,
+  focusedOpponent: PlayerId | null,
+  layout: MultiplayerBoardLayout,
+): PlayerId[] {
+  if (!gameState) return [];
+
+  const opponents = getOpponentIds(gameState, viewerId);
+  if (isOneOnOne(gameState)) {
+    return opponents[0] == null ? [viewerId] : [viewerId, opponents[0]];
+  }
+
+  if (isSplitBoardActive(layout, getSeatCount(gameState))) {
+    return [viewerId, ...opponents];
+  }
+
+  const focusedId = resolveFocusedOpponent(focusedOpponent, opponents);
+  return focusedId == null ? [viewerId] : [viewerId, focusedId];
 }
 
 export function getPlayerZoneIds(

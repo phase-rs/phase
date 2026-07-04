@@ -371,6 +371,11 @@ pub(crate) fn record_first_draw_and_enqueue_miracle(
     let Some(cost) = miracle_cost else {
         return;
     };
+    // CR 601.2f + CR 118.9c: concretize the granted miracle cost against the
+    // card's own mana cost at offer-enqueue time (Aminatou's `SelfManaCostReduced
+    // { 4 }` → MV−4). The offer stores a concrete `ManaCost::Cost`, so the cast
+    // substitution and payment paths never see an unresolved placeholder.
+    let cost = crate::game::keywords::resolve_keyword_mana_cost(state, object_id, &cost);
     state
         .pending_miracle_offers
         .push(crate::types::game_state::MiracleOffer {
