@@ -700,9 +700,12 @@ fn pay_ability_cost_inner(
                     owner_library: false,
                     track_exiled_by_source: true,
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
                     is_cost_payment: true,
+                    enters_modified_if: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
@@ -754,6 +757,18 @@ fn pay_ability_cost_inner(
             return Ok(payment_failed(format!(
                 "Cost not implemented: {description}"
             )));
+        }
+        // CR 118.9 + CR 702.62a: a borrowed keyword cost is an alternative cost on
+        // the *cast spell*, paid through the casting pipeline's
+        // `ExileWithAltCost` / `ExileWithAltAbilityCost` permissions
+        // (casting.rs / casting_costs.rs), never as an activation cost paid here.
+        // Reaching this arm means a misrouted cost — fail loudly rather than
+        // silently no-op.
+        AbilityCost::KeywordCostOfCastSpell { .. } => {
+            return Ok(payment_failed(
+                "Keyword-cost-of-cast-spell is paid by the casting pipeline, not as an \
+                 activation cost",
+            ));
         }
         // CR 107.14: A player can pay {E} only if they have enough energy.
         // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
@@ -1062,6 +1077,17 @@ pub(crate) fn can_pay(
             if !cost.is_payable(state, payer, source_id) {
                 return false;
             }
+            // CR 118.12a: disjunctive activation costs resolve via
+            // `ActivationCostOneOfChoice`, but each branch must still pass the
+            // same activation affordability authority (is_payable + dry-run) as a
+            // deterministic cost. `is_payable` alone does not catch tapped-source
+            // `{T}` legs — shard-style `OneOf([Composite([Mana, Tap]), …])` would
+            // otherwise surface as legal when every branch needs an untapped source.
+            if let AbilityCost::OneOf { costs } = cost {
+                return costs
+                    .iter()
+                    .any(|branch| can_pay(state, payer, source_id, branch, scope));
+            }
             // CR 701.67a: A bare Waterbend cost has no deterministic component
             // to dry-run — its affordability is fully answered by `is_payable`'s
             // auto-tap check above. Gate on the bare `Waterbend` *shape*, not the
@@ -1171,6 +1197,9 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, never as
+        // a resolution-time activation cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1310,6 +1339,9 @@ fn can_pay_resolution(
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, not a
+        // direct resolution-time cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }
@@ -1410,6 +1442,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { .. } => AbilityCost::Composite {
                 costs: vec![AbilityCost::Tap, AbilityCost::PayLife { amount: life }],
@@ -1437,6 +1470,9 @@ mod tests {
                 base: Box::new(AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 }),
+            },
+            AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
             },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
@@ -1521,6 +1557,7 @@ mod tests {
                 count: 0,
                 filter: TargetFilter::Any,
                 action: BeholdCostAction::ChooseOrReveal,
+                type_choice: None,
             },
             AbilityCost::Composite { costs: vec![] },
             AbilityCost::OneOf { costs: vec![] },
@@ -1542,6 +1579,9 @@ mod tests {
                 counter: CounterType::Age,
                 target: TargetFilter::SelfRef,
                 base: Box::new(AbilityCost::Tap),
+            },
+            AbilityCost::KeywordCostOfCastSpell {
+                keyword: crate::types::keywords::KeywordKind::Suspend,
             },
             AbilityCost::Unimplemented {
                 description: String::new(),
@@ -1783,6 +1823,41 @@ mod tests {
         );
     }
 
+    /// HIGH-1 regression (CR 118.12a + CR 118.3): shard-style
+    /// `OneOf([Composite([Mana, Tap]), …])` must route each branch through the
+    /// activation dry-run, not `is_payable` alone. The Tap arm is unconditionally
+    /// true in `is_payable`, so a tapped source must be `can_pay == false`.
+    #[test]
+    fn one_of_tap_branches_respects_tapped_source() {
+        use crate::parser::oracle_cost::parse_oracle_cost;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Granite Shard", 0, 0)
+            .as_artifact()
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, src, false, vec![]),
+                ManaUnit::new(ManaType::Red, src, false, vec![]),
+            ],
+        );
+        let cost = parse_oracle_cost("{3}, {T} or {R}, {T}");
+
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "untapped source with mana → OneOf tap branches payable"
+        );
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+        assert!(
+            !can_pay_activation(&scenario.state, src, &cost),
+            "tapped source → OneOf tap branches must be unpayable"
+        );
+    }
     /// HIGH-1 regression (CR 701.67a + CR 118.3): a `Composite[Waterbend, {T}]`
     /// (Avatar TLA "Waterbend [cost], {T}: …") must NOT skip the dry run just
     /// because the `payment_class` fold reports `InteractiveMana` for the

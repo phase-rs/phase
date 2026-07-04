@@ -77,6 +77,7 @@ fn make_targeted_loyalty_ability(loyalty_amount: i32) -> AbilityDefinition {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         },
     )
     .cost(AbilityCost::Loyalty {
@@ -148,6 +149,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         sub_link: SubAbilityLink::ContinuationStep,
         modal: None,
         mode_abilities: vec![],
+        dig_found_nothing_for_parent_target: false,
     }
 }
 

@@ -47,10 +47,18 @@ fn obeka_combat_damage_pushes_one_extra_upkeep_per_damage_point() {
     let expected = ExtraPhase {
         anchor: Phase::Upkeep,
         phase: Phase::Upkeep,
+        attacker_restriction: None,
+        attacker_restriction_source: None,
     };
     assert_eq!(
         runner.state().extra_phases,
-        vec![expected, expected, expected, expected, expected],
+        vec![
+            expected.clone(),
+            expected.clone(),
+            expected.clone(),
+            expected.clone(),
+            expected
+        ],
         "Obeka dealing 5 combat damage should schedule exactly 5 additional upkeep steps",
     );
 }

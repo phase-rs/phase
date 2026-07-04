@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 
 import type { GameFormat, MatchType, Phase } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
+import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
   ANIMATION_SPEED_DEFAULT,
   ANIMATION_SPEED_MAX,
@@ -75,6 +76,13 @@ export type BattlefieldCardDisplay = "art_crop" | "full_card";
  *  {@link useResolvedCommandZoneDisplay}, mirroring the `boardBackground`
  *  "auto-wubrg" resolve-at-use-site precedent. */
 export type CommandZoneDisplay = "compact" | "inline" | "auto";
+/** Whether a battlefield sub-row (lands / support) collapses into its summary
+ *  tile. "auto" = collapse once the row exceeds the crowding threshold (the
+ *  prior fixed behavior); "on" = always collapse into the tile; "off" = never
+ *  collapse (always show the full row). Resolved at the use-site in
+ *  {@link BattlefieldZoneOverflow}, mirroring the `commandZoneDisplay`
+ *  tri-state "auto" precedent. Lands and support each carry their own value. */
+export type ZoneCollapseMode = "auto" | "on" | "off";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
@@ -86,6 +94,7 @@ export type StackDockSide = "left" | "right";
  *  a single thin row (small avatar + name + life) that trades the breakdown for
  *  vertical real-estate. Player-toggleable from the rail. */
 export type OpponentHudDensity = "comfortable" | "compact";
+export type MultiplayerBoardLayout = "focused" | "split";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -275,14 +284,18 @@ function buildDefaultPreferences(): PreferencesState {
     collapsedFolderIds: [],
     lastSeenChangelogId: undefined,
     commandZoneDisplay: "auto",
+    collapseLands: "auto",
+    collapseSupport: "auto",
     tapRotation: "mtga",
     spellPaymentMode: "auto",
+    handSort: "none",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
     cardPreviewHoverDelayMs: 0,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
+    multiplayerBoardLayout: "focused",
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     aiArchetypeFilter: "Any",
@@ -339,8 +352,17 @@ interface PreferencesState {
   lastSeenChangelogId?: number;
   /** Command-zone layout mode (inline dock / compact pile / auto-by-viewport). */
   commandZoneDisplay: CommandZoneDisplay;
+  /** Whether the lands sub-row collapses into its summary tile (auto/on/off). */
+  collapseLands: ZoneCollapseMode;
+  /** Whether the support sub-row collapses into its summary tile (auto/on/off). */
+  collapseSupport: ZoneCollapseMode;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
+  /** Persisted sort order for the player's own hand (display-only — never
+   *  reorders `player.hand`). Mirrors the discard grid's `SortKey`; defaults to
+   *  "none" (insertion order, the prior behavior). The hide-filter is kept
+   *  ephemeral per-game in `uiStore.handFilter`. */
+  handSort: SortKey;
   showKeywordStrip: boolean;
   /** When true, hovering an unfocused opponent's tab opens a small popover
    *  previewing that opponent's nonland permanents. Disable for a quieter
@@ -357,6 +379,8 @@ interface PreferencesState {
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
+  /** Multiplayer board presentation: one focused opponent, or all opponent seats. */
+  multiplayerBoardLayout: MultiplayerBoardLayout;
   aiSeats: AiSeatPref[];
   /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
    *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
@@ -385,6 +409,7 @@ interface PreferencesActions {
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
+  setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -412,8 +437,11 @@ interface PreferencesActions {
   setCollapsedFolderIds: (ids: string[]) => void;
   setLastSeenChangelogId: (id: number) => void;
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
+  setCollapseLands: (mode: ZoneCollapseMode) => void;
+  setCollapseSupport: (mode: ZoneCollapseMode) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
+  setHandSort: (sort: SortKey) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
@@ -514,6 +542,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
       setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
+      setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -560,8 +589,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCollapsedFolderIds: (ids) => set({ collapsedFolderIds: ids }),
       setLastSeenChangelogId: (id) => set({ lastSeenChangelogId: id }),
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
+      setCollapseLands: (mode) => set({ collapseLands: mode }),
+      setCollapseSupport: (mode) => set({ collapseSupport: mode }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
+      setHandSort: (sort) => set({ handSort: sort }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
@@ -719,7 +751,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 18,
+      version: 21,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -754,6 +786,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          via the shallow merge. The changelog hook then silently seeds
       //          it to the current latest on first load, so existing users get
       //          no unread dot for entries that predate this upgrade.
+      // v18 → v19: Add handSort; legacy stores default to "none" (insertion
+      //          order — the prior hand behavior) via the shallow merge.
+      // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
+      //          "auto" (the prior threshold-driven collapse) via the shallow
+      //          merge, so existing users see no behavior change.
+      // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
+      //          "focused", preserving the current focused-opponent layout.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -888,6 +927,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
                 : s,
             ),
           };
+        }
+
+        if (version < 21) {
+          migrated = { ...migrated, multiplayerBoardLayout: "focused" };
         }
 
         return migrated;

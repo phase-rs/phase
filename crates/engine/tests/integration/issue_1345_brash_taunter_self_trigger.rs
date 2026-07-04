@@ -26,6 +26,7 @@ fn damage_ability(
             },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![target],
         source_id,

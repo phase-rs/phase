@@ -127,7 +127,16 @@ filter_allow_noncombinator() {
     printf '%s' "${added%$'\n'}"
 }
 
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
+# Outlined test files (`mod tests;` / `#[path] mod ..._tests;` siblings) are
+# #[cfg(test)]-gated by their module declaration and contain only test fixtures
+# and assertions (e.g. `assert!(s.contains("..."))`) — never production parser
+# dispatch, which would be dead code under cfg(test). They lose the inline
+# `#[cfg(test)]` marker a line-based scan keys on, so exclude them by name; their
+# parent module file is still fully scanned, including any inline test fixtures.
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" \
+    ':(exclude)**/*.md' \
+    ':(exclude)**/tests.rs' \
+    ':(exclude)**/*_tests.rs' 2>/dev/null || true)
 if [ -z "$files" ]; then
     exit 0
 fi

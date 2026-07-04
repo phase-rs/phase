@@ -928,6 +928,7 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",
@@ -1464,6 +1465,7 @@ mod tests {
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
+                is_suspected: false,
             }),
         };
         let ability = ResolvedAbility::new(

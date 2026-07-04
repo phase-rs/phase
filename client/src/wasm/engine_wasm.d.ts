@@ -103,8 +103,8 @@ export function get_ai_action(difficulty: string, player_id: number): any;
  * Score all candidate actions and return `[GameAction, score]` tuples.
  * Used by AI workers for root parallelism — each worker scores independently,
  * then results are merged on the main thread.
- * `rng_seed` seeds the game state's RNG so each worker's MCTS explores
- * different paths through the search tree, producing diverse score vectors.
+ * `rng_seed` seeds the game state's RNG so each worker's beam search explores
+ * different orderings, producing diverse score vectors.
  */
 export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
 
@@ -385,9 +385,9 @@ export interface InitOutput {
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
+    readonly clear_game_state: () => void;
     readonly list_token_presets_js: () => any;
     readonly create_initial_state: () => any;
-    readonly clear_game_state: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -33,6 +33,8 @@ import type {
   CardSizePreference,
   CommandZoneDisplay,
   LogDefaultState,
+  MultiplayerBoardLayout,
+  ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
@@ -67,9 +69,11 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
+const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
+const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
  *  max = instant (skip animations). `0` = slowest, `1` = normal. The endpoint
@@ -153,7 +157,10 @@ export function PreferencesModal({
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
+  const collapseLands = usePreferencesStore((s) => s.collapseLands);
+  const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -161,7 +168,10 @@ export function PreferencesModal({
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
+  const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
+  const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
+  const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
@@ -362,6 +372,24 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.collapseLands")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseLands}
+                      onChange={setCollapseLands}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.collapseSupport")}>
+                    <SegmentedControl
+                      options={ZONE_COLLAPSE_MODES}
+                      value={collapseSupport}
+                      onChange={setCollapseSupport}
+                      renderLabel={(opt) => t(`gameplay.collapseZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.logDefault")}>
                     <SegmentedControl
                       options={LOG_DEFAULTS}
@@ -449,6 +477,15 @@ export function PreferencesModal({
                       />
                       <span className="text-sm text-slate-200">{t("visual.showOpponentBoard")}</span>
                     </label>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.multiplayerBoardLayout")}>
+                    <SegmentedControl
+                      options={MULTIPLAYER_BOARD_LAYOUTS}
+                      value={multiplayerBoardLayout}
+                      onChange={setMultiplayerBoardLayout}
+                      renderLabel={(opt) => t(`visual.multiplayerBoardLayoutOptions.${opt}`)}
+                    />
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.cardPreview")}>

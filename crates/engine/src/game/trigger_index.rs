@@ -178,6 +178,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(_) => push(TriggerEventKey::AbilityOrCopyActivated),
         TriggerMode::Countered => {
@@ -598,7 +599,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. } => {}
         GameEvent::ReplacementApplied { .. } => {}
-        GameEvent::Transformed { .. } | GameEvent::TurnedFaceUp { .. } => {
+        GameEvent::Transformed { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
@@ -899,6 +902,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
         | EffectKind::TurnFaceUp
+        // CR 701.27b: a turned-face-down permanent fires any face-down trigger
+        // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's
+        // `EffectResolved`. No-op here, mirroring `TurnFaceUp`.
+        | EffectKind::TurnFaceDown
         // Added on origin/main after this branch point. No production
         // EffectResolved-dispatching matcher consumes either: cast-copy fires
         // on cast events (CastCopyOfCard, Mizzix's Mastery), and life/P-T

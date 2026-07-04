@@ -1,3 +1,4 @@
+use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
     ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
@@ -14,6 +15,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext
 #[cfg(test)]
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
@@ -1056,27 +1058,17 @@ pub struct ManaActivationGates {
 }
 
 impl ManaActivationGates {
-    /// One `game_functioning_statics` sweep computing both presence flags.
+    /// Reads both presence flags from the O(1) `StaticModePresence` index (Unit 1)
+    /// instead of sweeping `game_functioning_statics`. A post-flush-precise superset:
+    /// a spurious `true` falls through to the exact per-source scan.
     pub fn compute(state: &GameState) -> Self {
-        let mut gates = ManaActivationGates {
-            has_cant_be_activated: false,
-            has_cant_activate_during: false,
-        };
-        for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
-            match def.mode {
-                crate::types::statics::StaticMode::CantBeActivated { .. } => {
-                    gates.has_cant_be_activated = true
-                }
-                crate::types::statics::StaticMode::CantActivateDuring { .. } => {
-                    gates.has_cant_activate_during = true
-                }
-                _ => {}
-            }
-            if gates.has_cant_be_activated && gates.has_cant_activate_during {
-                break;
-            }
+        ManaActivationGates {
+            has_cant_be_activated: static_kind_present(state, StaticModeKind::CantBeActivated),
+            has_cant_activate_during: static_kind_present(
+                state,
+                StaticModeKind::CantActivateDuring,
+            ),
         }
-        gates
     }
 }
 
@@ -3396,6 +3388,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -3411,6 +3404,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -6125,7 +6119,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(lions)],
             pit,
@@ -6280,6 +6276,7 @@ mod tests {
         let ev = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }
@@ -8377,6 +8374,7 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
                     damage_source: None,
+                    excess: None,
                 },
             )),
         );
@@ -8430,6 +8428,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         );
 

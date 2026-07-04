@@ -46,6 +46,7 @@ fn add_damage_spell(scenario: &mut GameScenario, player: PlayerId, amount: i32) 
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             damage_source: None,
+            excess: None,
         })
         .id()
 }

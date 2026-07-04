@@ -1,0 +1,541 @@
+{
+  "generated_at": "2026-07-03T20:08:10+00:00",
+  "repo": "phase-rs/phase",
+  "ref": "origin/main",
+  "ref_sha": "b762fbcced6aaa143e68a8c445403e5d6944990f",
+  "window": {
+    "since": "30 days ago",
+    "until": null,
+    "first_commit": "2026-06-03T20:24:00+00:00",
+    "last_commit": "2026-07-02T19:53:55+00:00"
+  },
+  "total_commits": 1734,
+  "pr_limit_hit": false,
+  "gittensor_api": {
+    "url": "https://api.gittensor.io/prs",
+    "merged_prs_for_repo": 1349,
+    "warning": null
+  },
+  "groups": {
+    "gittensor": {
+      "contributors": 34,
+      "logins": [
+        "andriypolanski",
+        "bohdansolovie",
+        "carlh7777",
+        "carlos4s",
+        "claytonlin1110",
+        "dale053",
+        "danielbrock58",
+        "dean-alley",
+        "dearsishs",
+        "dripsmvcp",
+        "e11734937-beep",
+        "galuis116",
+        "gildardodev",
+        "glorydavid03023",
+        "glorysr1209-png",
+        "jaso0n0818",
+        "jonathanchang31",
+        "jony376",
+        "jsdevninja",
+        "kelvinchen03",
+        "khaostica",
+        "kiannidev",
+        "milosde111",
+        "minion1227",
+        "monsterdavidliu-ux",
+        "nickmopen",
+        "philluiz2323",
+        "plind-junior",
+        "real-venus",
+        "reckless5040",
+        "renzomxd",
+        "seekmistar01",
+        "techworks01",
+        "tmimmanuel"
+      ],
+      "commits": 1111,
+      "code_commits": 1109,
+      "prs": 1111,
+      "additions": 325012,
+      "deletions": 38932,
+      "code_additions": 302603,
+      "code_deletions": 20126,
+      "code_churn": 322729,
+      "files_touched": 5973,
+      "areas": {
+        "Engine": 196666,
+        "Parser": 85174,
+        "AI": 15974,
+        "Frontend": 13785,
+        "Desktop": 5453,
+        "Server": 3202,
+        "Other crates": 2197,
+        "Tooling": 204,
+        "Docs": 45,
+        "Infra": 27,
+        "Other": 2
+      }
+    },
+    "nongittensor": {
+      "contributors": 10,
+      "logins": [
+        "agilerck",
+        "bruno-branco-brito",
+        "lgray",
+        "matthewevans",
+        "michaelmillsofficial",
+        "mike-thedude",
+        "mpbunce",
+        "ntindle",
+        "whovencroft",
+        "wlaursen"
+      ],
+      "commits": 594,
+      "code_commits": 590,
+      "prs": 586,
+      "additions": 506925,
+      "deletions": 268538,
+      "code_additions": 477514,
+      "code_deletions": 209939,
+      "code_churn": 687453,
+      "files_touched": 4756,
+      "areas": {
+        "Engine": 324065,
+        "Parser": 213955,
+        "Frontend": 110936,
+        "AI": 18761,
+        "Tooling": 7066,
+        "Docs": 6657,
+        "Agent tooling": 2462,
+        "Server": 1229,
+        "Other": 985,
+        "Other crates": 675,
+        "Desktop": 359,
+        "Infra": 303
+      }
+    }
+  },
+  "bots": {
+    "commits": 29,
+    "prs": 1
+  },
+  "unclassified": [],
+  "per_contributor": {
+    "matthewevans": {
+      "group": "nongittensor",
+      "name": "Matt Evans",
+      "commits": 365,
+      "code_commits": 361,
+      "prs": 357,
+      "code_net": 125286,
+      "code_churn": 528530
+    },
+    "lgray": {
+      "group": "nongittensor",
+      "name": "Lindsey Gray",
+      "commits": 97,
+      "code_commits": 97,
+      "prs": 97,
+      "code_net": 84644,
+      "code_churn": 94118
+    },
+    "kiannidev": {
+      "group": "gittensor",
+      "name": "kpdev",
+      "commits": 363,
+      "code_commits": 362,
+      "prs": 363,
+      "code_net": 67322,
+      "code_churn": 79356
+    },
+    "minion1227": {
+      "group": "gittensor",
+      "name": "minion1227",
+      "commits": 32,
+      "code_commits": 32,
+      "prs": 32,
+      "code_net": 5682,
+      "code_churn": 6200
+    },
+    "real-venus": {
+      "group": "gittensor",
+      "name": "venus",
+      "commits": 4,
+      "code_commits": 4,
+      "prs": 4,
+      "code_net": 1147,
+      "code_churn": 1255
+    },
+    "e11734937-beep": {
+      "group": "gittensor",
+      "name": "e11734937-beep",
+      "commits": 9,
+      "code_commits": 9,
+      "prs": 9,
+      "code_net": 1317,
+      "code_churn": 1405
+    },
+    "bohdansolovie": {
+      "group": "gittensor",
+      "name": "bohdansolovie",
+      "commits": 2,
+      "code_commits": 2,
+      "prs": 2,
+      "code_net": 731,
+      "code_churn": 797
+    },
+    "gildardodev": {
+      "group": "gittensor",
+      "name": "Gildardo Guerra",
+      "commits": 18,
+      "code_commits": 18,
+      "prs": 18,
+      "code_net": 6649,
+      "code_churn": 6921
+    },
+    "nickmopen": {
+      "group": "gittensor",
+      "name": "Nick M",
+      "commits": 34,
+      "code_commits": 34,
+      "prs": 34,
+      "code_net": 8069,
+      "code_churn": 9157
+    },
+    "claytonlin1110": {
+      "group": "gittensor",
+      "name": "Clayton",
+      "commits": 40,
+      "code_commits": 40,
+      "prs": 40,
+      "code_net": 12383,
+      "code_churn": 13765
+    },
+    "phase-rs-release-bot": {
+      "group": "bot",
+      "name": "phase-rs release bot",
+      "commits": 28,
+      "code_commits": 28,
+      "prs": 0,
+      "code_net": 0,
+      "code_churn": 224
+    },
+    "ntindle": {
+      "group": "nongittensor",
+      "name": "Nicholas Tindle",
+      "commits": 70,
+      "code_commits": 70,
+      "prs": 70,
+      "code_net": 34331,
+      "code_churn": 37659
+    },
+    "carlh7777": {
+      "group": "gittensor",
+      "name": "Carl Harris",
+      "commits": 21,
+      "code_commits": 20,
+      "prs": 21,
+      "code_net": 1341,
+      "code_churn": 2433
+    },
+    "agilerck": {
+      "group": "nongittensor",
+      "name": "AgilErck",
+      "commits": 7,
+      "code_commits": 7,
+      "prs": 7,
+      "code_net": 4774,
+      "code_churn": 6058
+    },
+    "renzomxd": {
+      "group": "gittensor",
+      "name": "Renzo",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 125,
+      "code_churn": 127
+    },
+    "andriypolanski": {
+      "group": "gittensor",
+      "name": "\u0410\u043d\u0434\u0440\u0456\u0301\u0439 \u041f\u043e\u043b\u0430\u043d\u0441\u043a\u0456",
+      "commits": 47,
+      "code_commits": 47,
+      "prs": 47,
+      "code_net": 13061,
+      "code_churn": 15629
+    },
+    "philluiz2323": {
+      "group": "gittensor",
+      "name": "philluiz2323",
+      "commits": 74,
+      "code_commits": 74,
+      "prs": 74,
+      "code_net": 19037,
+      "code_churn": 20423
+    },
+    "bruno-branco-brito": {
+      "group": "nongittensor",
+      "name": "Bruno Branco e Brito",
+      "commits": 2,
+      "code_commits": 2,
+      "prs": 2,
+      "code_net": 1641,
+      "code_churn": 1659
+    },
+    "jsdevninja": {
+      "group": "gittensor",
+      "name": "Full Stack Developer",
+      "commits": 38,
+      "code_commits": 38,
+      "prs": 38,
+      "code_net": 17860,
+      "code_churn": 22254
+    },
+    "dale053": {
+      "group": "gittensor",
+      "name": "dale053",
+      "commits": 14,
+      "code_commits": 14,
+      "prs": 14,
+      "code_net": 3350,
+      "code_churn": 5914
+    },
+    "mike-thedude": {
+      "group": "nongittensor",
+      "name": "mike-theDude",
+      "commits": 18,
+      "code_commits": 18,
+      "prs": 18,
+      "code_net": 8434,
+      "code_churn": 10434
+    },
+    "wlaursen": {
+      "group": "nongittensor",
+      "name": "wlaursen",
+      "commits": 4,
+      "code_commits": 4,
+      "prs": 4,
+      "code_net": 1187,
+      "code_churn": 1261
+    },
+    "galuis116": {
+      "group": "gittensor",
+      "name": "galuis116",
+      "commits": 99,
+      "code_commits": 99,
+      "prs": 99,
+      "code_net": 18257,
+      "code_churn": 20233
+    },
+    "tmimmanuel": {
+      "group": "gittensor",
+      "name": "tmimmanuel",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 205,
+      "code_churn": 237
+    },
+    "jony376": {
+      "group": "gittensor",
+      "name": "jony376",
+      "commits": 34,
+      "code_commits": 34,
+      "prs": 34,
+      "code_net": 5717,
+      "code_churn": 6369
+    },
+    "carlos4s": {
+      "group": "gittensor",
+      "name": "carlos4s",
+      "commits": 33,
+      "code_commits": 33,
+      "prs": 33,
+      "code_net": 35709,
+      "code_churn": 36561
+    },
+    "dripsmvcp": {
+      "group": "gittensor",
+      "name": "dripsmvcp",
+      "commits": 123,
+      "code_commits": 123,
+      "prs": 123,
+      "code_net": 34867,
+      "code_churn": 40141
+    },
+    "whovencroft": {
+      "group": "nongittensor",
+      "name": "Whovencroft",
+      "commits": 29,
+      "code_commits": 29,
+      "prs": 29,
+      "code_net": 6567,
+      "code_churn": 6967
+    },
+    "jonathanchang31": {
+      "group": "gittensor",
+      "name": "Jonathan Chang",
+      "commits": 7,
+      "code_commits": 7,
+      "prs": 7,
+      "code_net": 1466,
+      "code_churn": 1600
+    },
+    "jaso0n0818": {
+      "group": "gittensor",
+      "name": "jaso0n0818",
+      "commits": 35,
+      "code_commits": 35,
+      "prs": 35,
+      "code_net": 5036,
+      "code_churn": 5140
+    },
+    "plind-junior": {
+      "group": "gittensor",
+      "name": "plind",
+      "commits": 3,
+      "code_commits": 3,
+      "prs": 3,
+      "code_net": 266,
+      "code_churn": 266
+    },
+    "app/dependabot": {
+      "group": "bot",
+      "name": "dependabot[bot]",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 0,
+      "code_churn": 6
+    },
+    "kelvinchen03": {
+      "group": "gittensor",
+      "name": "Kelvinchen03",
+      "commits": 18,
+      "code_commits": 18,
+      "prs": 18,
+      "code_net": 8731,
+      "code_churn": 9639
+    },
+    "milosde111": {
+      "group": "gittensor",
+      "name": "milosde111",
+      "commits": 14,
+      "code_commits": 14,
+      "prs": 14,
+      "code_net": 855,
+      "code_churn": 1757
+    },
+    "glorysr1209-png": {
+      "group": "gittensor",
+      "name": "Hernandez Avelino",
+      "commits": 14,
+      "code_commits": 14,
+      "prs": 14,
+      "code_net": 2976,
+      "code_churn": 3364
+    },
+    "danielbrock58": {
+      "group": "gittensor",
+      "name": "Dedatox",
+      "commits": 2,
+      "code_commits": 2,
+      "prs": 2,
+      "code_net": 910,
+      "code_churn": 950
+    },
+    "mpbunce": {
+      "group": "nongittensor",
+      "name": "Matthew Bunce",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 105,
+      "code_churn": 133
+    },
+    "dean-alley": {
+      "group": "gittensor",
+      "name": "Dean Alley Co.",
+      "commits": 5,
+      "code_commits": 5,
+      "prs": 5,
+      "code_net": 1265,
+      "code_churn": 1269
+    },
+    "reckless5040": {
+      "group": "gittensor",
+      "name": "Reckless5040",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 50,
+      "code_churn": 54
+    },
+    "seekmistar01": {
+      "group": "gittensor",
+      "name": "seekmistar01",
+      "commits": 5,
+      "code_commits": 5,
+      "prs": 5,
+      "code_net": 1948,
+      "code_churn": 2378
+    },
+    "michaelmillsofficial": {
+      "group": "nongittensor",
+      "name": "Michael Mills",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 606,
+      "code_churn": 634
+    },
+    "glorydavid03023": {
+      "group": "gittensor",
+      "name": "glorydavid03023",
+      "commits": 5,
+      "code_commits": 5,
+      "prs": 5,
+      "code_net": 861,
+      "code_churn": 939
+    },
+    "dearsishs": {
+      "group": "gittensor",
+      "name": "DearsisHS",
+      "commits": 11,
+      "code_commits": 11,
+      "prs": 11,
+      "code_net": 4129,
+      "code_churn": 4687
+    },
+    "techworks01": {
+      "group": "gittensor",
+      "name": "Phoenix",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 36,
+      "code_churn": 38
+    },
+    "monsterdavidliu-ux": {
+      "group": "gittensor",
+      "name": "monsterDavid",
+      "commits": 2,
+      "code_commits": 2,
+      "prs": 2,
+      "code_net": -2,
+      "code_churn": 106
+    },
+    "khaostica": {
+      "group": "gittensor",
+      "name": "Khaostica",
+      "commits": 1,
+      "code_commits": 1,
+      "prs": 1,
+      "code_net": 1121,
+      "code_churn": 1365
+    }
+  }
+}

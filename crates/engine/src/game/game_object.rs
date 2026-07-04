@@ -8,7 +8,7 @@ use crate::types::ability::{
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1119,6 +1119,32 @@ impl GameObject {
                     }
                 }
             }
+            PerpetualModification::ModifyCost { mode, amount } => {
+                // CR 601.2f: realize the perpetual self-cost modifier as a
+                // synthetic self-spell `ModifyCost` static. The self-spell cost collector
+                // reads LIVE `static_definitions` (casting.rs `collect_self_spell_cost_modifiers`)
+                // and the hand-zone layer pass re-syncs only `keywords` from base
+                // (layers.rs) — so push to BOTH live and base, mirroring the GrantKeywords
+                // arm (keywords + base_keywords): the live copy makes it visible to a
+                // from-hand cast immediately; the base copy survives the battlefield layer
+                // reset (`static_definitions = base.clone()`). `apply_perpetual_modification`
+                // runs once per `ApplyPerpetual` resolution (single caller, effects/perpetual.rs)
+                // so there is no double-injection; multiple distinct grants intentionally stack.
+                use crate::types::ability::TargetFilter;
+                use crate::types::statics::StaticMode;
+                self.sync_missing_base_characteristics();
+                let synthetic =
+                    crate::types::ability::StaticDefinition::new(StaticMode::ModifyCost {
+                        mode: *mode,
+                        amount: amount.clone(),
+                        spell_filter: None,
+                        dynamic_count: None,
+                    })
+                    .affected(TargetFilter::SelfRef)
+                    .active_zones(crate::types::zones::self_spell_cost_mod_active_zones());
+                self.static_definitions.push(synthetic.clone());
+                Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
+            }
         }
         self.perpetual_mods.push(modification.clone());
     }
@@ -1206,6 +1232,10 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            // CR 701.60b: Snapshot suspected status at the moment of the move,
+            // before `move_to_zone` resets the live flag — so an LTB / cost-paid
+            // look-back ("the sacrificed creature was suspected") reads it.
+            is_suspected: self.is_suspected,
         }
     }
 
@@ -1426,6 +1456,10 @@ impl GameObject {
             // object is still in its public zone (mana-spent / attack-declaration
             // captures), so `self.tapped` is authoritative.
             tapped: self.tapped,
+            // CR 701.60b: Capture live suspected status. Taken while the object is
+            // still on the battlefield (cost-paid snapshot precedes the sacrifice
+            // zone-change that resets the flag), so `self.is_suspected` is authoritative.
+            is_suspected: self.is_suspected,
         }
     }
 
@@ -1708,9 +1742,29 @@ impl GameObject {
     }
 
     /// Look up a stored creature type choice.
+    ///
+    /// CR 613.7: Reads the LAST `ChosenAttribute::CreatureType`, so that a
+    /// re-choice (which appends to `chosen_attributes`, since the vector is only
+    /// cleared on leave-battlefield) supersedes the prior choice — the most
+    /// recent persisted choice wins. ETB-once cards have a single entry, so the
+    /// last entry equals the first and behavior is unchanged. Kept consistent
+    /// with `chosen_card_name` so a same-clause read of "the last chosen name and
+    /// creature type" (Psychic Paper) reports both halves from the same choice.
     pub fn chosen_creature_type(&self) -> Option<&str> {
-        self.chosen_attributes.iter().find_map(|a| match a {
+        self.chosen_attributes.iter().rev().find_map(|a| match a {
             ChosenAttribute::CreatureType(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// CR 612.8 + CR 613.7: The most recently chosen card name (Psychic Paper's
+    /// "the last chosen name"). Reads the LAST `ChosenAttribute::CardName` so a
+    /// re-attach that chooses again (which appends, since `chosen_attributes` only
+    /// clears on leave-battlefield) supersedes the prior choice. Read by
+    /// `ContinuousModification::SetChosenName` at Layer 3 evaluation.
+    pub fn chosen_card_name(&self) -> Option<&str> {
+        self.chosen_attributes.iter().rev().find_map(|a| match a {
+            ChosenAttribute::CardName(s) => Some(s.as_str()),
             _ => None,
         })
     }
@@ -1734,6 +1788,22 @@ impl GameObject {
         })
     }
 
+    /// CR 608.2d: Look up ALL stored chosen keywords (Greymond, Avacyn's
+    /// Stalwart "choose two abilities from among first strike, vigilance, and
+    /// lifelink" persists two `ChosenAttribute::Keyword` entries). The plural
+    /// companion to `chosen_keyword`; read by
+    /// `ContinuousModification::AddChosenKeyword` at Layer 6 evaluation so a
+    /// multi-keyword choice grants every chosen ability, not just the first.
+    pub fn chosen_keywords(&self) -> Vec<&Keyword> {
+        self.chosen_attributes
+            .iter()
+            .filter_map(|a| match a {
+                ChosenAttribute::Keyword(k) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen
     /// as this permanent entered the battlefield (e.g. "Jeskai" / "Temur" on
     /// Frostcliff Siege, "Khans" / "Dragons" on a Khans of Tarkir Siege).
@@ -1743,6 +1813,18 @@ impl GameObject {
     pub fn chosen_label(&self) -> Option<&str> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Label(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// CR 607.2d + CR 508.1c: Look up the persisted chosen seat direction
+    /// (left/right) for a directional attack-restriction source (Pramikon,
+    /// Sky Rampart; Mystic Barrier; Teyo, Geometric Tactician). Returns `None`
+    /// until a direction has been chosen, in which case the restriction is
+    /// inert. Read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+    pub fn chosen_direction(&self) -> Option<SeatDirection> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Direction(d) => Some(*d),
             _ => None,
         })
     }
@@ -1959,6 +2041,44 @@ mod tests {
         obj.chosen_attributes
             .push(ChosenAttribute::Color(ManaColor::Red));
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn chosen_card_name_returns_last_choice() {
+        // CR 613.7: re-attach appends a second CardName; the most recent wins.
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.chosen_card_name().is_none());
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+        assert_eq!(obj.chosen_card_name(), Some("Llanowar Elves"));
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+        assert_eq!(obj.chosen_card_name(), Some("Grizzly Bears"));
+    }
+
+    #[test]
+    fn chosen_creature_type_returns_last_choice() {
+        // CR 613.7: re-attach appends a second CreatureType; the most recent wins.
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.chosen_creature_type().is_none());
+        obj.chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+        assert_eq!(obj.chosen_creature_type(), Some("Elf"));
+        obj.chosen_attributes
+            .push(ChosenAttribute::CreatureType("Bear".to_string()));
+        assert_eq!(obj.chosen_creature_type(), Some("Bear"));
     }
 
     #[test]

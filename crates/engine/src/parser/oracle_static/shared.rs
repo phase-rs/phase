@@ -371,21 +371,19 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
 /// Equipment is never an attacker, so the static never fires, and the keyword
 /// would land on the Equipment rather than the host.
 ///
-/// Returns a `Vec` so that any conjunct of the effect predicate which
-/// `push_grant_clause_modifications` cannot model (e.g. "must be blocked by a
-/// Dalek if able") is surfaced as a sibling `Effect::Unimplemented` residual,
-/// rather than being silently dropped. The residual makes coverage mark the card
-/// partially unsupported (`is_static_supported`) and the swallow check defer
-/// (`any_ability_has_unimplemented`) — an honest signal independent of the
-/// whole-card `"condition":{` suppression that the supported static's gate would
-/// otherwise trip in `detect_condition_if`.
-///
-/// DEFER: typed "must be blocked by <filter> if able" requires parameterizing
-/// the `MustBeBlocked`/`MustBeBlockedByAll` requirement family with a blocker
-/// filter — /add-engine-variant Stage-2 REFUSE_WITH_REFACTOR (~80 sites). Until
-/// then the dropped conjunct rides as an `Effect::Unimplemented` residual. An
-/// `Unrecognized`-condition companion is NOT used: it would suppress
-/// `detect_condition_if` (cond_markers include `"condition":{`) AND be
+/// Returns a `Vec` so that each conjunct of the effect predicate is modeled
+/// independently: the P/T + keyword grants merge into one gated `Continuous`
+/// static, recognized combat requirements ("must be blocked if able", "is
+/// goaded") become gated rule-statics, and the FILTERED "must be blocked by a
+/// Dalek if able" conjunct lowers to the typed `MustBeBlocked { by: Some(filter)
+/// }` requirement gated on the same combat condition (CR 509.1c). Only a
+/// conjunct that none of these recognize is surfaced as a sibling
+/// `Effect::Unimplemented` residual rather than being silently dropped — an
+/// honest coverage signal (`is_static_supported` / `any_ability_has_unimplemented`)
+/// independent of the whole-card `"condition":{` suppression that the supported
+/// static's gate would otherwise trip in `detect_condition_if`. An
+/// `Unrecognized`-condition companion is NOT used for residuals: it would
+/// suppress `detect_condition_if` (cond_markers include `"condition":{`) AND be
 /// runtime-active (`layers.rs` evaluates `Unrecognized => true`). CR 509.1c.
 pub(crate) fn try_parse_inverted_attached_combat_grant(
     split: &InvertedSplit,
@@ -469,8 +467,8 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         // if able", "attacks each combat if able", "is goaded"). Recover it via the
         // rule-static predicate combinator and emit a sibling rule-static gated on the
         // same combat condition — modeled, not an `Unimplemented` residual. (The
-        // FILTERED "must be blocked by a Dalek if able" form is NOT recognized by the
-        // combinator, so it correctly falls through to the residual below.)
+        // FILTERED "must be blocked by a Dalek if able" form is handled by the typed
+        // `MustBeBlocked { by }` branch below, not this bare-form combinator.)
         let residual_lower = residual_text.to_lowercase();
         if let Ok((rest, predicate)) =
             all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
@@ -482,24 +480,29 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
             continue;
         }
 
+        // CR 509.1c: the FILTERED "must be blocked by <quality> if able" conjunct
+        // (Ace's Baseball Bat: "must be blocked by a Dalek if able") lowers to the
+        // typed `MustBeBlocked { by: Some(filter) }` requirement, gated on the same
+        // combat condition as the grant (so it inherits the "as long as ~ is
+        // attacking" gate). Modeled, not an `Unimplemented` residual.
+        if let Some(filter) = parse_must_be_blocked_by_filter(&residual_lower) {
+            defs.push(
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                    .affected(affected.clone())
+                    .condition(gate.clone())
+                    .description(residual_text.clone()),
+            );
+            continue;
+        }
+
         // CR 509.1c: surface the still-unmodeled conjunct as an `Effect::Unimplemented`
         // residual carried in a `GrantAbility` modification so coverage flags it and
         // the swallow check defers (see fn-level note). The stable category key
         // groups the gap in coverage; the raw conjunct text is the diagnostic.
-        defs.push(
-            StaticDefinition::continuous()
-                .affected(affected.clone())
-                .modifications(vec![ContinuousModification::GrantAbility {
-                    definition: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        crate::types::ability::Effect::unimplemented(
-                            "attached_grant_unmodeled_conjunct",
-                            residual_text.clone(),
-                        ),
-                    )),
-                }])
-                .description(residual_text),
-        );
+        defs.push(attached_grant_unmodeled_conjunct_residual(
+            affected.clone(),
+            &residual_text,
+        ));
     }
 
     defs
@@ -541,50 +544,81 @@ pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<
     Some(filter)
 }
 
-pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+/// CR 113.6b: Whether `filter` scopes to cards you own/control in `zone` — the
+/// zone a granted cast keyword functions from. Generalized from the
+/// graveyard-only predicate so the same shape validates hand grants (foretell,
+/// miracle) against `Zone::Hand`.
+pub(crate) fn target_filter_is_your_zone(filter: &TargetFilter, zone: Zone) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::You)
-                && tf.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::InZone {
-                            zone: Zone::Graveyard
-                        }
-                    )
-                })
+                && tf
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone))
         }
-        TargetFilter::Or { filters } => filters.iter().all(target_filter_is_your_graveyard),
+        TargetFilter::Or { filters } => filters.iter().all(|f| target_filter_is_your_zone(f, zone)),
         _ => false,
     }
 }
 
+/// Thin wrapper preserving the graveyard-specific call sites (no churn) —
+/// delegates to the generalized `target_filter_is_your_zone`.
+pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+    target_filter_is_your_zone(filter, Zone::Graveyard)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraveyardGrantedKeywordKind {
+pub(crate) enum GrantedCastKeywordKind {
     Flashback,
     Escape,
     Mayhem,
     Scavenge,
     Encore,
+    /// CR 702.143a: Foretell functions from hand (Dream Devourer grant).
+    Foretell,
+    /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
+    Miracle,
 }
 
-impl GraveyardGrantedKeywordKind {
+impl GrantedCastKeywordKind {
     pub(crate) fn matches_keyword(self, keyword: &Keyword) -> bool {
         match self {
-            GraveyardGrantedKeywordKind::Flashback => {
+            GrantedCastKeywordKind::Flashback => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Flashback
             }
-            GraveyardGrantedKeywordKind::Escape => {
+            GrantedCastKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
             // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
-            GraveyardGrantedKeywordKind::Mayhem => {
+            GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
             // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
             // keywords share `KeywordKind::Unknown`, so match the variant directly.
-            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
-            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            // CR 702.143a / CR 702.94a: hand-zone cast keywords.
+            GrantedCastKeywordKind::Foretell => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Foretell
+            }
+            GrantedCastKeywordKind::Miracle => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Miracle
+            }
+        }
+    }
+
+    /// CR 113.6b: The zone this granted cast keyword functions from. The gate in
+    /// `keyword_grant.rs` uses it to decline zone mismatches (foretell-in-graveyard,
+    /// flashback-in-hand).
+    pub(crate) fn grant_zone(self) -> Zone {
+        match self {
+            GrantedCastKeywordKind::Flashback
+            | GrantedCastKeywordKind::Escape
+            | GrantedCastKeywordKind::Mayhem
+            | GrantedCastKeywordKind::Scavenge
+            | GrantedCastKeywordKind::Encore => Zone::Graveyard,
+            GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
 }
@@ -680,6 +714,67 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
         ));
     }
     None
+}
+
+/// CR 602.5: Parses the activation-prohibition tail of compound static text.
+fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag(", and "),
+            opt(alt((tag("its "), tag("their ")))),
+            alt((
+                tag("activated abilities can't be activated"),
+                tag("activated abilities can\u{2019}t be activated"),
+            )),
+            opt((tag(" unless they're "), tag("mana abilities"))),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+fn rule_static_predicate_to_activation_compound_mode(
+    predicate: RuleStaticPredicate,
+) -> Option<StaticMode> {
+    match predicate {
+        RuleStaticPredicate::CantAttack => Some(StaticMode::CantAttack),
+        RuleStaticPredicate::CantBlock => Some(StaticMode::CantBlock),
+        RuleStaticPredicate::CantAttackOrBlock => Some(StaticMode::CantAttackOrBlock),
+        RuleStaticPredicate::CantCrew => Some(StaticMode::CantCrew),
+        RuleStaticPredicate::CantUntap
+        | RuleStaticPredicate::CantBeActivated
+        | RuleStaticPredicate::CantBeSacrificed
+        | RuleStaticPredicate::MustAttack
+        | RuleStaticPredicate::MustBlock
+        | RuleStaticPredicate::MustBeBlocked
+        | RuleStaticPredicate::Goaded
+        | RuleStaticPredicate::BlockOnlyCreaturesWithFlying
+        | RuleStaticPredicate::Shroud
+        | RuleStaticPredicate::Hexproof
+        | RuleStaticPredicate::MayLookAtTopOfLibrary
+        | RuleStaticPredicate::LoseAllAbilities
+        | RuleStaticPredicate::NoMaximumHandSize
+        | RuleStaticPredicate::MayPlayAdditionalLand => None,
+    }
+}
+
+fn parse_activation_compound_restriction_modes(predicate_lower: &str) -> Option<Vec<StaticMode>> {
+    let (rest, restriction_text) = terminated(take_until(", and "), parse_activation_compound_tail)
+        .parse(predicate_lower)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let restriction_text = restriction_text.trim();
+    if let Ok((_, (predicate, None))) =
+        all_consuming(parse_combat_rule_static_predicate_with_defended_nom).parse(restriction_text)
+    {
+        return rule_static_predicate_to_activation_compound_mode(predicate).map(|mode| vec![mode]);
+    }
+
+    parse_restriction_modes(restriction_text)
 }
 
 /// Like `parse_static_line`, but returns all `StaticDefinition`s produced by a line.
@@ -1003,6 +1098,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 116.2d: "ignore this effect" actions from static abilities are special
+    // actions. Until the engine models that priority-time action, the static
+    // parser must fail closed instead of exporting the lock while dropping the
+    // opt-out sentence.
+    if nom_primitives::scan_contains(&lower, "ignore this effect until end of turn") {
+        return Vec::new();
+    }
+
     // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
     // the host creature's COMBAT STATE — "As long as equipped/enchanted creature
     // is attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
@@ -1039,6 +1142,22 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     }
 
     if let Some(defs) = parse_compound_subject_keyword_static(&stripped, &lower) {
+        return defs;
+    }
+
+    // CR 508.1c + CR 509.1b + CR 611.3a: "~ can't attack if <cond> and can't block
+    // if <cond>" (The Fallen Apart) — each restriction carries its own trailing
+    // gate; must split before the single-gate `can't block` dispatch arm.
+    // Attached-subject forms scope `affected` to the enchanted/equipped host.
+    if let Some(defs) = try_parse_dual_gated_cant_attack_and_cant_block(&tp, &stripped) {
+        return defs;
+    }
+
+    // CR 508.1c + CR 509.1b + CR 611.3a: "<grant> and can't attack if <A> and
+    // can't block if <B>" (Cagemail-class pump plus gated combat drawbacks).
+    // The bare dual-gate splitter declines when the subject carries a leading
+    // grant; peel the conjunct and append both gated combat statics.
+    if let Some(defs) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
         return defs;
     }
 
@@ -1106,13 +1225,20 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
-    // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
+    let tp = TextPair::new(&stripped, &lower);
+    let attached_activation_compound_modes =
+        attached_subject_filter(&tp).and_then(|(_, predicate)| {
+            let predicate_lower = predicate.to_lowercase();
+            parse_activation_compound_restriction_modes(&predicate_lower)
+        });
+
+    // CR 508.1c / CR 509.1b / CR 702.122c + CR 602.5: compound attack,
+    // block, crew, and activation prohibitions produce parallel static definitions.
     if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
-        && (nom_primitives::scan_contains(&lower, "can't attack")
+        && (attached_activation_compound_modes.is_some()
+            || nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))
     {
-        let tp = TextPair::new(&stripped, &lower);
         // Faith's Fetters / Arrest-class Aura lines lead with "enchanted
         // permanent/creature …"; the combat lock and activation prohibition apply
         // to the host, not the Aura source.
@@ -1121,18 +1247,24 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
             .unwrap_or(TargetFilter::SelfRef);
         let source_filter = affected.clone();
         let mut defs = Vec::new();
-        let combat_mode = if nom_primitives::scan_contains(&lower, "can't attack or block") {
-            StaticMode::CantAttackOrBlock
-        } else if nom_primitives::scan_contains(&lower, "can't attack") {
-            StaticMode::CantAttack
-        } else {
-            StaticMode::CantBlock
-        };
-        defs.push(
-            StaticDefinition::new(combat_mode)
-                .affected(affected.clone())
-                .description(stripped.to_string()),
-        );
+        let combat_modes = attached_activation_compound_modes.unwrap_or_else(|| {
+            vec![
+                if nom_primitives::scan_contains(&lower, "can't attack or block") {
+                    StaticMode::CantAttackOrBlock
+                } else if nom_primitives::scan_contains(&lower, "can't attack") {
+                    StaticMode::CantAttack
+                } else {
+                    StaticMode::CantBlock
+                },
+            ]
+        });
+        for combat_mode in combat_modes {
+            defs.push(
+                StaticDefinition::new(combat_mode)
+                    .affected(affected.clone())
+                    .description(stripped.to_string()),
+            );
+        }
         defs.push(
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
@@ -1463,6 +1595,32 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         }
     }
 
+    // CR 601.2 + CR 400.7: "<source> was cast this turn" gates on the source
+    // having been cast (WasCast) AND having entered this turn
+    // (SourceEnteredThisTurn) — a permanent that was cast and entered this turn
+    // was necessarily cast this turn, while one put onto the battlefield (not
+    // cast) or cast on an earlier turn fails one conjunct. Composed from the two
+    // existing leaf primitives rather than a new `SourceWasCastThisTurn` variant
+    // (compose-don't-proliferate). `parse_inner_condition` above recognizes the
+    // bare "<source> was cast" (→ `WasCast`) but not the "this turn" tightening,
+    // so the compound is handled here. Rock Jockey: "You can't play lands if this
+    // creature was cast this turn."
+    for self_ref in ["it ", "this creature ", "this permanent ", "~ "] {
+        let Some(after_ref) = nom_tag_lower(tp.lower, tp.lower, self_ref) else {
+            continue;
+        };
+        if nom_tag_lower(after_ref, after_ref, "was cast this turn")
+            .is_some_and(|remainder| remainder.trim().is_empty())
+        {
+            return Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::WasCast { zone: None },
+                    StaticCondition::SourceEnteredThisTurn,
+                ],
+            });
+        }
+    }
+
     // Compound " and " splitting: try splitting on " and ", parse both halves recursively.
     // Only succeeds if BOTH halves parse independently — avoids false splits on
     // noun phrases like "artifacts and creatures".
@@ -1513,6 +1671,29 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
 
     // "[N] or more [type] are on the battlefield" (Limited Resources)
     if let Some(condition) = parse_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "a[n] [type] is on the battlefield" (Wirecat: "... if an enchantment is on
+    // the battlefield") — singular existence gate = ObjectCount(type) >= 1.
+    if let Some(condition) = parse_exists_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "there are [N] or more [type] on the battlefield" (Hour of Revelation:
+    // "... if there are ten or more nonland permanents on the battlefield") —
+    // the existential-phrasing counterpart of the "[N] or more [type] are on the
+    // battlefield" count form. Same ObjectCount(type) >= N shape.
+    if let Some(condition) = parse_there_are_count_on_battlefield_condition(tp.lower) {
+        return Some(condition);
+    }
+
+    // "there's a[n]/another [type] on the battlefield" (Shauku, Endbringer:
+    // "... can't attack if there's another creature on the battlefield.") — the
+    // singular existential of the "there are [N] or more" count form. Existence
+    // gate = ObjectCount(type) >= 1; the "another " article carries source
+    // exclusion through into the filter (Another prop).
+    if let Some(condition) = parse_there_is_exists_on_battlefield_condition(tp.lower) {
         return Some(condition);
     }
 
@@ -1765,14 +1946,290 @@ pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticC
     })
 }
 
-/// CR 508.1 / CR 509.1c: Parse the trailing " if [condition]" clause of a
+/// True when `if_offset` points at an `if …` gate immediately preceded by `as `
+/// (the `as if` phrase).
+fn is_as_if_gate_marker(input: &str, if_offset: usize) -> bool {
+    let Some(start) = if_offset.checked_sub(3) else {
+        return false;
+    };
+    if !input.is_char_boundary(start) {
+        return false;
+    }
+    tag::<_, _, OracleError<'_>>("as ")
+        .parse(&input[start..if_offset])
+        .is_ok()
+}
+
+/// Split a trailing `" as long as <condition>"` rider, anchored on the last
+/// occurrence (restriction gates are terminal).
+fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
+    let (_, _, tail) = nom_primitives::scan_last_at_word_boundaries_with_offset(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as long as ").parse(i)
+    })?;
+    Some(tail.trim_start())
+}
+
+/// Split a trailing `" if <condition>"` rider, skipping `as if` false positives
+/// via word-boundary scanning with a nom `as ` prefix guard.
+fn split_trailing_if_condition(lower: &str) -> Option<&str> {
+    let (_, _, tail) = nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+        lower,
+        |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        |if_offset| !is_as_if_gate_marker(lower, if_offset),
+    )?;
+    Some(tail.trim_start())
+}
+
+fn split_trailing_if_condition_tp<'a>(tp: &'a TextPair<'a>) -> Option<&'a str> {
+    let (_, _, tail_lower) = nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+        tp.lower,
+        |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+        |if_offset| !is_as_if_gate_marker(tp.lower, if_offset),
+    )?;
+    let start = tp.lower.len().checked_sub(tail_lower.len())?;
+    Some(tp.original.get(start..)?.trim_start())
+}
+
+/// CR 508.1c + CR 509.1b: Split the gated combat tail `<A> and can't block if <B>`
+/// after the leading `"can't attack if "` marker has been consumed.
+fn parse_dual_gated_combat_condition_tails(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (input, attack_cond) = take_until(" and can't block if ").parse(input)?;
+    let (input, _) = tag(" and can't block if ").parse(input)?;
+    let (input, block_cond) = terminated(rest, opt(tag("."))).parse(input)?;
+    Ok((input, (attack_cond, block_cond)))
+}
+
+/// CR 508.1c + CR 509.1b: Split a compound "~ can't attack if <A> and can't block
+/// if <B>" static into two gated restrictions (The Fallen Apart).
+fn parse_dual_gated_cant_attack_block(input: &str) -> OracleResult<'_, (&str, &str, &str)> {
+    let (input, subject) = take_until("can't attack if ").parse(input)?;
+    let (input, _) = tag("can't attack if ").parse(input)?;
+    let (input, (attack_cond, block_cond)) = parse_dual_gated_combat_condition_tails(input)?;
+    Ok((input, (subject, attack_cond, block_cond)))
+}
+
+fn is_self_ref_combat_subject(subject: &str) -> bool {
+    let subject = subject.trim();
+    subject == "~"
+        || subject == "it"
+        || SELF_REF_TYPE_PHRASES.contains(&subject)
+        || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject)
+}
+
+fn lower_subslice_to_original<'a>(tp: &'a TextPair<'a>, lower_sub: &str) -> Option<&'a str> {
+    let start = lower_sub.as_ptr() as usize - tp.lower.as_ptr() as usize;
+    tp.original.get(start..start + lower_sub.len())
+}
+
+fn parse_attached_combat_subject_nom(input: &str) -> OracleResult<'_, TargetFilter> {
+    all_consuming(alt((
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted permanent"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted creature"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted land"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            tag("equipped creature"),
+        ),
+    )))
+    .parse(input)
+}
+
+fn is_attached_combat_subject(subject: &str) -> Option<TargetFilter> {
+    parse_attached_combat_subject_nom(subject.trim())
+        .ok()
+        .map(|(_, filter)| filter)
+}
+
+fn dual_gated_combat_affected(subject_lower: &str) -> Option<TargetFilter> {
+    is_attached_combat_subject(subject_lower)
+        .or_else(|| is_self_ref_combat_subject(subject_lower).then_some(TargetFilter::SelfRef))
+}
+
+fn try_parse_dual_gated_cant_attack_and_cant_block(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (remainder, (subject_lower, attack_cond_lower, block_cond_lower)) =
+        parse_dual_gated_cant_attack_block(tp.lower).ok()?;
+    let affected = dual_gated_combat_affected(subject_lower)?;
+    if !remainder.trim().is_empty() || attack_cond_lower.is_empty() || block_cond_lower.is_empty() {
+        return None;
+    }
+    let attack_cond = lower_subslice_to_original(tp, attack_cond_lower)?;
+    let block_cond = lower_subslice_to_original(tp, block_cond_lower)?;
+    let (Some(attack_condition), Some(block_condition)) = (
+        parse_static_condition(attack_cond.trim()),
+        parse_static_condition(block_cond.trim()),
+    ) else {
+        // CR 508.1c + CR 509.1b: both gates must decompose — an unrecognized
+        // rider must not collapse to unconditional CantAttack / CantBlock.
+        return Some(vec![]);
+    };
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantAttack)
+            .affected(affected.clone())
+            .condition(attack_condition)
+            .description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantBlock)
+            .affected(affected)
+            .condition(block_condition)
+            .description(text.to_string()),
+    ])
+}
+
+/// CR 508.1c + CR 509.1b + CR 611.3a: Decompose `"<grant> and can't attack if
+/// <A> and can't block if <B>"` into the leading grant static(s) plus gated
+/// `CantAttack` and `CantBlock` companions sharing the grant's `affected`.
+///
+/// Without this split the dual-gate arm declines (the subject prefix carries the
+/// grant) and the bare `try_split_and_cant_attack` / `try_split_and_cant_block`
+/// arms decline (non-terminal gated tails), so only the pump grant is emitted.
+fn try_split_grant_and_dual_gated_combat(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+
+    // `scan_preceded` resumes at word boundaries without the preceding space, so
+    // match `and can't attack if ` (not ` and …`) — same as `try_split_and_cant_attack`.
+    let (grant_lower, _matched, gates_lower) =
+        nom_primitives::scan_preceded(tp.lower, |i: &str| {
+            let (i, _) = alt((
+                tag::<_, _, VE>("and can't attack if "),
+                tag::<_, _, VE>("and can\u{2019}t attack if "),
+            ))
+            .parse(i)?;
+            Ok((i, ()))
+        })?;
+
+    let (remainder, (attack_cond_lower, block_cond_lower)) =
+        parse_dual_gated_combat_condition_tails(gates_lower).ok()?;
+    if !remainder.trim().is_empty() || attack_cond_lower.is_empty() || block_cond_lower.is_empty() {
+        return None;
+    }
+
+    let grant_text = lower_subslice_to_original(tp, grant_lower.trim())?;
+    let grant_line = format!("{}.", grant_text.trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&grant_line);
+    if defs.is_empty() {
+        return None;
+    }
+
+    let affected = defs.iter().find_map(|def| def.affected.clone())?;
+
+    let attack_cond = lower_subslice_to_original(tp, attack_cond_lower)?;
+    let block_cond = lower_subslice_to_original(tp, block_cond_lower)?;
+    let (Some(attack_condition), Some(block_condition)) = (
+        parse_static_condition(attack_cond.trim()),
+        parse_static_condition(block_cond.trim()),
+    ) else {
+        return None;
+    };
+
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+    defs.push(
+        StaticDefinition::new(StaticMode::CantAttack)
+            .affected(affected.clone())
+            .condition(attack_condition)
+            .description(text.to_string()),
+    );
+    defs.push(
+        StaticDefinition::new(StaticMode::CantBlock)
+            .affected(affected)
+            .condition(block_condition)
+            .description(text.to_string()),
+    );
+    Some(defs)
+}
+
+/// CR 611.3a: A static restriction may carry a trailing gate introduced by
+/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
+/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
+/// this turn." Returns the condition text for `parse_static_condition`. The
+/// `as long as` form is tried first so a card carrying both keywords anchors on
+/// the continuous form; a bare `if` gate uses the last valid trailing "if"
+/// (not an "as if" substring). As with the `as long as` peel, an unrecognized
+/// condition downstream leaves the line unsupported rather than enforcing the
+/// restriction unconditionally.
+pub(crate) fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
+    split_trailing_as_long_as(lower).or_else(|| split_trailing_if_condition(lower))
+}
+
+/// Body-preserving sibling of [`split_trailing_gate_condition`] for callers that
+/// must re-parse the pre-gate body as its own static (e.g. an extra-blocker grant
+/// gated on "… as long as you're the monarch"). Returns `(body, condition)` in
+/// ORIGINAL case from the SAME authority — `as long as` is tried first, then the
+/// last valid `if` marker (excluding `as if`) — so trailing-gate splitting is not
+/// re-implemented per call site. `body` is the line with the trailing gate
+/// removed (trailing separator whitespace trimmed); `condition` is the gate's
+/// condition text for [`parse_static_condition`]. The word-boundary scan yields
+/// the marker's byte offset, so the original-case body/condition are recovered by
+/// slicing `tp.original` (mirroring `split_trailing_if_condition_tp`).
+pub(crate) fn split_trailing_gate_condition_with_body<'a>(
+    tp: &'a TextPair<'a>,
+) -> Option<(&'a str, &'a str)> {
+    let (marker_offset, _, tail_lower) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("as long as ").parse(i)
+        })
+        .or_else(|| {
+            nom_primitives::scan_last_valid_at_word_boundaries_with_offset(
+                tp.lower,
+                |i| tag::<_, _, OracleError<'_>>("if ").parse(i),
+                |if_offset| !is_as_if_gate_marker(tp.lower, if_offset),
+            )
+        })?;
+    let condition_start = tp.lower.len().checked_sub(tail_lower.len())?;
+    let condition = tp.original.get(condition_start..)?.trim_start();
+    let body = tp.original.get(..marker_offset)?.trim_end();
+    Some((body, condition))
+}
+
+/// CR 508.1c / CR 509.1b: Parse the trailing " if [condition]" clause of a
 /// combat-restriction static ("~ can't attack if defending player controls an
-/// untapped land"). Mirrors `parse_unless_static_condition`; delegates the
-/// condition body to `parse_static_condition` → `parse_inner_condition` (the
-/// single authority for game-state conditions).
+/// untapped land"; "~ can't block if you control an untapped land"). Mirrors
+/// `parse_unless_static_condition`; delegates the condition body to
+/// `parse_static_condition` → `parse_inner_condition` (the single authority
+/// for game-state conditions).
 pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
-    let (_, if_text) = tp.split_around(" if ")?;
-    parse_static_condition(if_text.original)
+    let condition_text = split_trailing_if_condition_tp(tp)?;
+    parse_static_condition(condition_text.trim_end_matches('.'))
+}
+
+/// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
+/// combat-restriction static ("~ can't attack or block as long as it has a stun
+/// counter on it" — Seer of the Bright Side). "As long as" and "if" both express
+/// a continuous game-state gate on a static ability (CR 611.3a), so this mirrors
+/// [`parse_if_static_condition`] exactly, delegating the condition body to
+/// `parse_static_condition` → `parse_inner_condition` (the single authority for
+/// game-state conditions). Restriction arms peel "unless"/"if" but historically
+/// dropped the "as long as" rider on their SelfRef restriction, enforcing it
+/// unconditionally; this closes that keyword gap without touching the shared
+/// condition grammar.
+pub(crate) fn parse_as_long_as_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+    // CR 611.3a vs duration seam: "for as long as" is effect-duration/provenance
+    // text (`Duration::ForAsLongAs` — Promise of Loyalty: "... can't attack you
+    // or planeswalkers you control for as long as it has a vow counter on it"),
+    // NOT a trailing static-restriction gate. Only a bare "as long as" introduces
+    // a continuous game-state gate here; reject the "for as long as" form so it
+    // stays with the duration/effect pipeline rather than being mis-attached as a
+    // static condition.
+    if tp.split_around(" for as long as ").is_some() {
+        return None;
+    }
+    let (_, as_long_as_text) = tp.split_around(" as long as ")?;
+    parse_static_condition(as_long_as_text.original)
 }
 
 /// Result of the combat-tax nom parse.
@@ -1966,6 +2423,93 @@ pub(crate) fn parse_count_on_battlefield_condition(lower: &str) -> Option<Static
         .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
 }
 
+/// CR 611.3a: "there are [N] or more [type] on the battlefield" → the same count
+/// gate as `count_on_battlefield_condition` (`ObjectCount(type) >= N`) but in the
+/// existential "there are …" phrasing (Hour of Revelation: "This spell costs {3}
+/// less to cast if there are ten or more nonland permanents on the
+/// battlefield."). The count form anchors "are on the battlefield" after the
+/// type; this form fronts the "there are" existential and closes with a bare
+/// "on the battlefield".
+pub(crate) fn parse_there_are_count_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_are_count_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+/// CR 611.3a: "there's a[n]/another [type] on the battlefield" → an existence
+/// gate `ObjectCount(type) >= 1` (Shauku, Endbringer: "Shauku can't attack if
+/// there's another creature on the battlefield."). The singular existential
+/// counterpart of `there_are_count_on_battlefield_condition` ("there are [N] or
+/// more [type] …"): it fronts the "there's"/"there is" existential and closes
+/// with a bare "on the battlefield" (no trailing "is"/"are", unlike
+/// `exists_on_battlefield_condition`, which anchors "is on the battlefield").
+///
+/// The indefinite article "a "/"an " is stripped, but "another " is preserved so
+/// `parse_type_phrase` attaches the source-exclusion `Another` prop — "another
+/// creature" must count creatures OTHER than the source (else the source itself
+/// would satisfy its own gate and the restriction would never lift).
+pub(crate) fn parse_there_is_exists_on_battlefield_condition(
+    lower: &str,
+) -> Option<StaticCondition> {
+    there_is_exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn there_is_exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (input, subject) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let subject = subject.trim();
+    // Strip the indefinite article ("a"/"an") but keep "another " — parse_article's
+    // trailing-space word boundary leaves "another <type>" (source exclusion) intact.
+    let (type_text, _) = opt(nom_primitives::parse_article).parse(subject)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
+fn there_are_count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = tag("there are ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, type_text) = take_until(" on the battlefield").parse(input)?;
+    let (input, _) = tag(" on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
@@ -1986,6 +2530,41 @@ fn count_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticConditi
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 611.3a: "a[n] [type] is on the battlefield" → an existence gate, i.e.
+/// `ObjectCount(type) >= 1` (Wirecat: "This creature can't attack or block if an
+/// enchantment is on the battlefield."). Singular counterpart of
+/// `count_on_battlefield_condition` ("[N] or more [type] are on the
+/// battlefield"); it reuses the same `ObjectCount >= n` shape with `n = 1`. The
+/// type phrase must consume the whole subject, mirroring the count form's guard.
+pub(crate) fn parse_exists_on_battlefield_condition(lower: &str) -> Option<StaticCondition> {
+    exists_on_battlefield_condition(lower)
+        .ok()
+        .and_then(|(rest, cond)| rest.trim().is_empty().then_some(cond))
+}
+
+fn exists_on_battlefield_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = alt((tag("an "), tag("a "))).parse(input)?;
+    let (input, type_text) = take_until(" is on the battlefield").parse(input)?;
+    let (input, _) = tag(" is on the battlefield").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        input,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }

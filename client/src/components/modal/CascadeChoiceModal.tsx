@@ -18,7 +18,13 @@ export function CascadeChoiceModal() {
 
   if (waitingFor?.type !== "CastOffer") return null;
   const kind = waitingFor.data.kind;
-  if (kind.type !== "Cascade" && kind.type !== "Discover" && kind.type !== "Ripple") return null;
+  if (
+    kind.type !== "Cascade" &&
+    kind.type !== "Discover" &&
+    kind.type !== "Ripple" &&
+    kind.type !== "GraveyardPaidCast"
+  )
+    return null;
   if (!canActForWaitingState) return null;
 
   if (kind.type === "Discover") {
@@ -28,6 +34,21 @@ export function CascadeChoiceModal() {
         hitCardId={kind.hit_card}
         missCount={kind.exiled_misses.length}
         promptKind="Discover"
+        dispatch={dispatch}
+      />
+    );
+  }
+
+  // CR 608.2g + CR 609.4b: paid graveyard cast (Quistis Trepe, Tinybones the
+  // Pickpocket) — accepting pays the card's real cost with any-type mana, so the
+  // copy differs from the free Cascade/Ripple/Discover casts. No misses to count.
+  if (kind.type === "GraveyardPaidCast") {
+    return (
+      <CascadeChoiceContent
+        actionType="GraveyardPaidCastChoice"
+        hitCardId={kind.hit_card}
+        missCount={0}
+        promptKind="GraveyardPaidCast"
         dispatch={dispatch}
       />
     );
@@ -67,10 +88,10 @@ function CascadeChoiceContent({
   sourceMv,
   dispatch,
 }: {
-  actionType: "CascadeChoice" | "DiscoverChoice" | "RippleChoice";
+  actionType: "CascadeChoice" | "DiscoverChoice" | "RippleChoice" | "GraveyardPaidCastChoice";
   hitCardId: number;
   missCount: number;
-  promptKind: "Cascade" | "Discover" | "Ripple";
+  promptKind: "Cascade" | "Discover" | "Ripple" | "GraveyardPaidCast";
   sourceMv?: number;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
@@ -91,10 +112,14 @@ function CascadeChoiceContent({
             name: obj.name,
             total: missCount + 1,
           })
-        : t("cascadeChoice.subtitleDiscover", {
-            name: obj.name,
-            missCount,
-          });
+        : promptKind === "GraveyardPaidCast"
+          ? t("cascadeChoice.subtitleGraveyardPaid", {
+              name: obj.name,
+            })
+          : t("cascadeChoice.subtitleDiscover", {
+              name: obj.name,
+              missCount,
+            });
 
   return (
     <DialogShell
@@ -103,7 +128,9 @@ function CascadeChoiceContent({
           ? t("cascadeChoice.cascadeEyebrow")
           : promptKind === "Ripple"
             ? t("cascadeChoice.rippleEyebrow")
-            : t("cascadeChoice.discoverEyebrow")
+            : promptKind === "GraveyardPaidCast"
+              ? t("cascadeChoice.graveyardPaidEyebrow")
+              : t("cascadeChoice.discoverEyebrow")
       }
       title={t("cascadeChoice.title", { name: obj.name })}
       subtitle={subtitle}
@@ -123,7 +150,9 @@ function CascadeChoiceContent({
             {t("cascadeChoice.castNamed", { name: obj.name })}
           </span>
           <span className="ml-2 text-xs text-slate-400">
-            {t("cascadeChoice.castSuffix")}
+            {promptKind === "GraveyardPaidCast"
+              ? t("cascadeChoice.castPaidSuffix")
+              : t("cascadeChoice.castSuffix")}
           </span>
         </button>
         <button
@@ -143,7 +172,9 @@ function CascadeChoiceContent({
           <span className="ml-2 text-xs text-slate-400">
             {promptKind === "Discover"
               ? t("cascadeChoice.discoverDeclineSuffix")
-              : t("cascadeChoice.cascadeDeclineSuffix")}
+              : promptKind === "GraveyardPaidCast"
+                ? t("cascadeChoice.graveyardPaidDeclineSuffix")
+                : t("cascadeChoice.cascadeDeclineSuffix")}
           </span>
         </button>
       </div>

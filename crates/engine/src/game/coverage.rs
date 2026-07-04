@@ -13,12 +13,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    CounteredSpellDestination, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TapStateChange,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
@@ -121,6 +121,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1c: MustBeBlocked carries an optional blocker `TargetFilter`
+            // (None = any blocker; Some = "must be blocked by a <quality>"). The
+            // None shape is no longer registry-keyed (the variant is now
+            // parameterized with a non-Hash TargetFilter); runtime enforcement is
+            // direct-match in combat.rs declare-blockers validation (mirrors
+            // CantBeBlockedBy).
+            | StaticMode::MustBeBlocked { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -147,6 +154,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
+            // CR 701.23f + CR 614.1a: RestrictLibrarySearchToTop carries `who` +
+            // `count`. Runtime enforcement is in
+            // game/effects/search_library.rs::library_search_top_limit.
+            | StaticMode::RestrictLibrarySearchToTop { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -821,6 +832,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::PermanentType => "permanent type",
                     SharedQuality::LandType => "land type",
                 };
                 let prefix = match relation {
@@ -841,7 +853,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 from.map_or("any".into(), |zone| format!("{zone:?}")),
                 to.map_or("any".into(), |zone| format!("{zone:?}"))
             )),
-            FilterProp::AttackedThisTurn => parts.push("attacked this turn".into()),
+            FilterProp::AttackedThisTurn { defender } => match defender {
+                None => parts.push("attacked this turn".into()),
+                Some(ControllerRef::You) => parts.push("attacked you this turn".into()),
+                Some(ControllerRef::Opponent) => {
+                    parts.push("attacked your opponents this turn".into())
+                }
+                Some(_) => parts.push("attacked scoped player this turn".into()),
+            },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
@@ -869,6 +888,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
+            FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));
@@ -1417,6 +1437,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
         }
@@ -1462,7 +1483,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             aggregate,
             group_by,
             damage_kind,
-            excess_only,
+            channel,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
@@ -1473,7 +1494,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 crate::types::ability::DamageKindFilter::CombatOnly => " combat",
                 crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
             };
-            let excess_tag = if *excess_only { " excess" } else { "" };
+            let excess_tag = match channel {
+                crate::types::ability::DamageChannel::Excess => " excess",
+                crate::types::ability::DamageChannel::Total => "",
+            };
             format!(
                 "{}{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
@@ -1568,6 +1592,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {kind} counters {scope_s}")
         }
+        QuantityRef::TargetControllerCounter { kind } => {
+            format!("# of {kind} counters its controller has")
+        }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
@@ -1610,12 +1637,14 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             }
         },
         PlayerFilter::All => "each player",
+        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayer => "each of that player's opponents",
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
@@ -1774,7 +1803,7 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
 
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
-        ChoiceType::CreatureType => "creature type",
+        ChoiceType::CreatureType { .. } => "creature type",
         ChoiceType::Color { excluded } => {
             if excluded.is_empty() {
                 "color"
@@ -1801,7 +1830,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
         // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
-        ChoiceType::Keyword { options } => {
+        ChoiceType::Keyword { options, .. } => {
             return format!(
                 "ability from: {}",
                 options
@@ -2111,6 +2140,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
         Effect::TurnFaceUp { .. } => {}
+        Effect::TurnFaceDown { .. } => {}
         Effect::DestroyAll { target, .. }
         // CR 613.1b: mass gain-control reports its population `filter` like the
         // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
@@ -2176,20 +2206,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             // CR 701.6a + CR 614.1a: countered-spell destination redirect.
             match countered_spell_zone {
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 }) => d.push(("redirect".into(), "library top".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 }) => d.push(("redirect".into(), "library bottom".into())),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::NthFromTop { n },
                 }) => d.push(("redirect".into(), format!("library #{n} from top"))),
-                Some(CounteredSpellDestination::Library {
+                Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
-                Some(CounteredSpellDestination::Hand) => {
+                Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
+                }
+                // CR 614.1a: `Exile` is shared with the cast-this-way rider; the
+                // counter parser never emits it (exile-on-counter is a separate
+                // sub-ability rider), but the arm keeps the match exhaustive.
+                Some(SpellStackToGraveyardReplacement::Exile) => {
+                    d.push(("redirect".into(), "exile".into()))
                 }
                 None => {}
             }
@@ -2982,6 +3018,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             after,
             followed_by,
             count,
+            attacker_restriction,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
@@ -2991,6 +3028,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), format!("{count:?}")));
+            }
+            if let Some(restriction) = attacker_restriction {
+                d.push((
+                    "only these can attack".into(),
+                    fmt_target(restriction),
+                ));
             }
         }
         Effect::Double {
@@ -3275,8 +3318,16 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
-        AbilityCondition::PreviousEffectAmount { comparator, rhs } => format!(
-            "previous amount {} {}",
+        AbilityCondition::PreviousEffectAmount {
+            comparator,
+            rhs,
+            channel,
+        } => format!(
+            "previous {}amount {} {}",
+            match channel {
+                crate::types::ability::DamageChannel::Excess => "excess ",
+                crate::types::ability::DamageChannel::Total => "",
+            },
             fmt_comparator(comparator),
             fmt_quantity(rhs)
         ),
@@ -3320,6 +3371,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
+        AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
         AbilityCondition::ZoneChangedThisWay { filter } => {
             format!("{} changed zones this way", fmt_target(filter))
         }
@@ -3700,6 +3752,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("set land type {}", land_type.as_subtype_str())
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
+        ContinuousModification::SetChosenName => "set chosen name".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -6328,6 +6381,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
         AbilityCondition::FirstEndStepOfTurn => ("FirstEndStepOfTurn", Handled),
+        // CR 505.1 + CR 500.1 + CR 608.2c: live current-phase check; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::CurrentPhaseIs { .. } => ("CurrentPhaseIs", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
@@ -6503,6 +6559,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
         QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
@@ -6544,6 +6601,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::TargetControllerCounter { .. } => ("TargetControllerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
         QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
@@ -6555,6 +6613,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     use FeatureSupport::*;
     match scope {
         PlayerFilter::All => ("All", Handled),
+        PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -6570,6 +6629,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::OpponentOfTriggeringPlayer => ("OpponentOfTriggeringPlayer", Handled),
         // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
         // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
@@ -7902,6 +7962,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            // CR 508.1c: Pramikon/Mystic Barrier/Teyo directional restriction.
+            StaticMode::AttackOnlyNeighbor => {
+                effective_lower.contains("attack only the nearest opponent")
+            }
             // CR 701.60a + CR 701.60d: Airtight Alibi's "can't become suspected".
             StaticMode::CantBecomeSuspected => effective_lower.contains("can't become suspected"),
             StaticMode::CantCrew => {
@@ -8985,9 +9049,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "unless [it/they] attacked or blocked" — combat state check
             || lower.contains("unless it attacked")
             || lower.contains("unless it blocked")
-            // "unless target opponent pays" — payment alternative
-            || lower.contains("unless target opponent pays")
-            || lower.contains("unless target opponent sacrifices")
             // "if you have a card in hand" — resolve-time hand check
             || lower.contains("if you have a card in hand")
             // "if you pay {N} more to cast" — additional cost condition (casting option)
@@ -9824,6 +9885,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         assert!(unimplemented_mechanics(&obj).is_empty());
@@ -10411,10 +10473,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlocked { by: None },
                     affected: None,
                     modifications: vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
+                        mode: StaticMode::MustBeBlocked { by: None },
                     }],
                     condition: None,
                     per_player_condition: None,
@@ -11276,6 +11338,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
 
@@ -11546,6 +11609,7 @@ mod tests {
                 AbilityCondition::TargetMatchesFilter {
                     filter: TargetFilter::Any,
                     use_lki: false,
+                    subject_slot: None,
                 },
                 "TargetMatchesFilter",
             ),

@@ -223,7 +223,7 @@ fn cast_zero_cost_bear_with_uncivil_unrest() -> (GameRunner, ObjectId) {
 fn assert_riot_replacement_choice(runner: &GameRunner) {
     let WaitingFor::ReplacementChoice {
         candidate_count,
-        candidate_descriptions,
+        candidates,
         ..
     } = &runner.state().waiting_for
     else {
@@ -234,11 +234,10 @@ fn assert_riot_replacement_choice(runner: &GameRunner) {
     };
     assert_eq!(*candidate_count, 2);
     assert!(
-        candidate_descriptions
+        candidates
             .iter()
-            .any(|description| description.contains("Riot")),
-        "replacement choice should identify Riot, got {:?}",
-        candidate_descriptions
+            .any(|candidate| candidate.description.contains("Riot")),
+        "replacement choice should identify Riot, got {candidates:?}"
     );
 }
 
@@ -317,7 +316,7 @@ fn cast_zero_cost_dog_with_tesak_unleash_grant() -> (GameRunner, ObjectId, Objec
 fn assert_unleash_replacement_choice(runner: &GameRunner) {
     let WaitingFor::ReplacementChoice {
         candidate_count,
-        candidate_descriptions,
+        candidates,
         ..
     } = &runner.state().waiting_for
     else {
@@ -328,11 +327,10 @@ fn assert_unleash_replacement_choice(runner: &GameRunner) {
     };
     assert_eq!(*candidate_count, 2);
     assert!(
-        candidate_descriptions
+        candidates
             .iter()
-            .any(|description| description.contains("Unleash")),
-        "replacement choice should identify Unleash, got {:?}",
-        candidate_descriptions
+            .any(|candidate| candidate.description.contains("Unleash")),
+        "replacement choice should identify Unleash, got {candidates:?}"
     );
 }
 

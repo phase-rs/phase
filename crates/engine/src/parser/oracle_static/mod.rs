@@ -46,9 +46,9 @@ mod prelude {
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ParsedCondition, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -139,7 +139,10 @@ pub(crate) use cost_mod::{
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
     parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
-pub(crate) use evasion::{classify_block_exception, is_extra_blockers_static_candidate};
+pub(crate) use evasion::{
+    classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
+};
+pub(crate) use grammar::map_keyword;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
@@ -147,17 +150,19 @@ pub(crate) use keyword_grant::{
 };
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
+pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
 pub(crate) use shared::target_filter_is_your_graveyard;
-pub(crate) use shared::GraveyardGrantedKeywordKind;
+pub(crate) use shared::GrantedCastKeywordKind;
 pub(crate) use shared::{
     is_tiered_enters_with_additional_counters_static,
     parse_tiered_enters_with_additional_counters_pattern,
 };
+pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
     parse_every_creature_type_static_prefix,

@@ -932,11 +932,28 @@ pub(crate) fn lower_oracle_block(
             // `GenericEffect` with no target, so without this threading the
             // "Pick a Perk" mode emits an unresolvable `ParentTarget`.
             let modal_subject = derive_modal_subject(&triggers);
+            // CR 109.4 + CR 115.1 + CR 506.2: Derive the relative-
+            // player scope the trigger condition establishes (e.g.
+            // `TriggeringPlayer` for a "deals combat damage to a player" trigger)
+            // so a `"that player controls"` / `"that player's library"` anaphor
+            // in a BULLET-LINE mode body resolves to the damaged player, not the
+            // caster. `trigger_line` is the bare trigger condition here (the
+            // modal header was split off as the effect by
+            // `split_triggered_modal_header`), so it is the condition text that
+            // the single-authority scope resolver expects. Without this, bullet-
+            // line modes hit the `unwrap_or(ControllerRef::You)` fallback in
+            // `oracle_target.rs` while the inline `"; or"` form (which threads the
+            // same scope via `try_parse_inline_modal`) resolved correctly — the
+            // two modal surface forms of Grenzo, Havoc Raiser disagreed (#2346).
+            let relative_player_scope = super::oracle_trigger::relative_player_scope_for_condition(
+                &trigger_line.to_lowercase(),
+            );
             let mut modal_ability = build_modal_ability_with_subject(
                 AbilityKind::Spell,
                 &header,
                 &modes,
                 modal_subject,
+                relative_player_scope,
                 host_self_reference,
             );
 
@@ -1163,16 +1180,32 @@ pub(crate) fn build_modal_ability(
 ///
 /// CR 303.4 + CR 702.103: `host_self_reference` propagates the enclosing
 /// card's typed attachment-host self-reference into modal mode bodies.
+///
+/// CR 109.4 + CR 115.1 + CR 506.2: `relative_player_scope` threads
+/// the trigger condition's player binding (e.g. `TriggeringPlayer` for a "deals
+/// combat damage to a player" trigger) into every mode body so a `"that player
+/// controls"` / `"that player's library"` anaphor resolves to the player the
+/// condition introduced (the damaged player) rather than falling back to the
+/// caster (`ControllerRef::You`). This mirrors the inline `"; or"` modal path
+/// (`try_parse_inline_modal`); both must thread the same scope so bullet-line
+/// and inline modal forms of the same trigger agree (issue #2346).
 fn build_modal_ability_with_subject(
     kind: AbilityKind,
     header: &ModalHeaderAst,
     modes: &[ModeAst],
     subject: Option<TargetFilter>,
+    relative_player_scope: Option<crate::types::ability::ControllerRef>,
     host_self_reference: Option<TargetFilter>,
 ) -> AbilityDefinition {
     AbilityDefinition::new(kind, modal_marker_effect(header)).with_modal(
         build_modal_choice(header, modes),
-        lower_mode_abilities_with_subject(modes, kind, subject, host_self_reference),
+        lower_mode_abilities_with_scope(
+            modes,
+            kind,
+            subject,
+            relative_player_scope,
+            host_self_reference,
+        ),
     )
 }
 
@@ -1245,7 +1278,11 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         mode_count,
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
-        constraints: cap_modal_constraints(&header.constraints, mode_count),
+        constraints: cap_modal_constraints(
+            &header.constraints,
+            mode_count,
+            !mode_pawprints.is_empty(),
+        ),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         mode_pawprints,
         entwine_cost: None,
@@ -1263,6 +1300,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
 fn cap_modal_constraints(
     constraints: &[ModalSelectionConstraint],
     mode_count: usize,
+    is_pawprint_budget: bool,
 ) -> Vec<ModalSelectionConstraint> {
     constraints
         .iter()
@@ -1272,11 +1310,23 @@ fn cap_modal_constraints(
                 condition,
                 max_choices,
                 otherwise_max_choices,
-            } => ModalSelectionConstraint::ConditionalMaxChoices {
-                condition,
-                max_choices: max_choices.min(mode_count),
-                otherwise_max_choices: otherwise_max_choices.min(mode_count),
-            },
+            } => {
+                if is_pawprint_budget {
+                    // CR 700.2i: conditional caps on pawprint modals are point
+                    // budgets, not mode-count ceilings.
+                    ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition,
+                        max_choices,
+                        otherwise_max_choices,
+                    }
+                } else {
+                    ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition,
+                        max_choices: max_choices.min(mode_count),
+                        otherwise_max_choices: otherwise_max_choices.min(mode_count),
+                    }
+                }
+            }
             other => other,
         })
         .collect()
@@ -1313,7 +1363,7 @@ fn lower_mode_abilities_with_subject(
 /// anaphora resolve to the correct player scope established by the trigger
 /// condition (e.g. `TriggeringPlayer` for DamageDone triggers).
 ///
-/// CR 603.7c: For DamageDone triggers the damaged player is the triggering
+/// For DamageDone triggers the damaged player is the triggering
 /// player; "that player" in each modal branch must resolve to them, not the
 /// caster or `ParentTargetController`.
 pub(crate) fn lower_mode_abilities_with_scope(

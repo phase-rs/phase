@@ -74,11 +74,11 @@
     "resolveTooltip": "Passez la priorité afin que l'élément du dessus de la pile puisse se résoudre si tous les joueurs passent aussi. Raccourci : Espace.",
     "resolveAll": "Tout résoudre",
     "resolveAllTooltip": "Continuez de passer la priorité pendant que la pile se résout. Un choix requis ou un arrêt peut l'interrompre.",
-    "waiting": "En attente",
     "priorityTooltip": "Passez la priorité. Si la pile est vide, cela avance dans la fenêtre de priorité actuelle. Raccourci : Espace.",
     "pass": "Passer",
     "passToEndTooltip": "Passage automatique jusqu'à l'étape de fin sauf si un choix, un arrêt ou le Contrôle total interrompt. Raccourci : Entrée.",
-    "autoPassing": "Passage automatique jusqu'à l'étape de fin..."
+    "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
+    "resolvingStack": "Résolution de la pile..."
   },
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
@@ -153,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Réduire la rangée",
+      "auto": "Auto",
+      "on": "Toujours activé",
+      "off": "Toujours désactivé"
     }
   },
   "permanent": {
@@ -174,6 +180,10 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Choisir",
+    "fanConfirm": "Confirmer ({{count}})",
+    "viewAttachments_one": "Voir la carte attachée",
+    "viewAttachments_other": "Voir {{count}} cartes attachées",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -185,7 +195,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Gard."
     }
   },
   "player": {
@@ -216,7 +227,26 @@
     "you": "Vous",
     "ally": "Allié",
     "restoreDialog": "Restaurer la boîte de dialogue",
-    "restoreDialogTitle": "Restaurer la boîte de dialogue de cible d'attaque"
+    "restoreDialogTitle": "Restaurer la boîte de dialogue de cible d'attaque",
+    "distribute": "Répartir",
+    "attackersColumn": "Attaquants",
+    "unassigned": "Non assignés",
+    "assignedBadge": "Assigné",
+    "allAssigned": "Tous les attaquants assignés",
+    "unassignedRemaining_one": "{{count}} non assigné",
+    "unassignedRemaining_other": "{{count}} non assignés",
+    "evenSplitAll": "Tout répartir également",
+    "resetAssignments": "Réinitialiser",
+    "allHere": "Tous ici",
+    "spread": "Étaler",
+    "spreadEvenly": "Étaler uniformément",
+    "assignOne": "Assigner un à {{label}}",
+    "removeOne": "Retirer un de {{label}}",
+    "assignAllHere": "Tout envoyer à {{label}}",
+    "assignRemaining_one": "Assigner {{count}} de plus",
+    "assignRemaining_other": "Assigner {{count}} de plus",
+    "confirmDistribute_one": "Déclarer {{count}} attaquant",
+    "confirmDistribute_other": "Déclarer {{count}} attaquants"
   },
   "fullControl": {
     "on": "Contrôle total activé",
@@ -452,7 +482,9 @@
     "viewFullHand_other": "Voir la main complète ({{count}} cartes)",
     "handLabel": "Main {{count}}",
     "handTitle": "Main ({{count}})",
-    "cardBack": "Dos de carte"
+    "cardBack": "Dos de carte",
+    "organizeLabel": "Organiser la main",
+    "reorderPausedHint": "La réorganisation par glisser-déposer est en pause tant que la main est triée ou filtrée."
   },
   "opponentHud": {
     "ally": "Allié",
@@ -973,6 +1005,7 @@
       "manifest": "Manifester",
       "untap": "Dégager",
       "tap": "Engager",
+      "attach": "Attach",
       "crew": "Équipage ({{power}})",
       "saddle": "Seller ({{power}})",
       "station": "Station (+{{power}})"
@@ -1051,10 +1084,19 @@
       "subtitleManaValueUpTo_other": "Choisissez jusqu'à {{count}} cartes dans la limite de valeur de mana"
     },
     "searchPartition": {
-      "title": "Choisir des cartes pour le champ de bataille",
-      "subtitle_one": "Choisissez {{count}} carte à mettre sur le champ de bataille{{tapped}} ; le reste va dans votre main",
-      "subtitle_other": "Choisissez {{count}} cartes à mettre sur le champ de bataille{{tapped}} ; le reste va dans votre main",
-      "tapped": " engagée(s)"
+      "title": "Choisir des cartes",
+      "subtitle_one": "Choisissez {{count}} carte à mettre {{primary}}{{tapped}} ; le reste va {{rest}}",
+      "subtitle_other": "Choisissez {{count}} cartes à mettre {{primary}}{{tapped}} ; le reste va {{rest}}",
+      "tapped": " engagée(s)",
+      "zones": {
+        "Library": "dans votre bibliothèque",
+        "Hand": "dans votre main",
+        "Battlefield": "sur le champ de bataille",
+        "Graveyard": "dans votre cimetière",
+        "Stack": "sur la pile",
+        "Exile": "en exil",
+        "Command": "dans la zone de commandement"
+      }
     },
     "outsideGame": {
       "title": "Choisir depuis la réserve",
@@ -1080,6 +1122,7 @@
       "titleHand": "Renvoyer",
       "titleUntap": "Dégager",
       "titleTap": "Engager",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Choisissez {{count}} permanent à sacrifier",
       "subtitleSacrificeExact_other": "Choisissez {{count}} permanents à sacrifier",
       "subtitleSacrificeUpTo_one": "Choisissez jusqu'à {{count}} permanent à sacrifier",
@@ -1116,6 +1159,12 @@
       "subtitleTapUpTo_other": "Choisissez jusqu'à {{count}} permanents à engager",
       "subtitleTapRange_one": "Choisissez {{min}}-{{count}} permanent à engager",
       "subtitleTapRange_other": "Choisissez {{min}}-{{count}} permanents à engager",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Ignorer",
       "labelDecline": "Refuser",
       "labelPutOnTop": "Mettre au-dessus ({{order}})",
@@ -1123,6 +1172,7 @@
       "labelTop": "Dessus ({{selected}}/{{count}})",
       "labelPut": "Placer ({{selected}}/{{count}})",
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Dessus"
     },
     "drawnThisTurn": {
@@ -1252,6 +1302,12 @@
       "optCmc": "Valeur de mana",
       "optType": "Type",
       "optColor": "Couleur",
+      "filterLabel": "Afficher",
+      "filterNone": "Toutes",
+      "filterPlayable": "Jouables",
+      "filterCreatures": "Créatures",
+      "filterLands": "Terrains",
+      "filterNonland": "Non-terrain",
       "counterDiscard": "Défausser {{selected}} sur {{cap}}",
       "counterKeep": "Garder {{selected}} sur {{cap}}",
       "keepInstead": "Garder plutôt",
@@ -1482,16 +1538,20 @@
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Découverte",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Lancer depuis le cimetière",
     "title": "Lancer {{name}} ?",
     "subtitleCascade": "Cascade a exilé {{name}} (valeur de mana inférieure à {{sourceMv}}). Lancez-le sans payer son coût de mana, ou refusez et mélangez les {{total}} cartes exilées au-dessous de votre bibliothèque.",
     "subtitleDiscover": "Découverte a exilé {{name}}. Lancez-le sans payer son coût de mana, ou mettez-le dans votre main et mélangez les {{missCount}} autres cartes exilées au-dessous de votre bibliothèque.",
     "subtitleRipple": "Ripple a révélé {{name}}. Lancez-le sans payer son coût de mana, ou refusez et placez les {{total}} cartes révélées au-dessous de votre bibliothèque dans un ordre aléatoire.",
+    "subtitleGraveyardPaid": "Lancez {{name}} depuis un cimetière en payant son coût de mana — du mana de n'importe quel type peut être dépensé. Ou refusez et laissez-la dans le cimetière.",
     "castNamed": "Lancer {{name}}",
     "castSuffix": "(sans payer son coût de mana)",
+    "castPaidSuffix": "(payez son coût de mana — du mana de n'importe quel type peut être dépensé)",
     "putIntoHand": "Mettre en main",
     "decline": "Refuser",
     "discoverDeclineSuffix": "(mettre le reste en dessous)",
-    "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)"
+    "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)",
+    "graveyardPaidDeclineSuffix": "(la laisser dans le cimetière)"
   },
   "freeCastWindow": {
     "eyebrow": "Lancement gratuit",
@@ -1584,6 +1644,7 @@
     "copyDiagnostic": "Copier le diagnostic",
     "copied": "Copié !",
     "reportOnGithub": "Signaler sur GitHub",
+    "continueWaiting": "Continuer à attendre",
     "reload": "Recharger",
     "reportTitle": "Plantage du moteur : {{summary}}",
     "reportConnectionSummary": "Connexion au moteur perdue",
@@ -1840,7 +1901,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Conserver"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1850,14 +1912,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}} : force {{selected}} / {{max}} ou moins"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirmer ({{selected}}/{{max}} de force)"
   },
   "planechase": {
     "active": "Active plane",
@@ -1873,5 +1937,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

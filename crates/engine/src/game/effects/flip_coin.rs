@@ -883,7 +883,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             def.optional = true;
@@ -895,6 +897,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         ));
         let return_transformed = {
@@ -911,7 +914,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             def.condition = Some(AbilityCondition::effect_performed());

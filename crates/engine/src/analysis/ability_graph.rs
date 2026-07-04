@@ -42,7 +42,7 @@ use crate::analysis::resource::{
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, ManaProduction,
-    QuantityExpr, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    QuantityExpr, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, VoteSubject,
 };
 use crate::types::card::CardFace;
 use crate::types::counter::CounterMatch;
@@ -972,6 +972,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ManifestDread
         | Effect::Cloak { .. }
         | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
@@ -1128,6 +1129,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::NinjutsuActivated
         | TriggerMode::KeywordAbilityActivated(..)
         | TriggerMode::AbilityActivated
+        | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::Explored
@@ -1236,10 +1238,21 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
     out.push(effect);
     match effect {
         Effect::Vote {
-            per_choice_effect, ..
+            per_choice_effect,
+            subject,
+            ..
         } => {
             for d in per_choice_effect {
                 collect_effects(d, out);
+            }
+            // CR 701.38b: object-pool votes carry their sub-effect in
+            // `outcome_template` (empty `per_choice_effect`) — Council's
+            // Judgment, Prime Minister's Cabinet Room. Descend it too.
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                collect_effects(outcome_template, out);
             }
         }
         Effect::SeparateIntoPiles {
@@ -1504,6 +1517,10 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::PerCounter { .. }
+        // CR 118.9: a borrowed keyword cost is an alternative cost on a SEPARATE
+        // cast (the spell being cast), never an activation cost of this ability,
+        // so it carries no modeled axis for the loop detector.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }
@@ -2101,6 +2118,7 @@ mod tests {
             amount,
             target: default_target_filter_any(),
             damage_source: None,
+            excess: None,
         }
     }
     fn set_tap(state: TapStateChange) -> Effect {
@@ -2686,7 +2704,9 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         }
     }
     /// A `TriggerDefinition` with the zone-change disambiguator fields set.
@@ -2890,6 +2910,7 @@ mod tests {
                 after: crate::types::phase::Phase::PostCombatMain,
                 followed_by: Vec::new(),
                 count: fixed(1),
+                attacker_restriction: None,
             }),
             None,
         );
@@ -2904,6 +2925,7 @@ mod tests {
                 after: crate::types::phase::Phase::Upkeep,
                 followed_by: Vec::new(),
                 count: fixed(1),
+                attacker_restriction: None,
             }),
             Projection::Unmodeled
         ));

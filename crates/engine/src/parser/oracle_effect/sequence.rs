@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, opt, value};
+use nom::combinator::{all_consuming, eof, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -18,10 +18,10 @@ use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    CounteredSpellDestination, DigSource, Duration, Effect, EffectScope, FaceDownBody,
-    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
+    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -1240,6 +1240,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
+            || starts_target_players_subject_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
@@ -1518,6 +1519,23 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
     .is_ok()
 }
 
+/// CR 115.1d + CR 608.2c: True when `s` is a distributive "any number of target
+/// player(s) [each] <verb>" clause (Singularity Rupture: "Destroy all creatures,
+/// then any number of target players each mill half their library, rounded
+/// down."). The leading token is a player *subject*, not an imperative verb, so
+/// `starts_clause_text_or_conjugated` misses it and the whole tail is dropped —
+/// even though `parse_subject_application` lowers it to a per-player targeted
+/// effect on its own. Recognize it so the `, then …` splitter peels it off as a
+/// standalone continuation.
+fn starts_target_players_subject_clause(s: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("any number of target player"),
+        alt((tag("s each "), tag(" each "), tag("s "), tag(" "))),
+    )
+    .parse(s)
+    .is_ok()
+}
+
 /// CR 613.1b + CR 110.2: True when `s` is a "<player-subject> gains control of …"
 /// clause — i.e. the control-handoff predicate where a *player* (not the acting
 /// controller) takes control of an object. The subject axis is the full set of
@@ -1549,10 +1567,76 @@ fn starts_player_gains_control_clause(s: &str) -> bool {
     super::subject::starts_with_subject_prefix(subject_phrase)
 }
 
+/// CR 708.7 + CR 708.8: True when `s` is a "turn <object> face up" / "turn
+/// <object> face down" face-toggle clause (Yarus, Roar of the Old Gods: "...,
+/// then turn it face up"). CR 708.7 lets a face-down permanent's controller turn
+/// it face up; CR 708.8 reverts its copiable values as it is turned face up.
+///
+/// Narrowly gated to the COMPLETE toggle shape so it never re-splits unrelated
+/// "turn" phrasings ("turn it sideways", "each turn", "until your next turn"):
+///   - `tag("turn ")` head,
+///   - a recognized anaphoric/target object subject head (`it` / `this` / `that`
+///     / `those` / `them` / `target`) consumed as a complete word — the same
+///     object-subject axis the clause-starter table already recognizes,
+///   - the comma-free remainder of the (possibly multi-word) subject up to the
+///     `face ` marker,
+///   - the `up` / `down` toggle leaf.
+///
+/// Only a full "turn &lt;object&gt; face up|down" may license the split.
+fn starts_turn_face_up_down_clause(s: &str) -> bool {
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("turn ").parse(s) else {
+        return false;
+    };
+    // Object-subject head as a complete word (anaphor / target determiner).
+    let Ok((rest, _)) = terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("this"),
+            tag("that"),
+            tag("those"),
+            tag("them"),
+            tag("target"),
+        )),
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+    .parse(rest) else {
+        return false;
+    };
+    // Peel the comma-free remainder of the subject up to the " face " toggle
+    // marker. take_until stops at the first occurrence, keeping the match local
+    // to a single clause.
+    let Ok((tail, subject_rest)) = terminated(
+        take_until::<_, _, OracleError<'_>>("face "),
+        tag::<_, _, OracleError<'_>>("face "),
+    )
+    .parse(rest) else {
+        return false;
+    };
+    // A clause boundary inside the subject span means the " face " marker belongs
+    // to a different clause — reject (byte scan, not a dispatch string-method).
+    if subject_rest.bytes().any(|b| b == b',') {
+        return false;
+    }
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("up")),
+        value((), tag("down")),
+    ))
+    .parse(tail)
+    .is_ok()
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
         return false;
+    }
+
+    // CR 708.7 + CR 708.8: "turn <object> face up|down" face-toggle clause-starter
+    // (Yarus, Roar of the Old Gods). A complete toggle shape is always its own
+    // clause ("..., then turn it face up"), so it must split off to reach the
+    // TurnFaceUp lowering; the narrow match leaves other "turn" phrasings intact.
+    if starts_turn_face_up_down_clause(s) {
+        return true;
     }
 
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -1858,6 +1942,58 @@ fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
     // Check on the bounded segment but return `rest` (not the truncated segment
     // remainder) as the remaining input — correct nom discipline.
     let _ = value((), (take_until("counter"), tag("counter"))).parse(segment)?;
+    Ok((rest, ()))
+}
+
+/// CR 601.2c + CR 508.1d + CR 509.1c: A second `"[up to] <n> target <filter>"`
+/// conjunct joined by a bare `" and "` opens its OWN target (each instance of
+/// the word "target" is a distinct target — CR 601.2c) and applies its own
+/// combat requirement — an attack/block compulsion ("attacks or blocks this
+/// combat if able", CR 508.1d/509.1c) or a combat prohibition ("can't attack or
+/// block"). Boros Battleshaper: "... up to one target creature attacks or blocks
+/// this combat if able and up to one target creature can't attack or block this
+/// combat." Without this arm the second conjunct is not recognized as a clause
+/// start (its subject is a noun phrase, not an imperative verb), so it is
+/// swallowed and only one combat half parses. The discriminator is a
+/// combat-requirement predicate (attacks/blocks/can't attack/can't block) after
+/// the `"[up to] <n> target <filter>"` subject — a genuine noun-phrase
+/// continuation ("destroy up to one target creature and up to one target
+/// artifact") has no such verb and is left un-split. The predicate search is
+/// bounded to THIS conjunct's segment (up to the next `" and "`) so a combat
+/// verb in a later conjunct cannot trigger a false split. Combat sibling of
+/// `starts_target_continuous_clause_lower`.
+fn starts_up_to_target_combat_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    // Subject accepts both the counted "[up to] <n> target <filter>" form and the
+    // bare "target <filter>" form — CR 601.2c: every "target" opens its own
+    // target, numbered or not. An unnumbered second conjunct ("… and target
+    // creature can't block this combat") therefore splits identically to the
+    // counted Boros shape; the combat-requirement predicate below stays the
+    // discriminator, so a bare-`target` noun-phrase continuation with no combat
+    // verb is still left un-split.
+    let (rest, _) = alt((
+        value(
+            (),
+            (
+                opt(tag::<_, _, OracleError<'_>>("up to ")),
+                nom_primitives::parse_number,
+                tag(" target "),
+            ),
+        ),
+        value((), tag::<_, _, OracleError<'_>>("target ")),
+    ))
+    .parse(s)?;
+    // Bound the combat-predicate search to THIS conjunct segment only.
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    let _ = alt((
+        value((), (take_until("can't attack"), tag("can't attack"))),
+        value((), (take_until("can't block"), tag("can't block"))),
+        value((), (take_until("attacks "), tag("attacks "))),
+        value((), (take_until("blocks "), tag("blocks "))),
+    ))
+    .parse(segment)?;
     Ok((rest, ()))
 }
 
@@ -2176,6 +2312,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag::<_, _, OracleError<'_>>("may play ")),
         value((), tag("may cast ")),
     )))
+    // CR 601.2c + CR 508.1d/509.1c: a fresh "[up to] <n> target <filter>"
+    // conjunct + combat-requirement predicate opens its own target and combat
+    // compulsion/prohibition (Boros Battleshaper). Trailing `.or()` arm
+    // (mirroring `starts_target_continuous_clause_lower`) so the `alt(...)`
+    // cluster stays under nom's 21-arm limit.
+    .or(value((), starts_up_to_target_combat_clause_lower))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -2561,7 +2703,7 @@ pub(super) fn push_clause_chunk(
 /// spell / triggered contexts) or nested inside a `CreateDelayedTrigger`
 /// wrapper ("When you next cast ..., copy that spell"). Mirrors
 /// `def_tree_has_optional`'s descent through `CreateDelayedTrigger`.
-fn effect_wraps_copy_spell(effect: &Effect) -> bool {
+pub(super) fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     match effect {
         Effect::CopySpell { .. } => true,
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
@@ -2601,7 +2743,7 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 /// this way, put it <zone> instead of into that player's graveyard"
 /// continuation clause (Memory Lapse, Remand, Spell Crumple). Operates on
 /// lowercased text; tolerates a trailing period/whitespace. Returns the parsed
-/// [`CounteredSpellDestination`], or `None` for an unsupported destination
+/// [`SpellStackToGraveyardReplacement`], or `None` for an unsupported destination
 /// (Hinder's "your choice of the top or bottom", Transcendent Dragon's "exile
 /// it instead") so those cards are honestly gapped rather than misparsed.
 ///
@@ -2609,7 +2751,7 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - spell anaphor ("that spell" / "that card" / "it").
 ///   - destination ("on top of its owner's library" / "on the bottom of its
 ///     owner's library" / "into its owner's hand").
-fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDestination> {
+fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGraveyardReplacement> {
     let clause = lower.trim().trim_end_matches('.').trim_end();
     let mut parser = (
         tag::<_, _, OracleError<'_>>("if "),
@@ -2617,19 +2759,19 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDe
         tag(" is countered this way, put it "),
         alt((
             value(
-                CounteredSpellDestination::Library {
+                SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Top,
                 },
                 tag("on top of its owner's library"),
             ),
             value(
-                CounteredSpellDestination::Library {
+                SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
                 },
                 tag("on the bottom of its owner's library"),
             ),
             value(
-                CounteredSpellDestination::Hand,
+                SpellStackToGraveyardReplacement::Hand,
                 tag("into its owner's hand"),
             ),
         )),
@@ -2644,18 +2786,26 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<CounteredSpellDe
 
 /// CR 707.10c: nom parser for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
-pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
+///
+/// Returns the clause's plurality: `true` for the plural "the copies" form
+/// (Increasing Vengeance's "You may choose new targets for the copies" — every
+/// copy the spell makes is retargetable), `false` for the singular "the copy" /
+/// "that copy" forms (Fork/Twincast; the Chain cycle).
+pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> {
+    map(
         (
             opt(alt((tag(", and "), tag("and ")))),
             opt(tag("you ")),
             tag("may choose "),
             alt((tag("a new target "), tag("new targets "))),
             tag("for "),
-            alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            alt((
+                value(true, tag("the copies")),
+                value(false, alt((tag("the copy"), tag("that copy")))),
+            )),
             opt(alt((tag("."), tag(",")))),
         ),
+        |(_, _, _, _, _, all_copies, _)| all_copies,
     )
     .parse(input)
 }
@@ -2676,38 +2826,61 @@ pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 707.10c: plurality of a copy-retarget clause — `Some(true)` for the plural
+/// "the copies" form (patch every copy the source makes), `Some(false)` for the
+/// singular forms, `None` when the text is not a copy-retarget clause at all.
+pub(super) fn copy_retarget_clause_all_copies(lower: &str) -> Option<bool> {
+    all_consuming(parse_copy_retarget_clause)
+        .parse(lower.trim())
+        .ok()
+        .map(|(_, all_copies)| all_copies)
+}
+
 /// CR 707.10c: Set `retarget` on the (possibly delayed-trigger-wrapped)
-/// `CopySpell`. Returns true if a `CopySpell` was found and patched.
-fn set_copy_retarget(effect: &mut Effect, perm: CopyRetargetPermission) -> bool {
+/// `CopySpell`. Returns true if a `CopySpell` was found and patched. A
+/// `CreateDelayedTrigger` wrapper descends through its inner ability so a plural
+/// clause reaches every copy the delayed trigger makes.
+fn set_copy_retarget(effect: &mut Effect, perm: &CopyRetargetPermission, all: bool) -> bool {
     match effect {
         Effect::CopySpell { retarget, .. } => {
-            *retarget = perm;
+            *retarget = perm.clone();
             true
         }
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
-            set_copy_retarget(&mut inner.effect, perm)
+            set_copy_retarget_in_ability(inner, perm, all)
         }
         _ => false,
     }
 }
 
-/// CR 707.10c: Patch the `retarget` permission on the `CopySpell` reachable
+/// CR 707.10c: Patch the `retarget` permission on the `CopySpell`(s) reachable
 /// from this ability definition — its own effect, or a `CopySpell` carried as
 /// a (transitive) `sub_ability`. The Chain cycle (Chain of Acid / Plasma /
 /// Smog / Vapor) nests the optional copy under the parent effect ("Target
 /// player discards two cards. That player may copy this spell ..."), so the
 /// "and may choose a new target for that copy" continuation must descend the
 /// sub-ability chain rather than only inspecting the top-level effect.
+///
+/// `all` distinguishes the plural "the copies" clause (CR 707.10c grants
+/// retargeting to *every* copy — Increasing Vengeance's primary copy AND its
+/// conditional "copy that spell twice" copy nested as a `sub_ability`) from the
+/// singular "the copy" clause: when `all` is false the descent stops at the
+/// nearest copy; when true it patches every copy in the sub-ability chain.
+/// Returns true if at least one `CopySpell` was patched.
 fn set_copy_retarget_in_ability(
     def: &mut AbilityDefinition,
     perm: &CopyRetargetPermission,
+    all: bool,
 ) -> bool {
-    if set_copy_retarget(&mut def.effect, perm.clone()) {
+    let patched_here = set_copy_retarget(&mut def.effect, perm, all);
+    if patched_here && !all {
         return true;
     }
-    def.sub_ability
+    let patched_sub = def
+        .sub_ability
         .as_deref_mut()
-        .is_some_and(|sub| set_copy_retarget_in_ability(sub, perm))
+        .is_some_and(|sub| set_copy_retarget_in_ability(sub, perm, all));
+    patched_here || patched_sub
 }
 
 pub(super) fn apply_clause_continuation(
@@ -2719,6 +2892,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::SearchDestination {
             destination,
             enter_tapped,
+            enters_under,
             reveal,
             attach_to_source,
         } => {
@@ -2738,7 +2912,12 @@ pub(super) fn apply_clause_continuation(
                     *existing_reveal |= reveal;
                     multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
-                apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
+                apply_search_destination_to_ability_chain(
+                    previous,
+                    destination,
+                    enter_tapped,
+                    enters_under.clone(),
+                );
             }
             let put_origin = if multi_zone_search {
                 None
@@ -2753,12 +2932,14 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    enters_under: None,
+                    enters_under,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability
@@ -2866,17 +3047,33 @@ pub(super) fn apply_clause_continuation(
                 *countered_spell_zone = Some(destination);
             }
         }
-        ContinuationAst::CopyMayRetarget => {
-            // CR 707.10c: patch the preceding CopySpell — descending through a
-            // CreateDelayedTrigger wrapper ("When you next cast ..., copy that
-            // spell" — Galvanic Iteration) and through the sub-ability chain
-            // ("That player may copy this spell ..." — the Chain cycle, where
-            // the optional CopySpell is nested under the parent discard).
-            if let Some(previous) = defs.last_mut() {
-                set_copy_retarget_in_ability(
+        ContinuationAst::CopyMayRetarget { all_copies } => {
+            // CR 707.10c: patch the nearest preceding CopySpell — descending
+            // through a CreateDelayedTrigger wrapper ("When you next cast ...,
+            // copy that spell" — Galvanic Iteration) and through the sub-ability
+            // chain ("That player may copy this spell ..." — the Chain cycle,
+            // where the optional CopySpell is nested under the parent discard).
+            // The copy is usually the last def, but a clause that resolves
+            // between the copy and the retarget sentence (Narset's Reversal's
+            // bounce, Increasing Vengeance's conditional "copy that spell twice",
+            // Spinerock Tyrant's "those spells gain wither" rider) can sit in
+            // between — so walk the defs backward to the first ability whose
+            // effect-tree contains a CopySpell. Recognition already confirmed a
+            // preceding copy exists (parse_followup_continuation_ast), so this
+            // binds it; if somehow none is found, the loop is a no-op.
+            //
+            // `all_copies` (the plural "the copies" clause) patches every copy in
+            // that copy-bearing ability — Increasing Vengeance's primary copy and
+            // its nested conditional "copy that spell twice" copy both live in one
+            // ability — while the singular clause keeps nearest-only binding.
+            for previous in defs.iter_mut().rev() {
+                if set_copy_retarget_in_ability(
                     previous,
                     &CopyRetargetPermission::MayChooseNewTargets,
-                );
+                    all_copies,
+                ) {
+                    break;
+                }
             }
         }
         ContinuationAst::SuspectLastCreated => {
@@ -2927,6 +3124,20 @@ pub(super) fn apply_clause_continuation(
                         *cant_regenerate = true;
                     }
                     _ => unreachable!(),
+                }
+            }
+        }
+        ContinuationAst::ExcessDamageToController => {
+            // CR 120.4a + CR 608.2c: walk backward to the nearest DealDamage and
+            // attach the excess-redirect rider. The clause may not be adjacent to
+            // the DealDamage effect, mirroring the CantRegenerate walk above.
+            if let Some(def) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+            {
+                if let Effect::DealDamage { excess, .. } = &mut *def.effect {
+                    *excess = Some(ExcessRecipient::TargetController);
                 }
             }
         }
@@ -3246,7 +3457,9 @@ pub(super) fn apply_clause_continuation(
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
+                                conditional_enter_with_counters: vec![],
                                 face_down_profile,
+                                enters_modified_if: None,
                             },
                         );
                         if is_any_number {
@@ -3283,6 +3496,14 @@ pub(super) fn apply_clause_continuation(
                     // the seeded vanilla 2/2 profile with the spec's
                     // characteristics ("2/2 Cyberman artifact creatures").
                     | Effect::Manifest {
+                        profile: fdp @ Some(_),
+                        ..
+                    }
+                    // CR 708.2a: "Turn target creature face down" seeds a vanilla
+                    // 2/2 profile; overwrite it with the parsed "It's a 2/2
+                    // Cyberman artifact creature." characteristics (Cyber
+                    // Conversion).
+                    | Effect::TurnFaceDown {
                         profile: fdp @ Some(_),
                         ..
                     } => {
@@ -3375,7 +3596,9 @@ pub(super) fn apply_clause_continuation(
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 let mut rest_def = AbilityDefinition::new(
@@ -3391,7 +3614,9 @@ pub(super) fn apply_clause_continuation(
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 if (chosen_destination == Zone::Library || rest_destination == Zone::Library)
@@ -3475,7 +3700,7 @@ pub(super) fn apply_clause_continuation(
             );
             append_definition_to_sub_chain(previous, grant_def);
         }
-        ContinuationAst::EntersTappedAttacking => {
+        ContinuationAst::EntersTappedAttacking { moved_filter } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -3500,10 +3725,16 @@ pub(super) fn apply_clause_continuation(
                 Effect::ChangeZone {
                     enters_attacking,
                     enter_tapped,
+                    enters_modified_if,
                     ..
                 } => {
                     *enters_attacking = true;
                     *enter_tapped = crate::types::zones::EtbTapState::Tapped;
+                    // CR 614.12: when the followup carried a leading "if that
+                    // card is a/an <type>", gate the riders on the moved
+                    // object's type at ChangeZone resolution instead of
+                    // applying them unconditionally.
+                    *enters_modified_if = moved_filter;
                 }
                 _ => {}
             }
@@ -3733,6 +3964,7 @@ fn apply_search_destination_to_ability_chain(
     ability: &mut AbilityDefinition,
     destination: Zone,
     enter_tapped: bool,
+    enters_under: Option<ControllerRef>,
 ) {
     let mut cursor = Some(ability);
     while let Some(sub_ability) = cursor {
@@ -3740,12 +3972,17 @@ fn apply_search_destination_to_ability_chain(
             origin: Some(Zone::Library),
             destination: existing_destination,
             enter_tapped: existing_enter_tapped,
+            enters_under: existing_enters_under,
             ..
         } = &mut *sub_ability.effect
         {
             *existing_destination = destination;
             *existing_enter_tapped =
                 crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+            // CR 110.2a: only overwrite when the clause specified a controller, so a value set by an earlier clause is preserved.
+            if enters_under.is_some() {
+                *existing_enters_under = enters_under.clone();
+            }
         }
         cursor = sub_ability.sub_ability.as_deref_mut();
     }
@@ -3802,12 +4039,15 @@ pub(super) fn continuation_absorbs_current(
         // CR 707.10c: recognition was already gated on a preceding CopySpell in
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
-        ContinuationAst::CopyMayRetarget => true,
+        ContinuationAst::CopyMayRetarget { .. } => true,
         ContinuationAst::SelfCostKeywordCostClarification => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
+        // CR 120.4a: recognition was gated on a preceding DealDamage, so the
+        // rider is always absorbed into that effect (never a standalone effect).
+        ContinuationAst::ExcessDamageToController => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
@@ -3817,7 +4057,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
         ContinuationAst::BecomesPlotted => true,
         ContinuationAst::BecomesForetold => true,
-        ContinuationAst::EntersTappedAttacking => true,
+        ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
@@ -3928,6 +4168,9 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
+                // CR 110.2a: "... under your control" routes the found card to the ability controller.
+                enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
+                    .then_some(ControllerRef::You),
                 reveal,
                 attach_to_source,
             })
@@ -4496,7 +4739,12 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// CR 708.2a + CR 205.1a: Parse the singular "It's a/an <characteristics>
 /// <core-type-noun>." face-down characteristic clause for a permanent put onto
 /// the battlefield face down (Yedora, Grave Gardener: "It's a Forest land.").
-/// Returns `None` when the sentence is not an it's-characteristics clause.
+/// Also accepts the "It becomes a/an ..." copula variant used after a
+/// turn-face-down effect (Mondassian Colony Ship: "Turn target creature face
+/// down. It becomes a 2/2 Cyberman artifact creature."); both copulas describe
+/// the same CR 205.1a characteristic-setting and refine the same face-down
+/// profile via the `FaceDownProfileSpec` continuation. Returns `None` when the
+/// sentence is not an it's/it-becomes-characteristics clause.
 ///
 /// Built entirely from typed combinators (no card-named hardcode), mirroring
 /// `parse_theyre_face_down_profile` for the plural creature form: optional N/M
@@ -4506,12 +4754,17 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
 /// type explicit and no power/toughness (CR 208.1).
 pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
-    // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
+    // CR 205.1a: "It's a / It is a / It becomes a <characteristics> <core-type>."
+    // The "becomes" copula is the turn-face-down variant (Mondassian Colony
+    // Ship); it sets the same characteristics as the "is" copula (Cyber
+    // Conversion).
     let (mut rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it is an "),
         tag("it is a "),
+        tag("it becomes an "),
+        tag("it becomes a "),
     ))
     .parse(lower)
     .ok()?;
@@ -4672,6 +4925,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
+        // CR 708.2a: turning a permanent face down is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceDown { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
@@ -4906,6 +5162,131 @@ fn parse_self_cost_keyword_clarification(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 205.2a + CR 205.3a: Strip the moved-object subject prefix ("that card is
+/// a/an", "it's a/an", "it is a/an") from a recognized card-type / subtype
+/// condition clause, returning the type tail (`"enchantment card"`, a card type
+/// per CR 205.2a; subtype tails per CR 205.3a). Only the affirmative
+/// subjects are listed: a negated clause ("that card is not a/an") has no
+/// matching prefix and falls through to `None`, so the caller declines to
+/// emit a gate it cannot represent (the moved-object filter is affirmative).
+fn strip_moved_object_subject(clause: &str) -> Option<&str> {
+    alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+        tag("it's a "),
+        tag("it's an "),
+        tag("it is a "),
+        tag("it is an "),
+    ))
+    .parse(clause.trim_start())
+    .ok()
+    .map(|(rest, _)| rest)
+}
+
+/// CR 614.12: recognize the optional leading moved-object type condition on a
+/// ChangeZone "enters tapped and attacking" followup (Summoner's Grimoire:
+/// "If that card is an enchantment card, it enters tapped and attacking").
+///
+/// Returns the continuation to emit, or `None` to emit NOTHING:
+/// - no leading "if"  -> `EntersTappedAttacking { moved_filter: None }`
+///   (Stangg / Shark Shredder; byte-identical to the prior unconditional patch).
+/// - recognized moved-object card-type condition -> `{ moved_filter: Some(..) }`.
+/// - leading "if" present but NOT a recognized, materializable affirmative
+///   card-type condition -> `None`. Because `apply_clause_continuation` sets
+///   both riders UNCONDITIONALLY whenever this continuation is emitted, the only
+///   correct behavior for an unrepresentable condition is to emit nothing,
+///   leaving the bare " if " for the honest `Swallow:Condition_If` diagnostic.
+fn parse_change_zone_enters_tapped_attacking(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
+    let trimmed = lower.trim_start();
+    // No leading "if": unconditional riders (unchanged behavior).
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed) else {
+        return Some(ContinuationAst::EntersTappedAttacking { moved_filter: None });
+    };
+    // CR 614.12: the condition clause runs up to the first comma
+    // ("that card is an enchantment card" | ", it enters tapped and attacking").
+    let (_, condition_clause) = take_until::<_, _, OracleError<'_>>(",")
+        .parse(after_if)
+        .ok()?;
+    // Single condition-recognition authority: confirm this is a recognized
+    // moved-object card-type condition before materializing a filter.
+    let recognized = matches!(
+        super::conditions::try_nom_condition_as_ability_condition(condition_clause, ctx),
+        Some(
+            AbilityCondition::RevealedHasCardType { .. }
+                | AbilityCondition::TargetMatchesFilter { .. }
+        )
+    );
+    if !recognized {
+        return None;
+    }
+    // N-D: materialize TargetFilter::Typed via parse_type_phrase on the type
+    // tail — RevealedHasCardType carries no TargetFilter, so reuse the canonical
+    // materializer rather than reconstructing from the recognized condition.
+    let type_tail = strip_moved_object_subject(condition_clause)?;
+    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    if matches!(filter, TargetFilter::Any | TargetFilter::None) || !leftover.trim().is_empty() {
+        return None;
+    }
+    Some(ContinuationAst::EntersTappedAttacking {
+        moved_filter: Some(filter),
+    })
+}
+
+/// CR 614.12: returns true when `sentence` is a moved-object type-conditional
+/// enters-modifier clause — a leading "if that card is a/an <type>" (or
+/// "it's/it is a/an <type>") gating an "enters tapped and attacking" tail
+/// (Summoner's Grimoire). Shared with the `Condition_If` swallow detector so the
+/// represented clause can be located and stripped text-scoped, reusing the same
+/// leading-condition combinators (`strip_moved_object_subject` +
+/// `parse_type_phrase`) that `parse_change_zone_enters_tapped_attacking` uses —
+/// not a verbatim Oracle-string match.
+pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    if !(nom_primitives::scan_contains(lower, "enters tapped and attacking")
+        || nom_primitives::scan_contains(lower, "enter tapped and attacking"))
+    {
+        return false;
+    }
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Some(type_tail) = strip_moved_object_subject(after_if) else {
+        return false;
+    };
+    let (filter, _leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    !matches!(filter, TargetFilter::Any | TargetFilter::None)
+}
+
+/// CR 122.1 + CR 614.1c + CR 608.2c: returns true when `sentence` is a
+/// moved-object put-onto-battlefield-this-way conditional whose counter payoff
+/// is represented by `Effect::ChangeZone.conditional_enter_with_counters`
+/// ("If you put an artifact onto the battlefield this way, put two +1/+1 counters
+/// on it" — Oviya, Automech Artisan). Shared with the `Condition_If` swallow
+/// detector so the represented clause can be located and stripped text-scoped,
+/// reusing the same `parse_you_put_onto_battlefield_this_way_clause` combinator
+/// that produced the gate — not a verbatim Oracle-string match. Mirrors
+/// `is_moved_object_enters_modifier_clause`: it keys on the put-this-way condition
+/// AND a "counter" payoff tail so it drops only the represented clause.
+pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    let lower = lower.trim();
+    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
+        return false;
+    };
+    let Ok((body, _)) =
+        crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
+            after_if,
+        )
+    else {
+        return false;
+    };
+    nom_primitives::scan_contains(body, "counter")
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -5055,7 +5436,9 @@ pub(super) fn parse_followup_continuation_ast(
             if effect_wraps_copy_spell(previous_effect)
                 && recognize_copy_retarget_clause(&lower) =>
         {
-            Some(ContinuationAst::CopyMayRetarget)
+            Some(ContinuationAst::CopyMayRetarget {
+                all_copies: copy_retarget_clause_all_copies(&lower).unwrap_or(false),
+            })
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" after a private
         // `Dig` (the "look at the top N cards of <player>'s library" look step)
@@ -5207,6 +5590,18 @@ pub(super) fn parse_followup_continuation_ast(
             };
             Some(ContinuationAst::PutRest {
                 destination,
+                reorder_all: false,
+            })
+        }
+        // CR 701.20a + CR 608.2c: A reveal-until rest-pile clause may be
+        // separated from the RevealUntil by a transparent intervening effect
+        // ("~ deals damage equal to that card's mana value. Put that card into
+        // your hand and the rest ..."). Recognize the rest-pile clause here;
+        // apply_continuation_ast searches backward to patch the earlier
+        // RevealUntil, so no standalone PutAtLibraryPosition is emitted.
+        Effect::DealDamage { .. } if is_reveal_until_rest_pile_clause_after_intervening_effect(&lower) => {
+            Some(ContinuationAst::PutRest {
+                destination: parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library),
                 reorder_all: false,
             })
         }
@@ -5390,6 +5785,21 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::CantRegenerate)
         }
+        // CR 120.4a: "Excess damage is dealt to that creature's controller
+        // instead." — trailing rider on a `DealDamage` (Flame Spill, Gandalf's
+        // Sanction, Ravenous Tyrannosaurus). The two negative guards defer the
+        // conditional / trample-gated form (Ram Through: "If the creature you
+        // control has trample, excess ...") to `Effect::Unimplemented` — that
+        // form requires a controlled-source trample check we do not model here.
+        Effect::DealDamage { .. }
+            if nom_primitives::scan_contains(&lower, "excess damage")
+                && nom_primitives::scan_contains(&lower, "that creature's controller")
+                && nom_primitives::scan_contains(&lower, "instead")
+                && !nom_primitives::scan_contains(&lower, "has trample")
+                && !nom_primitives::scan_contains(&lower, "if ") =>
+        {
+            Some(ContinuationAst::ExcessDamageToController)
+        }
         Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
@@ -5540,6 +5950,11 @@ pub(super) fn parse_followup_continuation_ast(
         // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
         // artifact creatures." spec refines that seed via the back-walk patcher.
         | Effect::Manifest { profile: Some(_), .. }
+        // CR 708.2a + CR 205.1a: "Turn target creature face down. It's a 2/2
+        // Cyberman artifact creature." (Cyber Conversion) — the seeded vanilla
+        // 2/2 profile on the preceding `TurnFaceDown` is refined by this spec
+        // sentence via the back-walk patcher.
+        | Effect::TurnFaceDown { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -5595,12 +6010,23 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
-        // after CopyTokenOf, Token, or ChangeZone effects.
-        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
+        // after CopyTokenOf or Token. Tokens/copies always enter
+        // unconditionally — no moved-object type gate applies.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. }
             if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
                 || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
         {
-            Some(ContinuationAst::EntersTappedAttacking)
+            Some(ContinuationAst::EntersTappedAttacking { moved_filter: None })
+        }
+        // CR 508.4 / CR 614.1 / CR 614.12: the same followup after a ChangeZone,
+        // but the riders may be gated on the MOVED object's type by a leading
+        // "if that card is a/an <type>" (Summoner's Grimoire). Condition-aware so
+        // the leading clause is no longer silently dropped (Swallow:Condition_If).
+        Effect::ChangeZone { .. }
+            if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
+                || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
+        {
+            parse_change_zone_enters_tapped_attacking(&lower, ctx)
         }
         // CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token creation.
         Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
@@ -5645,6 +6071,13 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
+fn is_reveal_until_rest_pile_clause_after_intervening_effect(lower: &str) -> bool {
+    parse_reveal_until_rest_zone(lower).is_some()
+        && (nom_primitives::scan_contains(lower, "that card")
+            || nom_primitives::scan_contains(lower, "nonland card")
+            || nom_primitives::scan_contains(lower, "revealed this way"))
+}
+
 fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let lower = lower.trim();
@@ -5683,8 +6116,22 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
     ))
     .parse(input)?;
     let (input, _) = tag("all other ").parse(input)?;
-    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    let (input, filter) =
+        alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
     Ok((input, Some(filter)))
+}
+
+/// CR 701.21a: Parse "creatures [they/you/that player] control[s]" — the sacrifice
+/// domain for Slaughter the Strong's "sacrifices all other creatures they control".
+fn parse_creature_domain(input: &str) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("creatures ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((input, TargetFilter::Typed(TypedFilter::creature())))
 }
 
 fn parse_nonland_permanent_domain(
@@ -6023,7 +6470,7 @@ pub(super) fn parse_keyword_grant_list(input: &str) -> Option<(Vec<Keyword>, &st
 /// `GenericEffect` clause and clones its grant template once per keyword.
 /// Generalized over the whole evergreen-keyword vocabulary — covers every card
 /// of this "the same is true for …" class, not Odric alone.
-pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyword>> {
+pub(crate) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyword>> {
     let lower = text.to_lowercase();
     let (keywords, rest) = nom_on_lower(text, &lower, |i| {
         let (i, _) = tag("the same is true for ").parse(i)?;
@@ -6233,6 +6680,39 @@ mod tests {
         );
     }
 
+    /// CR 708.7: "..., then turn it face up" is its own clause (Yarus, Roar of
+    /// the Old Gods). The face-toggle clause must split off so it lowers to a
+    /// `TurnFaceUp` sub-ability. Reverting the `starts_turn_face_up_down_clause`
+    /// starter leaves the tail glued to the return clause (one chunk).
+    #[test]
+    fn turn_face_up_toggle_splits_off_after_then() {
+        let chunks = clause_texts("return it to the battlefield, then turn it face up");
+        assert_eq!(
+            chunks,
+            vec!["return it to the battlefield", "turn it face up"],
+            "the face-up toggle must split into its own clause"
+        );
+    }
+
+    /// The "turn <object> face up|down" starter is narrow: it matches ONLY a
+    /// complete toggle, never unrelated "turn" phrasings.
+    #[test]
+    fn turn_face_up_starter_is_narrow() {
+        assert!(starts_turn_face_up_down_clause("turn it face up"));
+        assert!(starts_turn_face_up_down_clause("turn it face down"));
+        assert!(starts_turn_face_up_down_clause(
+            "turn that creature face up"
+        ));
+        assert!(starts_turn_face_up_down_clause(
+            "turn target permanent face down"
+        ));
+        // Negatives — no face toggle / no recognized subject / not clause-initial.
+        assert!(!starts_turn_face_up_down_clause("turn it sideways"));
+        assert!(!starts_turn_face_up_down_clause("each turn"));
+        assert!(!starts_turn_face_up_down_clause("until your next turn"));
+        assert!(!starts_turn_face_up_down_clause("turn face up"));
+    }
+
     #[test]
     fn quoted_token_ability_boundary_splits_before_then_if() {
         let chunks = clause_texts(
@@ -6353,7 +6833,9 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         };
         let result =
             parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
@@ -6769,6 +7251,40 @@ mod tests {
     }
 
     #[test]
+    fn any_number_of_target_players_each_splits_after_then() {
+        // #4783 Singularity Rupture: "Destroy all creatures, then any number of
+        // target players each mill half their library, rounded down." The
+        // subject-led "any number of target players each …" tail lowers to a
+        // per-player Mill, so it must split off as its own clause after ", then"
+        // rather than being dropped.
+        let chunks = clause_texts(
+            "destroy all creatures, then any number of target players each mill half their library, rounded down",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "destroy all creatures",
+                "any number of target players each mill half their library, rounded down",
+            ]
+        );
+    }
+
+    #[test]
+    fn starts_target_players_subject_clause_recognizes_distributive() {
+        assert!(starts_target_players_subject_clause(
+            "any number of target players each mill half their library"
+        ));
+        assert!(starts_target_players_subject_clause(
+            "any number of target players mill two cards"
+        ));
+        // Not a player-subject distributive clause.
+        assert!(!starts_target_players_subject_clause("draw a card"));
+        assert!(!starts_target_players_subject_clause(
+            "any number of target creatures"
+        ));
+    }
+
+    #[test]
     fn conjugated_verb_puts_splits_after_then() {
         // "then puts that card on the bottom" should split
         let chunks = clause_texts("reveals the top card, then puts that card on the bottom");
@@ -6910,6 +7426,7 @@ mod tests {
             chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            total_power_cap: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -7187,7 +7704,10 @@ mod tests {
             &copy,
             &mut ParseContext::default(),
         );
-        assert_eq!(result, Some(ContinuationAst::CopyMayRetarget));
+        assert_eq!(
+            result,
+            Some(ContinuationAst::CopyMayRetarget { all_copies: false })
+        );
     }
 
     /// CR 707.10c: `set_copy_retarget_in_ability` must descend the sub-ability
@@ -7217,7 +7737,8 @@ mod tests {
 
         assert!(set_copy_retarget_in_ability(
             &mut def,
-            &CopyRetargetPermission::MayChooseNewTargets
+            &CopyRetargetPermission::MayChooseNewTargets,
+            false
         ));
         let sub = def.sub_ability.as_ref().unwrap();
         assert!(matches!(
@@ -8155,12 +8676,12 @@ mod tests {
         assert_eq!(creature.power, Some(3));
         assert_eq!(creature.toughness, Some(3));
 
-        // CR 205.1a: a creature body with an EXTRA core type before "creature"
-        // ("It's a 2/2 Cyberman artifact creature." — Missy / Cyber Conversion).
+        // CR 708.2a + CR 205.1a: Cyber Conversion's singular creature body with an
+        // extra core type AND a subtype — "It's a 2/2 Cyberman artifact creature."
         // The non-terminal "artifact " modifier must be consumed before the
         // terminal "creature" noun; the subtype "Cyberman" is retained.
         let cyberman =
-            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature").unwrap();
+            parse_its_face_down_profile("it's a 2/2 cyberman artifact creature.").unwrap();
         assert_eq!(cyberman.body, FaceDownBody::Creature);
         assert_eq!(cyberman.power, Some(2));
         assert_eq!(cyberman.toughness, Some(2));
@@ -8179,6 +8700,21 @@ mod tests {
         // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
         // a valid characteristic line — lands have no power/toughness).
         assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
+
+        // CR 205.1a: the "It becomes a/an ..." copula (Mondassian Colony Ship)
+        // sets the same characteristics as the "It's a ..." copula, so the same
+        // Cyberman creature body parses from the "becomes" lead-in.
+        let becomes_cyberman =
+            parse_its_face_down_profile("it becomes a 2/2 cyberman artifact creature.").unwrap();
+        assert_eq!(becomes_cyberman.body, FaceDownBody::Creature);
+        assert_eq!(becomes_cyberman.power, Some(2));
+        assert_eq!(becomes_cyberman.toughness, Some(2));
+        assert_eq!(becomes_cyberman.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(becomes_cyberman.subtypes, vec!["Cyberman".to_string()]);
+        // Sibling "becomes an" article proves class coverage, not Cyberman-specific.
+        let becomes_artifact = parse_its_face_down_profile("it becomes an artifact.").unwrap();
+        assert_eq!(becomes_artifact.body, FaceDownBody::Noncreature);
+        assert_eq!(becomes_artifact.extra_core_types, vec![CoreType::Artifact]);
 
         // Not an it's-characteristics clause → None.
         assert!(parse_its_face_down_profile("draw a card.").is_none());

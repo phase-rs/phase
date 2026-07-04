@@ -1100,6 +1100,12 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Unimplemented { .. } => {
                 payment_failed = true;
             }
+            // CR 118.9: a borrowed keyword cost is never an "unless [player] pays"
+            // cost — it is an alternative cost on a cast spell paid by the casting
+            // pipeline. Reaching here means a misrouted cost; fail the payment.
+            AbilityCost::KeywordCostOfCastSpell { .. } => {
+                payment_failed = true;
+            }
         }
 
         if !payment_failed {
@@ -2923,7 +2929,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
         let library_repl =
@@ -2940,7 +2948,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ));
 

@@ -74,11 +74,11 @@
     "resolveTooltip": "Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.",
     "resolveAll": "Resolve All",
     "resolveAllTooltip": "Keep passing priority while the stack resolves. A required choice or stop can interrupt it.",
-    "waiting": "Waiting",
     "priorityTooltip": "Pass priority. If the stack is empty, this advances through the current priority window. Shortcut: Space.",
     "pass": "Pass",
     "passToEndTooltip": "Auto-pass until the end step unless a choice, stop, or Full Control interrupts. Shortcut: Enter.",
-    "autoPassing": "Auto-Passing to End Step..."
+    "autoPassing": "Auto-Passing to End Step...",
+    "resolvingStack": "Resolving Stack..."
   },
   "board": {
     "regroupCreatures": "Regroup duplicate creature groups",
@@ -153,6 +153,12 @@
       "sacrifice": "Hidden objects that can be sacrificed.",
       "selected": "Hidden objects currently selected for the active choice.",
       "target": "Hidden objects that are legal targets."
+    },
+    "collapse": {
+      "label": "Collapse row",
+      "auto": "Auto",
+      "on": "Always on",
+      "off": "Always off"
     }
   },
   "permanent": {
@@ -175,6 +181,10 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Pick",
+    "fanConfirm": "Confirm ({{count}})",
+    "viewAttachments_one": "View attached card",
+    "viewAttachments_other": "View {{count}} attached cards",
     "hiddenExileCards": "+{{count}} more exiled",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -185,7 +195,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Keep"
     }
   },
   "boardChoice": {
@@ -198,7 +209,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Keep"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -208,14 +220,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: power {{selected}} / {{max}} or less"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Confirm ({{selected}}/{{max}} power)"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -245,7 +259,26 @@
     "you": "You",
     "ally": "Ally",
     "restoreDialog": "Restore dialog",
-    "restoreDialogTitle": "Restore attack target dialog"
+    "restoreDialogTitle": "Restore attack target dialog",
+    "distribute": "Distribute",
+    "attackersColumn": "Attackers",
+    "unassigned": "Unassigned",
+    "assignedBadge": "Assigned",
+    "allAssigned": "All attackers assigned",
+    "unassignedRemaining_one": "{{count}} unassigned",
+    "unassignedRemaining_other": "{{count}} unassigned",
+    "evenSplitAll": "Even Split All",
+    "resetAssignments": "Reset",
+    "allHere": "All Here",
+    "spread": "Spread",
+    "spreadEvenly": "Spread Evenly",
+    "assignOne": "Assign one to {{label}}",
+    "removeOne": "Remove one from {{label}}",
+    "assignAllHere": "Send all to {{label}}",
+    "assignRemaining_one": "Assign {{count}} more",
+    "assignRemaining_other": "Assign {{count}} more",
+    "confirmDistribute_one": "Declare {{count}} Attacker",
+    "confirmDistribute_other": "Declare {{count}} Attackers"
   },
   "fullControl": {
     "on": "Full Control On",
@@ -481,7 +514,9 @@
     "viewFullHand_other": "View full hand ({{count}} cards)",
     "handLabel": "Hand {{count}}",
     "handTitle": "Hand ({{count}})",
-    "cardBack": "Card back"
+    "cardBack": "Card back",
+    "organizeLabel": "Organize hand",
+    "reorderPausedHint": "Drag-to-reorder is paused while the hand is sorted or filtered."
   },
   "opponentHud": {
     "ally": "Ally",
@@ -1007,6 +1042,7 @@
       "manifest": "Manifest",
       "untap": "Untap",
       "tap": "Tap",
+      "attach": "Attach",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -1085,10 +1121,19 @@
       "subtitleManaValueUpTo_other": "Choose up to {{count}} cards within the mana value limit"
     },
     "searchPartition": {
-      "title": "Choose Cards for the Battlefield",
-      "subtitle_one": "Choose {{count}} card to put onto the battlefield{{tapped}}; the rest go to your hand",
-      "subtitle_other": "Choose {{count}} cards to put onto the battlefield{{tapped}}; the rest go to your hand",
-      "tapped": " tapped"
+      "title": "Choose Cards",
+      "subtitle_one": "Choose {{count}} card to put into {{primary}}{{tapped}}; the rest go to {{rest}}",
+      "subtitle_other": "Choose {{count}} cards to put into {{primary}}{{tapped}}; the rest go to {{rest}}",
+      "tapped": " tapped",
+      "zones": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "outsideGame": {
       "title": "Choose From Sideboard",
@@ -1114,6 +1159,7 @@
       "titleHand": "Return",
       "titleUntap": "Untap",
       "titleTap": "Tap",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Choose {{count}} permanent to sacrifice",
       "subtitleSacrificeExact_other": "Choose {{count}} permanents to sacrifice",
       "subtitleSacrificeUpTo_one": "Choose up to {{count}} permanent to sacrifice",
@@ -1150,6 +1196,12 @@
       "subtitleTapUpTo_other": "Choose up to {{count}} permanents to tap",
       "subtitleTapRange_one": "Choose {{min}}-{{count}} permanent to tap",
       "subtitleTapRange_other": "Choose {{min}}-{{count}} permanents to tap",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Skip",
       "labelDecline": "Decline",
       "labelPutOnTop": "Put on top ({{order}})",
@@ -1157,6 +1209,7 @@
       "labelTop": "Top ({{selected}}/{{count}})",
       "labelPut": "Put ({{selected}}/{{count}})",
       "labelReturn": "Return ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Top"
     },
     "drawnThisTurn": {
@@ -1286,6 +1339,12 @@
       "optCmc": "Mana value",
       "optType": "Type",
       "optColor": "Color",
+      "filterLabel": "Show",
+      "filterNone": "All",
+      "filterPlayable": "Playable",
+      "filterCreatures": "Creatures",
+      "filterLands": "Lands",
+      "filterNonland": "Nonland",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",
@@ -1516,16 +1575,20 @@
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Cast from Graveyard",
     "title": "Cast {{name}}?",
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
     "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
+    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost — mana of any type may be spent. Or decline and leave it in the graveyard.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
+    "castPaidSuffix": "(pay its mana cost — any type of mana may be spent)",
     "putIntoHand": "Put into hand",
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
-    "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
+    "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)",
+    "graveyardPaidDeclineSuffix": "(leave it in the graveyard)"
   },
   "freeCastWindow": {
     "eyebrow": "Free Cast",
@@ -1609,7 +1672,7 @@
     "connectionTitle": "Engine connection lost",
     "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
     "timeoutTitle": "Engine took too long",
-    "timeoutBody": "phase.rs couldn't finish computing this action within the time limit. This can happen on very complex boards (for example, hundreds of tokens). Your last saved turn is preserved — reload to restore the game, and consider exporting the state to report it.",
+    "timeoutBody": "phase.rs has been computing this action for a while. This can happen on very complex boards, and the operation is still running. You can keep waiting, or reload if you think it is stuck.",
     "diagnostic": "diagnostic: {{reason}}",
     "showDetails": "Show details",
     "exportGameState": "Export Game State",
@@ -1618,6 +1681,7 @@
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",
+    "continueWaiting": "Continue waiting",
     "reload": "Reload",
     "reportTitle": "Engine crash: {{summary}}",
     "reportConnectionSummary": "Engine connection lost",
@@ -1873,5 +1937,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

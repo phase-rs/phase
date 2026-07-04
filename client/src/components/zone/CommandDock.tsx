@@ -91,6 +91,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
         className="flex max-w-none flex-col items-end gap-1 overflow-visible"
         style={dockStyle(INLINE_SCALE)}
         data-debug-label="Command"
+        data-command-dock={isMirrored ? "opponent" : "player"}
       >
         {fullContent}
       </div>
@@ -104,6 +105,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
       emblemCount={emblemCount}
       damageEntries={damageEntries}
       label={t("zone.commandZone")}
+      dockRole={isMirrored ? "opponent" : "player"}
     >
       {fullContent}
     </CompactCommandDock>
@@ -112,6 +114,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
 
 interface CompactCommandDockProps {
   isMirrored: boolean;
+  dockRole: "player" | "opponent";
   commanders: GameObject[];
   emblemCount: number;
   damageEntries: CommanderDamageEntry[];
@@ -121,6 +124,7 @@ interface CompactCommandDockProps {
 
 function CompactCommandDock({
   isMirrored,
+  dockRole,
   commanders,
   emblemCount,
   damageEntries,
@@ -211,6 +215,7 @@ function CompactCommandDock({
       onMouseEnter={openDock}
       onMouseLeave={scheduleCloseDock}
       data-debug-label="Command"
+      data-command-dock={dockRole}
     >
       <button
         type="button"

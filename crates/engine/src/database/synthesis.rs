@@ -13,12 +13,12 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
     CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
-    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
 };
@@ -666,7 +666,9 @@ pub fn synthesize_craft(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -1758,7 +1760,9 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1840,7 +1844,9 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1934,7 +1940,9 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             );
             put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
@@ -2838,7 +2846,9 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         face.replacements.push(replacement);
@@ -2907,7 +2917,9 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     );
     // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
@@ -4224,7 +4236,9 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     // CR 603.5 + CR 702.46a "you may": optionality lives on the execute ability
@@ -6039,7 +6053,9 @@ fn build_recover_self_change_zone(destination: Zone) -> Effect {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     }
 }
 
@@ -6336,7 +6352,9 @@ fn build_dies_return_with_counter_trigger(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
@@ -6420,6 +6438,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // resolves, not via a lingering permission — this arms the
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
         },
     )
     .optional();
@@ -6539,6 +6558,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
     .condition(AbilityCondition::PreviousEffectAmount {
         comparator: Comparator::EQ,
         rhs: QuantityExpr::Fixed { value: 0 },
+        channel: crate::types::ability::DamageChannel::Total,
     });
     let remove_one = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -6634,6 +6654,7 @@ fn is_fading_upkeep_trigger(t: &TriggerDefinition) -> bool {
                     Some(AbilityCondition::PreviousEffectAmount {
                         comparator: Comparator::EQ,
                         rhs: QuantityExpr::Fixed { value: 0 },
+                        ..
                     })
                 ) && matches!(
                     &*sub.effect,
@@ -7491,6 +7512,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                     condition: Box::new(AbilityCondition::TargetMatchesFilter {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
+                        subject_slot: None,
                     }),
                 })
                 .description(
@@ -7624,7 +7646,9 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description(format!("Exile another {type_str} you control"));
@@ -7681,7 +7705,9 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .description("Return the exiled card to the battlefield under its owner's control".to_string());
@@ -8071,7 +8097,7 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
         },
     }
@@ -9414,7 +9440,9 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
     )
     .sub_ability(shuffle);
@@ -9531,6 +9559,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // router already routed this shape through during-resolution;
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
             },
         )
         .optional();
@@ -9547,7 +9576,9 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         .sub_ability(cast_sub);
@@ -19030,7 +19061,9 @@ mod backup_synthesis_tests {
         // Verify the condition is Not(TargetMatchesFilter(SelfRef))
         match &sub_ability.condition {
             Some(AbilityCondition::Not { condition }) => match condition.as_ref() {
-                AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                AbilityCondition::TargetMatchesFilter {
+                    filter, use_lki, ..
+                } => {
                     assert!(matches!(filter, TargetFilter::SelfRef));
                     assert!(!use_lki);
                 }
@@ -23118,6 +23151,7 @@ mod fading_vanishing_tests {
             Some(AbilityCondition::PreviousEffectAmount {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
+                ..
             })
         ));
         assert!(matches!(
@@ -25121,6 +25155,7 @@ mod absorb_synthesis_tests {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(target)],
             source,
