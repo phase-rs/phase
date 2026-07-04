@@ -710,6 +710,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Zone::Graveyard
         };
         if dest == Zone::Battlefield {
+            // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
+            // permanent AS it resolves onto the battlefield — BEFORE the ETB
+            // replacement pipeline matches the ZoneChange and before the
+            // zone-change record snapshots is_token, so token-scoped ETB
+            // replacements and enters-the-battlefield trigger filters
+            // (FilterProp::Token/NonToken) correctly observe it as a token.
+            // Copy-gated → no-op for every non-copy battlefield entry.
+            if let Some(obj) = state.objects.get_mut(&entry.id) {
+                if obj.is_copy {
+                    obj.is_copy = false;
+                    obj.is_token = true;
+                }
+            }
             // CR 614.1c + CR 608.3: Route battlefield entry through the replacement
             // pipeline so ETB replacements (saga lore counters, enter-tapped, etc.) fire.
             let mut proposed = crate::types::proposed_event::ProposedEvent::zone_change(
@@ -3012,6 +3025,104 @@ mod tests {
         );
     }
 
+    /// CR 707.10f + CR 608.3f: A copy of a PERMANENT spell, as it resolves onto
+    /// the battlefield, ceases being a copy and becomes a token permanent. Drives
+    /// the real spell-resolution → battlefield path (`resolve_top` →
+    /// `deliver_replaced_zone_change`). Revert probe: without the copy-gated flip,
+    /// `is_copy` stays true, `is_token` stays false, and
+    /// `is_represented_by_a_card()` wrongly returns false — and the CR 704.5e SBA
+    /// would later sweep the permanent off the battlefield the moment it moved.
+    #[test]
+    fn resolving_permanent_copy_becomes_a_token() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Permanent Copy".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_copy = true;
+            obj.is_token = false;
+        }
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(700),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(
+            obj.is_token,
+            "CR 707.10f: a permanent copy becomes a token as it resolves"
+        );
+        assert!(
+            !obj.is_copy,
+            "CR 707.10f: it is no longer a copy of a spell once on the battlefield"
+        );
+        assert!(
+            !obj.is_represented_by_a_card(),
+            "CR 111.1: a token permanent is not represented by a card"
+        );
+    }
+
+    /// Multi-authority negative for the CR 707.10f flip: a REAL permanent
+    /// (is_copy = false) resolving to the battlefield stays a card — the flip is
+    /// copy-gated and must not turn every entering permanent into a token.
+    #[test]
+    fn resolving_real_permanent_stays_a_card() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Real Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_copy = false;
+            obj.is_token = false;
+        }
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(701),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(!obj.is_token, "a real permanent must not become a token");
+        assert!(!obj.is_copy);
+        assert!(
+            obj.is_represented_by_a_card(),
+            "a real permanent is still represented by a card"
+        );
+    }
+
     /// CR 724.1b: "end the turn" exiles every object on the stack, including
     /// the resolving spell itself. Discriminating against routing the source
     /// through the normal CR 608.2n instant/sorcery graveyard path.
@@ -4749,7 +4860,7 @@ mod tests {
         use crate::game::triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{
-            AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, PtValue,
+            AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp, PtValue,
             QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
             TriggerDefinition, TypeFilter, TypedFilter,
         };
@@ -8016,6 +8127,154 @@ mod tests {
                     "{label}: keyword mismatch for {id:?}"
                 );
             }
+        }
+
+        /// Install a battlefield permanent hosting a token-scoped ETB replacement:
+        /// "each token that would enter the battlefield enters tapped." Modeled as a
+        /// `ReplacementEvent::ChangeZone` whose `valid_card` is
+        /// `Typed(Permanent, [FilterProp::Token])` and whose `execute` self-taps the
+        /// entering permanent (CR 701.26a → `EtbTapState::Tapped`). Returns the host
+        /// id. The replacement's `valid_card` is matched via
+        /// `matches_target_filter_on_battlefield_entry` DURING `replace_event`
+        /// (the pre-delivery seam) against the LIVE entering object's `is_token`.
+        fn add_token_enters_tapped_replacement(state: &mut GameState) -> ObjectId {
+            use crate::types::ability::{
+                AbilityKind, EffectScope, ReplacementDefinition, TapStateChange,
+            };
+            use crate::types::replacements::ReplacementEvent;
+            let host = create_object(
+                state,
+                CardId(970),
+                PlayerId(0),
+                "Token Taps Down".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&host).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let repl = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Permanent],
+                        properties: vec![FilterProp::Token],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::SetTapState {
+                            target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_replacement_definitions).push(repl.clone());
+                obj.replacement_definitions.push(repl);
+            }
+            host
+        }
+
+        /// Push a permanent-spell COPY (is_copy = true, is_token = false — exactly
+        /// the shape `Effect::CastCopyOfCard` produces for a permanent) onto the
+        /// stack and return its id.
+        fn push_permanent_copy_spell(state: &mut GameState, card_id: u64) -> ObjectId {
+            let copy_id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Permanent Copy".to_string(),
+                Zone::Stack,
+            );
+            {
+                let obj = state.objects.get_mut(&copy_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.is_copy = true;
+                obj.is_token = false;
+            }
+            state.stack.push_back(StackEntry {
+                id: copy_id,
+                source_id: copy_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(card_id),
+                    ability: None,
+                    casting_variant: super::CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            copy_id
+        }
+
+        /// CR 707.10f + CR 608.3f (PRODUCTION-PATH regression, revert-failing):
+        /// when a copy of a permanent spell resolves onto the battlefield, a
+        /// token-scoped ETB REPLACEMENT ("each token that enters enters tapped")
+        /// must OBSERVE the resolving copy as a token during `replace_event` and
+        /// therefore apply. This drives the real `resolve_top` →
+        /// `dest == Battlefield` block → `super::replacement::replace_event`
+        /// (stack.rs) path. The replacement's `valid_card`
+        /// (`FilterProp::Token`) is matched by
+        /// `matches_target_filter_on_battlefield_entry` against the LIVE entering
+        /// object BEFORE the ZoneChange is delivered.
+        ///
+        /// Revert probe: with the flip at its OLD (late) site in
+        /// `zone_pipeline::deliver_replaced_zone_change` (which runs AFTER
+        /// `replace_event`), the entering object is still `is_token = false` when
+        /// the replacement's token filter is evaluated, so the replacement does
+        /// NOT match and the copy enters UNTAPPED — the `tapped` assertion below
+        /// flips to false and the test fails.
+        #[test]
+        fn resolving_permanent_copy_is_observed_as_token_by_etb_replacement() {
+            let mut state = setup();
+            add_token_enters_tapped_replacement(&mut state);
+            let copy_id = push_permanent_copy_spell(&mut state, 972);
+
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+
+            let copy = &state.objects[&copy_id];
+            // Final-state sanity: the copy is now a token permanent (CR 707.10f).
+            assert_eq!(copy.zone, Zone::Battlefield);
+            assert!(copy.is_token, "CR 707.10f: the resolved copy is a token");
+            assert!(
+                !copy.is_copy,
+                "CR 707.10f: it is no longer a copy of a spell"
+            );
+            // The discriminating assertion: the token-scoped ETB replacement saw
+            // the entering copy as a token at `replace_event` time and tapped it.
+            assert!(
+                copy.tapped,
+                "CR 707.10f: a token-scoped ETB replacement must observe the \
+                 resolving permanent copy as a token as it enters — so it enters \
+                 tapped. If the flip lands after replace_event, it enters untapped."
+            );
+        }
+
+        /// Negative control for the token-scoped ETB replacement: a REAL permanent
+        /// (is_copy = false) resolving to the battlefield is a nontoken, so the
+        /// Token-filtered "enters tapped" replacement must NOT fire — it enters
+        /// untapped. Proves the discriminating assertion above keys on token-ness,
+        /// not on "every resolving permanent taps."
+        #[test]
+        fn resolving_real_permanent_is_not_tapped_by_token_replacement() {
+            let mut state = setup();
+            add_token_enters_tapped_replacement(&mut state);
+            let real_id = push_permanent_copy_spell(&mut state, 973);
+            // Make it a REAL permanent, not a copy.
+            {
+                let obj = state.objects.get_mut(&real_id).unwrap();
+                obj.is_copy = false;
+                obj.is_token = false;
+            }
+
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+
+            let obj = &state.objects[&real_id];
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert!(!obj.is_token, "a real permanent is not a token");
+            assert!(
+                !obj.tapped,
+                "a nontoken permanent must not be tapped by a Token-scoped ETB \
+                 replacement"
+            );
         }
     }
 
