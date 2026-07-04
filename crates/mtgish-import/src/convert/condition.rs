@@ -152,6 +152,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
             AbilityCondition::TargetMatchesFilter {
                 filter: crate::convert::filter::spells_to_filter(spells)?,
                 use_lki: false,
+                subject_slot: None,
             }
         }
         _ => {
@@ -688,6 +689,7 @@ fn permanent_filter_to_ability(
         PermanentAxis::Target => AbilityCondition::TargetMatchesFilter {
             filter,
             use_lki: false,
+            subject_slot: None,
         },
     })
 }
@@ -1077,6 +1079,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::LastCreated => "LastCreated",
         TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
+        TargetFilter::ChosenCard => "ChosenCard",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
         TargetFilter::ExiledBySource => "ExiledBySource",
@@ -1115,7 +1118,7 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
         FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
-        FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
+        FilterProp::AttackedThisTurn { .. } => Some("AttackedThisTurn"),
         FilterProp::BlockedThisTurn => Some("BlockedThisTurn"),
         FilterProp::AttackedOrBlockedThisTurn => Some("AttackedOrBlockedThisTurn"),
         FilterProp::EnchantedBy => Some("EnchantedBy"),
@@ -3752,7 +3755,9 @@ mod tests {
         let converted = convert_ability(&condition).unwrap();
 
         match converted {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter, use_lki, ..
+            } => {
                 assert!(!use_lki);
                 assert!(matches!(
                     filter,

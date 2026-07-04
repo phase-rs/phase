@@ -82,9 +82,12 @@ pub fn resolve(
         track_exiled_by_source: false,
         // CR 708.2a: Blight places -1/-1 counters; no face-down entry.
         face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
         count_param: count,
         library_position: None,
         is_cost_payment: false,
+        enters_modified_if: None,
     };
 
     Ok(())

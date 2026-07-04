@@ -377,6 +377,63 @@ fn do_eliminate(
         state.pending_cast = None;
     }
 
+    // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
+    // leaving player was answering. A CR 616.1 replacement-order (or optional
+    // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
+    // and resumed ONLY via `(WaitingFor::ReplacementChoice, ChooseReplacement)`
+    // (engine.rs) or that sub-choice's own resolution — both re-enter
+    // `continue_replacement`. If the player who must answer leaves the game, the
+    // choice is unanswerable: the post-loop reconcile rewrite advances
+    // `waiting_for` to `Priority{next}`, and every later `check_state_based_actions`
+    // then bails at its `pending_replacement` guard (sba.rs) — freezing all
+    // object-destroying SBAs for the rest of the game.
+    //
+    // Key off the LATCHED chooser identity, not the mutating object graph:
+    // `waiting_for.acting_player()` is the affected player for both
+    // `ReplacementChoice{player}` (game_state.rs) and a MayCost sub-choice re-park
+    // (payer == affected, replacement.rs), and `do_eliminate` never mutates
+    // `waiting_for` (the rewrite runs after the loop), so this key is CONSTANT
+    // across a simultaneous multi-elimination batch and object-graph-independent.
+    // (`ProposedEvent::affected_player` would mis-resolve here: once a co-eliminated
+    // lower-id loser has exiled the affected object, its effective controller is
+    // reverted to its owner — CR 616.1's owner-fallback is pre-existing and NOT
+    // relied upon.) Mirror the `pending_cast` teardown: clear `pending_replacement`
+    // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
+    // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
+    // `pending_connive_reentry`). The resume drain also touches OTHER resolution
+    // slots on a normal answer (e.g. `pending_phase_transition_progress`,
+    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
+    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
+    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
+    // drain) that predates this PR and is NOT the reported regression; repairing
+    // them correctly requires resuming the interrupted APNAP queue for the
+    // remaining players (not field-nulling), tracked as a separate follow-up. This
+    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
+    // `pending_replacement` guard.
+    if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
+        state.pending_replacement = None;
+        state.replacement_may_cost_paused = false;
+        state.post_replacement_continuation = None;
+        state.post_replacement_source = None;
+        state.post_replacement_event_source = None;
+        state.post_replacement_event_target = None;
+        state.pending_connive_reentry = None;
+    }
+
+    // CR 800.4a: A coupled ETB spell-resolution context can outlive its
+    // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
+    // engine_replacement.rs), so it is torn down under its OWN controller-keyed
+    // guard — cleared only for the LEAVING player's own resolution (mirroring the
+    // `pending_cast` controller key above) so a living player's paused resolution
+    // survives an opponent's departure.
+    if state
+        .pending_spell_resolution
+        .as_ref()
+        .is_some_and(|psr| psr.controller == player)
+    {
+        state.pending_spell_resolution = None;
+    }
+
     // CR 800.4a: All objects the player owns leave the game (exiled). Route each
     // through the zone pipeline under the `PlayerLeftGame` exempt cause — "This
     // is not a state-based action", and no replacement effect applies to a
@@ -564,11 +621,16 @@ pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut V
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::ability::{Effect, PostReplacementContinuation, ResolvedAbility, TargetRef};
+    use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{CastingVariant, PendingCast, StackEntry, StackEntryKind};
+    use crate::types::game_state::{
+        CastingVariant, PendingCast, PendingConniveReentry, PendingReplacement,
+        PendingSpellResolution, StackEntry, StackEntryKind,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -885,6 +947,183 @@ mod tests {
         assert!(
             state.pending_cast.is_some(),
             "an opponent leaving must not abandon the caster's in-progress spell"
+        );
+    }
+
+    #[test]
+    fn simultaneous_elimination_clears_object_referential_replacement_for_eliminated_chooser() {
+        // CR 800.4a + CR 616.1: 4-player FFA so two simultaneous losses leave the
+        // game running (exercises the reconcile rewrite that strands the choice).
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        state.turn_number = 1;
+
+        // O: OWNED by X = P1, CONTROLLED by chooser C = P2. X.0 (1) < C.0 (2), so
+        // do_eliminate(X) runs first and reverts O's effective controller to its
+        // OWNER (P1) on exile (zones.rs revert_layered_characteristics_to_base) --
+        // by the time do_eliminate(C) runs, `affected_player(O) == P1 != C`, so the
+        // OLD live key would SKIP the clear. This is the revert-failing wedge.
+        let o = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Contested".into(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&o) {
+            obj.controller = PlayerId(2);
+            obj.base_controller = Some(PlayerId(2));
+        }
+
+        // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(2),
+                    object_id: o,
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        // Latched chooser identity — the fix's key. C = P2.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(2),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        // Coupled continuation slots the resume drain would clear on a normal answer.
+        state.replacement_may_cost_paused = true;
+        state.post_replacement_continuation = Some(PostReplacementContinuation::Resolved(
+            Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "psrc".into(),
+                    description: None,
+                },
+                vec![],
+                o,
+                PlayerId(2),
+            )),
+        ));
+        state.post_replacement_source = Some(o);
+        state.post_replacement_event_source = Some(o);
+        state.post_replacement_event_target = Some(TargetRef::Object(o));
+        state.pending_connive_reentry = Some(PendingConniveReentry {
+            conniver: o,
+            count: 1,
+            applied: HashSet::new(),
+        });
+        // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: o,
+            controller: PlayerId(2),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        let mut events = Vec::new();
+        // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
+        // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+
+        assert!(state.players[1].is_eliminated && state.players[2].is_eliminated);
+        // Gap 1 core (revert-failing vs the affected_player key): the parked choice
+        // of the eliminated chooser is cleared even though a lower-id co-loser
+        // already exiled the affected object.
+        assert!(
+            state.pending_replacement.is_none(),
+            "eliminating the parked chooser must clear pending_replacement (latched acting_player key, not affected_player)"
+        );
+        // Every coupled continuation slot the resume drain owns is torn down.
+        assert!(!state.replacement_may_cost_paused);
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.post_replacement_source.is_none());
+        assert!(state.post_replacement_event_source.is_none());
+        assert!(state.post_replacement_event_target.is_none());
+        assert!(state.pending_connive_reentry.is_none());
+        assert!(
+            state.pending_spell_resolution.is_none(),
+            "the leaving chooser's coupled spell-resolution ctx must be torn down"
+        );
+    }
+
+    #[test]
+    fn opponent_leaving_preserves_living_choosers_replacement() {
+        // CR 800.4a affects only the leaving player: a DIFFERENT player's departure
+        // must NOT clear the living chooser's parked replacement (no over-clear).
+        let mut state = setup_three_player();
+
+        // Chooser C = P0 (survivor). Player-keyed parked Draw.
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        let mut events = Vec::new();
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[0].is_eliminated);
+        assert!(
+            state.pending_replacement.is_some(),
+            "an opponent leaving must not clear the living chooser's parked replacement"
+        );
+        assert!(
+            state.pending_spell_resolution.is_some(),
+            "an opponent leaving must not tear down the living player's spell-resolution ctx"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "the living chooser's ReplacementChoice park must be preserved"
         );
     }
 

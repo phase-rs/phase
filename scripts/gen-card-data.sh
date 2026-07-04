@@ -23,6 +23,11 @@ DECKS_OUTPUT="${OUTPUT_DIR}/decks.json"
 
 echo "=== Card Data Generation ==="
 
+# Pin the release-gate "as of" date to UTC today so `GATED_SETS` auto-unlocks
+# sets whose MTGJSON releaseDate has passed (issue #4365). Override in tests
+# with GATED_SETS_AS_OF=YYYY-MM-DD.
+export GATED_SETS_AS_OF="${GATED_SETS_AS_OF:-$(date -u +%Y-%m-%d)}"
+
 # Download MTGJSON AtomicCards if not present. mtgjson_download prefers the
 # gzipped artifact (~50 MB vs ~156 MB uncompressed) and retries the
 # mid-transfer connection resets mtgjson hands out on large anonymous reads.

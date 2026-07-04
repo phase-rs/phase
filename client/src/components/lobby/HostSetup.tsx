@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../../adapter/types";
 import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
@@ -221,6 +221,11 @@ export function HostSetup({
     Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
   );
   const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
+  // CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation and
+  // immutable during play. Available at every player count (Commander infinites).
+  const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>(
+    remembered?.loopDetection ?? { type: "Off" },
+  );
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -328,6 +333,7 @@ export function HostSetup({
       formatConfig,
       playerCount,
       matchType: effectiveMatchType,
+      loopDetection,
       isPublic,
       startWhenFull,
       // Ranked rating updates aren't implemented in the engine — the room is
@@ -343,6 +349,7 @@ export function HostSetup({
         timerSeconds: null,
         formatConfig: finalConfig,
         matchType: effectiveMatchType,
+        loopDetection,
         aiSeats: effectiveAiSeats.map((seat) => ({
           ...seat,
           ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
@@ -516,6 +523,27 @@ export function HostSetup({
                   className={seg(matchType === "Bo3", playerCount !== 2 ? "cursor-not-allowed opacity-40" : "")}
                 >
                   {t("hostSetup.bo3")}
+                </button>
+              </div>
+            </Field>
+
+            {/* CR 732.2a: combo (infinite-loop) detector opt-in, immutable once the
+                match starts. Offered at every player count (Commander infinites). */}
+            <Field label={t("common:comboDetector.label")}>
+              <div className={segWrap} title={t("common:comboDetector.title")}>
+                <button
+                  type="button"
+                  onClick={() => setLoopDetection({ type: "Off" })}
+                  className={seg(loopDetection.type === "Off")}
+                >
+                  {t("common:comboDetector.off")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLoopDetection({ type: "On" })}
+                  className={seg(loopDetection.type === "On")}
+                >
+                  {t("common:comboDetector.on")}
                 </button>
               </div>
             </Field>

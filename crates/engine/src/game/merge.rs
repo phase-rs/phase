@@ -25,9 +25,27 @@
 //! already-merged permanent extends its component stack, and the merged
 //! permanent's layer-1 copy effect is re-derived from the full stack each time.
 //!
-//! Deferred: copy effects targeting a merged permanent, face-down/DFC
-//! components, full CR 702.140d downstream reflexive effects, and the CR 730.3a
-//! graveyard/library arrange-order UI (a deterministic order is used).
+//! Face-down components (partial — CR 730.2e): handled now is the merged
+//! permanent's status following its topmost component (a face-down topmost keeps
+//! the survivor face down; a face-up topmost over a face-down component does NOT
+//! count as turning it face up, so no `TurnedFaceUp` event), and the suppression
+//! of a non-topmost face-down component's listed characteristics from the
+//! copiable-values union (a cloaked/disguised component's `base_keywords = [Ward]`
+//! is not inherited by a face-up merged permanent — CR 708.2a + CR 730.2e). Still
+//! deferred: CR 730.2f turn-up of a face-down merged permanent; full CR 702.140e
+//! reveal of a formerly-face-down bottom component's real abilities on a
+//! mutate-over; the split (CR 730.3) of a face-down merge survivor (the survivor's
+//! `base_*` holds the stale 2/2 face-down profile rather than the component's real
+//! card characteristics); and the extreme corner where a sticker placed on a
+//! face-down permanent is wiped by the Layer-1b re-seed (rules-correct per CR
+//! 708.2a — a face-down object has only its listed characteristics). Note:
+//! `apply_face_down` does not normalize `base_loyalty`/`base_defense`; that is
+//! pre-existing Step-1 reset behavior, faithfully preserved by the shared
+//! `seed_live_characteristics_from_base` helper.
+//!
+//! Deferred: copy effects targeting a merged permanent, DFC components, full CR
+//! 702.140d downstream reflexive effects, and the CR 730.3a graveyard/library
+//! arrange-order UI (a deterministic order is used).
 
 use std::sync::Arc;
 
@@ -128,6 +146,10 @@ pub fn merge_object_onto(
         }
     };
     let topmost_id = ordered[0];
+    // CR 730.2e: a merged permanent's face-down status follows its topmost
+    // component. Read it BEFORE any mutation so the survivor adopts the topmost
+    // component's face-down status while merged.
+    let topmost_is_face_down = state.objects.get(&topmost_id).is_some_and(|o| o.face_down);
 
     // Remove any previous mutate copy effect before deriving the new one, so a
     // re-merge where the survivor remains topmost reads the survivor's intrinsic
@@ -146,6 +168,11 @@ pub fn merge_object_onto(
         // guard can distinguish it from a Meld survivor (a two-creature mutate
         // also has `merged_components.len() == 2`).
         survivor.merge_kind = Some(crate::game::game_object::MergeKind::Mutate);
+        // CR 730.2e: the merged permanent's status follows its topmost component.
+        // When a face-down permanent becomes face up as a result of merging, other
+        // effects don't count it as turned face up, so no `GameEvent::TurnedFaceUp`
+        // is pushed here.
+        survivor.face_down = topmost_is_face_down;
     }
 
     // CR 730.2d: a merged permanent is a token only if its TOPMOST component is a
@@ -223,6 +250,15 @@ fn merged_copiable_values(
         let Some(obj) = state.objects.get(&component_id) else {
             continue;
         };
+        // CR 708.2a + CR 730.2e: a non-topmost face-down component carries no card
+        // abilities. Morph zeroes its base abilities/triggers/statics/replacements,
+        // but a cloaked/disguised component still holds `base_keywords = [Ward {2}]`;
+        // a face-up merged permanent must not inherit a buried face-down component's
+        // ward (or any other listed face-down characteristic). Skip non-topmost
+        // face-down components entirely from the copiable-values union.
+        if component_id != topmost_id && obj.face_down {
+            continue;
+        }
         let (abil, trig, stat, repl, kws): BaseSets = (
             obj.base_abilities.clone(),
             obj.base_trigger_definitions.clone(),
@@ -637,4 +673,189 @@ pub fn handle_mutate_merge_choice(
     Ok(crate::types::game_state::WaitingFor::Priority {
         player: state.active_player,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::layers::evaluate_layers;
+    use crate::game::morph::apply_face_down_creature_characteristics;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, FaceDownProfile, QuantityExpr, TargetFilter,
+    };
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::{Keyword, WardCost};
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+
+    fn make_creature(
+        state: &mut GameState,
+        card: u64,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.base_name = name.to_string();
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        obj.base_card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.card_types = obj.base_card_types.clone();
+        id
+    }
+
+    fn draw_n_ability(n: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: n },
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn set_base_abilities(state: &mut GameState, id: ObjectId, abilities: Vec<AbilityDefinition>) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.base_abilities = Arc::new(abilities.clone());
+        obj.abilities = Arc::new(abilities);
+    }
+
+    fn make_face_down(
+        state: &mut GameState,
+        player: PlayerId,
+        profile: FaceDownProfile,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(50),
+            player,
+            "Secret".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        apply_face_down_creature_characteristics(obj, &profile);
+        id
+    }
+
+    fn ward_2() -> Keyword {
+        Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))
+    }
+
+    // Plan test 4: a creature mutated UNDER a face-down survivor — the survivor
+    // stays a face-down 2/2 with no abilities (topmost is the face-down survivor;
+    // CR 730.2e + CR 708.2a, Layer 1b re-seed).
+    #[test]
+    fn mutate_under_face_down_stays_face_down_2_2() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let survivor = make_face_down(&mut state, player, FaceDownProfile::vanilla_2_2());
+        let mutant = make_creature(&mut state, 1, player, "Mutant", 5, 5);
+        set_base_abilities(&mut state, mutant, vec![draw_n_ability(1)]);
+
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, mutant, survivor, MergeSide::Bottom, &mut events);
+        evaluate_layers(&mut state);
+
+        let s = &state.objects[&survivor];
+        assert!(s.face_down, "topmost is the face-down survivor (CR 730.2e)");
+        assert_eq!(s.power, Some(2));
+        assert_eq!(s.toughness, Some(2));
+        assert!(
+            s.abilities.is_empty(),
+            "a face-down permanent has no abilities (CR 708.2a); Layer 1b drops the unioned mutant ability"
+        );
+
+        // SIBLING: mutate-under a FACE-UP host unions abilities normally.
+        let host = make_creature(&mut state, 2, player, "Host", 3, 3);
+        set_base_abilities(&mut state, host, vec![draw_n_ability(1)]);
+        let mutant2 = make_creature(&mut state, 3, player, "Mutant2", 5, 5);
+        set_base_abilities(&mut state, mutant2, vec![draw_n_ability(2)]);
+        merge_object_onto(&mut state, mutant2, host, MergeSide::Bottom, &mut events);
+        evaluate_layers(&mut state);
+        let h = &state.objects[&host];
+        assert!(!h.face_down);
+        assert_eq!(
+            h.abilities.len(),
+            2,
+            "a face-up merged permanent unions every component's abilities (CR 702.140e)"
+        );
+    }
+
+    // Plan test 5: a creature mutated OVER a cloaked face-down survivor clears the
+    // survivor's face-down status (topmost is face up — CR 730.2e), drops the
+    // buried ward (CR 708.2a + CR 730.2e), and emits NO TurnedFaceUp event.
+    #[test]
+    fn mutate_over_face_down_clears_face_down_drops_ward() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let survivor = make_face_down(&mut state, player, FaceDownProfile::cloaked_2_2());
+        assert!(state.objects[&survivor].base_keywords.contains(&ward_2()));
+        let mutant = make_creature(&mut state, 1, player, "Mutant", 5, 5);
+
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, mutant, survivor, MergeSide::Top, &mut events);
+        evaluate_layers(&mut state);
+
+        let s = &state.objects[&survivor];
+        assert!(
+            !s.face_down,
+            "status follows the face-up topmost component (CR 730.2e)"
+        );
+        assert!(
+            !s.keywords.contains(&ward_2()), // allow-raw-authority: asserts the exact post-merge keyword snapshot, not an off-zone-aware query
+            "a face-up merged permanent does not inherit a buried face-down ward (CR 708.2a)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::TurnedFaceUp { .. })),
+            "merging is not 'turned face up' (CR 730.2e) — no TurnedFaceUp event"
+        );
+    }
+
+    // Plan test 6: merged_copiable_values skips a non-topmost FACE-DOWN component's
+    // listed characteristics, but unions a non-topmost FACE-UP component's.
+    #[test]
+    fn merged_copiable_values_skips_non_topmost_face_down_component() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // Topmost face-up component carries Flying.
+        let top = make_creature(&mut state, 1, player, "Top", 3, 3);
+        state.objects.get_mut(&top).unwrap().base_keywords = vec![Keyword::Flying];
+        // Non-topmost cloaked face-down component carries ward {2}.
+        let buried = make_face_down(&mut state, player, FaceDownProfile::cloaked_2_2());
+
+        let (values, _, _, _) = merged_copiable_values(&state, &[top, buried], top).unwrap();
+        assert!(values.keywords.contains(&Keyword::Flying)); // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
+        assert!(
+            !values.keywords.contains(&ward_2()), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
+            "non-topmost face-down component's ward is suppressed (CR 708.2a + CR 730.2e)"
+        );
+
+        // NEGATIVE: a non-topmost FACE-UP component IS unioned.
+        let buried_up = make_creature(&mut state, 2, player, "BuriedUp", 1, 1);
+        state.objects.get_mut(&buried_up).unwrap().base_keywords = vec![Keyword::Trample];
+        let (values2, _, _, _) = merged_copiable_values(&state, &[top, buried_up], top).unwrap();
+        assert!(
+            values2.keywords.contains(&Keyword::Trample), // allow-raw-authority: merged_copiable_values snapshot struct, not a GameObject
+            "a face-up non-topmost component's keywords are unioned (CR 702.140e)"
+        );
+    }
 }

@@ -1,8 +1,11 @@
 use crate::game::filter;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{
+    quantity_expr_uses_recipient, resolve_quantity_with_targets,
+    resolve_quantity_with_targets_and_recipient,
+};
 use crate::types::ability::{
     ContinuousModification, DoublePTMode, Duration, Effect, EffectError, EffectKind, PtValue,
-    ResolvedAbility, TargetFilter,
+    QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -38,18 +41,31 @@ pub fn resolve(
         crate::game::targeting::resolved_targets(ability, &target_filter, state);
     let ids = crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
 
-    let modifications = pt_modifications(power, toughness, state, ability);
+    // CR 608.2h + CR 613.4c: the pump amount is determined once, as the effect
+    // resolves. When the P/T references the pumped object itself ("+X for each
+    // OTHER creature … that shares a type with it": FilterProp::Another /
+    // AttachedToRecipient), the count MUST be resolved with THAT object bound as
+    // the recipient so "other X" excludes the specific creature being pumped
+    // rather than the ability source (the Plane in the command zone would
+    // otherwise leave the attacker wrongly counted). Recipient-invariant
+    // quantities keep the single shared resolution reused across all targets.
+    let per_recipient = pt_uses_recipient(power) || pt_uses_recipient(toughness);
+    let shared = (!per_recipient).then(|| pt_modifications(power, toughness, state, ability, None));
 
     for obj_id in ids {
         if !state.objects.contains_key(&obj_id) {
             return Err(EffectError::ObjectNotFound(obj_id));
         }
+        let modifications = match &shared {
+            Some(m) => m.clone(),
+            None => pt_modifications(power, toughness, state, ability, Some(obj_id)),
+        };
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
             dur.clone(),
             TargetFilter::SpecificObject { id: obj_id },
-            modifications.clone(),
+            modifications,
             None,
         );
     }
@@ -81,7 +97,13 @@ pub fn resolve_all(
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
-    let modifications = pt_modifications(power, toughness, state, ability);
+    // CR 608.2h + CR 613.4c: same recipient-relative parity as `resolve` — an
+    // eager PumpAll whose per-creature amount references the pumped object
+    // ("each creature you control gets +1/+1 for each OTHER creature you control
+    // that shares a type with it") resolves the count per recipient; otherwise
+    // the shared single resolution is reused.
+    let per_recipient = pt_uses_recipient(power) || pt_uses_recipient(toughness);
+    let shared = (!per_recipient).then(|| pt_modifications(power, toughness, state, ability, None));
 
     // Collect matching object IDs first to avoid borrow conflicts.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
@@ -94,12 +116,16 @@ pub fn resolve_all(
         .collect();
 
     for obj_id in matching {
+        let modifications = match &shared {
+            Some(m) => m.clone(),
+            None => pt_modifications(power, toughness, state, ability, Some(obj_id)),
+        };
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
             dur.clone(),
             TargetFilter::SpecificObject { id: obj_id },
-            modifications.clone(),
+            modifications,
             None,
         );
     }
@@ -245,14 +271,44 @@ fn double_modifications(
     Ok(mods)
 }
 
+/// CR 608.2c: True when a `PtValue` is a dynamic quantity that reads the pumped
+/// object itself ("+X for each OTHER creature …", "… attached to it") and so
+/// must be resolved per recipient rather than against the ability source.
+fn pt_uses_recipient(pt: &PtValue) -> bool {
+    matches!(pt, PtValue::Quantity(expr) if quantity_expr_uses_recipient(expr))
+}
+
+/// Resolve a dynamic P/T quantity, binding `recipient` (the object being pumped)
+/// when present so recipient-relative filters ("other", "shares … with it")
+/// exclude that specific object; otherwise resolve against the ability source.
+fn resolve_pt_quantity(
+    expr: &QuantityExpr,
+    state: &GameState,
+    ability: &ResolvedAbility,
+    recipient: Option<ObjectId>,
+) -> i32 {
+    match recipient {
+        Some(id) => resolve_quantity_with_targets_and_recipient(state, expr, ability, id),
+        None => resolve_quantity_with_targets(state, expr, ability),
+    }
+}
+
 /// Build `ContinuousModification` entries for a P/T pump effect.
-/// Fixed values become `AddPower`/`AddToughness`; dynamic quantities
-/// become `AddDynamicPower`/`AddDynamicToughness` for layer evaluation.
+/// CR 608.2h: both fixed and dynamic quantities are snapshotted to fixed
+/// `AddPower`/`AddToughness` (with the count resolved) as the effect resolves —
+/// no `AddDynamic*` variant is emitted; the layer system applies the frozen
+/// amount.
+///
+/// `recipient` binds the object being pumped for recipient-relative dynamic
+/// quantities (see `pt_uses_recipient`); `None` uses source-relative resolution
+/// shared across all pumped objects. Fixed / Variable(X) arms are
+/// recipient-invariant, so passing `Some`/`None` is immaterial for them.
 fn pt_modifications(
     power: &PtValue,
     toughness: &PtValue,
     state: &GameState,
     ability: &ResolvedAbility,
+    recipient: Option<ObjectId>,
 ) -> Vec<ContinuousModification> {
     let mut mods = Vec::new();
     match power {
@@ -267,7 +323,7 @@ fn pt_modifications(
             }
         }
         PtValue::Quantity(expr) => {
-            let resolved = resolve_quantity_with_targets(state, expr, ability);
+            let resolved = resolve_pt_quantity(expr, state, ability, recipient);
             if resolved != 0 {
                 mods.push(ContinuousModification::AddPower { value: resolved });
             }
@@ -286,7 +342,7 @@ fn pt_modifications(
             }
         }
         PtValue::Quantity(expr) => {
-            let resolved = resolve_quantity_with_targets(state, expr, ability);
+            let resolved = resolve_pt_quantity(expr, state, ability, recipient);
             if resolved != 0 {
                 mods.push(ContinuousModification::AddToughness { value: resolved });
             }
@@ -310,7 +366,9 @@ mod tests {
     use super::*;
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
-    use crate::types::ability::{PtValue, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, PtValue, QuantityRef, TargetFilter, TargetRef, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -765,5 +823,156 @@ mod tests {
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&obj_id].power, Some(2));
         assert_eq!(state.objects[&obj_id].toughness, Some(2));
+    }
+
+    /// CR 608.2h + CR 613.4c (Mondassian Colony Ship / Shared Animosity class):
+    /// an eager `Effect::Pump` whose amount counts "other creature[s] its
+    /// controller controls" must exclude the SPECIFIC creature being pumped, not
+    /// the ability source. Here the attacker + 2 allies are all controlled by
+    /// P0; the amount is "+N/+N for each OTHER creature you control"
+    /// (`FilterProp::Another`). Bound to the attacker as recipient, `Another`
+    /// excludes the attacker → counts the 2 allies → +2/+2 → 4/4. Before Fix 2
+    /// the count resolved against the source (recipient = None), so `Another`
+    /// excluded the off-battlefield source instead and the attacker was wrongly
+    /// counted → 5/5. The 4-vs-5 gap is the fail-on-revert discriminator.
+    #[test]
+    fn pump_for_each_other_creature_excludes_pumped_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = make_creature(&mut state, "Attacker", 2, 2, PlayerId(0));
+        let _ally1 = make_creature(&mut state, "Ally 1", 1, 1, PlayerId(0));
+        let _ally2 = make_creature(&mut state, "Ally 2", 1, 1, PlayerId(0));
+        // Opponent creature — excluded by `controller: You`, never counted.
+        let _opp = make_creature(&mut state, "Opp", 3, 3, PlayerId(1));
+
+        let count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Quantity(count.clone()),
+                toughness: PtValue::Quantity(count),
+                target: TargetFilter::Any,
+            },
+            // The pumped creature is the attacker (the trigger's TriggeringSource).
+            vec![TargetRef::Object(attacker)],
+            // Source is the Plane — deliberately NOT on the battlefield, so a
+            // source-relative `Another` would exclude nothing and overcount.
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&attacker].power,
+            Some(4),
+            "attacker gains +2 from the 2 OTHER creatures its controller controls, not +3"
+        );
+        assert_eq!(state.objects[&attacker].toughness, Some(4));
+    }
+
+    /// Fix 2 regression: a dynamic pump whose count does NOT reference the pumped
+    /// object ("+N/+0 for each creature you control", no "other") keeps the single
+    /// shared resolution and counts the recipient itself. Confirms
+    /// `pt_uses_recipient` gates to `false` here and the shared-path amount is
+    /// unchanged — the pumped creature is included (3 = target + 2 allies).
+    #[test]
+    fn pump_for_each_creature_shared_path_counts_self() {
+        let mut state = GameState::new_two_player(42);
+        let target = make_creature(&mut state, "Target", 2, 2, PlayerId(0));
+        let _ally1 = make_creature(&mut state, "Ally 1", 1, 1, PlayerId(0));
+        let _ally2 = make_creature(&mut state, "Ally 2", 1, 1, PlayerId(0));
+
+        let count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Quantity(count),
+                toughness: PtValue::Fixed(0),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&target].power,
+            Some(5),
+            "no \"other\": all 3 creatures you control counted, self included"
+        );
+        assert_eq!(state.objects[&target].toughness, Some(2));
+    }
+
+    /// CR 608.2h + CR 613.4c (Shared Animosity class via `Effect::PumpAll`):
+    /// "each creature you control gets +N/+N for each OTHER creature you
+    /// control". The per-creature amount references the pumped object
+    /// (`FilterProp::Another`), so `resolve_all` must resolve the count PER
+    /// recipient — each of the 3 creatures excludes itself and counts the 2
+    /// others → +2/+2. The source is deliberately off-battlefield (`ObjectId`
+    /// 500), so if the per-recipient gating regressed to the shared source-
+    /// relative path, `Another` would exclude nothing on the battlefield and
+    /// every creature would count all 3 → +3/+3. Distinct base P/T (2/3/4)
+    /// confirms the frozen amount is applied independently to each recipient:
+    /// each ends exactly +2 above its base (4/5/6), never +3 (5/6/7).
+    #[test]
+    fn pump_all_for_each_other_creature_excludes_each_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let c1 = make_creature(&mut state, "C1", 2, 2, PlayerId(0));
+        let c2 = make_creature(&mut state, "C2", 3, 3, PlayerId(0));
+        let c3 = make_creature(&mut state, "C3", 4, 4, PlayerId(0));
+        // Opponent creature — excluded by `controller: You`, never counted/pumped.
+        let opp = make_creature(&mut state, "Opp", 3, 3, PlayerId(1));
+
+        let count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: PtValue::Quantity(count.clone()),
+                toughness: PtValue::Quantity(count),
+                target: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            },
+            vec![],
+            // Source off the battlefield — a source-relative `Another` would
+            // exclude nothing and overcount to +3/+3.
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // Each recipient excludes itself → counts the 2 others → +2/+2.
+        assert_eq!(state.objects[&c1].power, Some(4), "C1 base 2 +2 others");
+        assert_eq!(state.objects[&c1].toughness, Some(4));
+        assert_eq!(state.objects[&c2].power, Some(5), "C2 base 3 +2 others");
+        assert_eq!(state.objects[&c2].toughness, Some(5));
+        assert_eq!(state.objects[&c3].power, Some(6), "C3 base 4 +2 others");
+        assert_eq!(state.objects[&c3].toughness, Some(6));
+        // Opponent creature untouched.
+        assert_eq!(state.objects[&opp].power, Some(3));
+        assert_eq!(state.objects[&opp].toughness, Some(3));
     }
 }

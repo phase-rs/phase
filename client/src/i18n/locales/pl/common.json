@@ -28,6 +28,12 @@
     "updateIssue": "problem z aktualizacją",
     "updated": "zaktualizowano"
   },
+  "comboDetector": {
+    "label": "Wykrywacz combosów",
+    "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
+    "on": "Wł.",
+    "off": "Wył."
+  },
   "gameMenu": {
     "menu": "Menu gry",
     "sandboxTools": "Narzędzia piaskownicy",

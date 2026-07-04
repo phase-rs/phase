@@ -106,3 +106,96 @@ jobs:
       - name: Fail only on infrastructure errors
         if: steps.gate.outcome == 'cancelled'
         run: exit 1
+
+  ai-perf-gate:
+    name: Decision-cost perf gate
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-ai-gate
+
+      - name: Restore generated card data
+        id: cardgen-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/card-data.json
+            data/card-names.json
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Generate card data
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      # debug profile (authoritative): counter VALUES are profile-independent and the
+      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
+      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      - name: Run decision-cost perf gate
+        run: cargo ai-perf-gate
+
+  ai-perf-gate-nightly:
+    name: Nightly decision-cost perf drift monitor
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-ai-gate
+
+      - name: Restore generated card data
+        id: cardgen-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/card-data.json
+            data/card-names.json
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Generate card data
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      # debug profile (authoritative): counter VALUES are profile-independent and the
+      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
+      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      # `cargo` build progress goes to stderr and spawned children are Stdio::null on
+      # stdout, so the redirect captures only the binary's clean markdown table.
+      - name: Run decision-cost perf gate
+        id: gate
+        continue-on-error: true
+        run: |
+          cargo ai-perf-gate > target/ai-perf-gate-report.md
+
+      - name: Open or update drift issue
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Nightly decision-cost perf drift"
+          body="$(cat target/ai-perf-gate-report.md)"
+          existing="$(gh issue list --label ai-perf-drift --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --label ai-perf-drift --body "$body"
+          fi
+
+      - name: Fail only on infrastructure errors
+        if: steps.gate.outcome == 'cancelled'
+        run: exit 1

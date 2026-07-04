@@ -54,6 +54,12 @@ pub fn transform_permanent(
         .clone()
         .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))?;
 
+    // CR 613.7g: a double-faced permanent receives a new timestamp when it
+    // transforms. All blocked/no-op early-returns above (off-battlefield,
+    // CantTransform, meld, no back face) precede this, so they draw no timestamp.
+    // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
+    let ts = state.next_timestamp();
+
     let obj = state.objects.get_mut(&object_id).unwrap();
 
     if obj.transformed {
@@ -67,12 +73,45 @@ pub fn transform_permanent(
         obj.back_face = Some(current_front);
         obj.transformed = true;
     }
+    // Written after `apply_back_face_to_object` (which does not touch
+    // `timestamp`) so the single write covers both flip directions and cannot
+    // be clobbered by the back-face application.
+    obj.timestamp = ts;
 
     crate::game::layers::mark_layers_full(state);
 
     events.push(GameEvent::Transformed { object_id });
 
     Ok(())
+}
+
+/// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
+/// (transform/modal/meld DFC) or a melded permanent — none of which can be
+/// turned face down. Used by `effects::turn_face_down` to enforce the no-op.
+///
+/// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
+/// so that single-faced layouts that may legally be turned face down — Adventure,
+/// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
+/// `layout_kind`). A DFC currently showing its back face is caught by the
+/// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
+/// the front face is stashed in `back_face` during a transform.
+pub(crate) fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card::LayoutKind;
+    // CR 730.2j: a face-up melded permanent contains a double-faced component.
+    if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {
+        return true;
+    }
+    // CR 712.16: nonmodal/modal DFC and meld cards — the back face records the
+    // DFC layout.
+    if matches!(
+        obj.back_face.as_ref().and_then(|b| b.layout_kind),
+        Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
+    ) {
+        return true;
+    }
+    // CR 712.16: a DFC already showing its back face (its front face is snapshot
+    // into `back_face` with a zeroed `layout_kind`) is still a DFC.
+    obj.transformed
 }
 
 #[cfg(test)]
@@ -193,6 +232,49 @@ mod tests {
         assert!(!obj.transformed);
         assert_eq!(obj.name, "Werewolf Front");
         assert_eq!(events.len(), 2);
+    }
+
+    /// G1: transforming a double-faced permanent issues a new timestamp on each
+    /// flip in both directions (CR 613.7g). A non-DFC permanent (no back face)
+    /// returns before the write and draws no timestamp. Reverting Step 4 leaves
+    /// the timestamp unchanged across a transform, so the strict-increase
+    /// asserts fail.
+    #[test]
+    fn transform_bumps_timestamp_each_flip_but_not_for_non_dfc() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_dfc(&mut state);
+        let mut events = Vec::new();
+
+        let ts_initial = state.objects[&id].timestamp;
+
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        let ts_front_to_back = state.objects[&id].timestamp;
+        assert!(
+            ts_front_to_back > ts_initial,
+            "transforming to the back face must issue a new timestamp (CR 613.7g)"
+        );
+
+        transform_permanent(&mut state, id, &mut events).unwrap();
+        let ts_back_to_front = state.objects[&id].timestamp;
+        assert!(
+            ts_back_to_front > ts_front_to_back,
+            "transforming back to the front face must issue a new timestamp (CR 613.7g)"
+        );
+
+        // A non-DFC permanent (no back face) errors before the write -> no draw.
+        let plain = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let plain_ts = state.objects[&plain].timestamp;
+        assert!(transform_permanent(&mut state, plain, &mut events).is_err());
+        assert_eq!(
+            state.objects[&plain].timestamp, plain_ts,
+            "a non-DFC permanent must not draw a timestamp on a failed transform"
+        );
     }
 
     #[test]

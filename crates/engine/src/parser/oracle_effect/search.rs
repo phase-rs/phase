@@ -2875,6 +2875,69 @@ mod tests {
         }
     }
 
+    /// CR 110.2a: "put that card onto the battlefield under your control" must
+    /// thread `enters_under = Some(You)` all the way onto the chained
+    /// `Effect::ChangeZone`. Bribery routes the pre-chained path (the
+    /// `SearchLibrary` clause is `defs.last()` when the destination continuation
+    /// applies). Revert-failing: before the fix `enters_under` is `None`.
+    #[test]
+    fn search_put_onto_battlefield_under_your_control_sets_enters_under() {
+        use crate::types::ability::Effect;
+        let def = super::super::parse_effect_chain(
+            "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let enters_under = find_battlefield_change_zone_enters_under(&def)
+            .expect("chain should contain a ChangeZone to the battlefield");
+        assert_eq!(
+            enters_under,
+            Some(ControllerRef::You),
+            "under-your-control tutor must route the found card to the controller"
+        );
+        // Sanity: the search itself was recognized.
+        assert!(
+            matches!(&*def.effect, Effect::SearchLibrary { .. }),
+            "head of chain should be the SearchLibrary"
+        );
+    }
+
+    /// Negative sibling: a search-to-battlefield tutor WITHOUT "under your
+    /// control" must leave `enters_under = None` (the scan must not over-fire).
+    #[test]
+    fn search_put_onto_battlefield_without_control_clause_leaves_enters_under_none() {
+        let def = super::super::parse_effect_chain(
+            "Search your library for a creature card, put it onto the battlefield, then shuffle.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let enters_under = find_battlefield_change_zone_enters_under(&def)
+            .expect("chain should contain a ChangeZone to the battlefield");
+        assert_eq!(
+            enters_under, None,
+            "no control clause -> default owner's control (None)"
+        );
+    }
+
+    /// Walk the `sub_ability` chain and return the `enters_under` of the first
+    /// `ChangeZone` whose destination is the battlefield.
+    fn find_battlefield_change_zone_enters_under(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<Option<ControllerRef>> {
+        use crate::types::ability::Effect;
+        let mut cursor = Some(def);
+        while let Some(node) = cursor {
+            if let Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                enters_under,
+                ..
+            } = &*node.effect
+            {
+                return Some(enters_under.clone());
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        None
+    }
+
     #[test]
     fn search_target_player_library() {
         let details = parse_search_library_details(

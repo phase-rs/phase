@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EngineWorkerClient } from "../engine-worker-client";
-import { AdapterError, AdapterErrorCode } from "../types";
+
+const notifyEngineSlow = vi.hoisted(() => vi.fn());
+vi.mock("../../game/engineRecovery", () => ({
+  notifyEngineSlow,
+}));
 
 /**
  * Controllable stand-in for the engine Web Worker. Captures posted messages
  * and lets a test decide whether (and when) to reply, so we can exercise the
- * watchdog timeout that converts an infinite worker hang into a typed,
- * recoverable ENGINE_UNRESPONSIVE rejection (instead of a silent freeze that
- * leaves the dispatch mutex held forever).
+ * watchdog timeout that surfaces a slow-operation dialog while preserving the
+ * in-flight request for a late worker response.
  */
 class MockWorker {
   /** The most recently constructed instance, so a test can drive its replies. */
@@ -45,27 +48,35 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  notifyEngineSlow.mockClear();
   vi.unstubAllGlobals();
 });
 
 describe("EngineWorkerClient request timeout", () => {
-  it("rejects a gameplay round-trip with ENGINE_UNRESPONSIVE after the timeout", async () => {
+  it("notifies on a slow gameplay round-trip but keeps the request alive", async () => {
     vi.useFakeTimers();
     const client = new EngineWorkerClient();
 
-    // The worker never replies — simulates a wedged engine call.
     const promise = client.getState();
-    // Attach the rejection assertion before advancing timers so the eventual
-    // rejection is never seen as "unhandled".
-    const assertion = expect(promise).rejects.toBeInstanceOf(AdapterError);
+    let settled = false;
+    promise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const worker = currentWorker();
+    const reqId = worker.posted[0].id as number;
 
     await vi.advanceTimersByTimeAsync(60_000);
-    await assertion;
 
-    await expect(promise).rejects.toMatchObject({
-      code: AdapterErrorCode.ENGINE_UNRESPONSIVE,
-      recoverable: true,
-    });
+    expect(notifyEngineSlow).toHaveBeenCalledWith("getState-timeout");
+    expect(settled).toBe(false);
+
+    worker.replyResult(reqId, { stack: [] });
+    await expect(promise).resolves.toEqual({ stack: [] });
   });
 
   it("does not false-reject when the worker replies before the timeout, and clears the timer", async () => {
