@@ -12,8 +12,7 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
