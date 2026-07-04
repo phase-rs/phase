@@ -118,6 +118,41 @@ describe("CommanderDamage", () => {
     expect(root.textContent).toContain("11");
   });
 
+  it("uses shortened commander names in compact mode", () => {
+    const myCmd = buildCommanderGameObject({
+      id: 101,
+      owner: 0,
+      controller: 0,
+      name: "Otrimi, the Ever-Playful",
+    });
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: [
+          buildPlayer({ id: 0, life: 40 }),
+          buildPlayer({ id: 1, life: 40 }),
+        ],
+        objects: buildObjectMap(myCmd),
+        next_object_id: 1000,
+        next_timestamp: 2,
+        format_config: buildCommanderFormatConfig(),
+        command_zone: [myCmd.id],
+        commander_damage: [],
+        derived: {
+          commander_damage_by_attacker: {
+            "0": [{ victim: 1, commander: myCmd.id, damage: 7 }],
+          },
+        },
+      }),
+    });
+
+    render(<CommanderDamage playerId={1} compact />);
+
+    const root = screen.getByTestId("commander-damage-1");
+    expect(root.textContent).toContain("Otrimi");
+    expect(root.textContent).not.toContain("the Ever-Playful");
+    expect(screen.getByTitle("Commander damage from Otrimi, the Ever-Playful: 7/21")).toBeInTheDocument();
+  });
+
   it("keeps opposing player identity in the tooltip and seat-color rail", () => {
     const oppCmd = buildCommanderGameObject({
       id: 202,

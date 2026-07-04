@@ -1699,6 +1699,7 @@
       "numberRange": "Escolha um Número",
       "labeled": "Faça uma Escolha",
       "keyword": "Escolha uma Habilidade",
+      "counterKind": "Escolha um Marcador",
       "fallback": "Faça uma Escolha"
     },
     "searchSubtitle": "Digite para buscar em todas as cartas",

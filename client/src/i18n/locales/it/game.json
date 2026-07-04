@@ -1699,6 +1699,7 @@
       "numberRange": "Scegli un numero",
       "labeled": "Fai una scelta",
       "keyword": "Scegli un'abilità",
+      "counterKind": "Scegli un segnalino",
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
