@@ -1616,7 +1616,12 @@ fn check_counter_cancellation(
 }
 
 /// CR 704.5d: A token that's in a zone other than the battlefield ceases to exist.
-/// Tokens on the stack are excluded — spell copies resolve before the next SBA check.
+/// CR 704.5e + CR 707.10a: A copy of a card in a zone other than the stack or the
+/// battlefield also ceases to exist. Both are checked here because both are
+/// non-card objects swept by the same removal loop. The stack is excluded for both
+/// so spell copies (and copies of cards resolving as spells) finish resolving
+/// before the next SBA check; the battlefield is legal for a copy of a card
+/// (CR 707.10f) but not for a token off-battlefield.
 fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     let tokens_to_remove: Vec<(
         crate::types::identifiers::ObjectId,
@@ -1625,7 +1630,10 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     )> = state
         .objects
         .iter()
-        .filter(|(_, obj)| zones::token_is_outside_battlefield_and_stack(obj))
+        .filter(|(_, obj)| {
+            zones::token_is_outside_battlefield_and_stack(obj)
+                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+        })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
 
@@ -4265,6 +4273,127 @@ mod tests {
         assert!(
             state.objects.contains_key(&id),
             "Token on stack should survive SBA"
+        );
+    }
+
+    // --- CR 704.5e + CR 707.10a: Copy-of-a-card cease-to-exist tests ---
+
+    /// A copy of a card (is_copy = true, is_token = false) resolving to the
+    /// graveyard — as an `Effect::CastCopyOfCard` non-permanent spell copy does —
+    /// must cease to exist as a state-based action. Revert probe: without the
+    /// `copy_of_card_outside_battlefield_and_stack` filter arm, this copy persists
+    /// forever as an orphan graveyard object (the original bug).
+    #[test]
+    fn copy_of_card_in_graveyard_ceases_to_exist() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "SpellCopy".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_copy = true;
+            obj.is_token = false;
+        }
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        events.clear();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects.contains_key(&id),
+            "Copy of a card in the graveyard should cease to exist"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&id),
+            "Copy of a card should be removed from the graveyard"
+        );
+        // CR 400.7: ceasing to exist is not a zone change — no ZoneChanged event.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == id)),
+            "SBA removal must not emit a ZoneChanged event for the ceased copy"
+        );
+    }
+
+    /// The core negative: a real card (is_copy = false, is_token = false) in the
+    /// graveyard must NOT be swept. Revert probe: an over-broad filter that removed
+    /// any graveyard object would delete this and break every graveyard mechanic.
+    #[test]
+    fn real_card_in_graveyard_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "RealCard".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_copy = false;
+            obj.is_token = false;
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A real card in the graveyard must not be swept by the copy SBA"
+        );
+    }
+
+    /// Adjacent-zone hostile: a live copy of a card ON THE BATTLEFIELD must NOT be
+    /// swept — CR 707.10f makes a permanent copy legal there. Revert probe: dropping
+    /// the `Zone::Battlefield` carve-out in the predicate would delete it.
+    #[test]
+    fn copy_of_card_on_battlefield_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "BattlefieldCopy".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A copy of a card on the battlefield must survive the SBA"
+        );
+    }
+
+    /// Adjacent-zone hostile: a copy of a card ON THE STACK must NOT be swept —
+    /// it is still resolving. Mirrors `token_on_stack_survives_sba`.
+    #[test]
+    fn copy_of_card_on_stack_survives_sba() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "StackCopy".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.objects.contains_key(&id),
+            "A copy of a card on the stack must survive the SBA"
         );
     }
 
