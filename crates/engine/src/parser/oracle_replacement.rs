@@ -1756,26 +1756,31 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         choose
     } else {
         let leading = parse_effect_clause(middle_lower, &mut ParseContext::default());
-        // Honest-coverage gate: if the interposed clause didn't parse, leave the
-        // whole line Unimplemented rather than emitting a replacement that
-        // silently drops the leading instruction (e.g. the hand-look).
-        if matches!(leading.effect, Effect::Unimplemented { .. }) {
-            return None;
+        // Compose the middle ahead of the choice ONLY when it is a genuine,
+        // cleanly-parsed leading ACTION. A middle that doesn't parse
+        // (Unimplemented) or carries peeled structural slots we don't thread
+        // here (duration / sub_ability / distribute / multi_target / condition /
+        // optional / unless_pay) is almost always a subject/quantifier phrase —
+        // e.g. "you and an opponent each" (Null Chamber), "you and target
+        // opponent each secretly" (Power Level Analyzer) — NOT an action.
+        // In that case fall back to the bare choice: the pre-existing parse,
+        // which already ignored the prefix. This never drops a previously
+        // supported `Moved` replacement (zero regression), while still composing
+        // real leading actions (Anointed Peacekeeper / Sorcerous Spyglass:
+        // "look at an opponent's hand, then choose any card name").
+        let composable = !matches!(leading.effect, Effect::Unimplemented { .. })
+            && leading.duration.is_none()
+            && leading.sub_ability.is_none()
+            && leading.distribute.is_none()
+            && leading.multi_target.is_none()
+            && leading.condition.is_none()
+            && !leading.optional
+            && leading.unless_pay.is_none();
+        if composable {
+            AbilityDefinition::new(AbilityKind::Spell, leading.effect).sub_ability(choose)
+        } else {
+            choose
         }
-        // R3: refuse to drop peeled structural slots we are not threading here
-        // (optional / duration / for-each-derived condition / multi-target /
-        // distribute / unless-pay / an existing sub_ability we'd clobber).
-        if leading.duration.is_some()
-            || leading.sub_ability.is_some()
-            || leading.distribute.is_some()
-            || leading.multi_target.is_some()
-            || leading.condition.is_some()
-            || leading.optional
-            || leading.unless_pay.is_some()
-        {
-            return None;
-        }
-        AbilityDefinition::new(AbilityKind::Spell, leading.effect).sub_ability(choose)
     };
 
     let execute = if enters_tapped {
@@ -11033,18 +11038,39 @@ mod tests {
         );
     }
 
-    // Honest-coverage gate: if the interposed leading clause does not parse, the
-    // whole as-enters-choose handler must bail (leaving the line Unimplemented)
-    // rather than emit a replacement that silently drops the leading instruction.
+    // A non-action middle — a subject/quantifier phrase like "you and an
+    // opponent each" (Null Chamber) or "you and target opponent each secretly"
+    // (Power Level Analyzer) — is NOT composed. parse_as_enters_choose falls back
+    // to the bare choice (the pre-existing parse that ignored the prefix), rather
+    // than bailing (which would drop a previously-supported `Moved` replacement)
+    // or wrapping the subject as a leading action. Regression guard for Null
+    // Chamber / Power Level Analyzer, surfaced by the coverage parse-diff.
     #[test]
-    fn as_enters_unparseable_leading_clause_bails_out() {
+    fn as_enters_non_action_middle_falls_back_to_bare_choice() {
+        let def = parse_as_enters_choose(
+            "as ~ enters, you and an opponent each choose a card name.",
+            "As ~ enters, you and an opponent each choose a card name.",
+        )
+        .expect("a supported as-enters choice must still produce a Moved replacement");
+        let execute = def.execute.as_ref().unwrap();
+        // The bare persisted choice is the primary effect — the subject phrase is
+        // neither wrapped as a leading action nor allowed to drop the Moved node.
         assert!(
-            parse_as_enters_choose(
-                "as ~ enters, florble the wumpus, then choose a color.",
-                "As ~ enters, florble the wumpus, then choose a color.",
-            )
-            .is_none(),
-            "unparseable leading clause must bail the whole as-enters-choose handler"
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "non-action middle must fall back to the bare persisted choice, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "no leading action should be composed for a subject-phrase middle, got {:?}",
+            execute.sub_ability
         );
     }
 
