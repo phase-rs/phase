@@ -1,7 +1,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveGridRows } from "../useResolvedGridRows.ts";
+import { resolveGridRows, resolveSplitGridRows } from "../useResolvedGridRows.ts";
 import {
   defaultFlexLayout,
   usePreferencesStore,
@@ -28,6 +28,14 @@ describe("resolveGridRows", () => {
       false,
     );
     expect(rows).toBe("minmax(0,min(8%,60px)) 1fr minmax(0,min(30%,240px))");
+  });
+});
+
+describe("resolveSplitGridRows", () => {
+  it("collapses only the top opponent row and keeps the bottom band", () => {
+    expect(resolveSplitGridRows(defaultFlexLayout().gridBands, false)).toBe(
+      "0px 1fr minmax(0,min(18%,150px))",
+    );
   });
 });
 

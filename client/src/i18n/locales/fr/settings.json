@@ -61,6 +61,11 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "multiplayerBoardLayout": "Disposition du plateau multijoueur",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Adversaire ciblé",
+      "split": "Table divisée"
+    },
     "cardPreviewDelay": "Délai de survol",
     "cardPreviewDelayInstant": "Instantané",
     "cardPreviewDelayValue": "{{ms}} ms",

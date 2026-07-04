@@ -58,6 +58,7 @@ fn targeted_minus_loyalty_ability() -> AbilityDefinition {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             damage_source: None,
+            excess: None,
         },
     )
     .cost(AbilityCost::Loyalty { amount: -2 })
@@ -73,6 +74,7 @@ fn targeted_normal_ability() -> AbilityDefinition {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             damage_source: None,
+            excess: None,
         },
     )
 }
