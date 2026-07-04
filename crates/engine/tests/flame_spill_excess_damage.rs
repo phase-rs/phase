@@ -11,13 +11,16 @@
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, DamageContextSnapshot, Effect, ExcessRecipient, TargetRef,
+    AbilityDefinition, AbilityKind, DamageContextSnapshot, Effect, ExcessRecipient, QuantityExpr,
+    QuantityRef, ReplacementDefinition, TargetFilter, TargetRef,
 };
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. \
@@ -140,6 +143,27 @@ fn t10_creature_dealt_only_lethal_not_full_amount() {
     );
 }
 
+/// T12 — CR 120.4a + CR 120.10: when the excess is redirected, the CREATURE was
+/// dealt only its lethal portion, so its damage record must report ZERO excess —
+/// the excess was dealt to the controller instead. Otherwise "was dealt excess
+/// damage" triggers (Maarika, Rith, Aegar) would wrongly fire on the creature.
+/// Before the fix the creature recorded `excess = 2`; this asserts it is 0.
+#[test]
+fn t12_redirected_creature_records_no_excess_damage() {
+    let (outcome, creature) = cast_flame_spill_at(P1, 2, 0);
+    let creature_excess: u32 = outcome
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|r| r.target == TargetRef::Object(creature))
+        .map(|r| r.excess)
+        .sum();
+    assert_eq!(
+        creature_excess, 0,
+        "the creature took only lethal damage; the redirected excess must not be recorded as excess dealt to the creature"
+    );
+}
+
 /// T11 — CR 702.15b + CR 120.7: lifelink gains for each leg's actually-dealt
 /// damage exactly once, not twice. A lifelink source dealing 4 to a 2-toughness
 /// creature deals 2 (lethal) to the creature and redirects 2 to its controller;
@@ -161,6 +185,62 @@ fn t11_lifelink_counts_each_leg_once_not_twice() {
     let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
     outcome.assert_life_delta(P0, 4); // lifelink for 2 (creature) + 2 (redirect), not 6
     outcome.assert_life_delta(P1, -2); // the redirected excess
+}
+
+/// A "you gain twice that much life instead" replacement (Rhox Faithmender /
+/// Boon Reflection), used to force a CR 616.1 ordering choice when two are present.
+fn gain_life_doubler() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            player: TargetFilter::Controller,
+        },
+    ))
+}
+
+/// T13 — CR 120.4a + CR 614.7: the excess redirect must survive a lifelink
+/// life-gain replacement *choice* pause. P0 controls two life-gain doublers, so
+/// the lifelink gain surfaces a CR 616.1 ordering choice and the resolution
+/// pauses. Because the redirect now runs BEFORE the lifelink gain, the excess is
+/// already dealt to the creature's controller (P1 loses 2) at the pause —
+/// previously the pause returned before the redirect and the excess was never
+/// dealt. The run halts on the pending replacement choice rather than resolving
+/// clean, which is exactly the pause this guards.
+#[test]
+fn t13_lifelink_life_gain_replacement_choice_still_redirects_excess() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Victim", 2, 2).id();
+    {
+        let mut doublers = scenario.add_creature(P0, "Twin Menders", 0, 3);
+        doublers
+            .with_replacement_definition(gain_life_doubler())
+            .with_replacement_definition(gain_life_doubler());
+    }
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Flame Spill", false, FLAME_SPILL);
+        b.with_mana_cost(ManaCost::generic(0))
+            .with_keyword(Keyword::Lifelink);
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+    // The excess (2) was redirected to P1 before the lifelink gain paused.
+    outcome.assert_life_delta(P1, -2);
+    // Reach-guard (non-vacuous): the lifelink gain genuinely PAUSED — P0 has not
+    // gained any life yet (the CR 616.1 ordering choice is still pending), so the
+    // -2 above is the redirect surviving the pause, not a clean resolution.
+    outcome.assert_life_delta(P0, 0);
+    assert!(
+        !matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the lifelink life-gain replacement choice should still be pending, not resolved to priority"
+    );
 }
 
 /// Collect every effect in an ability's `sub_ability` chain.

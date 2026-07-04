@@ -601,6 +601,13 @@ pub(crate) fn apply_damage_after_replacement(
         0
     };
     let primary_amount = actual_amount.saturating_sub(redirect_excess);
+    // CR 120.4a: when the excess is redirected, the creature was dealt only its
+    // lethal portion — it was NOT "dealt excess damage" (the excess went to its
+    // controller instead). Report zero excess on the creature's event and record
+    // so "was dealt excess damage" triggers (Maarika, Rith, Aegar, …) do not
+    // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
+    // normal computed `excess` (e.g. plain overkill still reports its excess).
+    let primary_excess = excess.saturating_sub(redirect_excess);
     if redirect_excess > 0 {
         if let TargetRef::Object(obj_id) = &t {
             // Only the marked-damage path over-marks above; wither/infect deal
@@ -618,7 +625,7 @@ pub(crate) fn apply_damage_after_replacement(
         target: t.clone(),
         amount: primary_amount,
         is_combat,
-        excess,
+        excess: primary_excess,
     });
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
@@ -648,7 +655,10 @@ pub(crate) fn apply_damage_after_replacement(
             is_combat,
             // CR 120.10: Record excess so "was dealt excess damage this turn"
             // intervening-if conditions can query without re-computing lethal.
-            excess,
+            // Redirected excess is recorded against the controller by the redirect
+            // leg below, so the creature's record reports `primary_excess` (zero
+            // when the rider redirected it).
+            excess: primary_excess,
             // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
             // overwrites these when the source still exists; the empty/default
             // tail (Default::default()) covers the source-already-gone case.
@@ -695,22 +705,6 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to the damage
-    // this leg actually dealt. Under an excess-redirect rider that is the lethal
-    // `primary_amount` dealt to the creature here; the redirected excess leg deals
-    // its own damage to the controller and gains lifelink for that portion
-    // separately (CR 120.7, same source), so the two legs together gain for exactly
-    // `actual_amount` — and if the redirected leg is prevented, no life is gained
-    // for the excess. Without the rider `primary_amount == actual_amount`.
-    if ctx.has_lifelink
-        && primary_amount > 0
-        && super::life::apply_life_gain(state, ctx.controller, primary_amount, events).is_err()
-    {
-        // CR 614.7: Life gain replacement needs player choice.
-        // Damage was already dealt; lifelink gain is deferred.
-        return DamageResult::NeedsChoice;
-    }
-
     // CR 120.4a: redirect the excess to the damaged permanent's controller.
     // `excess` is the amount past what would be lethal / past loyalty / past
     // defense, accounting for marked damage (CR 120.6), deathtouch (CR 702.2c),
@@ -753,6 +747,24 @@ pub(crate) fn apply_damage_after_replacement(
                 }
             }
         }
+    }
+
+    // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to the damage
+    // this leg actually dealt (the lethal `primary_amount` for a redirect rider;
+    // the redirected excess leg above already gained lifelink for its own portion,
+    // CR 120.7, so the two legs gain for exactly `actual_amount`, and a prevented
+    // redirect gains nothing for the excess). This runs AFTER the redirect so a
+    // life-gain replacement pause here cannot skip the excess redirect — the excess
+    // has already been dealt to the controller. Without the rider
+    // `primary_amount == actual_amount`.
+    if ctx.has_lifelink
+        && primary_amount > 0
+        && super::life::apply_life_gain(state, ctx.controller, primary_amount, events).is_err()
+    {
+        // CR 614.7: Life gain replacement needs player choice. Both the primary
+        // damage and the excess redirect have already been dealt; only the lifelink
+        // gain is deferred to the choice.
+        return DamageResult::NeedsChoice;
     }
 
     DamageResult::Applied(actual_amount)
