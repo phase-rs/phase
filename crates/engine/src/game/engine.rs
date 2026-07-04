@@ -219,8 +219,16 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
+    state.consumed_before_priority_trigger_events.clear();
     check_actor_authorization(state, actor, &action)?;
-    let mut result = apply_action(state, actor, action, stack_resolution_limit)?;
+    let mut result = match apply_action(state, actor, action, stack_resolution_limit) {
+        Ok(result) => result,
+        Err(err) => {
+            state.consumed_before_priority_trigger_events.clear();
+            return Err(err);
+        }
+    };
+    state.consumed_before_priority_trigger_events.clear();
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -421,12 +429,14 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
 ///   their behalf (CR 104.3a).
-/// - **Preference actions** (SetPhaseStops, SetAutoPass, CancelAutoPass) are
-///   per-player UI settings. They have no CR semantics, mutate only the
-///   submitter's own preference slot, and may legitimately fire at any time —
-///   e.g. the human toggles a phase stop while the AI holds priority. The
-///   downstream handlers route by `actor`, so any seat may set its own
-///   preferences regardless of `WaitingFor`.
+/// - **Preference actions** (SetPhaseStops, CancelAutoPass) are per-player UI
+///   settings. They have no CR semantics, mutate only the submitter's own
+///   preference slot, and may legitimately fire at any time — e.g. the human
+///   toggles a phase stop while the AI holds priority. The downstream handlers
+///   route by `actor`, so any seat may set its own preferences regardless of
+///   `WaitingFor`. `SetAutoPass` is deliberately NOT exempt: its handler
+///   stores the mode for the `WaitingFor::Priority` player and immediately
+///   passes that priority, so it must come from the authorized submitter.
 fn check_actor_authorization(
     state: &GameState,
     actor: PlayerId,
@@ -2256,6 +2266,32 @@ fn apply_action(
         )?,
         (
             WaitingFor::ActivationCostOneOfChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
+        // behold cost; record it and resume behold payment.
+        (
+            WaitingFor::CostTypeChoice {
+                player,
+                options,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseOption { choice },
+        ) => casting_costs::handle_cost_type_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            options,
+            &choice,
+            &mut events,
+        )?,
+        (
+            WaitingFor::CostTypeChoice {
                 player,
                 pending_cast,
                 ..

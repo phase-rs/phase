@@ -7,6 +7,7 @@ import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
@@ -250,6 +251,11 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  // Armed Arena-style "Resolve All" session (multiplayer): the engine is
+  // auto-passing this seat's priority windows until the stack empties or
+  // grows. Surfaced with the same pulsing cancel affordance as UntilEndOfTurn
+  // so the player can revoke it between opponents' windows.
+  const isResolvingStack = autoPass?.type === "UntilStackEmpty";
   const canActDuringAutoPass = mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
@@ -371,12 +377,29 @@ export function ActionButton() {
               disabled={actionBlocked}
               aria-busy={isResolvingAll}
               onClick={() => {
-                const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
-                const aiSeats = usePreferencesStore.getState().aiSeats;
-                const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
-                  playerId: i + 1,
-                  difficulty: aiSeats[i]?.difficulty ?? "Medium",
-                }));
+                const { gameState: gs, gameMode } = useGameStore.getState();
+                // Only claim seats as AI-driven when an AI actually drives them,
+                // mirroring the controller each mode installs. "ai": every
+                // non-local seat (same prefs sourcing as scheduleBatchResolve).
+                // Draft matches: only a Bot pairing has an AI seat, and it uses
+                // the same binding installMatchRuntime gives the live controller.
+                // Everything else — "local" hotseat above all (#4978) — gets an
+                // empty list so dispatchResolveAll falls back to the per-seat
+                // engine auto-yield instead of handing human seats to the AI.
+                let seats: { playerId: number; difficulty: string }[] = [];
+                if (gameMode === "ai") {
+                  const playerCount = gs?.players?.length ?? 2;
+                  const aiSeats = usePreferencesStore.getState().aiSeats;
+                  seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+                    playerId: i + 1,
+                    difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                  }));
+                } else if (
+                  gameMode === "draft-match" &&
+                  useMultiplayerDraftStore.getState().matchPairing?.type === "Bot"
+                ) {
+                  seats = [DRAFT_BOT_AI_SEAT];
+                }
                 dispatchResolveAll(playerId, seats);
               }}
               aria-describedby={resolveAllTooltipId}
@@ -390,7 +413,7 @@ export function ActionButton() {
           </>
         )}
 
-        {(mode === "priority-empty" || idle) && !isEndingTurn && (
+        {(mode === "priority-empty" || idle) && !isEndingTurn && !isResolvingStack && (
           <>
             {canCompanionToHand && !idle && (
               <button
@@ -443,7 +466,7 @@ export function ActionButton() {
           </>
         )}
 
-        {isEndingTurn && !canActDuringAutoPass && (
+        {(isEndingTurn || isResolvingStack) && !canActDuringAutoPass && (
           <button
             disabled={actionBlocked}
             onClick={() => dispatchAction({ type: "CancelAutoPass" })}
@@ -453,7 +476,7 @@ export function ActionButton() {
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">
                 <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.451a.75.75 0 0 0 0-1.5H4.5a.75.75 0 0 0-.75.75v3.75a.75.75 0 0 0 1.5 0v-2.033l.364.363a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.75a.75.75 0 0 0 0 1.5h3.75a.75.75 0 0 0 .75-.75V3.42a.75.75 0 0 0-1.5 0v2.033l-.364-.364A7 7 0 0 0 3.074 8.227a.75.75 0 0 0 1.449.39l.165-.044Z" clipRule="evenodd" />
               </svg>
-              {t("actionButton.autoPassing")}
+              {isEndingTurn ? t("actionButton.autoPassing") : t("actionButton.resolvingStack")}
             </span>
           </button>
         )}

@@ -18,7 +18,7 @@ use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
-use crate::policies::context::PolicyContext;
+use crate::policies::context::{PolicyContext, PriorsEnv, SearchDepth};
 use crate::policies::PolicyRegistry;
 
 #[derive(Debug, Clone)]
@@ -911,6 +911,7 @@ impl<'a> PlannerServices<'a> {
         ctx: &AiDecisionContext,
         candidate: &CandidateAction,
         scoring_player: PlayerId,
+        search_depth: SearchDepth,
     ) -> f64 {
         let cast_facts = cast_facts_for_action(state, &candidate.action, scoring_player);
         let mut score = should_play_now_with_facts(
@@ -928,6 +929,7 @@ impl<'a> PlannerServices<'a> {
             config: self.config,
             context: &self.context,
             cast_facts,
+            search_depth,
         };
         score += self.policies.score(&policy_ctx);
 
@@ -957,15 +959,17 @@ impl<'a> PlannerServices<'a> {
         ctx: &AiDecisionContext,
         candidates: &[CandidateAction],
         scoring_player: PlayerId,
+        search_depth: SearchDepth,
     ) -> Vec<PolicyPrior> {
-        self.policies.priors(
+        let env = PriorsEnv {
             state,
-            ctx,
-            candidates,
-            scoring_player,
-            self.config,
-            &self.context,
-        )
+            decision: ctx,
+            ai_player: scoring_player,
+            config: self.config,
+            context: &self.context,
+            search_depth,
+        };
+        self.policies.priors(&env, candidates)
     }
 
     pub fn planner_evaluation(&mut self, state: &GameState) -> PlannerEvaluation {
@@ -976,7 +980,15 @@ impl<'a> PlannerServices<'a> {
         let ctx = self.build_decision_context(state);
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         PlannerEvaluation {
-            priors: self.policy_priors(state, &ctx, &ctx.candidates, scoring_player),
+            // Rollout leaf: every node reached here is deep lookahead, never the
+            // committed decision, so board-wide/affordability policies self-gate.
+            priors: self.policy_priors(
+                state,
+                &ctx,
+                &ctx.candidates,
+                scoring_player,
+                SearchDepth::Lookahead,
+            ),
             value: self.evaluate_for_planner(state),
         }
     }
@@ -1105,7 +1117,17 @@ impl BeamContinuationPlanner {
         let scoring_player = node_player.unwrap_or(services.ai_player);
         let ranked = rank_candidates(
             ctx.candidates.clone(),
-            |candidate| services.tactical_score(state, &ctx, candidate, scoring_player),
+            // Interior beam node: `search_value` is always entered ≥1 ply below
+            // the decision root, so move-ordering scoring runs in lookahead.
+            |candidate| {
+                services.tactical_score(
+                    state,
+                    &ctx,
+                    candidate,
+                    scoring_player,
+                    SearchDepth::Lookahead,
+                )
+            },
             services.config.search.max_branching as usize,
         );
 
@@ -1490,7 +1512,13 @@ mod tests {
             },
         ];
 
-        let priors = services.policy_priors(&state, &decision, &candidates, PlayerId(0));
+        let priors = services.policy_priors(
+            &state,
+            &decision,
+            &candidates,
+            PlayerId(0),
+            SearchDepth::Lookahead,
+        );
         assert_eq!(priors.len(), 2);
         assert!(priors.iter().all(|prior| prior.prior.is_finite()));
         assert!(priors.iter().any(|prior| prior.prior > 0.0));

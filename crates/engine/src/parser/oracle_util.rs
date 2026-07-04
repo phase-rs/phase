@@ -509,13 +509,68 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
                     return Some((expr, ""));
                 }
             }
+            // CR 107.1b + CR 107.3a: variable-first "X plus/minus <literal int N>"
+            // — the dual of the integer-first "N plus/minus <inner>" arm below.
+            // After the bare `X` ref, a "plus "/"minus " connective followed by a
+            // LITERAL integer (via `parse_number`) yields `Offset { inner: X,
+            // offset: +/-N }`, the offset stored directly (no `Multiply` wrapper).
+            // Flame Discharge / Light Up the Night: "deals X plus N damage". The
+            // integer restriction is deliberate — a dynamic operand ("X plus the
+            // number of …") must NOT be swallowed: `parse_number` fails there, so we
+            // fall through to the bare `X` ref with the connective left on the
+            // remainder (see `parse_count_expr_x_plus_dynamic_stays_bare_x`).
+            let after_x = rest.trim_start();
+            if let Ok((after_op, sign)) = nom::branch::alt((
+                nom::combinator::value(
+                    1i32,
+                    nom::bytes::complete::tag::<_, _, OracleError<'_>>("plus "),
+                ),
+                nom::combinator::value(-1i32, nom::bytes::complete::tag("minus ")),
+            ))
+            .parse(after_x)
+            {
+                // CR 107.1b + CR 107.3a: exclude a standalone `X` operand from the
+                // literal-integer offset. `parse_number` maps a bare "X" -> 0 (its
+                // numeric-only contract), so without this guard "X plus X" / "X minus X"
+                // would be wrongly consumed as `Offset { X, +/-0 }` instead of leaving the
+                // "plus X"/"minus X" connective on the remainder for the outer grammar.
+                // Peek — via the `nom_on_lower` bridge, so the check is case-insensitive —
+                // that `after_op` is NOT the `x` token as a standalone word (x followed by
+                // whitespace or end-of-input); `not` then succeeds only for a genuine
+                // literal-number operand. Regressions: parse_count_expr_x_plus_x_not_offset
+                // / parse_count_expr_x_minus_x_not_offset.
+                let after_op_lower = after_op.to_lowercase();
+                let operand_is_literal = nom_on_lower(after_op, &after_op_lower, |i| {
+                    nom::combinator::not(nom::sequence::terminated(
+                        nom::bytes::complete::tag::<_, _, OracleError<'_>>("x"),
+                        nom::branch::alt((nom::combinator::eof, nom::character::complete::space1)),
+                    ))
+                    .parse(i)
+                })
+                .is_some();
+                if operand_is_literal {
+                    if let Some((n, after_n)) = parse_number(after_op) {
+                        return Some((
+                            QuantityExpr::Offset {
+                                inner: Box::new(QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable {
+                                        name: "X".to_string(),
+                                    },
+                                }),
+                                offset: sign * i32::try_from(n).unwrap_or(i32::MAX),
+                            },
+                            after_n,
+                        ));
+                    }
+                }
+            }
             return Some((
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),
                     },
                 },
-                rest.trim_start(),
+                after_x,
             ));
         }
     }
@@ -1159,6 +1214,32 @@ fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
         }
     }
 
+    None
+}
+
+/// CR 205.3m creature-only subtype vocabulary, loaded from the committed
+/// `oracle-subtypes.json` (creature subtypes only — before the noncreature
+/// merge that `ORACLE_SUBTYPES` applies). Sorted longest-first so multi-word
+/// types (e.g. "Time Lord") match before shorter prefixes.
+static CREATURE_ONLY_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let mut creature: Vec<String> =
+        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+            .expect("oracle-subtypes.json well-formed");
+    creature.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    creature
+});
+
+/// Try to match a *creature* subtype (CR 205.3m) at the start of `text`.
+/// Returns `(canonical_name, bytes_consumed)` or `None`. Unlike `parse_subtype`,
+/// which also matches noncreature subtypes (Aura, Saga, Equipment, …), this is
+/// restricted to creature types — the correct vocabulary for "secretly choose
+/// <T1>, <T2>, or <T3>" candidate enumeration.
+pub fn parse_creature_subtype(text: &str) -> Option<(String, usize)> {
+    for subtype in CREATURE_ONLY_SUBTYPES.iter() {
+        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+            return Some(parsed);
+        }
+    }
     None
 }
 
@@ -2554,6 +2635,103 @@ mod tests {
             }
             other => panic!("Expected Offset, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_count_expr_x_plus_two() {
+        // CR 107.1b + CR 107.3a: variable-first "X plus 2" -> Offset { X, offset: 2 }
+        // (Flame Discharge / Light Up the Night's "deals X plus N damage"). Mirror
+        // of the integer-first "two plus X" arm; the literal operand's remainder is
+        // preserved for the caller (here the trailing "damage").
+        let (qty, rest) = parse_count_expr("X plus 2 damage").unwrap();
+        match qty {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 2);
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("Expected Offset {{X, +2}}, got {other:?}"),
+        }
+        assert_eq!(rest, "damage");
+    }
+
+    #[test]
+    fn parse_count_expr_x_minus_one() {
+        // CR 107.1b + CR 107.3a: variable-first "X minus 1" -> Offset { X, offset: -1 }.
+        // The negative offset (stored directly, not an inner Multiply) is clamped to
+        // zero by the resolver when X < 1, matching the integer-first arm's math.
+        let (qty, rest) = parse_count_expr("X minus 1 cards").unwrap();
+        match qty {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, -1);
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("Expected Offset {{X, -1}}, got {other:?}"),
+        }
+        assert_eq!(rest, "cards");
+    }
+
+    #[test]
+    fn parse_count_expr_x_plus_dynamic_stays_bare_x() {
+        // Regression / no-over-reach guard: the variable-first offset is literal
+        // integer only. A dynamic operand ("X plus the number of ...") must NOT be
+        // swallowed into an Offset; it falls through to the bare-X ref with the
+        // connective left on the remainder, exactly as before this arm existed.
+        let (qty, rest) = parse_count_expr("X plus the number of creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        ));
+        assert_eq!(rest, "plus the number of creatures you control");
+    }
+
+    #[test]
+    fn parse_count_expr_x_plus_x_not_offset() {
+        // CR 107.3a: the variable-first offset is LITERAL-integer only. `parse_number`
+        // maps a bare "X" -> 0 (its numeric-only contract), so "X plus X" must NOT be
+        // swallowed into `Offset { X, +0 }`; the standalone-`X` operand guard rejects
+        // it and the count falls through to a bare-X ref, leaving the "plus X ..."
+        // connective on the remainder for the outer grammar.
+        let (qty, rest) = parse_count_expr("X plus X damage").unwrap();
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { .. }
+                }
+            ),
+            "expected bare Variable X ref, got {qty:?}"
+        );
+        assert_eq!(rest, "plus X damage");
+    }
+
+    #[test]
+    fn parse_count_expr_x_minus_x_not_offset() {
+        // CR 107.3a: mirror of the "plus" case for subtraction. "X minus X" must not
+        // become `Offset { X, -0 }`; the standalone-`X` operand is excluded from the
+        // literal-int offset, leaving the bare-X ref with "minus X ..." on the remainder.
+        let (qty, rest) = parse_count_expr("X minus X counters").unwrap();
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { .. }
+                }
+            ),
+            "expected bare Variable X ref, got {qty:?}"
+        );
+        assert_eq!(rest, "minus X counters");
     }
 
     #[test]

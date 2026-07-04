@@ -30,8 +30,8 @@ use crate::types::ability::{
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
     ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
     QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -371,6 +371,7 @@ mod gate_reflexive_rider_tests {
                     TypedFilter::default().properties(vec![FilterProp::WasDealtDamageThisTurn]),
                 ),
                 use_lki: true,
+                subject_slot: None,
             }),
         }
     }
@@ -1028,6 +1029,108 @@ mod linked_exile_cleanup_tests {
     }
 }
 
+/// True for a `TargetFilter` carrying the `IsChosenCreatureType` discriminator.
+fn filter_has_chosen_creature_type(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(f)
+        if f.properties.contains(&FilterProp::IsChosenCreatureType))
+}
+
+/// The destination gate for "put onto the battlefield instead of putting it into
+/// your hand if this spell's additional cost was paid and the revealed card is
+/// the chosen type" — `And{ AdditionalCostPaid, TargetMatchesFilter{chosen type} }`.
+fn is_chosen_type_battlefield_gate(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::And { conditions } => {
+            conditions
+                .iter()
+                .any(|c| matches!(c, AbilityCondition::AdditionalCostPaid { .. }))
+                && conditions.iter().any(|c| {
+                    matches!(c, AbilityCondition::TargetMatchesFilter { filter, .. }
+                        if filter_has_chosen_creature_type(filter))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c: Rebuild a `Search … reveal … put it into your hand … put onto the
+/// battlefield instead if <cost paid> and <revealed card is the chosen type>`
+/// chain into the canonical conditional-destination form the runtime's search
+/// continuation evaluates: `SearchLibrary → N`, where `N` moves the found card to
+/// the battlefield when its `And` gate holds and otherwise (`else_ability`) to
+/// the hand, with a `Shuffle` in both branches. The lowered chain reaches this
+/// function as a mangled sequence (an unconditional battlefield move, a shuffle,
+/// and a trailing `And`-gated battlefield move); it is folded here rather than
+/// during clause assembly because the "instead of putting it into your hand"
+/// destination-swap is mid-phrase and does not reach the intra-chain instead
+/// composer. Scoped to the exact chosen-creature-type gate so no other card's
+/// search chain is touched.
+fn fold_search_choose_type_conditional_destination(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::SearchLibrary { .. }) {
+        return;
+    }
+    let mut gate: Option<AbilityCondition> = None;
+    let mut move_template: Option<AbilityDefinition> = None;
+    let mut shuffle: Option<AbilityDefinition> = None;
+    let mut cur = def.sub_ability.as_deref();
+    while let Some(node) = cur {
+        if move_template.is_none() && matches!(&*node.effect, Effect::ChangeZone { .. }) {
+            move_template = Some(node.clone());
+        }
+        if shuffle.is_none() && matches!(&*node.effect, Effect::Shuffle { .. }) {
+            shuffle = Some(node.clone());
+        }
+        if gate.is_none() {
+            if let Some(cond) = &node.condition {
+                if is_chosen_type_battlefield_gate(cond)
+                    && matches!(
+                        &*node.effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Battlefield,
+                            ..
+                        }
+                    )
+                {
+                    gate = Some(cond.clone());
+                }
+            }
+        }
+        cur = node.sub_ability.as_deref();
+    }
+    let (Some(gate), Some(mut move_template), Some(mut shuffle)) = (gate, move_template, shuffle)
+    else {
+        return;
+    };
+    // Strip any inherited chain wiring from the reused nodes.
+    move_template.condition = None;
+    move_template.else_ability = None;
+    move_template.sub_ability = None;
+    shuffle.condition = None;
+    shuffle.else_ability = None;
+    shuffle.sub_ability = None;
+
+    let set_destination = |node: &mut AbilityDefinition, dest: Zone| {
+        if let Effect::ChangeZone { destination, .. } = &mut *node.effect {
+            *destination = dest;
+        }
+    };
+
+    // else branch C: put the found card into hand, then shuffle.
+    let mut else_hand = move_template.clone();
+    set_destination(&mut else_hand, Zone::Hand);
+    else_hand.sub_ability = Some(Box::new(shuffle.clone()));
+
+    // then branch N: put the found card onto the battlefield, then shuffle,
+    // gated on the And condition; else_ability is the hand branch.
+    let mut then_bf = move_template;
+    set_destination(&mut then_bf, Zone::Battlefield);
+    then_bf.condition = Some(gate);
+    then_bf.sub_ability = Some(Box::new(shuffle));
+    then_bf.else_ability = Some(Box::new(else_hand));
+
+    def.sub_ability = Some(Box::new(then_bf));
+}
+
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
 
@@ -1435,6 +1538,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // ── Build AbilityDefinition from ClauseIr ──
         let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // CR 702.26a: Preserve clause provenance on parent-target tap riders so
+        // host-bound phase-in rewrites can match the exact printed phrase without
+        // falling back to whole-trigger text.
+        if matches!(
+            def.effect.as_ref(),
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ) {
+            def.description = Some(clause_ir.source_text.clone());
+        }
         // CR 608.2c: This clause's link to its parent = the boundary that
         // SEPARATED the previous clause from this one. A `Sentence` boundary
         // marks a `SequentialSibling` (next printed instruction, resolves even
@@ -1861,6 +1977,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // effect. Rewrite those subs by cloning the previous effect with an
     // updated count (Rite of Replication / Saproling Migration / Krothuss).
     resolve_those_tokens_anaphors(&mut defs);
+    resolve_populated_unsuspect_anaphors(&mut defs);
 
     // CR 701.36a + CR 603.7c: Resolve "the token created this way …" and the
     // "sacrifice it" anaphors that follow a token-creating effect (Populate,
@@ -2021,6 +2138,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
+    // CR 608.2c: two-target "put a counter on the you-control creature, then those
+    // creatures fight each other" (Malamet/Longstalk/Duel) — re-key the counter's
+    // ParentTarget anaphor to chain slot 0 and bind its condition subject to the
+    // same slot under most-recent-only propagation.
+    rewrite_two_target_counter_chain(&mut result);
     // CR 608.2c + CR 608.2b: resolve a chained tap/untap anaphor against a
     // SelfRef-subject head (The Incredible Hulk's "untap him") — rewrite its
     // ParentTarget to SelfRef so it binds the source, while a real/optional
@@ -2038,6 +2160,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 608.2c + CR 613.1f: persist a standalone "choose a [type] card exiled
     // with ~" pick as the host's last chosen card (Koh, the Face Stealer).
     append_remember_card_to_standalone_exiled_choice(&mut result);
+    fold_search_choose_type_conditional_destination(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
@@ -2172,6 +2295,73 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 /// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
 /// additional +1/+1 counter on it" riders on a parent battlefield zone change
 /// are entry replacement properties, not post-move `PutCounter` subs.
+/// CR 608.2c: Malamet Battle Glyph / Longstalk Brawl / Duel for Dominance —
+/// "Choose target creature you control and target creature you don't control. …
+/// put a +1/+1 counter on [the you-control creature]. Then those creatures fight
+/// each other." Chain descent propagates only the most-recent (opponent) target
+/// to later nodes, so the counter's `ParentTarget` anaphor — and any
+/// entered-this-turn condition subject — would bind the OPPONENT's creature. When
+/// the chain declares >= 2 `TargetOnly` object slots, re-key each
+/// `PutCounter{ParentTarget}` to `ParentTargetSlot { index: 0 }` (the
+/// first-declared you-control creature — `try_parse_two_targets` emits it first)
+/// and bind that node's `TargetMatchesFilter` condition to the same slot 0.
+/// Scoped to `PutCounter` (excludes Tail Swipe's `Pump`) and only rekeys a
+/// `ParentTarget` counter (measured: exactly these 3 cards; 0 cards already use
+/// `ParentTargetSlot`). Longstalk's `AdditionalCostPaid` and Duel's count gate
+/// are not `TargetMatchesFilter`, so their conditions stay node-local. Consumes
+/// increment-A's `ParentTargetSlot` counter resolver + `subject_slot` eval.
+fn rewrite_two_target_counter_chain(def: &mut AbilityDefinition) {
+    if count_typed_target_only_slots(def) >= 2 {
+        rekey_counter_slot_in_chain(def);
+    }
+}
+
+fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {
+    let here = usize::from(matches!(
+        &*def.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(_)
+        }
+    ));
+    here + def
+        .sub_ability
+        .as_deref()
+        .map_or(0, count_typed_target_only_slots)
+        + def
+            .else_ability
+            .as_deref()
+            .map_or(0, count_typed_target_only_slots)
+}
+
+fn rekey_counter_slot_in_chain(def: &mut AbilityDefinition) {
+    let rekeyed = if let Effect::PutCounter { target, .. } = &mut *def.effect {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if rekeyed {
+        // CR 608.2c: the counter node's own condition ("if the creature you
+        // control entered this turn") must test slot 0, not this node's
+        // most-recent (opponent) local target.
+        if let Some(AbilityCondition::TargetMatchesFilter { subject_slot, .. }) =
+            def.condition.as_mut()
+        {
+            *subject_slot = Some(0);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rekey_counter_slot_in_chain(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        rekey_counter_slot_in_chain(els);
+    }
+}
+
 fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     let parent_moves_to_battlefield = matches!(
         *def.effect,
@@ -2368,6 +2558,56 @@ fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
         let prev = &prev_rest[i - 1];
         let cur = &mut cur_rest[0];
         rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
+    }
+}
+
+/// CR 701.60a + CR 608.2c: Resolve the plural population anaphor in
+/// "[mass P/T modification to a population]. ... they're no longer suspected"
+/// (Eliminate the Impossible: "Creatures your opponents control get -2/-0 ...
+/// they're no longer suspected"). The un-suspect body parses to
+/// `Unsuspect { ParentTarget, Single }` because "they"/"them" is anaphoric, but
+/// the antecedent is a non-targeting `PumpAll` *population* — not an announced
+/// target — so `ParentTarget` resolves to nothing. Rebind the un-suspect to the
+/// preceding `PumpAll`'s population filter with `All` scope (CR 701.60a removes
+/// the designation from every matching permanent). Applying Unsuspect to a
+/// non-suspected creature is a no-op, so the redundant "if any of them are
+/// suspected" gate the card prints needs no separate condition.
+fn resolve_populated_unsuspect_anaphors(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let population = match &*defs[i - 1].effect {
+            Effect::PumpAll { target, .. } if !matches!(target, TargetFilter::None) => {
+                target.clone()
+            }
+            _ => continue,
+        };
+        if let Effect::Unsuspect { target, scope } = &mut *defs[i].effect {
+            if matches!(target, TargetFilter::ParentTarget) && matches!(scope, EffectScope::Single)
+            {
+                // CR 701.60a: un-designate every member of the antecedent
+                // population.
+                *target = population.clone();
+                *scope = EffectScope::All;
+                // CR 608.2c: represent the printed "if any of them are suspected"
+                // gate as an existential over the population restricted to the
+                // suspected status. Redundant with the un-suspect no-op, but it
+                // makes the condition explicit (and rules-faithful) rather than
+                // dropped. `defs[i]` carries no prior condition (the anaphor body
+                // parsed conditionless), so this is a pure add.
+                if defs[i].condition.is_none() {
+                    let mut suspected = population;
+                    if let TargetFilter::Typed(typed) = &mut suspected {
+                        typed.properties.push(FilterProp::Suspected);
+                    }
+                    defs[i].condition = Some(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter: suspected },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    });
+                }
+            }
+        }
     }
 }
 

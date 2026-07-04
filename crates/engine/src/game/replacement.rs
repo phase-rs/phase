@@ -5829,8 +5829,9 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
-    let proposed_damage_target = match &proposed {
+    let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
+        ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
 
@@ -5925,7 +5926,7 @@ fn apply_single_replacement(
                         post,
                         rid.source,
                         proposed_damage_source,
-                        proposed_damage_target.clone(),
+                        proposed_event_target.clone(),
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -6829,7 +6830,7 @@ mod tests {
         let choose = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: crate::types::ability::ChoiceType::CreatureType,
+                choice_type: crate::types::ability::ChoiceType::creature_type(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },

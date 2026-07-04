@@ -76,15 +76,14 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
-    parse_event_context_ref, parse_target, parse_target_with_ctx,
+    parse_event_context_ref, parse_fight_target, parse_target, parse_target_with_ctx,
     parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase,
     parse_type_phrase_with_ctx, TargetSyntax,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_mana_symbols,
-    parse_number, split_around, starts_with_possessive, strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
+    parse_mana_symbols, parse_number, split_around, starts_with_possessive, strip_after, TextPair,
 };
-use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -122,7 +121,10 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use self::conditions::*;
-pub(crate) use self::conditions::{condition_text_is_rehomeable, split_leading_conditional};
+pub(crate) use self::conditions::{
+    condition_text_is_rehomeable, parse_additional_cost_instead_condition_fragment,
+    split_leading_conditional,
+};
 use self::imperative::{
     lower_imperative_family_ast, lower_shuffle_ast, lower_targeted_action_ast,
     lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast,
@@ -159,6 +161,48 @@ pub(crate) fn is_bare_object_pronoun(text: &str) -> bool {
         text,
         "it" | "itself" | "him" | "himself" | "her" | "herself" | "them" | "themselves"
     )
+}
+
+/// CR 608.2c anaphora: substitute `replacement` for the FIRST bare object
+/// pronoun word ("it"/"them"/…) in `body`, leaving any later pronouns intact so
+/// a downstream "and it gains …" still chains to the now-declared target via
+/// `ParentTarget`. Word-bounded (checks a whitespace-delimited token, stripping
+/// trailing punctuation) so "its"/"item" are never touched. Returns `None` when
+/// the body contains no bare object pronoun.
+///
+/// Used by the target-declaring "if target … is the chosen type, <body>" strip
+/// (A Killer Among Us) to hoist the condition's target into the body so ordinary
+/// target parsing declares it as slot 0.
+///
+/// ponytail: rewrites the FIRST pronoun only; upgrade to per-pronoun tracking
+/// iff a multi-target "chosen type" card ever appears.
+pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < body.len() {
+        while i < body.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= body.len() {
+            break;
+        }
+        let start = i;
+        while i < body.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let word = &body[start..i];
+        let alpha = word.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if is_bare_object_pronoun(alpha) {
+            let trailing = &word[alpha.len()..];
+            let mut out = String::with_capacity(body.len() + replacement.len());
+            out.push_str(&body[..start]);
+            out.push_str(replacement);
+            out.push_str(trailing);
+            out.push_str(&body[i..]);
+            return Some(out);
+        }
+    }
+    None
 }
 
 /// CR 608.2k: Resolve bare pronoun ("it"/"itself"/"its") based on parser context.
@@ -544,6 +588,11 @@ fn parse_dealt_damage_this_way_dies_trigger(
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
+}
+
+fn has_unless_clause(text: &str) -> bool {
+    nom_primitives::scan_preceded(text, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
+        .is_some()
 }
 
 /// Windows that terminate the condition of an inline delayed trigger and
@@ -2657,6 +2706,52 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
     })
 }
 
+/// CR 508.1c + CR 611.2a + CR 611.2c: Teyo, Geometric Tactician's [−2]: "Until
+/// your next turn, each player may attack only the nearest opponent in the last
+/// chosen direction and planeswalkers controlled by that opponent." A
+/// duration-bound directional attack restriction — grant the same
+/// `StaticMode::AttackOnlyNeighbor` static that Pramikon/Mystic Barrier print,
+/// but only until the controller's next turn (CR 611.2a: a continuous effect
+/// from a resolving ability lasts as long as stated by that ability, here the
+/// specified "until your next turn" duration — NOT a cleanup-step "until end of
+/// turn" effect, so CR 514.2 does not govern its expiry; CR 611.2c fixes the
+/// affected object set at the time the effect begins). The prefix strip
+/// discriminates the temporary grant from a printed static; the shared static
+/// authority (`parse_static_line`) does the actual line recognition so both
+/// wordings ("the chosen" / "the last chosen") flow through one parser.
+fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("until your next turn, ")).parse(input)
+    })?;
+
+    let static_def = super::oracle_static::parse_static_line(rest_orig)?;
+    if !matches!(static_def.mode, StaticMode::AttackOnlyNeighbor) {
+        return None;
+    }
+
+    let duration = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(static_def),
+                }])],
+            duration: Some(duration.clone()),
+            target: Some(TargetFilter::SelfRef),
+        },
+        distribute: None,
+        multi_target: None,
+        duration: Some(duration),
+        sub_ability: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
@@ -3484,50 +3579,117 @@ fn try_parse_create_token_sequence(
     let consumed = tp.original.len() - after_create_original.len();
     let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
 
-    let (left_original, left_lower, right_original, right_lower) =
-        split_create_token_sequence(after_create)?;
-    let left_effect = token::try_parse_token(left_lower, left_original.trim(), ctx)?;
-    let right_effect = token::try_parse_token(right_lower, right_original.trim(), ctx)?;
+    let items = split_create_token_sequence(after_create)?;
 
-    if !matches!(left_effect, Effect::Token { .. }) || !matches!(right_effect, Effect::Token { .. })
-    {
-        return None;
+    // Parse every list item as a predefined/created token in written order
+    // (CR 608.2c). If the conjunctive "and"-gate fired and produced >= 2 items
+    // but some item is not an `Effect::Token`, do NOT fall through to the silent
+    // single-leading-token path — that is exactly the middle-drop bug this fix
+    // removes. Surface an honest `Effect::unimplemented` for the whole clause so
+    // coverage stays red rather than claiming partial support.
+    let mut effects: Vec<(&str, Effect)> = Vec::with_capacity(items.len());
+    for (orig, lower) in items {
+        match token::try_parse_token(lower, orig.trim(), ctx) {
+            Some(effect @ Effect::Token { .. }) => effects.push((orig, effect)),
+            _ => {
+                return Some(parsed_clause(Effect::unimplemented(
+                    "create_token_sequence_non_token_item",
+                    tp.original,
+                )));
+            }
+        }
     }
 
-    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_effect);
-    right_def.description = Some(format!("create {}", right_original.trim()));
+    // Chain every token via `sub_ability` in written order, reproducing the
+    // former binary builder shape (head clause + trailing sub-abilities). Both
+    // `AbilityDefinition::new` and `parsed_clause` take `Effect` by value, so the
+    // owned effects are consumed here (`into_iter`, not `iter`).
+    let mut iter = effects.into_iter();
+    let (_, head_effect) = iter.next()?;
+    let tail: Vec<(&str, Effect)> = iter.collect();
 
-    let mut clause = parsed_clause(left_effect);
-    clause.sub_ability = Some(Box::new(right_def));
+    let mut chain: Option<Box<AbilityDefinition>> = None;
+    for (orig, effect) in tail.into_iter().rev() {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+        def.description = Some(format!("create {}", orig.trim()));
+        def.sub_ability = chain.take();
+        chain = Some(Box::new(def));
+    }
+
+    let mut clause = parsed_clause(head_effect);
+    clause.sub_ability = chain;
     Some(clause)
 }
 
-fn split_create_token_sequence<'a>(
-    after_create: TextPair<'a>,
-) -> Option<(&'a str, &'a str, &'a str, &'a str)> {
-    let mut search_lower = after_create.lower;
-    while let Some((before_lower, (), right_lower)) =
-        nom_primitives::scan_preceded(search_lower, parse_token_sequence_conjunction)
-    {
-        let split_offset = after_create.lower.len() - search_lower.len() + before_lower.len();
-        let right_offset = after_create.lower.len() - right_lower.len();
-        let left_original = &after_create.original[..split_offset];
-        let left_lower = &after_create.lower[..split_offset];
-        let right_original = &after_create.original[right_offset..];
+/// Split a conjunctive create-ALL token list into its item slices `(orig, lower)`.
+///
+/// CR 608.2c: "create A, B, and C" is a do-ALL instruction in written order. The
+/// list is always terminated by an "and" coordinator followed by a token noun
+/// phrase; a pure-disjunctive "A, B, or C" lacks that and is declined here so the
+/// modal choice parser (`try_parse_create_token_choice`) handles it.
+///
+/// Splitting reuses the two protections proven by the sibling
+/// `split_choice_list_items`: a `peek(parse_token_noun_start)` guard on every
+/// separator (so an intra-item keyword comma — "with menace, vigilance, and …" —
+/// is not mistaken for a list break) and a quote-swallowing item unit (so a comma
+/// inside a granted-ability quote — The Companion's Rat "…can't block," — never
+/// severs an item).
+//
+// ponytail: named-token-first ceiling. A hypothetical "create Boo, a legendary
+// 1/1 Hamster token, and a Treasure token" would over-split the bare name "Boo"
+// (", " + "a legendary" peek passes) → "Boo" is not an `Effect::Token` → the
+// caller emits `unimplemented`. Zero such cards in the corpus today; teach the
+// item unit a leading named-token preamble only if one ever appears.
+fn split_create_token_sequence<'a>(after_create: TextPair<'a>) -> Option<Vec<(&'a str, &'a str)>> {
+    // Disjunctive rejector — require a conjunctive "and <noun>" coordinator.
+    nom_primitives::scan_preceded(after_create.lower, parse_token_sequence_conjunction)?;
 
-        if token::parse_token_description(left_original.trim()).is_some()
-            && token::parse_token_description(right_original.trim()).is_some()
-        {
-            return Some((left_original, left_lower, right_original, right_lower));
-        }
-
-        search_lower = right_lower;
+    let unit = alt((
+        recognize((tag("\""), take_until("\""), tag("\""))),
+        recognize(preceded(not(parse_token_sequence_separator), anychar)),
+    ));
+    let item = recognize(many1(unit));
+    let (_, lower_items) = all_consuming(separated_list1(parse_token_sequence_separator, item))
+        .parse(after_create.lower)
+        .ok()?;
+    if lower_items.len() < 2 {
+        return None;
     }
-    None
+
+    // Map each lowercase item slice back to the original text by byte offset.
+    // `to_lowercase()` preserves byte offsets for the ASCII create-token span
+    // (the former binary split relied on the same parity).
+    let base = after_create.lower.as_ptr() as usize;
+    let items = lower_items
+        .into_iter()
+        .map(|lower_item| {
+            let start = lower_item.as_ptr() as usize - base;
+            (
+                &after_create.original[start..start + lower_item.len()],
+                lower_item,
+            )
+        })
+        .collect();
+    Some(items)
 }
 
 fn parse_token_sequence_conjunction(input: &str) -> OracleResult<'_, ()> {
     preceded(tag("and "), peek(parse_token_noun_start)).parse(input)
+}
+
+/// Conjunctive-only separator for create-ALL token lists (CR 608.2c). Mirrors
+/// `parse_choice_list_separator` minus the disjunctive `" or "` / `", or "`
+/// coordinators, and additionally requires a token noun phrase after the
+/// comma/coordinator so an intra-item keyword comma is not read as a list break.
+fn parse_token_sequence_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag(", and "), tag(", "), tag(" and "))),
+            peek(parse_token_noun_start),
+        ),
+    )
+    .parse(input)
 }
 
 fn parse_token_noun_start(input: &str) -> OracleResult<'_, ()> {
@@ -4862,6 +5024,29 @@ fn parsed_unless_unsupported_clause(full_text: &str, rider: &str) -> ParsedEffec
     ))
 }
 
+fn counter_unless_payment_is_unsupported(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let Some((_, rest_original)) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("counter all "),
+                tag("counter each "),
+                tag("counter "),
+            )),
+        )
+        .parse(i)
+    }) else {
+        return false;
+    };
+    let rest_lower = &lower[lower.len() - rest_original.len()..];
+    has_unless_clause(rest_lower) && parse_unless_payment(rest_lower).is_none()
+}
+
+fn parsed_unless_payment_unsupported_clause(full_text: &str) -> ParsedEffectClause {
+    parsed_clause(Effect::unimplemented("unless_payment", full_text))
+}
+
 fn attach_unless_slots(
     mut clause: ParsedEffectClause,
     unless_condition: Option<AbilityCondition>,
@@ -4891,6 +5076,8 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
+            } else if counter_unless_payment_is_unsupported(text) {
+                return parsed_unless_payment_unsupported_clause(text);
             } else if unless_rider_defers_to_body_parser(text) {
                 (None, clause_text)
             } else {
@@ -5586,6 +5773,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             description: None,
         });
     }
+    if counter_unless_payment_is_unsupported(text) {
+        return parsed_unless_payment_unsupported_clause(text);
+    }
     // CR 608.2c: Self-ref continuation adverb. "also" after a self-ref subject
     // is a natural-language additive connector with no semantic weight — it
     // signals "in addition, [self-ref] [verb]…" and must reduce to plain
@@ -6055,6 +6245,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // (Rowan/Will, Scion of …). Tried after the "next spell" handlers since
     // those are the more specific one-spell forms.
     if let Some(clause) = try_parse_temporary_spell_cost_modification(tp) {
+        return clause;
+    }
+
+    // CR 508.1c + CR 611.2c: "Until your next turn, each player may attack only
+    // the nearest opponent in the last chosen direction ..." (Teyo, Geometric
+    // Tactician [−2]) — a duration-bound directional attack restriction.
+    if let Some(clause) = try_parse_temporary_attack_only_neighbor(tp) {
         return clause;
     }
 
@@ -11623,7 +11820,7 @@ fn try_parse_verb_and_target<'a>(
         // CR 115.6: preserve "up to N target …" optionality through the AST so
         // the compound-splitter path lowers it onto the clause's multi_target.
         let (target_text, multi_target) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target_with_ctx(target_text, ctx);
+        let (target, rem) = parse_fight_target(target_text, ctx);
         return Some((
             TargetedImperativeAst::Fight {
                 target,
@@ -11825,7 +12022,7 @@ fn try_parse_verb_and_target<'a>(
             parsed_target
         };
         let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
-        if unless_pay.is_none() && scan_contains_phrase(rest_lower, "unless") {
+        if unless_pay.is_none() && has_unless_clause(rest_lower) {
             return None;
         }
         return Some((
@@ -11863,7 +12060,7 @@ fn try_parse_verb_and_target<'a>(
         };
         // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
         let unless_pay = parse_unless_payment(rest_lower).map(counter_unless_pay_modifier);
-        if unless_pay.is_none() && scan_contains_phrase(rest_lower, "unless") {
+        if unless_pay.is_none() && has_unless_clause(rest_lower) {
             return None;
         }
         return Some((
@@ -17358,7 +17555,7 @@ fn rewrite_filter_keyword(filter: &mut TargetFilter, new_keyword: &Keyword) {
 }
 
 /// Swap the granted keyword inside a `StaticCondition` to `new_keyword`.
-fn rewrite_condition_keyword(condition: &mut StaticCondition, new_keyword: &Keyword) {
+pub(crate) fn rewrite_condition_keyword(condition: &mut StaticCondition, new_keyword: &Keyword) {
     match condition {
         StaticCondition::IsPresent {
             filter: Some(filter),
@@ -17715,6 +17912,30 @@ fn is_card_type_enumeration(rest: &str) -> bool {
     }
 }
 
+/// CR 205.3m: Recognize an *enumerated* creature-type choice — an explicit
+/// Oracle-listed candidate set such as A Killer Among Us' "Human, Merfolk, or
+/// Goblin". Returns the candidate creature types in source order (canonicalized)
+/// when `rest` is a 2+-element list of creature-type words, else `None`. This is
+/// the creature-type analogue of `is_card_type_enumeration`, but yields the
+/// restricted `options` list rather than collapsing to the generic chooser
+/// (a partial candidate set is the whole point — CR 205.3m + CR 607.2d).
+fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
+    fn creature_type_word(input: &str) -> nom::IResult<&str, String, OracleError<'_>> {
+        match parse_creature_subtype(input) {
+            Some((canonical, len)) => Ok((&input[len..], canonical)),
+            None => Err(oracle_err(input)),
+        }
+    }
+    fn separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    }
+    let rest = rest.trim_end_matches('.').trim_end();
+    match all_consuming(nom::multi::separated_list1(separator, creature_type_word)).parse(rest) {
+        Ok((_, items)) if items.len() >= 2 => Some(items),
+        _ => None,
+    }
+}
+
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
@@ -17726,7 +17947,12 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     .ok()?;
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
-        Some(ChoiceType::CreatureType)
+        Some(ChoiceType::creature_type())
+    } else if let Some(options) = parse_creature_type_enumeration(rest) {
+        // CR 205.3m + CR 607.2d: "secretly choose Human, Merfolk, or Goblin"
+        // (A Killer Among Us) — an explicit candidate set. Preserve source order
+        // so the restricted `WaitingFor::NamedChoice.options` matches the print.
+        Some(ChoiceType::creature_type_from(options))
     } else if let Ok((_, excluded)) = preceded(
         tag::<_, _, E>("a color other than "),
         nom_primitives::parse_color,
@@ -19301,6 +19527,40 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
 }
 
+/// CR 122.1 + CR 603.4 + CR 603.10a: The deferred count placeholder emitted for
+/// a bare anaphoric "the difference" whose two operands live on the trigger's
+/// hoisted intervening-if comparison rather than the effect clause ("Whenever a
+/// creature dies, if it had power greater than ~'s power, put a number of +1/+1
+/// counters on ~ equal to the difference" — Drizzt Do'Urden). The put-counter
+/// parser cannot see the comparison operands, so it emits this placeholder and
+/// the trigger-level difference binding in `lower_trigger_ir` (oracle_trigger.rs)
+/// replaces it with the `QuantityExpr::Difference` of the condition's two
+/// operands (alongside the sibling draw/lose bindings). Left unbound
+/// (a card with the anaphor but no comparison), a `Variable` ref resolves to 0
+/// in `quantity::resolve_ref`, so the effect is inert rather than wrong.
+pub(crate) const DIFFERENCE_ANAPHOR_VARIABLE: &str = "difference";
+
+/// Construct the deferred "the difference" count placeholder (see
+/// [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+pub(crate) fn difference_anaphor_placeholder() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: DIFFERENCE_ANAPHOR_VARIABLE.to_string(),
+        },
+    }
+}
+
+/// True when `expr` is the deferred "the difference" count placeholder awaiting
+/// a trigger-level bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
+    matches!(
+        expr,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == DIFFERENCE_ANAPHOR_VARIABLE
+    )
+}
+
 /// True when a trigger's intervening-if references the controller gaining life
 /// this turn (Lathiel / Ocelot Pride class).
 pub(crate) fn trigger_condition_references_controller_life_gained(
@@ -19851,16 +20111,19 @@ fn try_parse_repeat_process_directive(
 ) -> Option<RepeatProcessOutcome> {
     use crate::types::ability::RepeatContinuation;
 
-    // Strip a leading game-state condition, if any. The card-type strippers
-    // ("if the exiled card is a land card") run alongside the general inner-
-    // condition path ("then if an opponent controls more lands than you").
+    // Strip a leading game-state condition, if any. In the "repeat this process"
+    // context, "if the exiled/revealed card is a <type> card" refers to the card
+    // just revealed by the process (`RevealedHasCardType`, CR 608.2c), so the
+    // card-type strippers run FIRST — otherwise the cost-paid-object look-back
+    // ("the exiled card is a land card") would incorrectly claim it. Non-card-type
+    // predicates ("then if an opponent controls more lands than you") fall through
+    // to the general inner-condition path.
     let (condition, body) = {
-        let (general, rest) = strip_leading_general_conditional(text, ctx);
-        if general.is_some() {
-            (general, rest)
+        let (card_type, rest) = strip_card_type_conditional(text);
+        if card_type.is_some() {
+            (card_type, rest)
         } else {
-            let (card_type, rest2) = strip_card_type_conditional(text);
-            (card_type, rest2)
+            strip_leading_general_conditional(text, ctx)
         }
     };
 
@@ -21501,6 +21764,21 @@ pub(crate) fn parse_effect_chain_ir(
         }
 
         let (condition, text) = strip_additional_cost_conditional(normalized_text);
+        // CR 205.3m + CR 607.2d + CR 608.2h: target-declaring leading-if that
+        // gates the ability's target on the source's chosen creature type
+        // ("If target attacking creature token is the chosen type, <body>",
+        // A Killer Among Us). Runs after the additional-cost stripper (so
+        // Celestial's compound arm still wins first) and before the general
+        // handler (which would drop the target-hoist). Rewrites the body to
+        // declare the target as slot 0.
+        let (condition, text) = if condition.is_none() {
+            match conditions::strip_target_declaring_chosen_type_conditional(&text) {
+                Some((cond, body)) => (Some(cond), body),
+                None => (None, text),
+            }
+        } else {
+            (condition, text)
+        };
         // CR 608.2c: General leading conditional — "if [condition], [effect]".
         // Runs only when no dedicated leading stripper matched. Handles patterns like
         // "if you control 3 or more creatures, draw a card".
@@ -23024,6 +23302,26 @@ pub(crate) fn parse_effect_chain_ir(
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                // CR 707.10c: a "you may choose new targets for the copy/copies"
+                // sentence still grants the copy's controller retargeting even
+                // when a clause that resolves between the copy and this sentence
+                // separates them — Narset's Reversal's "then return it to its
+                // owner's hand" bounce, Increasing Vengeance's conditional "copy
+                // that spell twice instead", Spinerock Tyrant's "those spells
+                // gain wither" rider. The nearest-clause lookback above only sees
+                // that intervening clause, so scan the non-absorbed clauses
+                // (nearest-first) for the closest one whose effect wraps a
+                // `CopySpell` and bind the permission there. If NO preceding copy
+                // exists, fall through so the clause stays an honest orphaned
+                // residual rather than a silently-wrong retarget.
+                let lower = normalized_text.to_lowercase();
+                let all_copies = sequence::copy_retarget_clause_all_copies(&lower)?;
+                non_absorbed
+                    .iter()
+                    .any(|c| sequence::effect_wraps_copy_spell(&effective_effect_of(c)))
+                    .then_some(ContinuationAst::CopyMayRetarget { all_copies })
             });
         let absorb_followup = followup_continuation
             .as_ref()
@@ -23886,6 +24184,12 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
         if let Some(cost) = parse_unless_mana_or_energy_payment(cost_str) {
             return Some(cost);
         }
+        if tag::<_, _, OracleError<'_>>("{")
+            .parse(cost_str.trim_start())
+            .is_ok()
+        {
+            return None;
+        }
     }
     // CR 118.12a: "unless [target's controller] has [~] deal N damage to them"
     // (Molten Influence and other counter spells with damage alternatives).
@@ -23913,20 +24217,13 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
 /// the "pays " verb. Returns `None` for non-mana shapes (life / sacrifice /
 /// discard), which the caller routes to the shared non-mana authority.
 fn parse_unless_mana_or_energy_payment(cost_str: &str) -> Option<AbilityCost> {
+    let cost_str = cost_str.trim_start();
     // CR 107.14 + CR 202.3: dynamic energy unless-cost — checked before the
     // brace-run truncation below, which collapses "an amount of {e} …" to "an".
     if let Some(amount) = parse_dynamic_energy_unless_cost(cost_str) {
         return Some(AbilityCost::PayEnergy { amount });
     }
-    // Extract the mana cost (brace-delimited symbols)
-    let cost_end = cost_str
-        .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
-        .unwrap_or(cost_str.len());
-    let cost_text = cost_str[..cost_end].trim();
-    if cost_text.is_empty() || !cost_text.contains('{') {
-        return None;
-    }
-    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text) {
+    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_str) {
         if rest.trim().is_empty() {
             return Some(AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed {
@@ -23936,35 +24233,57 @@ fn parse_unless_mana_or_energy_payment(cost_str: &str) -> Option<AbilityCost> {
         }
     }
     // Check for dynamic {X} with "where X is" clause
-    if cost_text == "{X}" || cost_text == "{x}" {
-        let after_cost = &cost_str[cost_end..];
-        if let Some(quantity) = parse_where_x_is(after_cost) {
-            return Some(AbilityCost::ManaDynamic { quantity });
-        }
-        if tag::<_, _, OracleError<'_>>("where x is ")
-            .parse(after_cost.trim().trim_start_matches(',').trim())
-            .is_ok()
+    if let Ok((after_cost, _)) = tag::<_, _, OracleError<'_>>("{x}").parse(cost_str) {
+        if tag::<_, _, OracleError<'_>>("{")
+            .parse(after_cost.trim_start())
+            .is_err()
         {
-            return None;
-        }
-        // CR 107.3a + CR 118.12: bare {X} unless-cost references the announced X
-        // of the spell carrying this counter.
-        return Some(AbilityCost::ManaDynamic {
-            quantity: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+            if let Some(quantity) = parse_where_x_is(after_cost) {
+                return Some(AbilityCost::ManaDynamic { quantity });
+            }
+            if tag::<_, _, OracleError<'_>>("where x is ")
+                .parse(after_cost.trim().trim_start_matches(',').trim())
+                .is_ok()
+            {
+                return None;
+            }
+            // CR 107.3a + CR 118.12: bare {X} unless-cost references the announced X
+            // of the spell carrying this counter.
+            return Some(AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
-            },
-        });
+            });
+        }
     }
-    let cost = parse_mtgjson_mana_cost(cost_text);
-    if let Some(unless_cost) = parse_unless_for_each_payment(&cost_str[cost_end..], &cost) {
+    let (cost, after_cost) = parse_unless_mana_cost_prefix(cost_str)?;
+    if let Some(unless_cost) = parse_unless_for_each_payment(after_cost, &cost) {
         return Some(unless_cost);
     }
     if cost == ManaCost::NoCost || cost == ManaCost::zero() {
         return None;
     }
     Some(AbilityCost::Mana { cost })
+}
+
+pub(crate) fn parse_unless_mana_cost_prefix(input: &str) -> Option<(ManaCost, &str)> {
+    let input = input.trim_start();
+    // Oracle text is lowercased before these unless-cost paths, while mana
+    // symbol parsing is case-sensitive. ASCII uppercasing preserves byte length,
+    // so the consumed prefix still maps back onto the original input slice.
+    let normalized = input.to_ascii_uppercase();
+    let (normalized_rest, cost) = nom_primitives::parse_mana_cost(&normalized).ok()?;
+    let consumed = normalized.len().checked_sub(normalized_rest.len())?;
+    let rest = &input[consumed..];
+    if tag::<_, _, OracleError<'_>>("{")
+        .parse(rest.trim_start())
+        .is_ok()
+    {
+        return None;
+    }
+    Some((cost, rest))
 }
 
 /// Winternight Stories shape: primary Discard with "unless you discard a [type]"
@@ -24288,20 +24607,22 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<AbilityCost> {
     // CR 107.3a: extract_resolution_unless_pay_modifier lowercased the text; the
     // case-sensitive X mana symbol no longer matches, so handle bare {x}
     // explicitly. The announced X of the carrying effect drives the cost.
-    if tag::<_, _, OracleError<'_>>("{x}")
-        .parse(cost_text.trim_start())
-        .is_ok()
-    {
-        return Some(AbilityCost::ManaDynamic {
-            quantity: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+    if let Ok((after_cost, _)) = tag::<_, _, OracleError<'_>>("{x}").parse(cost_text.trim_start()) {
+        if tag::<_, _, OracleError<'_>>("{")
+            .parse(after_cost.trim_start())
+            .is_err()
+        {
+            return Some(AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
-            },
-        });
+            });
+        }
     }
 
-    if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
+    if let Some((cost, rest)) = parse_unless_mana_cost_prefix(cost_text) {
         if let Some(unless_cost) = parse_unless_for_each_payment(rest, &cost) {
             return Some(unless_cost);
         }

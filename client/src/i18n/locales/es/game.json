@@ -77,7 +77,8 @@
     "priorityTooltip": "Pasa la prioridad. Si la pila está vacía, esto avanza por la ventana de prioridad actual. Atajo: Espacio.",
     "pass": "Pasar",
     "passToEndTooltip": "Pasar automáticamente hasta el paso final a menos que lo interrumpa una elección, una parada o el Control total. Atajo: Intro.",
-    "autoPassing": "Pasando automáticamente al paso final..."
+    "autoPassing": "Pasando automáticamente al paso final...",
+    "resolvingStack": "Resolviendo la pila..."
   },
   "board": {
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",

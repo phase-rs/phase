@@ -24,7 +24,7 @@ use crate::types::player::PlayerId;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
     CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
-    ProhibitionScope, StaticMode,
+    ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -41,7 +41,7 @@ use super::ability_utils::{
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
-use super::functioning_abilities::active_static_definitions;
+use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
 use super::priority;
@@ -5726,6 +5726,11 @@ fn collect_battlefield_cost_modifiers(
     // a reduction's `saturating_sub` floor can never clamp generic to 0 ahead of a
     // later increase (which would overcharge the spell, order-dependently).
     let mut collected = Vec::new();
+    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost modifiers.
+    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+        return collected;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
         let source_controller = src_obj.controller;
@@ -5851,6 +5856,11 @@ pub(super) fn collect_imposed_additional_cast_costs(
     use crate::types::ability::ControllerRef;
 
     let mut costs = Vec::new();
+    // CR 604.1: O(1) presence gate — no ImposeAdditionalCost static means no imposed costs.
+    if !static_kind_present(state, StaticModeKind::ImposeAdditionalCost) {
+        return costs;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
         let source_controller = src_obj.controller;
@@ -5973,6 +5983,11 @@ fn apply_cost_floor_inner(
     target_sensitive_only: bool,
     mana_cost: &mut ManaCost,
 ) {
+    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost floor to apply.
+    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+        return;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_functioning_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
         let bf_id = bf_obj.id;
@@ -6101,6 +6116,19 @@ fn spell_matches_cost_filter(
             .all(|inner| spell_matches_cost_filter(state, caster, spell_id, inner, source_id)),
         TargetFilter::Not { filter: inner } => {
             !spell_matches_cost_filter(state, caster, spell_id, inner, source_id)
+        }
+        // CR 201.2: "spells with the chosen name" (Disruptor Flute).
+        TargetFilter::HasChosenName => {
+            let Some(source_obj) = state.objects.get(&source_id) else {
+                return false;
+            };
+            cant_cast_filter_matches(state, spell_obj, filter, source_obj, caster)
+        }
+        TargetFilter::Named { .. } => {
+            let Some(source_obj) = state.objects.get(&source_id) else {
+                return false;
+            };
+            cant_cast_filter_matches(state, spell_obj, filter, source_obj, caster)
         }
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
@@ -6269,13 +6297,30 @@ fn apply_pending_spell_cost_reductions(
     }
 }
 
-/// CR 601.2f: Consume (remove) a one-shot pending cost reduction after a spell is cast.
-pub(super) fn consume_pending_spell_cost_reduction(state: &mut GameState, caster: PlayerId) {
-    if let Some(idx) = state
-        .pending_spell_cost_reductions
-        .iter()
-        .position(|r| r.player == caster && r.spell_filter.is_none())
-    {
+/// CR 601.2f: Consume (remove) the one-shot pending cost reduction a cast spell
+/// used. Removes the first entry for this caster that the cast spell matches —
+/// whether unfiltered OR filter-matched (e.g. "the next face-down creature spell
+/// you cast this turn costs {3} less", Kadena) — mirroring the single entry that
+/// [`apply_pending_spell_cost_reductions`] applied (it also stops at the first
+/// match). The previous predicate removed only *unfiltered* entries, so a
+/// filtered reduction was never consumed and kept discounting every matching
+/// spell for the rest of the turn instead of just the next one. Mirrors
+/// [`consume_pending_next_spell_modifiers`].
+pub(super) fn consume_pending_spell_cost_reduction(
+    state: &mut GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) {
+    let matched = state.pending_spell_cost_reductions.iter().position(|r| {
+        r.player == caster
+            && match &r.spell_filter {
+                None => true,
+                Some(filter) => {
+                    spell_matches_cost_filter(state, caster, spell_id, filter, spell_id)
+                }
+            }
+    });
+    if let Some(idx) = matched {
         state.pending_spell_cost_reductions.remove(idx);
     }
 }
@@ -14207,6 +14252,20 @@ pub fn handle_cancel_cast(
 ) {
     state.cancelled_casts.push(pending.object_id);
 
+    // CR 601.2 + CR 733.1: Backing out of a cast reverses every choice and
+    // payment made during it ("the entire action is reversed"). A pre-cost
+    // behold "choose a creature type" (Celestial Reunion) records the chosen
+    // type as a `ChosenAttribute::CreatureType` on the spell object
+    // (`casting_costs::handle_cost_type_choice`). If it survived the rewind, the
+    // `already_chosen` guard in the behold cost dispatch
+    // (`casting_costs::pay_additional_cost_with_source`) would skip the type
+    // prompt on the next cast attempt and silently reuse the stale type — so
+    // remove it here and let a re-cast re-prompt from a clean slate.
+    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+    }
+
     let convoked_creatures = if pending.convoked_creatures.is_empty() {
         state
             .objects
@@ -14460,7 +14519,7 @@ fn apply_cost_reduction(
     // (active_keyword == None) — so skipping the whole function is equivalent to
     // skipping just the "activated" arm, and clearer.
     if !is_plot_special_action(ability_def) {
-        apply_static_activated_ability_cost_reduction(state, ability_def, source_id);
+        apply_static_activated_ability_cost_reduction(state, ability_def, player, source_id);
     }
 
     // CR 116.2k + CR 702.170: Plot is taken as a special action via a synthesized
@@ -14480,8 +14539,14 @@ fn apply_cost_reduction(
 fn apply_static_activated_ability_cost_reduction(
     state: &GameState,
     ability_def: &mut AbilityDefinition,
+    player: PlayerId,
     source_id: ObjectId,
 ) {
+    // CR 604.1: O(1) presence gate — no ReduceAbilityCost static means no reduction.
+    if !static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
+        return;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 601.2f: A `ReduceAbilityCost` static keyed on a keyword (e.g. "power-up")
     // also reduces a tagged activated ability whose tag matches that keyword
     // (Hulk reduces other creatures' power-up abilities). Read the activating
@@ -14489,6 +14554,11 @@ fn apply_static_activated_ability_cost_reduction(
     let active_keyword = ability_def
         .ability_tag
         .map(crate::types::ability::AbilityTag::keyword_str);
+    // CR 605.1a: Classify the activating ability BEFORE the mutable cost borrow so
+    // an `ActivationExemption::ManaAbilities` static ("unless they're mana
+    // abilities" / "that aren't mana abilities" — Suppression Field, Zirda) can
+    // skip a mana ability's cost.
+    let ability_is_mana = super::mana_abilities::is_mana_ability(ability_def);
 
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
@@ -14501,12 +14571,38 @@ fn apply_static_activated_ability_cost_reduction(
             amount,
             minimum_mana,
             dynamic_count,
+            exemption,
+            activator,
         } = &def.mode
         else {
             continue;
         };
         if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
             continue;
+        }
+        // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
+        // adjustment (Suppression Field's tax, Zirda's discount).
+        if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
+            continue;
+        }
+        // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda,
+        // the Dawnwaker; Fluctuator) keys off WHO is activating the ability,
+        // evaluated relative to the static's controller — NOT who controls the
+        // ability's source. Reuse the activator-permission predicate with the
+        // static's controller as the reference point so "you" resolves to the
+        // static controller. An ability on a permanent this player doesn't control
+        // (activatable via `activator_filter`) is still discounted when they
+        // activate it, and an ability on a permanent they DO control but activated
+        // by someone else is not. `None` leaves the source/global scope untouched.
+        if let Some(activator) = activator {
+            if !player_may_begin_activating(
+                state,
+                player,
+                static_source.controller,
+                Some(activator),
+            ) {
+                continue;
+            }
         }
         if def.affected.as_ref().is_some_and(|filter| {
             !super::filter::matches_target_filter(
@@ -14690,6 +14786,11 @@ fn is_blocked_from_casting_from_zone(
     }
 
     let object_id = obj.id;
+    // CR 604.1: O(1) presence gate — no CantCastFrom static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantCastFrom) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCastFrom { ref who } = def.mode else {
@@ -14740,6 +14841,11 @@ pub(super) fn is_blocked_by_cant_be_activated(
     activating_source_id: ObjectId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantBeActivated static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantBeActivated) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let bf_id = bf_obj.id;
@@ -14834,6 +14940,11 @@ fn evaluate_casting_prohibition_condition(
 /// E.g., Dosan, the Falling Leaf (`who=AllPlayers, when=NotDuringAffectedPlayersTurn`):
 ///   each player can only cast on their own turn.
 fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
+    // CR 604.1: O(1) presence gate — no CantCastDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantCastDuring) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCastDuring { ref who, ref when } = def.mode else {
@@ -14870,6 +14981,11 @@ pub(super) fn is_blocked_by_cant_activate_during(
     activator: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantActivateDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantActivateDuring) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantActivateDuring {
@@ -14908,6 +15024,11 @@ fn is_blocked_by_cant_be_cast(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantBeCast static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantBeCast) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`
     // — including the per-static `condition` check; no inline duplication needed.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
@@ -14922,7 +15043,7 @@ fn is_blocked_by_cant_be_cast(
 
         // CR 604.1: Check spell filter if present.
         if let Some(ref affected) = def.affected {
-            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj) {
+            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj, caster) {
                 continue;
             }
         }
@@ -14946,18 +15067,31 @@ fn is_blocked_by_cant_be_cast(
 
 /// CR 101.2: Check if a spell matches a CantBeCast affected filter.
 /// Handles type filters, mana value comparisons, chosen name, and chosen card type.
-/// Source-dependent filters (HasChosenName, IsChosenCardType) are resolved here
-/// because they need the source permanent's chosen attributes.
+/// Evaluate a `CantBeCast` affected filter against a spell being cast, with the
+/// prohibiting permanent as the filter source.
+///
+/// Only `HasChosenName` needs a dedicated arm — the shared spell-filter matcher
+/// has no top-level chosen-name variant. Every other filter, including the
+/// chosen-attribute *properties* (`IsChosenColor` per CR 105.2/105.4,
+/// `IsChosenCardType` per CR 205), is evaluated as a normal typed-filter
+/// conjunction through the source-aware `spell_object_matches_filter_from_state`
+/// path. That path resolves each chosen property against the source permanent's
+/// chosen attributes from context, so a prohibition can combine a chosen
+/// attribute with any card-type, controller, or zone axis without a bespoke
+/// per-property matcher here.
 fn cant_cast_filter_matches(
     state: &GameState,
     spell_obj: &super::game_object::GameObject,
     filter: &TargetFilter,
     source_obj: &super::game_object::GameObject,
+    caster: PlayerId,
 ) -> bool {
-    use crate::types::ability::{ChosenAttribute, FilterProp};
+    use crate::types::ability::ChosenAttribute;
 
     match filter {
-        // CR 201.2: "spells with the chosen name" — match spell name against source's chosen name.
+        // CR 201.2: "spells with the chosen name" — the shared spell-filter path
+        // has no top-level chosen-name variant, so match the spell name against
+        // the source's chosen name here.
         TargetFilter::HasChosenName => {
             let chosen_name = source_obj.chosen_attributes.iter().find_map(|a| match a {
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
@@ -14965,48 +15099,17 @@ fn cant_cast_filter_matches(
             });
             chosen_name.is_some_and(|name| name.eq_ignore_ascii_case(&spell_obj.name))
         }
-        // CR 205: Typed filter with IsChosenCardType requires source's chosen card type.
-        TargetFilter::Typed(tf)
-            if tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::IsChosenCardType)) =>
-        {
-            let chosen_type = source_obj.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardType(ct) => Some(ct),
-                _ => None,
-            });
-            let Some(chosen_type) = chosen_type else {
-                return false;
-            };
-            spell_obj
-                .card_types
-                .core_types
-                .iter()
-                .any(|ct| ct == chosen_type)
-        }
-        // All other filters delegate to the spell record matcher.
-        _ => {
-            let record = SpellCastRecord {
-                name: spell_obj.name.clone(),
-                core_types: spell_obj.card_types.core_types.clone(),
-                supertypes: spell_obj.card_types.supertypes.clone(),
-                subtypes: spell_obj.card_types.subtypes.clone(),
-                keywords: spell_obj.keywords.clone(),
-                colors: spell_obj.color.clone(),
-                mana_value: spell_obj.mana_cost.mana_value(),
-                has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-                from_zone: spell_obj.zone,
-                cast_variant: crate::types::game_state::CastingVariant::Normal,
-                was_kicked: !spell_obj.kickers_paid.is_empty(),
-            };
-            super::filter::spell_record_matches_filter(
-                &record,
-                filter,
-                source_obj.controller,
-                &state.all_creature_types,
-            )
-        }
+        // Everything else — including IsChosenColor / IsChosenCardType properties —
+        // flows through the shared source-aware typed-filter conjunction.
+        _ => super::filter::spell_object_matches_filter_from_state(
+            state,
+            spell_obj,
+            spell_obj.zone,
+            caster,
+            filter,
+            source_obj.id,
+            &state.all_creature_types,
+        ),
     }
 }
 
@@ -15019,6 +15122,11 @@ fn is_blocked_by_per_turn_cast_limit(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no PerTurnCastLimit static means no limit.
+    if !static_kind_present(state, StaticModeKind::PerTurnCastLimit) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         {

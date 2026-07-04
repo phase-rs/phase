@@ -4869,6 +4869,101 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
     assert!(state.players[0].graveyard.contains(&hill_giant));
 }
 
+/// Cluster J1 (headline `/card-test` regression guard): "When this creature
+/// enters, sacrifice **another** creature." must exclude the source. Casting
+/// Disciple of Bolas through the full cast → trigger → stack → apply() → chain
+/// → `sacrifice::resolve` pipeline with exactly one OTHER creature must
+/// sacrifice that other creature and leave Disciple on the battlefield.
+///
+/// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
+/// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
+/// builds its eligible pool via `FilterContext::from_ability` (source excluded
+/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+///
+/// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
+/// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
+/// `recipient_id: None` identically to `from_ability`, so both paths hit the
+/// same `FilterProp::Another` exclusion site with an identical source id. This
+/// one effect-path guard therefore substantiates the whole "sacrifice another"
+/// class (effect + cost forms) — no separate cost-path integration test needed.
+///
+/// The positive Hill-Giant sacrifice plus the +3 life / +3 draw deltas prove
+/// the sacrifice machinery actually ran (non-vacuous), and the paired sibling
+/// test `sacrifice_a_creature_without_another_includes_sole_source` proves the
+/// exclusion is `Another`-driven, not an empty-pool artifact.
+#[test]
+fn disciple_of_bolas_sacrifices_another_creature_not_itself() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The entering creature carries the verbatim Oracle text (parser branch
+    // fidelity — a paraphrase could take a different branch). Mana is elided
+    // (default zero cost) so the test isolates the sacrifice-exclusion seam.
+    let disciple = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Disciple of Bolas",
+            2,
+            1,
+            "When this creature enters, sacrifice another creature. You gain X life and draw X cards, where X is that creature's power.",
+        )
+        .id();
+
+    // Exactly one OTHER creature: the sole eligible sacrifice, so the effect
+    // auto-resolves (no EffectZoneChoice) onto it. Power 3 → X = 3.
+    let hill_giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+
+    // Three library cards so the "draw X" (X = 3) has cards to draw.
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(disciple).resolve();
+
+    // Source excluded: Disciple survives on the battlefield.
+    outcome.assert_zone(&[disciple], Zone::Battlefield);
+    // The OTHER creature was sacrificed (positive, non-vacuous reach-guard).
+    outcome.assert_zone(&[hill_giant], Zone::Graveyard);
+    // X = Hill Giant's power (3): +3 life and 3 cards drawn.
+    outcome.assert_life_delta(P0, 3);
+    outcome.assert_hand_drawn(P0, 3);
+}
+
+/// Cluster J1 (paired sibling reach-guard): the same ETB shape WITHOUT the
+/// `another` qualifier ("sacrifice a creature") DOES include the sole source,
+/// sacrificing the entering creature itself. This proves the exclusion in
+/// `disciple_of_bolas_sacrifices_another_creature_not_itself` is driven by
+/// `FilterProp::Another`, not by a vacuously empty eligible pool.
+///
+/// CR 701.21a: with the source as the only eligible creature, the mandatory
+/// sacrifice auto-resolves onto it.
+#[test]
+fn sacrifice_a_creature_without_another_includes_sole_source() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // No "another" — the source is a legal sacrifice target. It is the ONLY
+    // creature on the battlefield when the ETB resolves.
+    let reaper = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Test Reaper",
+            1,
+            1,
+            "When this creature enters, sacrifice a creature.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(reaper).resolve();
+
+    // Sole eligible creature is the source itself → it sacrifices itself.
+    outcome.assert_zone(&[reaper], Zone::Graveyard);
+}
+
 const SQUADRON_HAWK_ORACLE: &str = "Flying\nWhen this creature enters, you may search your library for up to three cards named Squadron Hawk, reveal them, put them into your hand, then shuffle.";
 
 fn add_squadron_hawk_to_library(state: &mut GameState, card_id: u64) -> ObjectId {

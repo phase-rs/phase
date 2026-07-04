@@ -152,6 +152,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CommanderZoneChoice",
     "BattleProtectorChoice",
     "NamedChoice",
+    "CostTypeChoice",
     "UntapChoice",
     "ChooseUntapSubset",
     "ExertChoice",

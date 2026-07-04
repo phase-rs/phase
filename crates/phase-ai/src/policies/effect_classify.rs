@@ -2,7 +2,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
     ContinuousModification, Effect, EffectScope, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TypeFilter,
+    TargetFilter, TriggerDefinition, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
@@ -813,6 +813,23 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
     }
 }
 
+/// CR 603.1: A `GrantTrigger` confers a triggered ability on its target. The
+/// benefit/harm to the bearer is the polarity of the effect that granted trigger
+/// *executes* — Undying Malice grants "when this dies, return it to the
+/// battlefield" (`ChangeZone`→Battlefield, Beneficial); a downside grant of "at
+/// the beginning of your upkeep, you lose 1 life" (`LoseLife`, Harmful) must NOT
+/// read Beneficial. Delegating to `effect_polarity` covers the whole class of
+/// grant-a-trigger buffs and downside curses (AI heuristic). The polarity is
+/// bound statically from the parsed `TriggerDefinition.execute.effect`; no live
+/// game-state lookup.
+fn granted_trigger_polarity(trigger: &TriggerDefinition) -> EffectPolarity {
+    trigger
+        .execute
+        .as_deref()
+        .map(|exec| effect_polarity(&exec.effect))
+        .unwrap_or(EffectPolarity::Contextual)
+}
+
 /// Classify a continuous modification as beneficial/harmful to its target.
 pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarity {
     match m {
@@ -834,6 +851,7 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::AddSubtype { .. } => EffectPolarity::Beneficial,
+        ContinuousModification::GrantTrigger { trigger } => granted_trigger_polarity(trigger),
         ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::RemoveType { .. }
@@ -1075,6 +1093,130 @@ mod suspect_scope_tests {
         assert!(
             extract_target_filter(&all_unsuspect).is_none(),
             "mass Unsuspect{{All}} (Absolving Lammasu) is a population effect, not target-filtered"
+        );
+    }
+}
+
+#[cfg(test)]
+mod grant_trigger_polarity_tests {
+    use super::*;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, StaticDefinition, TypedFilter};
+    use engine::types::zones::EtbTapState;
+
+    /// Build a `GenericEffect` that grants its target a triggered ability whose
+    /// executed effect is `exec` — the Undying-Malice-shaped AST
+    /// (`GenericEffect{ Continuous{ GrantTrigger{ dies → exec } } }`).
+    fn grant_trigger_generic(exec: Effect) -> Effect {
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, exec)));
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(trigger),
+                }])],
+            target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            duration: None,
+        }
+    }
+
+    /// "When this dies, return it to the battlefield" — the Undying Malice grant.
+    fn return_to_battlefield() -> Effect {
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    #[test]
+    fn grant_return_trigger_reads_beneficial() {
+        // Undying Malice grants "when this dies, return it to the battlefield"
+        // (ChangeZone→Battlefield, Beneficial). Pre-fix `GrantTrigger` hit the
+        // `_ => Contextual` fallback, so the whole GenericEffect read Contextual.
+        let ge = grant_trigger_generic(return_to_battlefield());
+        assert_eq!(effect_polarity(&ge), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn harmful_grant_trigger_not_beneficial() {
+        // A downside grant ("at the beginning of your upkeep, you lose 1 life")
+        // must read Harmful, NOT a blanket Beneficial — this is the load-bearing
+        // discriminator that proves the arm reads the executed-effect polarity
+        // rather than labeling every grant beneficial.
+        let ge = grant_trigger_generic(Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        });
+        assert_eq!(effect_polarity(&ge), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn granted_trigger_without_execute_is_contextual() {
+        // A grant whose trigger has no executed effect carries no polarity
+        // signal — stays Contextual (the same as the pre-existing fallback).
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.execute = None;
+        assert_eq!(
+            modification_polarity(&ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger),
+            }),
+            EffectPolarity::Contextual
+        );
+    }
+
+    #[test]
+    fn parsed_undying_malice_grant_reads_beneficial() {
+        // Production-parser reach guard: the real Undying Malice Oracle text parses
+        // to `GenericEffect{ Continuous{ GrantTrigger{ dies → ChangeZone→Battlefield
+        // } } }`, so its polarity must read Beneficial through the same classifier
+        // the AI target-scorer uses. Guards the fix against future parser AST drift.
+        use engine::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Until end of turn, target creature gains \"When this creature dies, return it to the battlefield tapped under its owner's control with a +1/+1 counter on it.\"",
+            "Undying Malice",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Spell)
+            .expect("Undying Malice parses to a spell ability");
+        assert_eq!(
+            effect_polarity(&spell.effect),
+            EffectPolarity::Beneficial,
+            "Undying Malice's granted return-to-battlefield trigger must read Beneficial"
+        );
+    }
+
+    #[test]
+    fn grant_ability_still_beneficial() {
+        // Sibling reach-guard: `GrantAbility` (a granted static/activated ability,
+        // no executed-trigger effect to inspect) stays in the Beneficial cluster,
+        // unchanged by the new GrantTrigger arm.
+        assert_eq!(
+            modification_polarity(&ContinuousModification::GrantAbility {
+                definition: Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::TargetOnly {
+                        target: TargetFilter::Any,
+                    },
+                )),
+            }),
+            EffectPolarity::Beneficial
         );
     }
 }

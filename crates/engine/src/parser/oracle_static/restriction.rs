@@ -1016,9 +1016,17 @@ pub(crate) fn parse_cant_cast_type_spells(
     }
 
     // --- "spells of the chosen color" ---
+    // CR 101.2 + CR 105.4: scope the prohibition to spells whose colors (CR 105.2)
+    // include the source's chosen color — not every spell. Mirrors the "chosen
+    // type" branch above; runtime resolution lives in `cant_cast_filter_matches`.
     if nom_tag_lower(trimmed, trimmed, "spells of the chosen color").is_some() {
-        let def =
-            StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
+        let filter = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::IsChosenColor],
+            ..TypedFilter::default()
+        });
+        let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+            .affected(filter)
+            .description(text.to_string());
         return attach_parsed_static_gate(def, gate_condition_text);
     }
 
