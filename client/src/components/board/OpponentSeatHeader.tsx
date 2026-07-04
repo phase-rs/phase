@@ -120,7 +120,11 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           title={t("opponentHud.clickToTarget", { name: label })}
         />
       ) : null}
-      <div className={`pointer-events-none absolute right-1.5 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-y-1/2 items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
+      {/* Click-through only while the click-to-target button is up — the
+          identity cluster sits above it (z-10 vs z-0), so pointer events must
+          pass through during targeting. Outside targeting, normal pointer
+          events keep the badge tooltips, popovers, and titles working. */}
+      <div className={`absolute right-1.5 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-y-1/2 items-center justify-end ${compact ? "gap-1" : "gap-1.5"} ${isValidPlayerTarget ? "pointer-events-none" : ""}`}>
         <div
           className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
             isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
