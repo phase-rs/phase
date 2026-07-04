@@ -1346,21 +1346,40 @@ pub fn candidate_actions_broad_with_probe(
             options,
             actor,
             player,
+            candidate_objects,
             ..
         } => {
             let actor = actor.resolve(*player);
-            options
-                .iter()
-                .map(|opt| {
-                    candidate(
-                        GameAction::ChooseOption {
-                            choice: opt.clone(),
-                        },
-                        TacticalClass::Selection,
-                        Some(actor),
-                    )
-                })
-                .collect()
+            if candidate_objects.is_empty() {
+                // CR 701.38: named vote — each option is a legal ballot.
+                options
+                    .iter()
+                    .map(|opt| {
+                        candidate(
+                            GameAction::ChooseOption {
+                                choice: opt.clone(),
+                            },
+                            TacticalClass::Selection,
+                            Some(actor),
+                        )
+                    })
+                    .collect()
+            } else {
+                // CR 701.38b: object-pool vote — each candidate object is a
+                // legal ballot, submitted by index (disambiguates same-named
+                // candidates that the string path cannot).
+                (0..candidate_objects.len())
+                    .map(|i| {
+                        candidate(
+                            GameAction::SubmitVoteCandidate {
+                                candidate_index: i as u32,
+                            },
+                            TacticalClass::Selection,
+                            Some(actor),
+                        )
+                    })
+                    .collect()
+            }
         }
         WaitingFor::ModeChoice {
             player,

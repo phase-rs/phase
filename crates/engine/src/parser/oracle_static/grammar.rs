@@ -54,9 +54,11 @@ pub(crate) fn lower_rule_static(
         RuleStaticPredicate::MustBlock => StaticDefinition::new(StaticMode::MustBlock)
             .affected(affected)
             .description(description.to_string()),
-        RuleStaticPredicate::MustBeBlocked => StaticDefinition::new(StaticMode::MustBeBlocked)
-            .affected(affected)
-            .description(description.to_string()),
+        RuleStaticPredicate::MustBeBlocked => {
+            StaticDefinition::new(StaticMode::MustBeBlocked { by: None })
+                .affected(affected)
+                .description(description.to_string())
+        }
         RuleStaticPredicate::Goaded => StaticDefinition::new(StaticMode::Goaded)
             .affected(affected)
             .description(description.to_string()),
@@ -462,46 +464,119 @@ pub(crate) fn parse_attached_condition_run(input: &str) -> OracleResult<'_, Stat
 /// `StaticMode`). Simple lines return a length-1 vec; unparsed lines an empty
 /// vec.
 ///
-/// CR 509.1c: Recognize a "must be blocked by <filter> if able" lure conjunct.
+/// CR 509.1c: Capture the inner "<quality>" of a filtered "must be blocked by
+/// <quality> if able" lure conjunct.
 ///
-/// The BARE form ("must be blocked if able" → `StaticMode::MustBeBlocked`) is
-/// already modeled by `try_split_and_must_attack_block`. The FILTERED form
-/// ("must be blocked by a Dalek if able", "must be blocked by an Eldrazi if
-/// able") requires the typed `MustBeBlocked { by: <filter> }` requirement that
-/// has not yet been parameterized (/add-engine-variant Stage-2
-/// REFUSE_WITH_REFACTOR, ~80 sites). This combinator detects ONLY the filtered
-/// form — the leading `tag("by ")` after "must be blocked " excludes the bare
-/// form — so it can be surfaced as an `Effect::Unimplemented` residual rather
-/// than silently dropped.
-pub(crate) fn parse_must_be_blocked_by_filter_lure(input: &str) -> OracleResult<'_, &str> {
-    recognize((
-        tag("must be blocked by "),
-        take_until(" if able"),
-        tag(" if able"),
-    ))
-    .parse(input)
+/// The BARE form ("must be blocked if able" → `StaticMode::MustBeBlocked { by:
+/// None }`) is modeled by `try_split_and_must_attack_block` /
+/// `RuleStaticPredicate::MustBeBlocked`. The FILTERED form ("must be blocked by
+/// a Dalek if able", "must be blocked by an Eldrazi if able") lowers to the
+/// parameterized `StaticMode::MustBeBlocked { by: Some(filter) }`. This
+/// combinator captures ONLY the filtered form — the `tag("must be blocked by ")`
+/// requires the "by " that the bare form lacks — and returns the inner quality
+/// span; the caller parses it into a `TargetFilter`. The successful combinator
+/// parse IS the detector (no `contains`/`find` dispatch).
+pub(crate) fn parse_must_be_blocked_by_quality(input: &str) -> OracleResult<'_, &str> {
+    let (rest, _) = tag("must be blocked by ").parse(input)?;
+    let (after, inner) = take_until(" if able").parse(rest)?;
+    let (after, _) = tag(" if able").parse(after)?;
+    Ok((after, inner))
 }
 
-/// Scan the lowercase predicate for a filtered "must be blocked by … if able"
-/// lure conjunct at any word boundary and, when present, return the matched
-/// conjunct span (from "must" through "if able"). The successful combinator parse
-/// IS the detector — `scan_at_word_boundaries` tries the combinator at each word
-/// start, so there is no `contains`/`find` dispatch. Returns `None` when only the
-/// bare (already-modeled) form or no lure is present.
-fn extract_must_be_blocked_by_filter_lure(predicate: &str) -> Option<String> {
+/// CR 509.1c + CR 105.4: Lower a captured "<quality>" span (e.g.
+/// "a Dalek", "an Eldrazi", "a creature of the chosen color") to the blocker
+/// `TargetFilter`. Composes the SAME quality combinators `CantBeBlockedBy` uses
+/// (`parse_chosen_qualifier_subject`, then `parse_type_phrase`). Returns `None`
+/// when the quality fails to constrain the blocker at all — either
+/// `TargetFilter::Any` or the empty `Typed` filter `parse_type_phrase` yields for
+/// an UNRECOGNIZED noun — so an unparseable requirement is never silently
+/// weakened to "any blocker satisfies".
+fn must_be_blocked_quality_to_filter(quality: &str) -> Option<TargetFilter> {
+    // Operate on the lowercase quality (mirrors the `CantBeBlockedBy` path, whose
+    // `filter_text` is a slice of the already-lowercased predicate). `TextPair`
+    // requires `lower` to be the lowercase of `original`, so pair them honestly
+    // even when the caller passes mixed-case input (e.g. a direct unit test).
+    let quality_lower = quality.to_lowercase();
+    let quality_tp = TextPair::new(quality, &quality_lower);
+    let filter = parse_chosen_qualifier_subject(&quality_tp).unwrap_or_else(|| {
+        let (f, _) = parse_type_phrase(&quality_lower);
+        f
+    });
+    filter_constrains_blocker(&filter).then_some(filter)
+}
+
+/// CR 509.1c: Does `filter` actually narrow the set of legal blockers? An
+/// unconstrained filter — `TargetFilter::Any`, or an empty `Typed` carrying no
+/// type, property, or controller constraint (what `parse_type_phrase` returns for
+/// an unrecognized noun like "a splorf") — matches every blocker and therefore
+/// expresses no quality requirement. Lowering such a filter into a
+/// `MustBeBlocked { by }` would silently degrade "must be blocked by <X>" to
+/// "must be blocked by anything"; rejecting it lets callers surface the gap.
+fn filter_constrains_blocker(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => false,
+        TargetFilter::Typed(typed) => {
+            !typed.type_filters.is_empty()
+                || !typed.properties.is_empty()
+                || typed.controller.is_some()
+        }
+        _ => true,
+    }
+}
+
+/// CR 509.1c: Parse a filtered "must be blocked by <quality> if able" span
+/// anchored at the start of `input` → the blocker `TargetFilter`. Used by the
+/// conditional attached-grant path (Ace's Baseball Bat) where the residual
+/// conjunct is already isolated. Returns `None` for the bare form or an
+/// unrecognized quality.
+pub(crate) fn parse_must_be_blocked_by_filter(input: &str) -> Option<TargetFilter> {
+    let (_, quality) = parse_must_be_blocked_by_quality(input).ok()?;
+    must_be_blocked_quality_to_filter(quality)
+}
+
+/// CR 509.1c: Classification of a scanned "must be blocked by <quality> if able"
+/// conjunct. Distinguishes an ABSENT conjunct (no `Some`) from a PRESENT one,
+/// and within present, whether the quality is recognized vs. unrecognized — so
+/// the un-gated attached-grant path can surface an `Unimplemented` residual for
+/// an unrecognized quality instead of silently dropping the block requirement.
+pub(crate) enum MustBeBlockedByConjunct {
+    /// The quality lowered to a recognized blocker `TargetFilter`.
+    Recognized(TargetFilter),
+    /// The conjunct is present but its quality is unrecognized (would weaken to
+    /// `TargetFilter::Any`). Carries the reconstructed conjunct text so the
+    /// requirement can be surfaced as an `Unimplemented` residual diagnostic —
+    /// never silently dropped.
+    Unrecognized(String),
+}
+
+/// Scan the predicate for a filtered "must be blocked by <quality> if able"
+/// conjunct at any word boundary and classify it. The successful combinator
+/// parse IS the detector — `scan_at_word_boundaries` tries
+/// `parse_must_be_blocked_by_quality` at each word start, so there is no
+/// `contains`/`find` dispatch. Returns `None` when only the bare form or no lure
+/// is present.
+pub(crate) fn extract_must_be_blocked_by_conjunct(
+    predicate: &str,
+) -> Option<MustBeBlockedByConjunct> {
     let lower = predicate.to_lowercase();
-    nom_primitives::scan_at_word_boundaries(&lower, parse_must_be_blocked_by_filter_lure)
-        .map(|span| span.trim().to_string())
+    let quality =
+        nom_primitives::scan_at_word_boundaries(&lower, parse_must_be_blocked_by_quality)?;
+    Some(match must_be_blocked_quality_to_filter(quality) {
+        Some(filter) => MustBeBlockedByConjunct::Recognized(filter),
+        None => {
+            MustBeBlockedByConjunct::Unrecognized(format!("must be blocked by {quality} if able"))
+        }
+    })
 }
 
-/// CR 509.1c: Build an `Effect::Unimplemented` residual static for an unmodeled
-/// effect-conjunct inside an attached-subject grant (the filtered "must be
-/// blocked by … if able" lure). The residual rides in a `GrantAbility`
-/// modification so coverage flags the card (`is_static_supported`) and the
-/// swallow check defers (`any_ability_has_unimplemented`) — the single honest
-/// signal that the conjunct is a known gap. See
-/// `try_parse_inverted_attached_combat_grant` for the full deferral rationale.
-pub(crate) fn unimplemented_conjunct_residual(
+/// CR 509.1c: Build the sibling `Effect::Unimplemented` residual for an attached
+/// grant conjunct the typed static modes can't model. Carried inside a
+/// `GrantAbility` continuous modification so coverage flags the gap (stable
+/// category key `"attached_grant_unmodeled_conjunct"`) and the swallow check
+/// defers, rather than silently dropping the requirement. Shared by the gated
+/// (`try_parse_inverted_attached_combat_grant`) and un-gated attached-grant
+/// paths so both surface unrecognized conjuncts identically.
+pub(crate) fn attached_grant_unmodeled_conjunct_residual(
     affected: TargetFilter,
     residual_text: &str,
 ) -> StaticDefinition {
@@ -812,15 +887,29 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // CR 509.1c: "<grant> and must be blocked by <filter> if able"
         // (Slayer's Cleaver: "Equipped creature gets +3/+1 and must be blocked
         // by an Eldrazi if able."). `parse_continuous_modifications` models the
-        // P/T/keyword grant but silently drops the filtered lure conjunct (the
-        // bare "must be blocked if able" form is handled by
-        // `try_split_and_must_attack_block`; the typed by-filter requirement is
-        // the deferred /add-engine-variant Stage-2 work). Surface the dropped
-        // conjunct as an `Effect::Unimplemented` residual so it is a visible
-        // coverage gap, not a silent drop, even when the predicate has no
-        // continuous grant sibling.
-        if let Some(residual_text) = extract_must_be_blocked_by_filter_lure(predicate) {
-            defs.push(unimplemented_conjunct_residual(affected, &residual_text));
+        // P/T/keyword grant; this branch models the filtered blocking
+        // requirement as the typed `MustBeBlocked { by: Some(filter) }` static
+        // (unconditional — this non-conditional path has no "as long as" gate).
+        match extract_must_be_blocked_by_conjunct(predicate) {
+            Some(MustBeBlockedByConjunct::Recognized(filter)) => {
+                defs.push(
+                    StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                        .affected(affected.clone())
+                        .description(description.to_string()),
+                );
+            }
+            // CR 509.1c: the lure conjunct is present but its quality is
+            // unrecognized (would weaken to `TargetFilter::Any`). Surface an
+            // `Unimplemented` residual so coverage flags the gap — mirroring the
+            // gated path (`try_parse_inverted_attached_combat_grant`) — instead
+            // of silently dropping the blocking requirement.
+            Some(MustBeBlockedByConjunct::Unrecognized(residual)) => {
+                defs.push(attached_grant_unmodeled_conjunct_residual(
+                    affected.clone(),
+                    &residual,
+                ));
+            }
+            None => {}
         }
         defs
     }

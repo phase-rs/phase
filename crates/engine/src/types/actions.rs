@@ -300,6 +300,16 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.38b: Cast a vote for one object candidate in an object-pool vote
+    /// (`VoteSubject::Objects` — Council's Judgment, Prime Minister's Cabinet
+    /// Room). `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`
+    /// (and the parallel `option_labels`). Index-based — not name-based — so
+    /// two candidates with the same printed name are disambiguated. Named votes
+    /// continue to use `ChooseOption { choice }`; object votes reject the string
+    /// path because their candidates are not canonical option words.
+    SubmitVoteCandidate {
+        candidate_index: u32,
+    },
     /// Alchemy spellbook draft: the player's chosen card name in response to
     /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
     /// pending destination.
@@ -1311,6 +1321,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }

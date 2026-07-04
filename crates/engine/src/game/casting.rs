@@ -8282,10 +8282,12 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
-    /// CR 608.2g + CR 609.4b: whether the during-resolution cast is free
-    /// (Cascade/Discover/Suspend, `Auto`) or pays the card's real printed cost
-    /// (Quistis Trepe / Tinybones the Pickpocket, `Manual` with an optional
-    /// any-type-mana concession).
+    /// CR 608.2g + CR 609.4b + CR 118.9: whether the during-resolution cast
+    /// is free (Cascade/Discover/Suspend, `Auto`), pays the card's real
+    /// printed cost (Quistis Trepe / Tinybones the Pickpocket, `Manual` with
+    /// an optional any-type-mana concession), or pays an explicit alternative
+    /// mana cost borrowed from a keyword (The Face of Boe's suspend cost,
+    /// `Manual` at that keyword's mana cost).
     pub(super) cost: crate::types::ability::ResolutionCastCost,
 }
 
@@ -8302,7 +8304,9 @@ pub(super) struct ResolutionCastRequest {
 /// zeroes the cost and continues on `Auto` (Cascade/Discover/Suspend);
 /// `FullCost` charges the card's live printed cost (`SelfManaCost`), forwards the
 /// any-type-mana concession onto the grant, and pauses on `Manual` payment so the
-/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b). The
+/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b);
+/// `AlternativeMana { cost }` stamps an explicit keyword-borrowed mana cost and
+/// drains the pool on `Auto` payment at that cost (The Face of Boe — CR 118.9). The
 /// returned `WaitingFor` falls through
 /// `run_post_action_pipeline` normally, which fires the hit's own cast-triggers
 /// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
@@ -8331,11 +8335,14 @@ pub(super) fn initiate_cast_during_resolution(
         graveyard_replacement,
         cost,
     } = request;
-    // CR 608.2g + CR 609.4b: resolve the payment shape once. `Free` zeroes the
-    // cost and auto-pays (Cascade/Discover/Suspend). `FullCost` charges the
-    // card's live printed cost (`SelfManaCost`) and pauses for manual payment so
-    // the caster can spend mana; the any-type concession, when present, rides the
-    // grant (Quistis Trepe, Tinybones the Pickpocket).
+    // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
+    // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
+    // `FullCost` charges the card's live printed cost (`SelfManaCost`) and
+    // pauses for manual payment so the caster can spend mana; the any-type
+    // concession, when present, rides the grant (Quistis Trepe, Tinybones the
+    // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
+    // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
+    // manual payment at that cost rather than the card's printed cost.
     let (perm_cost, mana_spend_permission, payment_mode) = match cost {
         crate::types::ability::ResolutionCastCost::Free => {
             (ManaCost::zero(), None, CastPaymentMode::Auto)
@@ -8349,6 +8356,15 @@ pub(super) fn initiate_cast_during_resolution(
             mana_spend_permission,
             CastPaymentMode::Manual,
         ),
+        // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
+        // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
+        // directly — not `SelfManaCost` — so the permission carries the exact
+        // keyword cost. `Auto` payment drains the pool for the keyword cost
+        // automatically during resolution, matching Suspend's last-counter cast
+        // semantics (the triggering player's pool already has the mana).
+        crate::types::ability::ResolutionCastCost::AlternativeMana { cost: alt_cost } => {
+            (alt_cost, None, CastPaymentMode::Auto)
+        }
     };
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
