@@ -167,24 +167,16 @@ describe("CommanderDamage", () => {
   });
 
   it("uses shortened commander names in compact mode", () => {
-    const myCmd = buildCommanderGameObject({
+    const myCmd = commanderObject({
       id: 101,
       owner: 0,
       controller: 0,
       name: "Otrimi, the Ever-Playful",
     });
     useGameStore.setState({
-      gameState: buildGameState({
-        players: [
-          buildPlayer({ id: 0, life: 40 }),
-          buildPlayer({ id: 1, life: 40 }),
-        ],
-        objects: buildObjectMap(myCmd),
-        next_object_id: 1000,
-        next_timestamp: 2,
-        format_config: buildCommanderFormatConfig(),
+      gameState: baseGameState({
+        objects: { [myCmd.id]: myCmd },
         command_zone: [myCmd.id],
-        commander_damage: [],
         derived: {
           commander_damage_by_attacker: {
             "0": [{ victim: 1, commander: myCmd.id, damage: 7 }],
