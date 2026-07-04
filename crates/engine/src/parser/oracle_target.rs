@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{opt, peek, success, value};
+use nom::combinator::{eof, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::Parser;
 
@@ -25,7 +25,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_nom::error::OracleError;
+use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -3870,27 +3870,8 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed_outer);
 
-    // CR 506.5: "attacking alone" is a combat status distinct from merely
-    // attacking a particular defender; runtime evaluation already lives on
-    // FilterProp::AttackingAlone.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("attacking alone").parse(trimmed) {
-        let rest_trim = rest.trim_start();
-        if alt((
-            tag::<_, _, OracleError<'_>>("if "),
-            tag::<_, _, OracleError<'_>>("unless "),
-            tag::<_, _, OracleError<'_>>("and/or "),
-            tag::<_, _, OracleError<'_>>("or "),
-        ))
-        .parse(rest_trim)
-        .is_err()
-        {
-            match rest.chars().next() {
-                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
-                    return Some((FilterProp::AttackingAlone, text.len() - rest.len()));
-                }
-                _ => {}
-            }
-        }
+    if let Ok((rest, prop)) = parse_attacking_alone_suffix_status(trimmed) {
+        return Some((prop, text.len() - rest.len()));
     }
 
     for (pattern, defender) in [
@@ -3947,6 +3928,34 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         }
     }
     None
+}
+
+/// CR 506.5: "attacking alone" is a combat status distinct from merely
+/// attacking a particular defender; runtime evaluation already lives on
+/// FilterProp::AttackingAlone.
+fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = (tag("attacking"), space1, tag("alone")).parse(input)?;
+    let (_, _) = parse_attacking_status_clause_boundary(input)?;
+    Ok((input, FilterProp::AttackingAlone))
+}
+
+fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
+    let trimmed = input.trim_start();
+    let (_, _) = not(alt((
+        tag::<_, _, OracleError<'_>>("if "),
+        tag("unless "),
+        tag("and/or "),
+        tag("or "),
+    )))
+    .parse(trimmed)?;
+
+    alt((
+        value((), eof),
+        value((), peek(tag::<_, _, OracleError<'_>>("."))),
+        value((), peek(tag(","))),
+        value((), (space1, eof)),
+    ))
+    .parse(input)
 }
 
 /// Parse "with power [or toughness] N or less/greater", "with toughness N or
