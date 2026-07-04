@@ -498,6 +498,15 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
+    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
+    /// an unblocked creature at that time — the precondition for "becomes blocked"
+    /// triggers to fire from an effect-block.
+    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
+    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
+    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    AttackerBecameBlockedByEffect {
+        attacker: ObjectId,
+    },
     /// CR 508.1h + CR 509.1d: The aggregate combat tax was paid; the declaration
     /// proceeds with every declared creature intact.
     CombatTaxPaid {

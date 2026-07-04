@@ -903,6 +903,11 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(target));
             acc
         }
+        Effect::BecomeBlocked { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc
+        }
         Effect::SetClassLevel { level: _ } => Axes::NONE,
         Effect::CreateDelayedTrigger { .. } => Axes::CONSERVATIVE,
         Effect::AddTargetReplacement { .. } => Axes::CONSERVATIVE,
@@ -3367,6 +3372,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::AddTargetReplacement { .. }

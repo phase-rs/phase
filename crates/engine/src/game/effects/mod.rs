@@ -38,6 +38,7 @@ pub mod animate;
 pub mod attach;
 pub mod attractions;
 pub mod awaken;
+pub mod become_blocked;
 pub mod become_copy;
 pub mod become_monarch;
 pub mod blight;
@@ -3089,6 +3090,9 @@ pub fn resolve_effect(
             prepare::resolve_become_unprepared(state, ability, events)
         }
         Effect::BecomeSaddled { .. } => saddle::resolve(state, ability, events),
+        Effect::BecomeBlocked { .. } => {
+            become_blocked::resolve_become_blocked(state, ability, events)
+        }
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::AddTargetReplacement { .. } => {

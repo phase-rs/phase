@@ -900,6 +900,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::BlockersDeclared { .. }
+        // Mirrors BlockersDeclared: the "becomes blocked" trigger uses the
+        // dedicated matcher, not this generic per-object count helper.
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
         | GameEvent::VehicleCrewed { .. }
@@ -3265,6 +3268,25 @@ pub(super) fn matching_becomes_blocked_events(
     source_id: ObjectId,
     state: &GameState,
 ) -> Vec<GameEvent> {
+    if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
+        // CR 509.3d: an effect-driven block is NOT "blocked by a creature" — the
+        // "becomes blocked by a creature" form (which carries a `valid_target`
+        // blocker filter) must NOT fire. Only the bare "becomes blocked" form
+        // (CR 509.3c) fires, and only for the matching attacker.
+        if trigger.valid_target.is_some() {
+            return Vec::new();
+        }
+        let attacker_matches = if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *attacker, source_id)
+        } else {
+            *attacker == source_id
+        };
+        return if attacker_matches {
+            vec![event.clone()]
+        } else {
+            Vec::new()
+        };
+    }
     if let GameEvent::BlockersDeclared { assignments } = event {
         // CR 509.3d: the "becomes blocked by a creature [with quality]" form
         // (carries a `valid_target` blocker filter) triggers once for each
@@ -4550,6 +4572,60 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn effect_block_fires_becomes_blocked_but_not_block_side_matchers() {
+        // CR 509.3c: a bare "whenever ~ becomes blocked" trigger (valid_target =
+        // None) fires from an effect-block for the matching attacker.
+        // CR 509.3d: the blocker-side matchers (`matching_block_events`,
+        // `match_blockers_declared`) must ignore the effect-block event entirely —
+        // they concrete-match `BlockersDeclared`. These assertions fail if a
+        // synthetic `BlockersDeclared` were reintroduced for effect-blocks.
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Effect-Blocked Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::AttackerBecameBlockedByEffect { attacker };
+
+        // Positive (CR 509.3c): the bare becomes-blocked matcher fires, source == attacker.
+        let bare = make_trigger(TriggerMode::BecomesBlocked);
+        let fired = matching_becomes_blocked_events(&event, &bare, attacker, &state);
+        assert_eq!(fired.len(), 1, "bare becomes-blocked fires on effect-block");
+
+        // CR 509.3d: the "by a creature" form (valid_target set) must NOT fire.
+        let mut by_creature = make_trigger(TriggerMode::BecomesBlocked);
+        by_creature.valid_target = Some(TargetFilter::Any);
+        assert!(
+            matching_becomes_blocked_events(&event, &by_creature, attacker, &state).is_empty(),
+            "becomes-blocked-BY-A-CREATURE must not fire on an effect-block (CR 509.3d)"
+        );
+
+        // CR 509.3d: blocker-side matchers ignore the effect-block event.
+        let blocks = make_trigger(TriggerMode::Blocks);
+        assert!(
+            matching_block_events(&event, &blocks, attacker, &state).is_empty(),
+            "block-side matcher must ignore the effect-block event (CR 509.3d)"
+        );
+        assert!(
+            !match_blockers_declared(&event, &blocks, attacker, &state),
+            "match_blockers_declared must ignore the effect-block event (CR 509.3d)"
+        );
+
+        // Reach-guard: match_blockers_declared DOES fire on a real BlockersDeclared,
+        // proving the negative above is not vacuous.
+        assert!(match_blockers_declared(
+            &GameEvent::BlockersDeclared {
+                assignments: vec![(attacker, attacker)],
+            },
+            &blocks,
+            attacker,
+            &state,
+        ));
     }
 
     /// CR 702.143c: an effect-driven `BecameForetold` is NOT the foretell
