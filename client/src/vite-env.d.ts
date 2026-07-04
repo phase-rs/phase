@@ -24,6 +24,7 @@ declare const __PREVIEW_SITE_URL__: string;
 declare const __IS_RELEASE_BUILD__: boolean;
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_ANON_KEY__: string;
+declare const __TELEMETRY_URL__: string;
 
 // Fontsource packages ship only side-effect CSS (no type declarations); Vite
 // resolves the import at build time, but tsc needs an ambient module.
