@@ -2632,6 +2632,11 @@ pub(crate) fn parse_oracle_ir(
         // zero parsed abilities for these cards.
         let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
         let raw_line: &str = reminder_body_owned.as_deref().unwrap_or(raw_line);
+        let activation_timing_parenthetical_owned =
+            preserve_activation_timing_parenthetical(raw_line);
+        let raw_line: &str = activation_timing_parenthetical_owned
+            .as_deref()
+            .unwrap_or(raw_line);
 
         let line = strip_reminder_text(raw_line);
         let ability_cant_be_copied = x_annotation_marks_ability_uncopyable(&line);
@@ -5245,6 +5250,13 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         ),
         value(ActivationRestriction::AsInstant, tag("as an instant")),
         value(
+            opponents_turn_activation_restriction(),
+            alt((
+                tag("during an opponent's turn"),
+                tag("during an opponents turn"),
+            )),
+        ),
+        value(
             ActivationRestriction::DuringYourTurn,
             alt((tag("during your turn"), tag("during their turn"))),
         ),
@@ -5268,6 +5280,67 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }]);
     }
     None
+}
+
+// CR 602.1b: Activation instructions after the colon restrict when an ability
+// can be activated and are not part of the ability's effect.
+// CR 304.5 / CR 307.5: "Only as an instant" and "only as a sorcery" define
+// the priority and timing permissions for activating the ability.
+fn parse_activation_speed_parenthetical_body(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let lower = phrase.to_lowercase();
+    let (_, rest_original) = nom_on_lower(phrase, &lower, |i| {
+        value((), tag("activate only ")).parse(i)
+    })?;
+    let restrictions = parse_activation_timing_restriction(rest_original)?;
+    restrictions
+        .iter()
+        .all(|restriction| {
+            matches!(
+                restriction,
+                ActivationRestriction::AsInstant | ActivationRestriction::AsSorcery
+            )
+        })
+        .then_some(restrictions)
+}
+
+// CR 602.1b: A parenthesized speed instruction after an activated ability is
+// still an activation restriction, so keep it visible before reminder stripping.
+fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
+    let lower = raw_line.to_lowercase();
+    let (_, parenthetical_original) = nom_on_lower(raw_line, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>(" (activate only ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" (").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = raw_line.len() - parenthetical_original.len() - " (".len();
+    let prefix = raw_line[..prefix_len].trim_end();
+
+    let Ok((tail, inner_original)) = terminated(take_until::<_, _, OracleError<'_>>(")"), tag(")"))
+        .parse(parenthetical_original)
+    else {
+        return None;
+    };
+    if !tail.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let timing_text = inner_original.trim().trim_end_matches('.').trim();
+    parse_activation_speed_parenthetical_body(timing_text)?;
+    Some(format!("{prefix} {timing_text}."))
+}
+
+fn opponents_turn_activation_restriction() -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(opponents_turn_activation_condition()),
+    }
+}
+
+/// CR 602.5b + CR 102.1 + CR 109.5: "Activate only during an opponent's turn"
+/// gates activation to turns where the activator is not the active player.
+fn opponents_turn_activation_condition() -> ParsedCondition {
+    ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::IsYourTurn),
+    }
 }
 
 pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
@@ -5352,6 +5425,17 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
+        if let Some((before, restrictions)) = split_legacy_play_this_ability_timing(&remaining) {
+            remaining = before
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.restrictions.extend(restrictions);
+            if remaining.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         const OPPONENTS_ACTIVATE_SUFFIX: &str = "only your opponents may activate this ability";
         if lower.ends_with(OPPONENTS_ACTIVATE_SUFFIX) {
             let end = remaining.len() - OPPONENTS_ACTIVATE_SUFFIX.len();
@@ -5387,66 +5471,28 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        // CR 602.5b + CR 602.5c: "<timing> and only once [each turn]" pairings are
-        // NOT enumerated here. `peel_only_once_rider` (below) strips the limit
-        // rider and re-enters this loop so the bare "activate only <timing>" arm
-        // matches on the next pass — one composed suffix axis for the limit, one
-        // for the timing, rather than a hardcoded timing × limit table.
-
-        if let Some(prefix) = lower.strip_suffix("activate only as a sorcery") {
-            let end = remaining.len() - "activate only as a sorcery".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::AsSorcery);
-            if prefix.trim().is_empty() {
-                break;
+        // CR 602.5b: Delegate bare "Activate only <timing>" phrases to the same
+        // timing parser used by the "Any player may activate ... but only"
+        // composition path. The condition-only form stays on its specialized
+        // branch below so the once-per-turn rider is stripped before condition
+        // parsing.
+        if let Some((before, restriction)) = tp.rsplit_around("activate only ") {
+            if tag::<_, _, OracleError<'_>>("if ")
+                .parse(restriction.lower.trim_start())
+                .is_err()
+            {
+                if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
+                    constraints.restrictions.extend(parsed);
+                    remaining = before
+                        .original
+                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                        .to_string();
+                    if remaining.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
             }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only as an instant") {
-            let end = remaining.len() - "activate only as an instant".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::AsInstant);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only during your turn") {
-            let end = remaining.len() - "activate only during your turn".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourTurn);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
-
-        if let Some(prefix) = lower.strip_suffix("activate only during your upkeep") {
-            let end = remaining.len() - "activate only during your upkeep".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourUpkeep);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
         }
 
         if let Some(prefix) = lower.strip_suffix("activate only during combat") {
@@ -5662,6 +5708,35 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     }
 
     (remaining, constraints)
+}
+
+// CR 602.1d: Older cards referred to activating an activated ability as
+// "playing" that ability.
+// CR 602.1b + CR 307.5: "Play this ability as a sorcery" is a trailing
+// activation instruction, not part of the ability's effect.
+fn split_legacy_play_this_ability_timing(text: &str) -> Option<(&str, Vec<ActivationRestriction>)> {
+    let lower = text.to_lowercase();
+    let (_, restriction_original) = nom_on_lower(text, &lower, |i| {
+        let (i, before) = take_until::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        if !is_empty_or_sentence_boundary(before) {
+            return Err(nom::Err::Error(OracleError::new(
+                before,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+        let (i, _) = tag::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = text.len() - restriction_original.len() - "play this ability ".len();
+    let restrictions = parse_activation_timing_restriction(restriction_original)?;
+    Some((&text[..prefix_len], restrictions))
+}
+
+fn is_empty_or_sentence_boundary(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .next_back()
+        .is_none_or(|ch| ch == '.')
 }
 
 /// CR 602.5b: Recognize a standalone `"Activate only once each turn"` cadence

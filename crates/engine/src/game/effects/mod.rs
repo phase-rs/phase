@@ -3264,6 +3264,18 @@ pub fn resolve_effect(
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
+            // Diagnostics: record the source card so the telemetry `game_summary`
+            // surface can report which cards hit an unimplemented effect this game.
+            // Oracle id when available; object name fallback covers tokens/emblems
+            // (`printed_ref == None`).
+            if let Some(obj) = state.objects.get(&ability.source_id) {
+                let id = obj
+                    .printed_ref
+                    .as_ref()
+                    .map(|p| p.oracle_id.clone())
+                    .unwrap_or_else(|| obj.name.clone());
+                state.unimplemented_oracle_ids.insert(id);
+            }
             Ok(())
         }
     }
@@ -9112,6 +9124,62 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve_effect(&mut state, &ability, &mut events);
         assert!(result.is_ok());
+    }
+
+    /// Telemetry `game_summary` surface: resolving an `Effect::Unimplemented`
+    /// records the source card's oracle id in `unimplemented_oracle_ids`
+    /// (name fallback for tokens/emblems with no `printed_ref`), and dedups on
+    /// repeated resolution. Diagnostics plumbing only — no rules behavior.
+    #[test]
+    fn unimplemented_effect_records_source_in_game_summary() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card object with a printed oracle id.
+        let mut card = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Fancy Card".to_string(),
+            Zone::Stack,
+        );
+        card.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "oracle-abc-123".to_string(),
+            face_name: "Fancy Card".to_string(),
+        });
+        state.objects.insert(ObjectId(7), card);
+
+        // Token object with no printed_ref — must fall back to the name.
+        let token = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(0),
+            PlayerId(0),
+            "Goblin Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(8), token);
+
+        let unimplemented = |source: ObjectId| {
+            ResolvedAbility::new(
+                Effect::unimplemented("SomeEffect", "some fragment"),
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let mut events = Vec::new();
+
+        // Oracle-id path: resolves and records the oracle id.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("oracle-abc-123"));
+
+        // Dedup: a second resolution of the same source adds no new entry.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert_eq!(state.unimplemented_oracle_ids.len(), 1);
+
+        // Name-fallback path: a token with no printed_ref records its name.
+        resolve_effect(&mut state, &unimplemented(ObjectId(8)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("Goblin Token"));
+        assert_eq!(state.unimplemented_oracle_ids.len(), 2);
     }
 
     fn optional_gain_life(

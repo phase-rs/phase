@@ -12,7 +12,10 @@ import type { CardSearchFilters } from "./CardSearch";
  */
 export function hasSearchCriteria(filters: CardSearchFilters): boolean {
   return Boolean(
-    filters.text
+    // `text` is the raw, untrimmed input box value, so a whitespace-only query
+    // ("   ") is not real criteria — trim before testing, or it would trip the
+    // search trigger + deck-vs-results canvas swap for an effectively empty query.
+    filters.text.trim()
       || filters.colors.length > 0
       || filters.type
       || filters.cmcMax !== undefined

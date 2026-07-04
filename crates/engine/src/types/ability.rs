@@ -4027,6 +4027,10 @@ pub enum TargetFilter {
     /// Gladiator) checks only the creature this trigger's damage went to.
     /// Resolved via `extract_target_object_from_event` against
     /// `state.current_trigger_event`; matches no object outside a trigger.
+    /// DealDamage has a narrow CR 115.10a / CR 120.3 exception for "that
+    /// permanent or player": its resolver reads the raw `DamageDealt.target`,
+    /// which may be `TargetRef::Player`. Generic filter, targeting, and
+    /// quantity paths remain object-only.
     EventTarget,
     /// CR 603.7c + CR 109.4 + CR 110.2: Resolves to the *controller* of the
     /// triggering event's source object — the player-level counterpart of
@@ -12082,6 +12086,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSpellOwner
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
+                | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
                 // continuations bind to objects created earlier in the same

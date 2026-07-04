@@ -18,6 +18,16 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
     obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
 }
 
+/// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
+/// the battlefield ceases to exist as a state-based action. Distinct from the
+/// token rule (CR 704.5d): a copy of a card is legal on the battlefield
+/// (CR 707.10f makes a permanent copy a token there) and may change zones freely
+/// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
+/// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
+pub(super) fn copy_of_card_outside_battlefield_and_stack(obj: &GameObject) -> bool {
+    obj.is_copy && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+}
+
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
 /// into the `to` zone. The default (CR 122.2) is that counters cease to exist on
 /// any zone change. A `StaticMode::CountersPersistAcrossZones` ability overrides

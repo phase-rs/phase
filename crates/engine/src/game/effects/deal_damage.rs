@@ -1139,12 +1139,23 @@ pub fn resolve(
     //
     // Other implicit-target filters (`Controller`) keep the pre-existing
     // "fall back when targets are empty" semantic.
-    let effective_targets = resolve_effect_recipients(
-        state,
-        ability,
-        target_filter,
-        matches!(damage_source, Some(DamageSource::Target)),
-    );
+    let effective_targets = if matches!(target_filter, TargetFilter::EventTarget) {
+        // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
+        // uses the exact object or player recipient carried by the triggering
+        // DamageDealt event. This is intentionally DealDamage-local; generic
+        // EventTarget filter resolution remains object-only.
+        match state.current_trigger_event.as_ref() {
+            Some(GameEvent::DamageDealt { target, .. }) => vec![target.clone()],
+            _ => Vec::new(),
+        }
+    } else {
+        resolve_effect_recipients(
+            state,
+            ability,
+            target_filter,
+            matches!(damage_source, Some(DamageSource::Target)),
+        )
+    };
 
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.

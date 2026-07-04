@@ -15,7 +15,9 @@ use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
-use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use crate::parser::oracle_quantity::{
+    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
@@ -1186,6 +1188,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 111.1 + CR 707.2: "for each <object>, create a token that's a copy
+    // of it" is one copy-token instruction. The comma separates the object-set
+    // head from the token body, not two independent clauses.
+    if is_for_each_copy_token_continuation(&current_lower, trimmed, &trimmed_lower) {
+        return None;
+    }
+
     if tag::<_, _, OracleError<'_>>("then ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -1295,6 +1304,42 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+fn is_for_each_copy_token_continuation(
+    current_lower: &str,
+    next_text: &str,
+    next_lower: &str,
+) -> bool {
+    let current = strip_sequence_connector_lower(current_lower);
+    let Ok((object_clause, _)) = tag::<_, _, OracleError<'_>>("for each ").parse(current) else {
+        return false;
+    };
+    if parse_for_each_object_filter_clause(object_clause.trim()).is_none() {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    matches!(
+        super::token::try_parse_token(next_lower, next_text, &mut ctx),
+        Some(Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource,
+            ..
+        })
+    )
+}
+
+fn strip_sequence_connector_lower(input: &str) -> &str {
+    let trimmed = input.trim();
+    alt((
+        tag::<_, _, OracleError<'_>>("then, "),
+        tag::<_, _, OracleError<'_>>("then "),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `

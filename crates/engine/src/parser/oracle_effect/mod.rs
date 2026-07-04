@@ -21,9 +21,10 @@ pub(crate) use lower::{
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
     apply_where_x_to_filter, extract_bounded_target_multi_target,
-    extract_exact_target_multi_target, parse_dynamic_counter_suffix_body,
-    parse_multi_target_count_expr, parse_where_x_quantity_expression, strip_exact_target_prefix,
-    strip_optional_target_prefix, try_parse_pump,
+    extract_exact_target_multi_target, extract_optional_target_multi_target,
+    parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
+    parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
+    try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -73,7 +74,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
-    parse_for_each_object_filter_clause,
+    parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_target, parse_target_with_ctx,
@@ -5106,6 +5107,14 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             unless_pay_deferred,
         );
     }
+    let original_lower = text.to_lowercase();
+    if let Some(mut clause) = try_parse_for_each_copy_token_source(text, &original_lower, ctx) {
+        peel_ctx.apply_optional(&mut clause.optional);
+        if clause.condition.is_none() {
+            clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
+        }
+        return attach_unless_slots(clause, None, unless_pay_deferred);
+    }
     if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
@@ -5113,7 +5122,6 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         }
         return attach_unless_slots(clause, None, unless_pay_deferred);
     }
-    let original_lower = text.to_lowercase();
     if scan_contains_phrase(&original_lower, "this turn")
         || scan_contains_phrase(&original_lower, "until ")
         || scan_contains_phrase(&original_lower, "remain exiled")
@@ -5178,23 +5186,18 @@ fn try_parse_for_each_copy_token_source(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    let (source_filter, body) = parse_for_each_object_copy_parts(text, lower)?;
-    let body_lower = body.to_lowercase();
+    let (source_filter, body_effect) = parse_for_each_object_copy_parts(text, lower, ctx)?;
     let Effect::CopyTokenOf {
-        target,
         enters_attacking,
         tapped,
         count,
         extra_keywords,
         additional_modifications,
         ..
-    } = token::try_parse_token(&body_lower, body, ctx)?
+    } = body_effect
     else {
         return None;
     };
-    if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
-        return None;
-    }
     Some(parsed_clause(Effect::CopyTokenOf {
         target: TargetFilter::None,
         owner: TargetFilter::Controller,
@@ -5369,39 +5372,54 @@ fn try_parse_choose_and_pay_per_object(
     Some(clause)
 }
 
-fn parse_for_each_object_copy_parts<'a>(
-    text: &'a str,
+fn parse_for_each_object_copy_parts(
+    text: &str,
     lower: &str,
-) -> Option<(TargetFilter, &'a str)> {
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, Effect)> {
+    let text = strip_leading_sequence_connector(text).trim();
+    let lower = strip_leading_sequence_connector(lower).trim();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("for each ")
         .parse(lower)
         .ok()?;
     let clause_start = lower.len() - after_prefix.len();
-    let (after_clause, clause_lower) = take_until::<_, _, OracleError<'_>>(", ")
-        .parse(after_prefix)
-        .ok()?;
-    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
-        .parse(after_clause)
-        .ok()?;
-    if !is_copy_token_anaphor_body(body_lower.trim()) {
-        return None;
-    }
-    let clause = &lower[clause_start..clause_start + clause_lower.len()];
-    let source_filter = parse_for_each_object_filter_clause(clause)?;
-    let body_start = text.len() - body_lower.len();
-    Some((source_filter, text[body_start..].trim()))
-}
+    let mut search_lower = after_prefix;
+    let mut search_offset = 0usize;
 
-fn is_copy_token_anaphor_body(input: &str) -> bool {
-    let parsed = |i| -> OracleResult<'_, ()> {
-        let (i, _) = token::parse_copy_token_entry_modifiers(i)?;
-        let i = i.trim_start();
-        let (i, _) = tag("it").parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    parsed(input).is_ok()
+    loop {
+        let (body_lower, clause_lower) =
+            terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", "))
+                .parse(search_lower)
+                .ok()?;
+        let clause_end = clause_start + search_offset + clause_lower.len();
+        let clause = &lower[clause_start..clause_end];
+        let body_start = text.len() - body_lower.len();
+        let body = text[body_start..].trim();
+        let candidate_ctx = ctx.clone();
+
+        if let Some(source_filter) =
+            parse_for_each_object_filter_clause_with_context(clause, &candidate_ctx)
+        {
+            let mut body_ctx = candidate_ctx.clone();
+            if let Some(effect) = token::try_parse_token(body_lower, body, &mut body_ctx) {
+                if matches!(
+                    &effect,
+                    Effect::CopyTokenOf {
+                        target: TargetFilter::ParentTarget
+                            | TargetFilter::SelfRef
+                            | TargetFilter::TriggeringSource,
+                        ..
+                    }
+                ) {
+                    *ctx = candidate_ctx;
+                    return Some((source_filter, effect));
+                }
+            }
+        }
+
+        search_offset = after_prefix.len() - body_lower.len();
+        search_lower = body_lower;
+    }
 }
 
 /// CR 608.2c + CR 109.4: "Choose a [second|third|...] player to <verb>" —
@@ -7066,6 +7084,37 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
     }
 
     let lower = tp.lower;
+
+    // Explicit target form: "Target creature perpetually gets -2/-0."
+    // `parse_target` owns the target/filter grammar; this arm only recognizes the
+    // perpetual P/T tail and rejects compound grants so mixed forms stay honest.
+    if peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(lower)
+        .is_ok()
+    {
+        let (target, after_target) = parse_target(lower);
+        if !matches!(target, TargetFilter::Any) {
+            let (rest, _) = space1::<_, OracleError<'_>>(after_target).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(rest)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            let (rest, (power_delta, toughness_delta)) =
+                nom_primitives::parse_pt_modifier(rest).ok()?;
+            return tail_done(rest).then_some(Effect::ApplyPerpetual {
+                target,
+                modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            });
+        }
+    }
 
     // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
@@ -11683,7 +11732,8 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
     {
         clause.multi_target = extract_exact_target_multi_target(text)
-            .or_else(|| extract_bounded_target_multi_target(text));
+            .or_else(|| extract_bounded_target_multi_target(text))
+            .or_else(|| extract_optional_target_multi_target(text));
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
@@ -22909,6 +22959,11 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
+            // trigger context so non-target event anaphors ("that permanent or
+            // player" on Ghyrson) bind to the triggering event instead of being
+            // reparsed as ordinary target phrases.
+            in_trigger: ctx.in_trigger,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -24665,7 +24720,7 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     }
     // CR 118.12a: "unless [target's controller] has [~] deal N damage to them"
     // (Molten Influence and other counter spells with damage alternatives).
-    if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless) {
+    if let Some((cost, _)) = parse_unless_have_deal_damage_cost(after_unless) {
         return Some(cost);
     }
     // CR 118.12a + CR 121.3a: "unless its controller has you draw a card"
@@ -24807,15 +24862,33 @@ fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
 }
 
 /// CR 118.12a: "unless [that object's|its] controller has [~] deal N damage to
-/// them" (Blazing Salvo, Lava Blister, Molten Influence) — the controller may
-/// take the damage instead of the primary effect.
-fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature's controller has "),
-        tag("its controller has "),
-        tag("that permanent's controller has "),
-        tag("that land's controller has "),
-        tag("that spell's controller has "),
+/// them" (Blazing Salvo, Lava Blister, Molten Influence) or "unless that player
+/// has [~] deal N damage to them" (Skullscorch) — the payer may take the
+/// damage instead of the primary effect.
+fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<(AbilityCost, TargetFilter)> {
+    let (rest, payer) = alt((
+        value(
+            TargetFilter::ParentTargetController,
+            tag::<_, _, OracleError<'_>>("that creature's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("its controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that permanent's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that land's controller has "),
+        ),
+        value(
+            TargetFilter::ParentTargetController,
+            tag("that spell's controller has "),
+        ),
+        value(TargetFilter::Player, tag("that player has ")),
+        value(TargetFilter::Player, tag("that opponent has ")),
     ))
     .parse(after_unless)
     .ok()?;
@@ -24826,14 +24899,17 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
     let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
     parse_deal_damage_to_them_tail(tail)?;
-    Some(AbilityCost::EffectCost {
-        effect: Box::new(Effect::DealDamage {
-            amount,
-            target: TargetFilter::Player,
-            damage_source: None,
-            excess: None,
-        }),
-    })
+    Some((
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::DealDamage {
+                amount,
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            }),
+        },
+        payer,
+    ))
 }
 
 /// CR 118.12a + CR 121.3a: "unless [that object's|its] controller has you draw
@@ -24924,15 +25000,9 @@ fn extract_resolution_unless_pay_modifier(
                 );
             }
         }
-        if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+        if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::ParentTargetController,
-                }),
-            );
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
         if let Some(cost) = parse_unless_have_you_draw_cost(after_unless_lower) {
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();

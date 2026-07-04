@@ -228,5 +228,10 @@
     "settings": "Ustawienia",
     "languageSettings": "Język ({{lang}}) — otwórz ustawienia",
     "languageTitle": "Język: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Coś poszło nie tak",
+    "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
+    "reload": "Załaduj ponownie"
   }
 }
