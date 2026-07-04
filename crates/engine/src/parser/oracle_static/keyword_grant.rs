@@ -29,28 +29,32 @@ pub(crate) enum RuleStaticPredicate {
 
 /// CR 702.34a / CR 702.138a / CR 702.187b / CR 702.97 / CR 702.141: maps the
 /// leading keyword token of a graveyard-cast-keyword grant ("flashback",
-/// "escape", "mayhem", "scavenge", "encore") to its `GraveyardGrantedKeywordKind`.
+/// "escape", "mayhem", "scavenge", "encore") to its `GrantedCastKeywordKind`.
 /// Single authority for the keyword-word → kind dispatch, shared by the static
 /// "each ... has <kw>" clause below and the targeted/imperative grant front door
 /// in `oracle_effect` so both forms recognize the same keyword set.
 pub(crate) fn parse_graveyard_granted_keyword_kind(
     input: &str,
-) -> OracleResult<'_, GraveyardGrantedKeywordKind> {
+) -> OracleResult<'_, GrantedCastKeywordKind> {
     alt((
-        value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
-        value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
-        value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+        value(GrantedCastKeywordKind::Flashback, tag("flashback")),
+        value(GrantedCastKeywordKind::Escape, tag("escape")),
+        value(GrantedCastKeywordKind::Mayhem, tag("mayhem")),
         // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
         // Wire Surgeons (encore) grant activated graveyard keywords.
-        value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
-        value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
+        value(GrantedCastKeywordKind::Scavenge, tag("scavenge")),
+        value(GrantedCastKeywordKind::Encore, tag("encore")),
+        // CR 702.143a / CR 702.94a: Dream Devourer grants foretell, Aminatou
+        // grants miracle — hand-zone cast keywords (gated by `grant_zone`).
+        value(GrantedCastKeywordKind::Foretell, tag("foretell")),
+        value(GrantedCastKeywordKind::Miracle, tag("miracle")),
     ))
     .parse(input)
 }
 
 pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     text: &str,
-) -> Option<(TargetFilter, GraveyardGrantedKeywordKind, String)> {
+) -> Option<(TargetFilter, GrantedCastKeywordKind, String)> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let rest = nom_tag_lower(&stripped, &lower, "each ")?;
@@ -70,7 +74,10 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     .0;
 
     let (filter, remainder) = parse_type_phrase(subject);
-    if !remainder.trim().is_empty() || !target_filter_is_your_graveyard(&filter) {
+    // CR 113.6b: the affected filter's zone must match the keyword's functional
+    // zone (graveyard for flashback/escape/…, hand for foretell/miracle). A
+    // mismatch (foretell-in-graveyard, flashback-in-hand) declines the grant.
+    if !remainder.trim().is_empty() || !target_filter_is_your_zone(&filter, kind.grant_zone()) {
         return None;
     }
 
@@ -83,7 +90,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
 /// arrives in a separate continuation sentence (handled upstream).
 fn parse_graveyard_granted_keyword_phrase(
     keyword_text: &str,
-    kind: GraveyardGrantedKeywordKind,
+    kind: GrantedCastKeywordKind,
 ) -> Option<Keyword> {
     if let Some((keyword, where_x)) = parse_keyword_with_where_x(keyword_text) {
         return normalize_graveyard_granted_keyword(keyword, where_x, kind);
@@ -105,13 +112,15 @@ fn binds_recipient_mana_value(where_x: &Option<QuantityRef>) -> bool {
     )
 }
 
-fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GraveyardGrantedKeywordKind> {
+fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GrantedCastKeywordKind> {
     [
-        GraveyardGrantedKeywordKind::Flashback,
-        GraveyardGrantedKeywordKind::Escape,
-        GraveyardGrantedKeywordKind::Mayhem,
-        GraveyardGrantedKeywordKind::Scavenge,
-        GraveyardGrantedKeywordKind::Encore,
+        GrantedCastKeywordKind::Flashback,
+        GrantedCastKeywordKind::Escape,
+        GrantedCastKeywordKind::Mayhem,
+        GrantedCastKeywordKind::Scavenge,
+        GrantedCastKeywordKind::Encore,
+        GrantedCastKeywordKind::Foretell,
+        GrantedCastKeywordKind::Miracle,
     ]
     .into_iter()
     .find(|kind| kind.matches_keyword(keyword))
@@ -130,7 +139,7 @@ fn finalize_graveyard_zone_grant_keyword(
 fn normalize_graveyard_granted_keyword(
     keyword: Keyword,
     where_x: Option<QuantityRef>,
-    kind: GraveyardGrantedKeywordKind,
+    kind: GrantedCastKeywordKind,
 ) -> Option<Keyword> {
     if !kind.matches_keyword(&keyword) {
         return None;
@@ -1083,6 +1092,43 @@ fn parse_all_land_types_modification(text: &str) -> Option<ContinuousModificatio
     })
 }
 
+/// One characteristic listed in an "its `<X>` is/are the last chosen `<X>`"
+/// clause. Parser-local — maps to the chosen-attribute read modification(s) for
+/// that characteristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastChosenCharacteristic {
+    Name,
+    CreatureType,
+}
+
+/// CR 612.8 + CR 205.1a / CR 613.1d: Parse the SUBJECT list of an "its
+/// `<characteristics>` is/are the last chosen `<characteristics>`" clause
+/// (Psychic Paper: "its name and creature type are the last chosen name and
+/// creature type"). The mandatory `"its "` prefix distinguishes this clause from
+/// the `"it can't be blocked"` restriction anaphor. The subject characteristic
+/// list drives the emitted modifications; the trailing object list ("the last
+/// chosen name and creature type") is the read source and is left unconsumed.
+/// One `alt()` per axis (separator, characteristic) rather than enumerating the
+/// cross-product, per the combinator-composition mandate.
+fn parse_last_chosen_characteristic_list(
+    input: &str,
+) -> OracleResult<'_, Vec<LastChosenCharacteristic>> {
+    preceded(
+        tag("its "),
+        terminated(
+            separated_list1(
+                alt((tag(", and "), tag(" and "), tag(", "))),
+                alt((
+                    value(LastChosenCharacteristic::CreatureType, tag("creature type")),
+                    value(LastChosenCharacteristic::Name, tag("name")),
+                )),
+            ),
+            (alt((tag(" is "), tag(" are "))), tag("the last chosen ")),
+        ),
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -1249,6 +1295,39 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         || nom_primitives::scan_contains(unquoted_lower.as_str(), "are every creature type")
     {
         modifications.push(ContinuousModification::AddAllCreatureTypes);
+    }
+
+    // CR 612.8 (name, Layer 3) + CR 205.1a / CR 613.1d (creature type, Layer 4):
+    // "its <characteristics> is/are the last chosen <characteristics>" — set each
+    // listed characteristic to the granting source's persisted ChosenAttribute
+    // (Psychic Paper). `split_keyword_list` shreds this clause across its commas
+    // and "and"s, so it is recognized HERE on the intact predicate, ahead of the
+    // keyword-list path. It is a distinct clause type (not a restriction, so no
+    // overlap with `parse_restriction_modes`). Built for the class of "its <X> is
+    // the last chosen <X>" equipment-choice readbacks, not the single card.
+    if let Some(characteristics) = nom_primitives::scan_at_word_boundaries(
+        unquoted_lower.as_str(),
+        parse_last_chosen_characteristic_list,
+    ) {
+        for characteristic in characteristics {
+            match characteristic {
+                LastChosenCharacteristic::Name => {
+                    modifications.push(ContinuousModification::SetChosenName);
+                }
+                LastChosenCharacteristic::CreatureType => {
+                    // CR 205.1a + CR 613.1d: setting a creature's creature type
+                    // REPLACES its existing creature subtypes (Layer 4), so remove
+                    // all current creature subtypes before adding the chosen one.
+                    // Emission order is the intra-layer timestamp order (CR 613.7a).
+                    modifications.push(ContinuousModification::RemoveAllSubtypes {
+                        set: SubtypeSet::Creature,
+                    });
+                    modifications.push(ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::CreatureType,
+                    });
+                }
+            }
+        }
     }
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
@@ -1473,6 +1552,21 @@ pub(crate) fn push_grant_clause_modifications(
     let part_trimmed = part.trim().trim_end_matches('.');
     let (part_without_duration, _) = strip_trailing_duration(part_trimmed);
     let part_trimmed = part_without_duration.trim().trim_end_matches('.');
+    let part_lower = part_trimmed.to_lowercase();
+
+    // CR 509.1b: A compound equipped/enchanted-creature grant lists restriction
+    // conjuncts with an anaphoric subject ("…, it can't be blocked, …" — Psychic
+    // Paper). Strip a leading subject-anaphor so the bare predicate reaches the
+    // single restriction authority (`parse_restriction_modes`) already called at
+    // this fn's tail — no second `CantBeBlocked` detector. `tag("it ")` is
+    // word-boundary-safe (it never matches "its …"). Keywords / "can't be the
+    // target" grants never begin with these anaphors, so the strip leaves
+    // `map_keyword` / `classify_cant_be_targeted` unaffected. Mirrors the
+    // anaphor-strip idiom in oracle_static/shared.rs.
+    let part_trimmed = nom_tag_lower(part_trimmed, &part_lower, "it ")
+        .or_else(|| nom_tag_lower(part_trimmed, &part_lower, "this creature "))
+        .or_else(|| nom_tag_lower(part_trimmed, &part_lower, "they "))
+        .unwrap_or(part_trimmed);
     let part_lower = part_trimmed.to_lowercase();
 
     // CR 702: Check for dynamic "keyword X" with "where X is [qty]"

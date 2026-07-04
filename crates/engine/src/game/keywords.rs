@@ -173,6 +173,25 @@ pub fn effective_mayhem_cost(state: &GameState, object_id: ObjectId) -> Option<M
     }
 }
 
+/// CR 702.143a + CR 113.6b: Effective Foretell cost for a card in hand, honoring
+/// off-zone characteristic grants (Dream Devourer's "Each nonland card in your
+/// hand without foretell has foretell. Its foretell cost is equal to its mana
+/// cost reduced by {2}.") in addition to a printed Foretell keyword. Resolves the
+/// placeholder cost (`SelfManaCost` / `SelfManaCostReduced`) against the card's
+/// own printed mana cost via `resolve_keyword_mana_cost`, mirroring
+/// `effective_mayhem_cost`.
+pub fn effective_foretell_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    // CR 702.143a + CR 113.6b: single authority (mirrors effective_mayhem/harmonize/
+    // sneak). effective_keyword_for_object routes battlefield->obj.keywords, else->the
+    // off-zone layer (base_keywords + off-zone Add/Remove), so an off-zone
+    // RemoveKeyword(Foretell)/RemoveAllAbilities correctly strips a PRINTED foretell.
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Foretell)?;
+    match keyword {
+        Keyword::Foretell(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 /// CR 702.180a: Effective Harmonize alt-cost for a card in the graveyard,
 /// honoring off-zone keyword grants (e.g. Songcrafter Mage's "target instant or
 /// sorcery card in your graveyard gains harmonize until end of turn. Its
@@ -263,7 +282,19 @@ fn effective_keyword_for_object(
     crate::game::off_zone_characteristics::effective_off_zone_keyword(state, object_id, kind)
 }
 
-fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &ManaCost) -> ManaCost {
+/// CR 601.2f + CR 118.9c: Single authority for concretizing a granted keyword's
+/// placeholder mana cost against the recipient object's own printed mana cost.
+/// `SelfManaCost` → the card's mana cost; `SelfManaValue` → that mana value as
+/// generic; `SelfManaCostReduced { reduction }` → the card's mana cost with the
+/// generic component reduced (floors at {0}, colored pips untouched). Every seam
+/// that stamps a granted keyword's payable cost (foretell exile, miracle offer,
+/// miracle cast substitution, activated-ability synthesis) routes through here so
+/// no unresolved placeholder reaches the mana payment path.
+pub(crate) fn resolve_keyword_mana_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> ManaCost {
     match cost {
         ManaCost::SelfManaCost => state
             .objects
@@ -276,6 +307,13 @@ fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &Mana
             .objects
             .get(&object_id)
             .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
+            .unwrap_or(ManaCost::NoCost),
+        // CR 601.2f: "its mana cost reduced by {N}" (Dream Devourer foretell,
+        // Aminatou miracle) — reduce only the generic component, floor at {0}.
+        ManaCost::SelfManaCostReduced { reduction } => state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.mana_cost.reduced_by_generic(*reduction))
             .unwrap_or(ManaCost::NoCost),
         _ => cost.clone(),
     }

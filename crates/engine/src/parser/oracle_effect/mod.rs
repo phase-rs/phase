@@ -3406,6 +3406,7 @@ fn parse_unless_player_have_deal_damage_cost(after_unless: &str) -> Option<Abili
             amount,
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }),
     })
 }
@@ -4557,6 +4558,7 @@ fn try_parse_have_causative(
                             amount,
                             target,
                             damage_source: None,
+                            excess: None,
                         }));
                     }
                 }
@@ -4565,6 +4567,7 @@ fn try_parse_have_causative(
                         amount,
                         target: TargetFilter::Player,
                         damage_source: None,
+                        excess: None,
                     }));
                 }
                 // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
@@ -4575,6 +4578,7 @@ fn try_parse_have_causative(
                         amount,
                         target: TargetFilter::ParentTarget,
                         damage_source: None,
+                        excess: None,
                     }));
                 }
             }
@@ -9951,7 +9955,7 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
     )?;
     if !matches!(
         keyword_kind,
-        crate::parser::oracle_static::GraveyardGrantedKeywordKind::Escape
+        crate::parser::oracle_static::GrantedCastKeywordKind::Escape
     ) {
         return None;
     }
@@ -10414,10 +10418,15 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 amount,
                 target,
                 damage_source,
+                excess,
             } => Effect::DealDamage {
                 amount: replace_fixed_quantity(amount, quantity.clone()),
                 target,
                 damage_source,
+                // CR 120.4a: preserve the excess-redirect rider when the fixed
+                // amount is replaced by a for-each quantity (e.g. Gandalf's
+                // Sanction's X). Dropping it here would silently lose the redirect.
+                excess,
             },
             Effect::DamageEachPlayer {
                 amount,
@@ -13238,6 +13247,7 @@ fn parse_bare_damage_continuation<'a>(
                 amount,
                 target: TargetFilter::ParentTarget,
                 damage_source: None,
+                excess: None,
             },
             "",
         ));
@@ -13250,6 +13260,7 @@ fn parse_bare_damage_continuation<'a>(
             amount,
             target,
             damage_source: None,
+            excess: None,
         },
         rem,
     ))
@@ -16486,6 +16497,27 @@ fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
     }
 }
 
+fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(tf)
+            if !tf
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })) =>
+        {
+            tf.properties.push(FilterProp::InZone { zone: Zone::Exile });
+        }
+        TargetFilter::Typed(_) => {}
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for inner in filters {
+                ensure_exile_zone_on_cast_target(inner);
+            }
+        }
+        TargetFilter::Not { filter } => ensure_exile_zone_on_cast_target(filter),
+        _ => {}
+    }
+}
+
 /// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
 /// (card|cards) exiled this way"` anchor and lift its optional typed leg
 /// into a `TargetFilter`.
@@ -16517,7 +16549,7 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
 
     // Try disjunctive typed leg first ("instant or sorcery cards"); fall
     // back to parse_type_phrase ("nonland cards", "creature cards").
-    let typed_filter = parse_cast_type_disjunction(after_article)
+    let mut typed_filter = parse_cast_type_disjunction(after_article)
         .map(TargetFilter::Typed)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
 
@@ -16531,9 +16563,11 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
 
     Some(if !meaningful {
         TargetFilter::ExiledBySource
-    } else if typed_filter.references_exiled_by_source() {
-        typed_filter.normalized()
     } else {
+        ensure_exile_zone_on_cast_target(&mut typed_filter);
+        if typed_filter.references_exiled_by_source() {
+            return Some(typed_filter.normalized());
+        }
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
@@ -17035,14 +17069,13 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     // anywhere in `rest` (post-"cast " prefix) is structurally diagnostic of
     // the per-resolution exile-set anaphor.
     if scan_contains_phrase(rest, "from among those nonland cards") {
+        let mut nonland_card_filter = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        );
+        ensure_exile_zone_on_cast_target(&mut nonland_card_filter);
         return Some(Effect::CastFromZone {
             target: TargetFilter::And {
-                filters: vec![
-                    TargetFilter::ExiledBySource,
-                    TargetFilter::Typed(
-                        TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
-                    ),
-                ],
+                filters: vec![TargetFilter::ExiledBySource, nonland_card_filter],
             },
             without_paying_mana_cost: without_paying,
             mode,
@@ -20316,6 +20349,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir);
     sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
+    fold_additional_combat_attacker_restriction(&mut def);
     def
 }
 
@@ -20352,6 +20386,7 @@ pub(crate) fn parse_effect_chain_with_context(
     let mut def = lower_effect_chain_ir(&ir);
     sequence::patch_reveal_until_for_library_category_exile(&mut def);
     fold_speed_floor_sentences(&mut def);
+    fold_additional_combat_attacker_restriction(&mut def);
     def
 }
 
@@ -20547,6 +20582,91 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
         },
     )));
     Some(def)
+}
+
+/// CR 508.1c + CR 611.2c: Parse "only X can attack during that combat phase"
+/// (Last Night Together, Bumi) → the `TargetFilter` describing the permitted
+/// attackers. The subject (`X`) is delegated to the shared typed-target
+/// combinator `parse_target_with_ctx`, so "the chosen creatures"
+/// (`ParentTarget`), "those creatures" (`TrackedSet`), and "<type> creature(s)"
+/// (`Typed`, e.g. Bumi's "land creatures") all resolve without re-implementing
+/// subject parsing. Only enforceable subjects are accepted; any other filter
+/// returns `None`, leaving the clause as `Unimplemented` (a documented
+/// strict-failure — never a silent misparse).
+fn parse_only_can_attack_restriction(text: &str) -> Option<TargetFilter> {
+    // allow-noncombinator: structural trailing-period cleanup on a whole
+    // description string before combinator parsing (PATTERNS.md §9).
+    let text = text.trim().trim_end_matches('.').trim();
+    let lower = text.to_lowercase();
+    // Strip the leading "only " quantifier (description is capitalized "Only").
+    let ((), after_only) = nom_on_lower(text, &lower, |i| value((), tag("only ")).parse(i))?;
+    // Delegate the subject phrase to the shared typed-target combinator.
+    let mut ctx = ParseContext::default();
+    let (filter, after_subject) = parse_target_with_ctx(after_only, &mut ctx);
+    // Require the exact trailing clause on the remainder.
+    let after_subject = after_subject.trim_start();
+    let after_lower = after_subject.to_lowercase();
+    let ((), rest) = nom_on_lower(after_subject, &after_lower, |i| {
+        value((), tag("can attack during that combat phase")).parse(i)
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // CR 508.1c: accept only subjects the combat enforcement path can evaluate.
+    match filter {
+        TargetFilter::ParentTarget
+        | TargetFilter::Typed(_)
+        | TargetFilter::SelfRef
+        | TargetFilter::TrackedSet { .. } => Some(filter),
+        _ => None,
+    }
+}
+
+/// CR 508.1c + CR 611.2c: Fold a trailing "Only X can attack during that combat
+/// phase" sub-ability sentence into the preceding `AdditionalPhase` effect's
+/// `attacker_restriction` field, then delete the now-redundant `Unimplemented`
+/// node. Mirrors [`fold_speed_floor_sentences`]: the restriction sentence parses
+/// as its own `Effect::unimplemented("only", …)` sub-ability; leaving it
+/// would surface a spurious unimplemented gap (Last Night Together).
+pub(crate) fn fold_additional_combat_attacker_restriction(def: &mut AbilityDefinition) {
+    let mut cursor: &mut AbilityDefinition = def;
+    loop {
+        let folded = match (&*cursor.effect, &cursor.sub_ability) {
+            (
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    attacker_restriction: None,
+                    ..
+                },
+                Some(child),
+            ) => match &*child.effect {
+                Effect::Unimplemented { description, .. } => description
+                    .as_deref()
+                    .and_then(parse_only_can_attack_restriction),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(filter) = folded {
+            // Re-link past the restriction sentence, then fold the filter in.
+            let grandchild = cursor
+                .sub_ability
+                .take()
+                .and_then(|child| child.sub_ability);
+            cursor.sub_ability = grandchild;
+            if let Effect::AdditionalPhase {
+                attacker_restriction,
+                ..
+            } = &mut *cursor.effect
+            {
+                *attacker_restriction = Some(filter);
+            }
+        }
+        match cursor.sub_ability.as_deref_mut() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
 }
 
 /// CR 702.179c-d: Fold a trailing "This effect can't reduce their speed below
@@ -24451,6 +24571,7 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
             amount,
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }),
     })
 }
@@ -25539,4 +25660,80 @@ fn for_each_target_player_controls_search_that_players_library_keeps_caster_sear
         panic!("expected typed target-player library owner, got {target_player:?}");
     };
     assert_eq!(target_player.controller, None);
+}
+
+/// CR 508.1c + CR 611.2c: building-block test for the "only X can attack during
+/// that combat phase" subject parser. Covers every enforceable subject class and
+/// the strict-fail boundary (unrecognized clause → `None`, stays Unimplemented).
+#[test]
+fn parse_only_can_attack_restriction_covers_subject_class() {
+    // "the chosen creatures" → ParentTarget (Last Night Together).
+    assert_eq!(
+        parse_only_can_attack_restriction(
+            "Only the chosen creatures can attack during that combat phase"
+        ),
+        Some(TargetFilter::ParentTarget)
+    );
+    // Trailing period tolerated.
+    assert_eq!(
+        parse_only_can_attack_restriction(
+            "Only the chosen creatures can attack during that combat phase."
+        ),
+        Some(TargetFilter::ParentTarget)
+    );
+    // "land creatures" → Typed (Bumi, Unleashed) — re-evaluated continuously.
+    match parse_only_can_attack_restriction(
+        "Only land creatures can attack during that combat phase",
+    ) {
+        Some(TargetFilter::Typed(_)) => {}
+        other => panic!("expected Typed(land creature) restriction, got {other:?}"),
+    }
+    // Strict-fail boundary: a different trailing clause is not an attack
+    // restriction — return None so the clause stays a documented Unimplemented.
+    assert_eq!(
+        parse_only_can_attack_restriction("Only the chosen creatures can block this turn"),
+        None
+    );
+}
+
+/// CR 508.1c: Last Night Together's sixth sentence must fold onto the scheduled
+/// `AdditionalPhase` rather than surfacing as an `Unimplemented` gap.
+#[test]
+fn last_night_together_folds_attacker_restriction_into_additional_phase() {
+    let def = parse_effect_chain(
+        "Choose two target creatures. Untap them. Put two +1/+1 counters on each of them. \
+         They gain vigilance, indestructible, and haste until end of turn. After this main \
+         phase, there is an additional combat phase. Only the chosen creatures can attack \
+         during that combat phase.",
+        AbilityKind::Spell,
+    );
+
+    let mut node = Some(&def);
+    let mut saw_additional_phase = false;
+    while let Some(d) = node {
+        match d.effect.as_ref() {
+            Effect::Unimplemented { name, .. } => {
+                panic!("unexpected Unimplemented node remained after fold: {name}");
+            }
+            Effect::AdditionalPhase {
+                phase,
+                attacker_restriction,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::BeginCombat);
+                assert_eq!(
+                    attacker_restriction.as_ref(),
+                    Some(&TargetFilter::ParentTarget),
+                    "the chosen-creatures restriction must fold onto AdditionalPhase"
+                );
+                saw_additional_phase = true;
+            }
+            _ => {}
+        }
+        node = d.sub_ability.as_deref();
+    }
+    assert!(
+        saw_additional_phase,
+        "the AdditionalPhase clause must be present in the chain"
+    );
 }

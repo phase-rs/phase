@@ -544,50 +544,81 @@ pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<
     Some(filter)
 }
 
-pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+/// CR 113.6b: Whether `filter` scopes to cards you own/control in `zone` — the
+/// zone a granted cast keyword functions from. Generalized from the
+/// graveyard-only predicate so the same shape validates hand grants (foretell,
+/// miracle) against `Zone::Hand`.
+pub(crate) fn target_filter_is_your_zone(filter: &TargetFilter, zone: Zone) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::You)
-                && tf.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::InZone {
-                            zone: Zone::Graveyard
-                        }
-                    )
-                })
+                && tf
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone))
         }
-        TargetFilter::Or { filters } => filters.iter().all(target_filter_is_your_graveyard),
+        TargetFilter::Or { filters } => filters.iter().all(|f| target_filter_is_your_zone(f, zone)),
         _ => false,
     }
 }
 
+/// Thin wrapper preserving the graveyard-specific call sites (no churn) —
+/// delegates to the generalized `target_filter_is_your_zone`.
+pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+    target_filter_is_your_zone(filter, Zone::Graveyard)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraveyardGrantedKeywordKind {
+pub(crate) enum GrantedCastKeywordKind {
     Flashback,
     Escape,
     Mayhem,
     Scavenge,
     Encore,
+    /// CR 702.143a: Foretell functions from hand (Dream Devourer grant).
+    Foretell,
+    /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
+    Miracle,
 }
 
-impl GraveyardGrantedKeywordKind {
+impl GrantedCastKeywordKind {
     pub(crate) fn matches_keyword(self, keyword: &Keyword) -> bool {
         match self {
-            GraveyardGrantedKeywordKind::Flashback => {
+            GrantedCastKeywordKind::Flashback => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Flashback
             }
-            GraveyardGrantedKeywordKind::Escape => {
+            GrantedCastKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
             // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
-            GraveyardGrantedKeywordKind::Mayhem => {
+            GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
             // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
             // keywords share `KeywordKind::Unknown`, so match the variant directly.
-            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
-            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            // CR 702.143a / CR 702.94a: hand-zone cast keywords.
+            GrantedCastKeywordKind::Foretell => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Foretell
+            }
+            GrantedCastKeywordKind::Miracle => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Miracle
+            }
+        }
+    }
+
+    /// CR 113.6b: The zone this granted cast keyword functions from. The gate in
+    /// `keyword_grant.rs` uses it to decline zone mismatches (foretell-in-graveyard,
+    /// flashback-in-hand).
+    pub(crate) fn grant_zone(self) -> Zone {
+        match self {
+            GrantedCastKeywordKind::Flashback
+            | GrantedCastKeywordKind::Escape
+            | GrantedCastKeywordKind::Mayhem
+            | GrantedCastKeywordKind::Scavenge
+            | GrantedCastKeywordKind::Encore => Zone::Graveyard,
+            GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
 }

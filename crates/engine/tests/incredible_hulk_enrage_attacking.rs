@@ -62,6 +62,7 @@ fn damage_ability(source: ObjectId, target: ObjectId, amount: i32) -> ResolvedAb
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target)],
         source,
@@ -139,6 +140,8 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
         extra_phase_scheduled: state.extra_phases.contains(&ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         }),
         hulk_tapped: state.objects[&hulk].tapped,
     }

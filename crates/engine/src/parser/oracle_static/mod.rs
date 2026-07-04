@@ -157,7 +157,7 @@ pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
 pub(crate) use shared::target_filter_is_your_graveyard;
-pub(crate) use shared::GraveyardGrantedKeywordKind;
+pub(crate) use shared::GrantedCastKeywordKind;
 pub(crate) use shared::{
     is_tiered_enters_with_additional_counters_static,
     parse_tiered_enters_with_additional_counters_pattern,
