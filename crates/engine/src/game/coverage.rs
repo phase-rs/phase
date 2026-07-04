@@ -121,6 +121,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1c: MustBeBlocked carries an optional blocker `TargetFilter`
+            // (None = any blocker; Some = "must be blocked by a <quality>"). The
+            // None shape is no longer registry-keyed (the variant is now
+            // parameterized with a non-Hash TargetFilter); runtime enforcement is
+            // direct-match in combat.rs declare-blockers validation (mirrors
+            // CantBeBlockedBy).
+            | StaticMode::MustBeBlocked { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -1430,6 +1437,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
         }
@@ -1795,7 +1803,7 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
 
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
-        ChoiceType::CreatureType => "creature type",
+        ChoiceType::CreatureType { .. } => "creature type",
         ChoiceType::Color { excluded } => {
             if excluded.is_empty() {
                 "color"
@@ -3010,6 +3018,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             after,
             followed_by,
             count,
+            attacker_restriction,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
@@ -3019,6 +3028,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), format!("{count:?}")));
+            }
+            if let Some(restriction) = attacker_restriction {
+                d.push((
+                    "only these can attack".into(),
+                    fmt_target(restriction),
+                ));
             }
         }
         Effect::Double {
@@ -3737,6 +3752,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("set land type {}", land_type.as_subtype_str())
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
+        ContinuousModification::SetChosenName => "set chosen name".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -6543,6 +6559,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
         QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
@@ -9868,6 +9885,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
         assert!(unimplemented_mechanics(&obj).is_empty());
@@ -10455,10 +10473,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlocked { by: None },
                     affected: None,
                     modifications: vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
+                        mode: StaticMode::MustBeBlocked { by: None },
                     }],
                     condition: None,
                     per_player_condition: None,
@@ -11320,6 +11338,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
 
@@ -11590,6 +11609,7 @@ mod tests {
                 AbilityCondition::TargetMatchesFilter {
                     filter: TargetFilter::Any,
                     use_lki: false,
+                    subject_slot: None,
                 },
                 "TargetMatchesFilter",
             ),

@@ -31,6 +31,7 @@ fn source_damage_to_player(source: ObjectId, amount: i32) -> ResolvedAbility {
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Player(P1)],
         source,

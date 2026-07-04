@@ -1,6 +1,8 @@
 use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::AttachmentKind;
+use crate::types::ability::CardPlayMode::{Cast, Play};
+use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::card_type::CoreType;
 use crate::types::mana::ManaCostShard;
 
@@ -3290,6 +3292,7 @@ fn effect_damage_to_defending_player_counts_defending_player_objects() {
                 },
             target: TargetFilter::DefendingPlayer,
             damage_source: None,
+            excess: _,
         } => {
             assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
             assert!(tf
@@ -3500,6 +3503,7 @@ fn damage_to_itself_equal_to_power_low_level() {
                 },
                 target: TargetFilter::ParentTarget,
                 damage_source: Some(DamageSource::Target),
+                excess: _,
             }
         ),
         "expected DealDamage with TargetPower/ParentTarget, got: {e:?}"
@@ -3524,6 +3528,7 @@ fn damage_to_itself_equal_to_power_full_pipeline() {
                 },
                 target: TargetFilter::ParentTarget,
                 damage_source: Some(DamageSource::Target),
+                excess: _,
             }
         ),
         "expected DealDamage with TargetPower/ParentTarget, got: {:?}",
@@ -3545,6 +3550,7 @@ fn damage_to_any_target_and_itself_preserves_both_segments() {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: _,
             }
         ),
         "expected primary any-target damage, got {:?}",
@@ -3562,6 +3568,7 @@ fn damage_to_any_target_and_itself_preserves_both_segments() {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::SelfRef,
                 damage_source: None,
+                excess: _,
             }
         ),
         "expected self-damage continuation, got {:?}",
@@ -3587,6 +3594,7 @@ fn self_subject_damage_equal_to_its_power_uses_source_power() {
                 },
                 target: TargetFilter::Typed(_),
                 damage_source: None,
+                excess: _,
             }
         ),
         "expected source-power DealDamage, got: {:?}",
@@ -3617,6 +3625,7 @@ fn damage_equal_to_object_count_resolves_to_object_count_not_variable() {
                 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: _,
             }
         ),
         "expected ObjectCount-amount DealDamage to Any, got: {:?}",
@@ -3653,6 +3662,7 @@ fn target_subject_damage_equal_to_its_power_uses_target_source_power() {
                 },
                 target: TargetFilter::Or { .. },
                 damage_source: Some(DamageSource::Target),
+                excess: _,
             }
         ),
         "expected target-source-power damage, got {:?}",
@@ -10263,6 +10273,203 @@ fn effect_chain_create_single_token_with_keyword_conjunction_does_not_split() {
     }
 }
 
+/// Walk a `create A, B, and C` chain: head `def.effect` plus every `sub_ability`
+/// node, in written order.
+fn token_sequence_chain(def: &AbilityDefinition) -> Vec<&Effect> {
+    let mut out = vec![&*def.effect];
+    let mut cur = def.sub_ability.as_deref();
+    while let Some(node) = cur {
+        out.push(&*node.effect);
+        cur = node.sub_ability.as_deref();
+    }
+    out
+}
+
+// CR 608.2c: "create A, a B, and a C token" is a do-ALL list in written order;
+// the middle item must not be dropped. Each test below fails if the N-way split
+// regresses to the old binary (first+last only) form.
+
+#[test]
+fn effect_chain_bestial_menace_preserves_middle_token() {
+    let def = parse_effect_chain(
+        "Create a 1/1 green Snake creature token, a 2/2 green Wolf creature token, and a 3/3 green Elephant creature token.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 3, "expected 3 chained tokens, got {nodes:?}");
+    // node[1] = the middle token the old binary split silently dropped.
+    match nodes[1] {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            ..
+        } => {
+            assert_eq!(name, "Wolf");
+            assert_eq!(*power, PtValue::Fixed(2));
+            assert_eq!(*toughness, PtValue::Fixed(2));
+        }
+        other => panic!("expected Wolf 2/2 at node[1], got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_chain_fae_offering_preserves_middle_token() {
+    let def = parse_effect_chain(
+        "Create a Clue token, a Food token, and a Treasure token.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 3, "expected 3 chained tokens, got {nodes:?}");
+    match nodes[1] {
+        Effect::Token { name, .. } => assert_eq!(name, "Food"),
+        other => panic!("expected Food at node[1], got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_chain_triplicate_titan_middle_keyword_no_oversplit() {
+    // Each item carries a trailing "with <keyword>" clause; the intra-item
+    // separators (", and " for the coordinator only) must not split on the
+    // keyword commas, and "with vigilance" must land on the MIDDLE token.
+    let def = parse_effect_chain(
+        "Create a 3/3 colorless Golem artifact creature token with flying, a 3/3 colorless Golem artifact creature token with vigilance, and a 3/3 colorless Golem artifact creature token with trample.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 3, "expected exactly 3 tokens, got {nodes:?}");
+    match nodes[1] {
+        Effect::Token { keywords, .. } => {
+            assert_eq!(keywords, &vec![Keyword::Vigilance]);
+        }
+        other => panic!("expected Golem/Vigilance at node[1], got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_chain_trostanis_summoner_mixed_keywords() {
+    let def = parse_effect_chain(
+        "Create a 2/2 white Knight creature token with vigilance, a 3/3 green Centaur creature token, and a 4/4 green Rhino creature token with trample.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 3, "expected 3 tokens, got {nodes:?}");
+    match nodes[0] {
+        Effect::Token { name, keywords, .. } => {
+            assert_eq!(name, "Knight");
+            assert_eq!(keywords, &vec![Keyword::Vigilance]);
+        }
+        other => panic!("expected Knight/Vigilance at node[0], got {other:?}"),
+    }
+    match nodes[1] {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            keywords,
+            ..
+        } => {
+            assert_eq!(name, "Centaur");
+            assert_eq!(*power, PtValue::Fixed(3));
+            assert_eq!(*toughness, PtValue::Fixed(3));
+            assert!(keywords.is_empty(), "middle Centaur carries no keyword");
+        }
+        other => panic!("expected Centaur 3/3 at node[1], got {other:?}"),
+    }
+    match nodes[2] {
+        Effect::Token { name, keywords, .. } => {
+            assert_eq!(name, "Rhino");
+            assert_eq!(keywords, &vec![Keyword::Trample]);
+        }
+        other => panic!("expected Rhino/Trample at node[2], got {other:?}"),
+    }
+}
+
+/// The Companion of the Wilds — the strongest discriminating witness. The old
+/// binary split wrongly attached the quoted "can't block" static to the FIRST
+/// token (Food) and dropped the Rat entirely. The quote-swallowing item unit
+/// keeps the comma inside `"…can't block,"` from severing the Rat item, so the
+/// `CantBlock` static lands on node[1] (Rat), not node[0] (Food).
+#[test]
+fn effect_chain_companion_of_the_wilds_cant_block_on_rat_not_food() {
+    let def = parse_effect_chain(
+        "Create a Food token, a 1/1 black Rat creature token with \"This creature can't block,\" and a Royal role token attached to a creature you control.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 3, "expected 3 tokens, got {nodes:?}");
+    // node[0] = Food, and it must NOT carry the can't-block static.
+    match nodes[0] {
+        Effect::Token {
+            name,
+            static_abilities,
+            ..
+        } => {
+            assert_eq!(name, "Food");
+            assert!(
+                !static_abilities
+                    .iter()
+                    .any(|s| s.mode == crate::types::statics::StaticMode::CantBlock),
+                "CantBlock must not land on Food (node[0])"
+            );
+        }
+        other => panic!("expected Food at node[0], got {other:?}"),
+    }
+    // node[1] = the 1/1 black Rat with the CantBlock static.
+    match nodes[1] {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            colors,
+            static_abilities,
+            ..
+        } => {
+            assert_eq!(name, "Rat");
+            assert_eq!(*power, PtValue::Fixed(1));
+            assert_eq!(*toughness, PtValue::Fixed(1));
+            assert_eq!(colors, &vec![ManaColor::Black]);
+            assert!(
+                static_abilities
+                    .iter()
+                    .any(|s| s.mode == crate::types::statics::StaticMode::CantBlock),
+                "CantBlock must land on the Rat (node[1]), got {static_abilities:?}"
+            );
+        }
+        other => panic!("expected Rat 1/1 black at node[1], got {other:?}"),
+    }
+}
+
+/// [REVIEW A2] The only test that exercises the new step-2 `peek` guard. The
+/// gate-PASSING "…, and a 1/1 Bird…" coordinator lets the splitter run, but the
+/// intra-item "with menace, vigilance," keyword comma must NOT split off a bare
+/// "vigilance" item. Reverting the peek makes ", " after "menace" a split point
+/// → 3 items, "vigilance" not a Token → the whole clause becomes unimplemented →
+/// this exact assertion fails.
+#[test]
+fn effect_chain_intra_item_keyword_comma_does_not_oversplit() {
+    let def = parse_effect_chain(
+        "Create a 2/2 black Zombie creature token with menace, vigilance, and a 1/1 white Bird creature token with flying.",
+        AbilityKind::Spell,
+    );
+    let nodes = token_sequence_chain(&def);
+    assert_eq!(nodes.len(), 2, "expected exactly 2 tokens, got {nodes:?}");
+    match nodes[0] {
+        Effect::Token { name, keywords, .. } => {
+            assert_eq!(name, "Zombie");
+            assert_eq!(keywords, &vec![Keyword::Menace, Keyword::Vigilance]);
+        }
+        other => panic!("expected Zombie(menace,vigilance) at node[0], got {other:?}"),
+    }
+    match nodes[1] {
+        Effect::Token { name, keywords, .. } => {
+            assert_eq!(name, "Bird");
+            assert_eq!(keywords, &vec![Keyword::Flying]);
+        }
+        other => panic!("expected Bird(flying) at node[1], got {other:?}"),
+    }
+}
+
 #[test]
 fn effect_create_treasure_token() {
     let e = parse_effect("Create a Treasure token");
@@ -10766,7 +10973,10 @@ fn effect_gain_keyword_and_must_be_blocked_splits_into_chained_generic_effects()
             duration,
             ..
         } => {
-            assert_eq!(static_abilities[0].mode, StaticMode::MustBeBlocked);
+            assert_eq!(
+                static_abilities[0].mode,
+                StaticMode::MustBeBlocked { by: None }
+            );
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
             assert_eq!(
                 static_abilities[0].affected,
@@ -11420,14 +11630,14 @@ fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
 #[test]
 fn parse_graveyard_granted_keyword_kind_recognizes_all_members() {
     use crate::parser::oracle_static::{
-        parse_graveyard_granted_keyword_kind, GraveyardGrantedKeywordKind,
+        parse_graveyard_granted_keyword_kind, GrantedCastKeywordKind,
     };
     for (word, expected) in [
-        ("flashback", GraveyardGrantedKeywordKind::Flashback),
-        ("escape", GraveyardGrantedKeywordKind::Escape),
-        ("mayhem", GraveyardGrantedKeywordKind::Mayhem),
-        ("scavenge", GraveyardGrantedKeywordKind::Scavenge),
-        ("encore", GraveyardGrantedKeywordKind::Encore),
+        ("flashback", GrantedCastKeywordKind::Flashback),
+        ("escape", GrantedCastKeywordKind::Escape),
+        ("mayhem", GrantedCastKeywordKind::Mayhem),
+        ("scavenge", GrantedCastKeywordKind::Scavenge),
+        ("encore", GrantedCastKeywordKind::Encore),
     ] {
         let (_, kind) = parse_graveyard_granted_keyword_kind(word)
             .unwrap_or_else(|_| panic!("combinator failed on {word:?}"));
@@ -12031,7 +12241,7 @@ fn choose_a_creature_type() {
     assert_eq!(
         e,
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
         }
@@ -12234,6 +12444,7 @@ fn deal_damage_each_of_one_or_two_targets_is_multi_targeted() {
         amount: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Any,
         damage_source: None,
+        excess: _,
     } = clause.effect
     else {
         panic!(
@@ -12254,6 +12465,7 @@ fn deal_damage_each_of_up_to_two_target_creatures_is_multi_targeted() {
         amount: QuantityExpr::Fixed { value: 6 },
         target: TargetFilter::Or { filters },
         damage_source: None,
+        excess: _,
     } = clause.effect
     else {
         panic!(
@@ -12290,6 +12502,7 @@ fn deal_damage_divided_among_up_to_two_target_creatures_planeswalkers() {
         amount: QuantityExpr::Fixed { value: 5 },
         target: TargetFilter::Or { filters },
         damage_source: None,
+        excess: _,
     } = clause.effect
     else {
         panic!(
@@ -12326,6 +12539,7 @@ fn deal_damage_divided_x_among_up_to_two_targets() {
                 },
                 target: TargetFilter::Or { .. },
                 damage_source: None,
+                excess: _,
             }
         ),
         "Expected divided X DealDamage with multi_target, got {:?}",
@@ -14985,7 +15199,9 @@ fn instead_condition_recognizes_that_permanent_is_color() {
         .expect("instead sub_ability must carry a condition");
     match cond {
         AbilityCondition::ConditionInstead { inner } => match inner.as_ref() {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter, use_lki, ..
+            } => {
                 assert!(!use_lki, "present-tense 'is' should not use LKI");
                 match filter {
                     TargetFilter::Typed(typed) => {
@@ -15182,6 +15398,7 @@ fn instead_condition_preserves_it_apostrophe_s_color_form() {
             AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(typed),
                 use_lki: false,
+                ..
             } => {
                 assert!(
                     typed.properties.iter().any(|p| matches!(
@@ -15241,6 +15458,7 @@ fn instead_condition_recognizes_disjunctive_color() {
             AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Or { filters },
                 use_lki: false,
+                ..
             } => {
                 assert_eq!(filters.len(), 2, "expected 2 color filters in Or");
                 assert!(
@@ -15958,7 +16176,10 @@ fn must_be_blocked_imperative() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlocked { by: None }
+                )
             )
         ),
         "Expected GenericEffect with MustBeBlocked, got {:?}",
@@ -15973,7 +16194,10 @@ fn must_be_blocked_if_able_variant() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlocked { by: None }
+                )
             )
         ),
         "Expected GenericEffect with MustBeBlocked, got {:?}",
@@ -16002,7 +16226,10 @@ fn pump_compound_with_must_be_blocked() {
     assert!(
         matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlocked { by: None }
+                )
             )
         ),
         "Expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
@@ -16566,6 +16793,7 @@ fn expected_creature_target_match() -> AbilityCondition {
     AbilityCondition::TargetMatchesFilter {
         filter: TargetFilter::Typed(TypedFilter::creature()),
         use_lki: true,
+        subject_slot: None,
     }
 }
 
@@ -17043,7 +17271,7 @@ fn become_creature_type_of_choice() {
         matches!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CreatureType,
+                choice_type: ChoiceType::CreatureType { .. },
                 ..
             }
         ),
@@ -23855,7 +24083,10 @@ fn parse_an_article_subtype_addendum_condition() {
         .sub_ability
         .as_ref()
         .expect("expected conditional token addendum");
-    let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = &sub.condition else {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    }) = &sub.condition
+    else {
         panic!(
             "expected TargetMatchesFilter condition, got {:?}",
             sub.condition
@@ -23887,7 +24118,10 @@ fn parse_controlled_parent_target_addendum_condition() {
         .sub_ability
         .as_ref()
         .expect("expected controlled-parent-target addendum");
-    let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = &sub.condition else {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    }) = &sub.condition
+    else {
         panic!(
             "expected TargetMatchesFilter condition, got {:?}",
             sub.condition
@@ -23913,7 +24147,10 @@ fn parse_you_controlled_parent_target_condition_variants() {
         &mut ParseContext::default(),
     )
     .expect("artifact condition should parse");
-    let AbilityCondition::TargetMatchesFilter { filter, use_lki } = artifact else {
+    let AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    } = artifact
+    else {
         panic!("expected TargetMatchesFilter condition");
     };
     assert!(use_lki);
@@ -23928,7 +24165,10 @@ fn parse_you_controlled_parent_target_condition_variants() {
     let it =
         try_nom_condition_as_ability_condition("you controlled it", &mut ParseContext::default())
             .expect("it condition should parse");
-    let AbilityCondition::TargetMatchesFilter { filter, use_lki } = it else {
+    let AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    } = it
+    else {
         panic!("expected TargetMatchesFilter condition");
     };
     assert!(use_lki);
@@ -23948,6 +24188,7 @@ fn parse_you_controlled_parent_target_condition_variants() {
     let AbilityCondition::TargetMatchesFilter {
         filter: present_filter,
         use_lki,
+        ..
     } = present
     else {
         panic!("expected TargetMatchesFilter condition");
@@ -23969,7 +24210,10 @@ fn parse_you_controlled_parent_target_condition_variants() {
     let AbilityCondition::Not { condition } = negative_present else {
         panic!("expected negated condition");
     };
-    let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+    let AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    } = *condition
+    else {
         panic!("expected inner TargetMatchesFilter condition");
     };
     assert!(!use_lki);
@@ -23989,7 +24233,10 @@ fn parse_you_controlled_parent_target_condition_variants() {
     let AbilityCondition::Not { condition } = negative_past else {
         panic!("expected negated condition");
     };
-    let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+    let AbilityCondition::TargetMatchesFilter {
+        filter, use_lki, ..
+    } = *condition
+    else {
         panic!("expected inner TargetMatchesFilter condition");
     };
     assert!(use_lki);
@@ -24272,6 +24519,7 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
             AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(ref tf),
                 use_lki: true,
+                ..
             } => {
                 assert_eq!(tf.properties, vec![expected_prop]);
             }
@@ -25744,7 +25992,10 @@ fn for_each_pump_with_keyword_preserves_must_be_blocked_followup() {
     assert!(
         matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlocked { by: None }
+                )
             )
         ),
         "expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
@@ -27488,7 +27739,9 @@ fn suffix_legendary_condition_gates_counter_and_anaphoric_fight_subject() {
         );
 
     match def.condition {
-        Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) => {
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        }) => {
             assert!(!use_lki);
             let TargetFilter::Typed(tf) = filter else {
                 panic!("expected typed condition filter");
@@ -27575,6 +27828,7 @@ fn one_sided_fight_dealdamage_keeps_fresh_opponent_recipient() {
             target,
             amount,
             damage_source,
+            excess: _,
         } => {
             // Recipient must stay a fresh opponent target, NOT ParentTarget.
             assert_ne!(
@@ -27632,6 +27886,7 @@ fn one_sided_fight_power_source_variant() {
             target,
             amount,
             damage_source,
+            excess: _,
         } => {
             assert_ne!(target, &TargetFilter::ParentTarget);
             assert!(
@@ -29837,7 +30092,9 @@ fn strip_mv_conditional_suffix_le() {
     assert!(cond.is_some(), "should extract MV ≤ 2 condition");
     assert_eq!(text, "Destroy target creature");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(!use_lki);
             if let TargetFilter::Typed(tf) = filter {
                 assert!(tf.properties.iter().any(|p| matches!(
@@ -29885,7 +30142,9 @@ fn strip_mv_conditional_past_tense_uses_lki() {
     assert!(cond.is_some(), "should extract past-tense MV condition");
     assert_eq!(text, "Scry 1");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(use_lki);
             if let TargetFilter::Typed(tf) = filter {
                 assert!(tf.properties.iter().any(|p| matches!(
@@ -29912,7 +30171,9 @@ fn strip_mv_conditional_leading_past_tense_uses_lki() {
     );
     assert_eq!(text, "scry 1.");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(use_lki);
             if let TargetFilter::Typed(tf) = filter {
                 assert!(tf.properties.iter().any(|p| matches!(
@@ -29940,7 +30201,9 @@ fn strip_mv_conditional_leading_present_tense() {
     );
     assert_eq!(text, "scry 1.");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(!use_lki, "present-tense check must not use LKI");
             if let TargetFilter::Typed(tf) = filter {
                 assert!(tf.properties.iter().any(|p| matches!(
@@ -29968,7 +30231,9 @@ fn strip_mv_conditional_leading_present_tense_greater() {
     );
     assert_eq!(text, "draw a card.");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(!use_lki);
             if let TargetFilter::Typed(tf) = filter {
                 assert!(tf.properties.iter().any(|p| matches!(
@@ -30000,7 +30265,9 @@ fn strip_target_supertype_conditional_leading_nonbasic_land_uses_lki() {
     assert!(cond.is_some(), "should extract nonbasic land condition");
     assert_eq!(text, "~ deals 2 damage.");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(use_lki);
             let TargetFilter::Typed(tf) = filter else {
                 panic!("expected Typed filter");
@@ -30027,7 +30294,9 @@ fn strip_target_supertype_conditional_suffix_nonbasic_land_uses_lki() {
     assert!(cond.is_some(), "should extract nonbasic land condition");
     assert_eq!(text, "~ deals 2 damage");
     match cond.unwrap() {
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
             assert!(use_lki);
             let TargetFilter::Typed(tf) = filter else {
                 panic!("expected Typed filter");
@@ -31699,7 +31968,7 @@ fn kindred_dominance_excludes_chosen_creature_type() {
     else {
         panic!("expected Choose, got {:?}", def.effect);
     };
-    assert_eq!(*choice_type, ChoiceType::CreatureType);
+    assert_eq!(*choice_type, ChoiceType::creature_type());
     assert!(*persist);
 
     let destroy = def.sub_ability.as_ref().expect("destroy continuation");
@@ -33533,6 +33802,14 @@ fn cast_from_among_those_nonland_cards_binds_to_exiled_by_source_and_nonland() {
         "expected Non(Land), got {:?}",
         typed.type_filters
     );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })),
+        "expected cast target to be explicitly in exile, got {:?}",
+        typed.properties
+    );
 }
 
 /// CR 610.3 + CR 608.2c + CR 118.9: Etali, Primal Conqueror's ETB cast
@@ -33579,6 +33856,14 @@ fn cast_from_among_the_nonland_cards_exiled_this_way_binds_to_exiled_by_source_a
             .any(|f| matches!(f, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
         "expected Non(Land), got {:?}",
         typed.type_filters
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })),
+        "expected cast target to be explicitly in exile, got {:?}",
+        typed.properties
     );
 }
 
@@ -37786,6 +38071,110 @@ fn reef_worm_nested_token_is_not_modal_choice() {
         );
     };
     assert_eq!(name, "Fish", "outer token is the 3/3 Fish");
+}
+
+/// CR 702.62a + CR 118.9: The Face of Boe's verbless "pay its suspend cost
+/// rather than its mana cost" rider must parse to the parameterized
+/// `KeywordCostOfCastSpell { Suspend }` alternative cost (broadened head
+/// guard + suspend body recognizer).
+#[test]
+fn suspend_cost_rider_recognized() {
+    assert_eq!(
+        super::parse_alt_ability_cost_rider("pay its suspend cost rather than its mana cost"),
+        Some(crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+            keyword: crate::types::keywords::KeywordKind::Suspend,
+        }),
+    );
+}
+
+/// Regression guard for the broadened head guard + body ordering: the discard
+/// (Cruelclaw) and pay-life (Nashi) riders must keep returning their existing
+/// costs unchanged — the suspend body only fires when neither matched.
+#[test]
+fn discard_and_pay_life_riders_unchanged_by_suspend_addition() {
+    assert!(matches!(
+        super::parse_alt_ability_cost_rider(
+            "cast that card by discarding a card rather than paying its mana cost"
+        ),
+        Some(crate::types::ability::AbilityCost::Discard { .. })
+    ));
+    assert!(matches!(
+        super::parse_alt_ability_cost_rider(
+            "pay life equal to its mana value rather than paying its mana cost"
+        ),
+        Some(crate::types::ability::AbilityCost::PayLife { .. })
+    ));
+}
+
+/// CR 608.2g vs CR 611.2 + CR 118.9: The Face of Boe's full cast clause folds
+/// the suspend cost onto the hand-origin `CastFromZone` AND re-derives the
+/// driver to `DuringResolution` (the alt-cost arm of the shared filter-form
+/// authority), with no `Unimplemented` leaking anywhere.
+#[test]
+fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
+    let def = super::parse_effect_chain(
+        "you may cast a spell with suspend from your hand. if you do, pay its suspend cost rather than its mana cost.",
+        AbilityKind::Activated,
+    );
+    fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(*d.effect, Effect::CastFromZone { .. }) {
+            return Some(&d.effect);
+        }
+        d.sub_ability.as_ref().and_then(|s| find_cast(s))
+    }
+    let cast = find_cast(&def).expect("CastFromZone should be in chain");
+    let Effect::CastFromZone {
+        alt_ability_cost: Some(alt),
+        driver,
+        ..
+    } = cast
+    else {
+        panic!("expected CastFromZone with alt_ability_cost, got {cast:?}");
+    };
+    assert_eq!(
+        *alt,
+        crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+            keyword: crate::types::keywords::KeywordKind::Suspend,
+        },
+        "expected folded KeywordCostOfCastSpell {{ Suspend }}",
+    );
+    assert_eq!(
+        *driver,
+        crate::types::ability::CastFromZoneDriver::DuringResolution,
+        "hand-origin alt-cost cast must re-derive to DuringResolution",
+    );
+    fn has_unimpl(d: &AbilityDefinition) -> bool {
+        matches!(&*d.effect, Effect::Unimplemented { .. })
+            || d.sub_ability.as_ref().is_some_and(|s| has_unimpl(s))
+    }
+    assert!(
+        !has_unimpl(&def),
+        "no Unimplemented may survive the suspend-cost fold"
+    );
+}
+
+/// CR 608.2g vs CR 611.2: the shared filter-form DRIVER authority is
+/// duration-blind — the discriminator is mode + hand-origin + an alternative
+/// casting method (`without_paying` OR an alternative cost). Duration is
+/// intentionally not a parameter: twinning glass (durational, free →
+/// DuringResolution) and Sen Triplets (durational, full-cost → Lingering)
+/// prove the wp/alt axis decides, not duration.
+#[test]
+fn filter_cast_driver_authority_is_duration_blind() {
+    let d = super::during_resolution_for_filter_cast_clause;
+    // The Face of Boe via fold: hand-origin alt cost.
+    assert_eq!(d(Cast, false, true, true), DuringResolution);
+    // Colossal Dreadmaw / Form of the Mulldrifter / Sen Triplets: full-cost
+    // hand cast (durational or not) -> standing grant.
+    assert_eq!(d(Cast, false, false, true), LingeringPermission);
+    // Memory Plunder / Tasha: non-hand free pool.
+    assert_eq!(d(Cast, true, false, false), LingeringPermission);
+    // Expertise cycle / Brain in a Jar / twinning glass / chandra: hand free.
+    assert_eq!(d(Cast, true, false, true), DuringResolution);
+    // Xander's Pact: exile-origin alt cost — hand gate, not duration.
+    assert_eq!(d(Cast, false, true, false), LingeringPermission);
+    // CR 305.1 land plays have no during-resolution mechanism.
+    assert_eq!(d(Play, true, false, true), LingeringPermission);
 }
 
 #[test]

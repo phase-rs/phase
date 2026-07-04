@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -391,6 +392,57 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 701.38 secret ballot (Truth or Consequences): withhold the running
+    // tallies and ballots from EVERY viewer until the simultaneous reveal, so
+    // neither later voters nor opponents can infer earlier secret votes. The
+    // acting voter still sees their own `options`/`option_labels`. After
+    // `VoteResolved` fires the public tally lives in the event log, so there is
+    // no residual state leak.
+    //
+    // NOTE (D6 limitation): this scrubs the per-viewer snapshot only. The local
+    // WASM AI computes over the unfiltered thread-local state and can therefore
+    // read a human's earlier secret ballot — an accepted hidden-information gap
+    // (the AI already sees full hidden state for its own search). Multiplayer
+    // human↔human secrecy IS enforced here.
+    if let WaitingFor::VoteChoice {
+        player,
+        remaining_votes,
+        ref options,
+        ref option_labels,
+        ref remaining_voters,
+        ref tallies,
+        ref per_choice_effect,
+        controller,
+        source_id,
+        actor,
+        tally_mode,
+        ref candidate_objects,
+        ref outcome_template,
+        visibility,
+        ..
+    } = state.waiting_for
+    {
+        if visibility == crate::types::ability::VoteVisibility::Secret {
+            filtered.waiting_for = WaitingFor::VoteChoice {
+                player,
+                remaining_votes,
+                options: options.clone(),
+                option_labels: option_labels.clone(),
+                remaining_voters: remaining_voters.clone(),
+                tallies: vec![0; tallies.len()],
+                ballots: crate::im::Vector::new(),
+                per_choice_effect: per_choice_effect.clone(),
+                controller,
+                source_id,
+                actor,
+                tally_mode,
+                candidate_objects: candidate_objects.clone(),
+                outcome_template: outcome_template.clone(),
+                visibility,
+            };
+        }
+    }
+
     if let WaitingFor::SearchChoice {
         player,
         ref cards,
@@ -592,6 +644,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2: Hand and library are hidden zones. The `options` on a
+    // `CostTypeChoice` (Celestial Reunion's pre-cost "choose a creature type")
+    // is the set of creature types the caster can actually pay for — computed by
+    // `feasible_behold_creature_types` over beholdable cards, which INCLUDE the
+    // caster's hand. Serialized in full, it leaks private hand contents to
+    // opponents (e.g. offering "Goblin" reveals a Goblin is beholdable from hand)
+    // before the behold selection is even made. Redact `options` to empty for
+    // viewers who cannot see the caster's private zones; `choice_type` and
+    // `pending_cast` are public (CR 400.2 — the stack is a public zone), and the
+    // acting player still receives the full list to choose from.
+    if let WaitingFor::CostTypeChoice {
+        player,
+        ref choice_type,
+        ref options,
+        ref pending_cast,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) && !options.is_empty() {
+            filtered.waiting_for = WaitingFor::CostTypeChoice {
+                player,
+                choice_type: choice_type.clone(),
+                options: Vec::new(),
+                pending_cast: pending_cast.clone(),
+            };
+        }
+    }
+
     if let WaitingFor::EffectZoneChoice {
         player,
         ref cards,
@@ -758,6 +837,131 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
 }
 
+/// Whether `viewer` may see another player's library/hand private zones.
+fn viewer_may_see_player_private_zone(
+    state: &GameState,
+    viewer: PlayerId,
+    player: PlayerId,
+) -> bool {
+    player == viewer
+        || (player == state.active_player
+            && turn_control::viewer_controls_active_turn(state, viewer))
+}
+
+/// Returns a viewer-safe copy of `events` for wire broadcast.
+///
+/// `StateUpdate` / `GameStarted` carry a parallel `events` array alongside the
+/// filtered `GameState`. Unlike the state snapshot, this array was broadcast
+/// verbatim to every seat and spectator — leaking hidden library information
+/// through `GameEvent::CardDrawn` (specific `object_id`) and
+/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
+/// `ZoneChangeRecord` embeds the full card name and type line). The structured
+/// game log already excludes these events; this closes the same hole on the
+/// raw event channel clients also consume.
+pub fn filter_events_for_viewer(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    events
+        .iter()
+        .filter(|event| event_visible_to_viewer(event, state, viewer))
+        .cloned()
+        .collect()
+}
+
+fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerId) -> bool {
+    let can_view_private_for_player = |player: PlayerId| {
+        player == viewer
+            || (player == state.active_player
+                && turn_control::viewer_controls_active_turn(state, viewer))
+    };
+
+    match event {
+        // Individual draws identify the exact library card — only viewers with
+        // private-zone authority for the drawer may see them.
+        GameEvent::CardDrawn { player_id, .. } => can_view_private_for_player(*player_id),
+        GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+            ..
+        } if *from == Some(Zone::Library) => library_zone_change_visible_to_viewer(
+            state,
+            viewer,
+            *object_id,
+            *to,
+            record,
+            &can_view_private_for_player,
+        ),
+        _ => true,
+    }
+}
+
+/// Whether a library-origin `ZoneChanged` event may be sent to `viewer`.
+///
+/// The `ZoneChangeRecord` snapshots the card's real identity at move time, so
+/// face-down manifest/cloak moves and face-down exiles must be gated the same
+/// way `filter_state_for_viewer` gates the post-move object — not by a fixed
+/// destination-zone allowlist.
+fn library_zone_change_visible_to_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    object_id: ObjectId,
+    to: Zone,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    if matches!(to, Zone::Hand | Zone::Library) {
+        return viewer_may_see_player_private_zone(state, viewer, record.owner);
+    }
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    if obj.face_down {
+        match to {
+            Zone::Battlefield | Zone::Stack => {
+                return can_view_private_for_player(obj.controller)
+                    || viewer_may_look_at_face_down(state, object_id, can_view_private_for_player);
+            }
+            Zone::Exile => {
+                return face_down_exile_visible_to_viewer(
+                    state,
+                    object_id,
+                    obj,
+                    can_view_private_for_player,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+/// Mirrors the face-down exile redaction in `filter_state_for_viewer`.
+fn face_down_exile_visible_to_viewer(
+    state: &GameState,
+    object_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    use crate::types::game_state::ExileLinkKind;
+    let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+    let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+        link.exiled_id == object_id
+            && link.kind == ExileLinkKind::HideawayLookable
+            && state
+                .objects
+                .get(&link.source_id)
+                .is_some_and(|src| can_view_private_for_player(src.controller))
+    });
+    foretell_ok || hideaway_lookable_by_viewer
+}
+
 /// CR 708.5: `viewer` may look at face-down permanent `obj_id` they do not
 /// control if they control an active `MayLookAtFaceDown` permission whose
 /// affected filter matches the permanent. The permission has two sources:
@@ -910,7 +1114,8 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
 /// an opponent has no rules-permission to see, leaving only
 /// the public spine (source_id, controller, timestamp, ability,
 /// condition, target_constraints, subject_match_count, die_result,
-/// may_trigger_origin) needed for the engine to keep running on
+/// may_trigger_origin) plus the public scheduling metadata on the wrapping
+/// context needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
 fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
@@ -924,7 +1129,8 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects).
+/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
@@ -1035,6 +1241,176 @@ mod tests {
 
         // The authoritative source state is untouched by filtering.
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn filters_library_draw_events_for_non_drawer() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Library),
+            Zone::Hand,
+        );
+        record.name = "Secret Card".to_string();
+        record.owner = PlayerId(0);
+
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: PlayerId(0),
+                object_id: ObjectId(99),
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(record),
+            },
+        ];
+
+        let drawer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(drawer.len(), 2);
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent.is_empty());
+    }
+
+    #[test]
+    fn library_draw_events_visible_to_turn_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        let event = GameEvent::CardDrawn {
+            player_id: PlayerId(1),
+            object_id: ObjectId(99),
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+
+        let controller =
+            filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
+        assert_eq!(controller, vec![event]);
+    }
+
+    #[test]
+    fn library_face_down_battlefield_zone_change_hidden_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let _secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+
+        let controller_filtered = filter_events_for_viewer(&events, &state, controller);
+        let lib_to_bf: Vec<_> = controller_filtered
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Some(Zone::Library),
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(lib_to_bf.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = lib_to_bf[0] {
+            assert_eq!(record.name, "Secret Manifest");
+        } else {
+            panic!("expected ZoneChanged");
+        }
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
+
+        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(spectator.iter().all(|e| !matches!(
+            e,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn library_to_exile_reveal_zone_change_stays_public() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let card = create_object(
+            &mut state,
+            CardId(3),
+            owner,
+            "Cascade Card".to_string(),
+            Zone::Exile,
+        );
+
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            card,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record.name = "Cascade Card".to_string();
+        record.owner = owner;
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Library),
+            to: Zone::Exile,
+            record: Box::new(record),
+        }];
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(opponent.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = &opponent[0] {
+            assert_eq!(record.name, "Cascade Card");
+        } else {
+            panic!("expected ZoneChanged");
+        }
+    }
+
+    #[test]
+    fn library_mill_zone_change_stays_public() {
+        let state = GameState::new_two_player(42);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(7),
+            Some(Zone::Library),
+            Zone::Graveyard,
+        );
+        record.name = "Milled Card".to_string();
+        record.owner = PlayerId(1);
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        }];
+
+        let opponent = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert_eq!(opponent.len(), 1);
+        if let GameEvent::ZoneChanged { record, .. } = &opponent[0] {
+            assert_eq!(record.name, "Milled Card");
+        } else {
+            panic!("expected ZoneChanged");
+        }
     }
 
     #[test]

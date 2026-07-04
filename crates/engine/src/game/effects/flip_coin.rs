@@ -897,6 +897,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         ));
         let return_transformed = {

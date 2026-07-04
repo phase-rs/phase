@@ -1284,6 +1284,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1312,6 +1313,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1822,6 +1824,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -2101,6 +2104,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let config = AiConfig::default();

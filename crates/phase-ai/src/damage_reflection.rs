@@ -169,6 +169,7 @@ mod tests {
                         ],
                     },
                     damage_source: None,
+                    excess: None,
                 },
             ))
     }
@@ -184,6 +185,7 @@ mod tests {
                     },
                     target: TargetFilter::Controller,
                     damage_source: None,
+                    excess: None,
                 },
             ))
     }

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WasmAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
-import type { EngineAdapter, GameState, SubmitResult } from "../types";
+import type { EngineAdapter, SubmitResult } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
+import { buildGameState } from "../../test/factories/gameStateFactory";
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
 const mockWorkerClient = {
@@ -18,16 +19,10 @@ const mockWorkerClient = {
   submitAction: vi
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
-  getState: vi.fn().mockResolvedValue({
+  getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
-    active_player: 0,
     phase: "Untap",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] } },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] } },
-    ],
-    priority_player: 0,
-  } as unknown as GameState),
+  })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
   getAiAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
@@ -228,13 +223,11 @@ describe("WasmAdapter", () => {
     it("serializes state to JSON and posts to worker", async () => {
       await adapter.initialize();
 
-      const mockState = {
+      const mockState = buildGameState({
         turn_number: 3,
-        active_player: 0,
         phase: "PreCombatMain",
         players: [],
-        priority_player: 0,
-      } as unknown as GameState;
+      });
 
       await adapter.restoreState(mockState);
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
@@ -246,7 +239,7 @@ describe("WasmAdapter", () => {
     });
 
     it("throws if not initialized", async () => {
-      const mockState = {} as GameState;
+      const mockState = buildGameState();
       await expect(adapter.restoreState(mockState)).rejects.toThrow(AdapterError);
     });
   });
