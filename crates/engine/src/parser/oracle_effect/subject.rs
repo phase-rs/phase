@@ -4931,6 +4931,7 @@ pub(super) fn try_parse_each_source_deals_damage(
                 amount,
                 target,
                 damage_source,
+                ..
             } => (amount, target, damage_source),
             _ => return None,
         };
