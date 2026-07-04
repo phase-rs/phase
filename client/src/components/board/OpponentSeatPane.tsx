@@ -1,6 +1,8 @@
 import type { CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
+import { seatStatusKey } from "../../game/waitingForRegistry.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -35,10 +37,14 @@ export function OpponentSeatPane({
   onKickPlayer,
   onViewZone,
 }: OpponentSeatPaneProps) {
+  const { t } = useTranslation("game");
   const seatColor = useSeatColor(playerId);
-  const { activePlayerId, waitingSeatId } = useTurnStatus();
+  const { activePlayerId, waitingSeatId, reason } = useTurnStatus();
   const isActiveTurn = activePlayerId === playerId;
   const isWaitingOnThisPlayer = waitingSeatId === playerId;
+  const waitingReasonText = isWaitingOnThisPlayer
+    ? t(seatStatusKey(reason), reason?.params)
+    : null;
   const seatStyle = {
     "--card-size-scale": "0.62",
     "--card-w": "clamp(30px, 2.7vw, 58px)",
@@ -80,7 +86,24 @@ export function OpponentSeatPane({
           onKickPlayer={onKickPlayer}
         />
       </div>
-      <div className="pointer-events-none absolute inset-x-0 top-[calc(0.25rem+var(--game-seat-header-height,2.25rem))] z-20 h-[var(--game-seat-hand-peek,2rem)] overflow-hidden">
+      {/* 1fr/auto/1fr grid keeps the hand fan dead-center regardless of the
+          waiting chip: the chip anchors top-left in the left track (below the
+          header, clear of the global menu cluster that overlays the first
+          pane's header corner) and the track ends at the fan's left edge, so
+          a long label truncates instead of colliding with the hand. */}
+      <div className="pointer-events-none absolute inset-x-0 top-[calc(0.25rem+var(--game-seat-header-height,2.25rem))] z-20 grid h-[var(--game-seat-hand-peek,2rem)] grid-cols-[1fr_auto_1fr] overflow-hidden">
+        <div className="flex min-w-0 items-center justify-start pl-1.5">
+          {waitingReasonText && (
+            <span
+              className="pointer-events-auto inline-flex min-w-0 items-center gap-1 rounded-full bg-amber-400/16 px-2 py-0.5 text-[10px] font-semibold text-amber-100 ring-1 ring-amber-300/30"
+              data-testid={`seat-waiting-reason-${playerId}`}
+              title={waitingReasonText}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-300" />
+              <span className="truncate">{waitingReasonText}</span>
+            </span>
+          )}
+        </div>
         <div className="pointer-events-auto -translate-y-[52%]">
           <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
         </div>

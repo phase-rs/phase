@@ -6,7 +6,6 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
-import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
@@ -42,7 +41,6 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const disconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
   const designations = usePlayerDesignations(playerId);
-  const { waitingSeatId, reason } = useTurnStatus();
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
 
@@ -103,9 +101,6 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const activeTurnChrome = isTheirTurn
     ? "border-rose-300/70 bg-rose-950/58 shadow-[0_10px_26px_rgba(244,63,94,0.28)] after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-rose-300 after:shadow-[0_0_10px_rgba(251,113,133,0.95)]"
     : "";
-  const waitingReasonText = waitingSeatId === playerId
-    ? t(reason?.key ?? "status.reason.thinking", reason?.params)
-    : null;
 
   return (
     <div
@@ -125,14 +120,6 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           title={t("opponentHud.clickToTarget", { name: label })}
         />
       ) : null}
-      {waitingReasonText && (
-        <span
-          className="pointer-events-none absolute left-1/2 top-1/2 z-20 max-w-[45%] -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-sm border border-amber-200/50 bg-amber-300/18 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-[0.12em] text-amber-100 shadow-[0_0_10px_rgba(251,191,36,0.35)]"
-          title={waitingReasonText}
-        >
-          {waitingReasonText}
-        </span>
-      )}
       <div className={`pointer-events-none absolute right-1.5 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-y-1/2 items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
         <div
           className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
