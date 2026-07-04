@@ -19,6 +19,9 @@ export function clearPromptOverlayState(): void {
   });
   useUiStore.getState().setPendingAbilityChoice(null);
   useUiStore.getState().setEnchantmentsDialogPlayer(null);
+  useUiStore.getState().setAttachmentFanHost(null);
   // The per-game "Manual mana" toggle must never leak into the next game.
   useUiStore.getState().setManualManaOverride(false);
+  // The ephemeral hand hide-filter is a per-game focus aid — reset it too.
+  useUiStore.getState().setHandFilter("none");
 }

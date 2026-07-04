@@ -28,9 +28,11 @@ use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::replacements::ReplacementEvent;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
+use crate::analysis::resource::ResourceAxis;
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -233,6 +235,24 @@ pub struct LKISnapshot {
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default, with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
+    /// CR 110.5 + CR 110.5d: Tap status as it last existed on the battlefield.
+    /// A permanent's tapped/untapped status is battlefield-only — once the object
+    /// leaves a public zone it is neither tapped nor untapped, so a look-back rider
+    /// ("Return target creature to its owner's hand. If it was tapped, ..." —
+    /// Brackish Blunder) must read this captured value via `FilterProp::Tapped`
+    /// (use_lki). `#[serde(default)]` ⇒ pre-existing saved states deserialize to
+    /// `tapped = false`.
+    #[serde(default)]
+    pub tapped: bool,
+    /// CR 701.60b + CR 608.2c: Suspected status as it last existed in the public
+    /// zone. Suspected is a battlefield-only status reset on any zone change
+    /// (`GameObject::is_suspected` clears when the object moves), so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner) must
+    /// read this captured value via `FilterProp::Suspected` (LKI). The snapshot
+    /// is taken at cost payment, before the sacrifice zone-change resets the flag.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
@@ -503,6 +523,14 @@ pub struct ZoneChangeRecord {
     /// within the same turn for batched trigger replay guards (issue #3866).
     #[serde(default)]
     pub turn_zone_change_index: usize,
+    /// CR 701.60b + CR 608.2c: Suspected status as of the zone change. Suspected
+    /// is a battlefield-only status reset on any zone change, so a cost-paid
+    /// look-back ("the sacrificed creature was suspected" — Agency Coroner)
+    /// evaluated via the LKI snapshot synthesized in
+    /// `matches_target_filter_on_lki_snapshot` must read this captured value.
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
+    #[serde(default)]
+    pub is_suspected: bool,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -605,6 +633,7 @@ impl ZoneChangeRecord {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            is_suspected: false,
         }
     }
 }
@@ -1086,6 +1115,15 @@ pub struct PendingChangeZoneIteration {
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
+    /// Conditional entry-counter specs carried across a pause so each remaining
+    /// object can be re-evaluated per-object on resume (Winter Soldier Hero
+    /// rider through `EffectZoneChoice`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_enter_with_counters: Vec<(
+        crate::types::ability::TargetFilter,
+        crate::types::counter::CounterType,
+        crate::types::ability::QuantityExpr,
+    )>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
@@ -1107,6 +1145,14 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+    /// moved object's type, carried across a replacement-ordering / as-enters
+    /// pause so a paused-then-resumed gated move (Summoner's Grimoire) still
+    /// applies the riders only to a matching object on resume. `None` = apply
+    /// unconditionally. Mirrors the `enter_tapped`/`face_down_profile`
+    /// carry-through pattern on this same struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_modified_if: Option<crate::types::ability::TargetFilter>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -2457,6 +2503,22 @@ pub struct PendingTriggerSummary {
     pub description: String,
 }
 
+/// CR 616.1 / CR 614: Display payload for one replacement-effect option — either
+/// one candidate in a CR 616.1 ordering prompt, or one branch (accept/decline)
+/// of an optional "you may" replacement. Engine-derived so the filtered state
+/// snapshot (multiplayer) and the frontend `ReplacementModal` never re-derive
+/// the source object/description from `state.objects`, exactly as
+/// [`PendingTriggerSummary`] does for CR 603.3b trigger ordering. For the
+/// optional case both branches carry the same `source_id` (one object, two
+/// outcomes); rule-based virtual replacements (shield counter, Umbra armor,
+/// Compleated, combat skip) still point at the object they act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementCandidateSummary {
+    pub source_id: ObjectId,
+    pub source_name: String,
+    pub description: String,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -2820,6 +2882,31 @@ pub enum CastOfferKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
     },
+    /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
+    /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
+    /// target X card from a graveyard, and mana of any type can be spent to cast
+    /// that spell"). Unlike Cascade/Discover/Ripple this is not a free cast — on
+    /// accept the caster pays the card's real printed cost with the any-type
+    /// concession applied; on decline the card stays in the graveyard.
+    GraveyardPaidCast {
+        /// CR 601.2a: The graveyard card being offered for casting.
+        hit_card: ObjectId,
+        /// CR 609.4b: "mana of any type can be spent to cast that spell" —
+        /// forwarded onto the granted permission so off-color mana pays the cost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+        /// CR 614.1a + CR 608.2n: Optional graveyard-redirect rider on the cast
+        /// (e.g. "if that spell would be put into a graveyard, exile it instead").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        /// CR 712.14a: Whether the spell is cast transformed. Rare for this
+        /// class; carried for parity with the free during-resolution casts.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cast_transformed: bool,
+        /// CR 601.2b: Optional cast-time predicate gating the cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    },
 }
 
 /// CR 701.56a: Which half of a time-travel choice is currently being
@@ -3032,7 +3119,7 @@ pub enum WaitingFor {
         player: PlayerId,
         candidate_count: usize,
         #[serde(default)]
-        candidate_descriptions: Vec<String>,
+        candidates: Vec<ReplacementCandidateSummary>,
     },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
@@ -3360,6 +3447,16 @@ pub enum WaitingFor {
         /// `enter_transformed` / `enters_under_player` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+        /// CR 122.1 + CR 614.1c: Unconditional entry-time counters carried across
+        /// the `EffectZoneChoice` round-trip (e.g. "enters with two +1/+1
+        /// counters").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 122.1 + CR 614.1c: Conditional entry-time counter specs carried
+        /// across the `EffectZoneChoice` round-trip (e.g. "If a Hero enters
+        /// this way, it enters with an additional +1/+1 counter on it").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
         /// CR 701.68a: N for Blight N — number of -1/-1 counters to place.
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
@@ -3374,6 +3471,13 @@ pub enum WaitingFor {
         /// handling for exile-link tracking (push_exiled_with_source_this_turn).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_cost_payment: bool,
+        /// CR 614.12: gates the `enter_tapped`/`enters_attacking` riders on the
+        /// chosen object's type, carried across the `EffectZoneChoice` round-trip
+        /// so the gate is evaluated per chosen object at resume (Summoner's
+        /// Grimoire). `None` = apply the riders unconditionally (every non-Grimoire
+        /// use). Mirrors the `enter_tapped` / `enters_attacking` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_modified_if: Option<crate::types::ability::TargetFilter>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -3890,6 +3994,18 @@ pub enum WaitingFor {
         costs: Vec<AbilityCost>,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 601.2b + CR 701.4a: The player must choose a value (creature type for
+    /// Celestial Reunion) as part of paying a `Behold { type_choice: Some(_) }`
+    /// additional cost, before the behold selection. The chosen value is written
+    /// as a `ChosenAttribute` on the spell object; cost payment then resumes the
+    /// behold step. `options` is the feasible set (types with >= count beholdable
+    /// creatures), so an unpayable type is never offered.
+    CostTypeChoice {
+        player: PlayerId,
+        choice_type: crate::types::ability::ChoiceType,
+        options: Vec<String>,
+        pending_cast: Box<PendingCast>,
+    },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
     BlightChoice {
         player: PlayerId,
@@ -4038,7 +4154,7 @@ pub enum WaitingFor {
         /// `state.last_vote_ballots`. Append-only; the lifecycle matches
         /// `last_zone_changed_ids` (cleared at chain depth 0).
         #[serde(default)]
-        ballots: im::Vector<(PlayerId, u8)>,
+        ballots: im::Vector<(PlayerId, u32)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -4060,16 +4176,39 @@ pub enum WaitingFor {
         /// authorized to submit the next `ChooseOption`.
         actor: VoteActor,
         /// CR 701.38a: How the completed tally maps to effects (the
-        /// strict-majority/tie outcome of `Threshold` is card-defined, not a
+        /// top-tally/tie outcome of `TopVotes` is card-defined, not a
         /// CR subrule). Carried on the WaitingFor (not re-derived from the
         /// source ability) so the final `resolve_tally` can branch between
-        /// per-vote fan-out (`VoteTally::PerVote`) and single-outcome
-        /// Will-of-the-council resolution (`VoteTally::Threshold`) once the
-        /// voter queue empties.
+        /// per-vote fan-out (`VoteTally::PerVote`) and Will-of-the-council
+        /// winner resolution (`VoteTally::TopVotes`) once the voter queue
+        /// empties. `TopVotes` itself resolves either a single winner
+        /// (`TieResolution::Breaker`) or every tied winner
+        /// (`TieResolution::AllTied`, multi-outcome).
         /// Defaults to `PerVote` so pre-existing serialized vote states
         /// deserialize unchanged.
         #[serde(default)]
         tally_mode: super::ability::VoteTally,
+        /// CR 701.38b: For object-pool votes (`VoteSubject::Objects` —
+        /// Council's Judgment, Prime Minister's Cabinet Room), the candidate
+        /// objects enumerated at resolution. Parallel to `options` /
+        /// `option_labels`: a ballot `(PlayerId, u8)` indexes into this vector.
+        /// Empty for named votes; ballots there carry the `options` index.
+        #[serde(default)]
+        candidate_objects: im::Vector<ObjectId>,
+        /// CR 701.38b + CR 608.2c: For object-pool votes, the per-winner
+        /// outcome template (e.g. single-target Exile). `resolve_top_votes_tally`
+        /// resolves it once per winning object with that object injected as the
+        /// single target. `None` for named votes (which use `per_choice_effect`).
+        #[serde(default)]
+        outcome_template: Option<Box<super::ability::AbilityDefinition>>,
+        /// Card-defined: whether this vote is public (`Open`) or secret
+        /// (`Secret` — Truth or Consequences). Under `Secret`, per-ballot
+        /// `VoteCast` events are suppressed and `filter_state_for_viewer`
+        /// scrubs running tallies/ballots until the simultaneous reveal.
+        /// Defaults to `Open` so pre-existing serialized states deserialize
+        /// unchanged.
+        #[serde(default)]
+        visibility: super::ability::VoteVisibility,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -4226,6 +4365,34 @@ pub enum WaitingFor {
         /// controlled by these players are subject to the sweep. Empty only on a
         /// mid-resolution save/reload (`#[serde(default)]`), in which case
         /// `sacrifice_unchosen` falls back to the full APNAP set.
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+    },
+    /// CR 107.1c + CR 701.21a (Slaughter the Strong): `player` keeps any number of
+    /// `target_player`'s `eligible` creatures whose combined power is at most
+    /// `cap`, then the rest are sacrificed. Entered only when keeping all eligible
+    /// creatures would exceed the cap (otherwise the keep-all case auto-resolves).
+    KeepWithinTotalPowerChoice {
+        player: PlayerId,
+        target_player: PlayerId,
+        /// The chooser's creatures eligible to be kept (battlefield objects).
+        eligible: Vec<ObjectId>,
+        /// CR 208.3: maximum combined power of the kept subset.
+        cap: i32,
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        source_id: ObjectId,
+        #[serde(default)]
+        source_controller: PlayerId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// Creatures kept by previous players — protected from the sacrifice sweep.
+        all_kept: Vec<ObjectId>,
+        /// APNAP-ordered set of players within the effect's `player_scope`.
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
@@ -4540,6 +4707,7 @@ impl WaitingFor {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
+            WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
@@ -4564,6 +4732,7 @@ impl WaitingFor {
             WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
@@ -4665,6 +4834,7 @@ impl WaitingFor {
             | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
+            | WaitingFor::CostTypeChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
@@ -4690,6 +4860,7 @@ impl WaitingFor {
             | WaitingFor::AssistChoosePlayer { player, .. }
             | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::AssignBlockerDamage { player, .. }
@@ -4769,6 +4940,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
@@ -4801,6 +4973,7 @@ impl WaitingFor {
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
@@ -4919,6 +5092,46 @@ pub enum AutoPassMode {
     /// turn starts. Interrupted by opponent stack activity (MTGA-style) or when
     /// the current phase matches the player's entry in `GameState::phase_stops`.
     UntilEndOfTurn,
+}
+
+/// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
+///
+/// `Off` (the default) restores EXACT pre-detector behavior: the engine records
+/// no loop-detection samples (no per-resolution `normalize_for_loop` clone), never
+/// fires the mandatory-loop game-ending shortcut (CR 732.2a / CR 732.5 / CR 704.5a),
+/// and never marks `∞` unbounded resources from a detected loop. `On` enables the
+/// detector. New game-changing functionality is opt-in so it can be developed
+/// safely (issue #4603).
+///
+/// This is a game-wide setting (the gated shortcut ends the whole game, so a
+/// per-player flag would be meaningless). It is INTENTIONALLY a typed mode enum
+/// rather than a `bool`, matching the engine's `*Mode` idiom (`AutoPassMode`,
+/// `ConvokeMode`, `CastPaymentMode`) and leaving room for a future detect-only
+/// mode (display `∞` without the game-ending shortcut). The debug
+/// `DebugAction::SetInfiniteMana` toggle is a SEPARATE producer of
+/// `unbounded_resources` and is NOT gated by this flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LoopDetectionMode {
+    /// Pre-feature behavior: no loop sampling, no shortcut, no detector `∞`.
+    #[default]
+    Off,
+    /// Live combo-detector active: samples loops, fires the CR 732.2a mandatory-loop
+    /// shortcut, and marks `unbounded_resources` for a confirmed loop.
+    On,
+}
+
+impl LoopDetectionMode {
+    /// True when the live combo-detector is enabled.
+    pub fn is_on(self) -> bool {
+        matches!(self, LoopDetectionMode::On)
+    }
+
+    /// True when the detector is off (pre-feature behavior). Takes `&self` so it can
+    /// serve as a serde `skip_serializing_if` predicate on `MatchConfig.loop_detection`.
+    pub fn is_off(&self) -> bool {
+        matches!(self, LoopDetectionMode::Off)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5113,12 +5326,16 @@ pub enum CastingVariant {
     /// paying the spell's mana cost. Unlike Sneak, Web-slinging grants no
     /// special timing permission and has no enter-attacking placement rule.
     WebSlinging { returned_creature: ObjectId },
-    /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
-    /// the card as the first card drawn this turn. The granting keyword carries
-    /// the miracle mana cost, which `prepare_spell_cast_with_variant_override`
-    /// substitutes for the printed mana cost. The keyword's `ManaCost` payload
-    /// is read at preparation time rather than stored here because
-    /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
+    /// CR 702.94a + CR 608.2g: Cast from hand via Miracle's alternative cost after
+    /// revealing the card as the first card drawn this turn. This is a UNIT variant;
+    /// the concrete miracle cost is NOT re-read from live keywords at cast time.
+    /// Instead it is latched at offer-enqueue on `CastOfferKind::Miracle.cost` (a
+    /// concrete `ManaCost::Cost` resolved by `draw.rs`) and threaded through
+    /// `handle_cast_spell_as_miracle_with_payment_mode` →
+    /// `prepare_spell_cast_with_variant_override_inner(latched_alt_cost)`. This
+    /// preserves the offered cost even if the granting source (e.g. Aminatou) has
+    /// left the battlefield between reveal-accept and trigger resolution
+    /// (CR 608.2b last-known-information).
     Miracle,
     /// CR 702.35a: Cast from exile via Madness after the discard replacement
     /// exiled the card and its madness triggered ability resolved.
@@ -5576,6 +5793,41 @@ pub struct TriggerIndex {
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementIndexEntry {
+    pub id: ReplacementId,
+    pub ordinal: usize,
+}
+
+/// CR 614.1: Derived candidate pre-filter for replacement effects. The index is
+/// an optional acceleration over the legacy active-replacement scan: it stores
+/// only `ReplacementId`s plus their legacy scan ordinal, never replacement
+/// definitions, so consults re-read live object state and preserve CR 616 order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplacementIndex {
+    pub initialized: bool,
+    pub dirty: bool,
+    pub pipeline_active: bool,
+    pub by_event: im::HashMap<ReplacementEvent, im::Vector<ReplacementIndexEntry>>,
+}
+
+impl Default for ReplacementIndex {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            dirty: true,
+            pipeline_active: false,
+            by_event: im::HashMap::new(),
+        }
+    }
+}
+
+impl Clone for ReplacementIndex {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 /// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
 /// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
 /// `layers_dirty`-covered source categories: battlefield permanents with a
@@ -5603,6 +5855,31 @@ pub struct StaticSourceIndex {
     pub battlefield_sources: im::Vector<ObjectId>,
     /// Command-zone emblem generators, in `state.command_zone` order.
     pub command_sources: im::Vector<ObjectId>,
+}
+
+/// CR 608.2: The resolution-scoped triggering-event context of an ability that
+/// paused for an interactive `ChooseFromZoneChoice`. An ability's resolution is a
+/// single, ongoing process (CR 608.2); when it parks on a player choice,
+/// `stack::resolve_top` runs to completion and unconditionally clears the live
+/// trigger context. These three values are exactly the inputs the
+/// `EventContextAmount` ("that many") cascade in `game::quantity` consults, so
+/// they are captured while still live and restored around the continuation drain
+/// when the player answers — letting an `EventContextAmount` sub_ability
+/// (Amy Pond: "choose a suspended card you own and remove that many time counters
+/// from it") read the triggering event's amount after the pause. Building-block
+/// generalization of the `pending_optional_trigger_event` /
+/// `pending_optional_trigger_match_count` pair (The Ur-Dragon) and the
+/// `WaitingFor::ChooseObjectsSelection` save/restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvingTriggerContext {
+    /// CR 608.2: The triggering event — source of `extract_amount_from_event`.
+    pub event: Option<GameEvent>,
+    /// CR 603.2c: The firing trigger's filtered subject/occurrence count (the
+    /// batched "that many"); outranks the event amount in the cascade.
+    pub match_count: Option<u32>,
+    /// CR 706.4: A die result recorded earlier in this resolution ("roll a die …
+    /// remove that many counters"); outranks the event amount in the cascade.
+    pub die_result: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5795,6 +6072,13 @@ pub struct GameState {
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
     pub trigger_index: TriggerIndex,
+    /// CR 614.1: Derived replacement-effect candidate index. Rebuilt from the
+    /// legacy `active_replacements(state)` order before replacement pipeline
+    /// entry, invalidated after every applied replacement, and ignored whenever
+    /// dirty/uninitialized. `#[serde(skip, default)]` because it is pure derived
+    /// acceleration and must not affect equality or serialized state.
+    #[serde(skip, default)]
+    pub replacement_index: ReplacementIndex,
     /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
     /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
     /// reconstructed from `state.battlefield` + `state.command_zone` +
@@ -5804,6 +6088,24 @@ pub struct GameState {
     /// must not break AI-search dedup on semantically-identical positions.
     #[serde(skip)]
     pub static_source_index: StaticSourceIndex,
+    /// O(1) presence index over `StaticModeKind` discriminants — "does any functioning
+    /// static of kind K exist on the board?" Rebuilt wholesale from `game_functioning_statics`
+    /// as a byproduct of the layers pipeline (`layers::refresh_static_mode_presence`), so it is
+    /// exactly `.any(kind)` for every kind. Lets discriminant-only scan gates (e.g. the
+    /// hexproof scans in `static_abilities`) skip an O(battlefield) `.any()` when zero statics
+    /// of that kind exist.
+    ///
+    /// DERIVED CACHE — `#[serde(skip)]` with an `all_present` default: before the first flush
+    /// makes the index precise, every consumer must fall through to its exact per-object check,
+    /// so the conservative all-true default can only cost a redundant scan, never miss a grant.
+    /// INTENTIONALLY omitted from `impl PartialEq for GameState` — CR 104.4b loop detection
+    /// compares semantic board state; derived caches must not perturb loop-detection equality
+    /// (like `static_source_index`/`static_gate_truth`).
+    #[serde(
+        skip,
+        default = "crate::types::statics::StaticModePresence::all_present"
+    )]
+    pub static_mode_presence: crate::types::statics::StaticModePresence,
     /// CR 732.2a loop-shortcut detection ring (PR-3). A bounded FIFO of recent
     /// post-resolution NORMALIZED board snapshots, captured at the post-pipeline frame
     /// of `game::engine::pass_priority_once_with_pipeline` (after
@@ -5910,6 +6212,15 @@ pub struct GameState {
     /// `handle_order_triggers` concatenates and dispatches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_trigger_order: Option<PendingTriggerOrder>,
+
+    /// CR 603.3b: PhaseChanged occurrences whose delayed triggers were merged
+    /// into a simultaneous normal-trigger ordering batch before priority. The
+    /// generic delayed-trigger pass filters these exact occurrences so the same
+    /// delayed ability is not dispatched again. Transient engine coordination,
+    /// cleared at action/pipeline boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed_before_priority_trigger_events:
+        Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
 
     // CR 607.2a + CR 406.5: Exile tracking for "until leaves" linked abilities.
     #[serde(default)]
@@ -6040,6 +6351,21 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
+    /// attacker restriction (Last Night Together / Bumi), only creatures matching
+    /// this filter may be declared as attackers. Set on entering that
+    /// BeginCombat, cleared at end of combat (CR 511.3). `None` during ordinary
+    /// (unrestricted) combats.
+    #[serde(default)]
+    pub current_combat_attacker_restriction: Option<TargetFilter>,
+    /// CR 611.2c: The source `ObjectId` of the effect that imposed
+    /// `current_combat_attacker_restriction`. Propagated from `ExtraPhase` so
+    /// `passes_combat_attacker_restriction` can build a correct `FilterContext`
+    /// for source-relative restriction predicates. `None` when there is no
+    /// active restriction.
+    #[serde(default)]
+    pub current_combat_attacker_restriction_source: Option<ObjectId>,
+
     // N-player support
     #[serde(default)]
     pub seat_order: Vec<PlayerId>,
@@ -6098,15 +6424,43 @@ pub struct GameState {
     #[serde(default)]
     pub debug_permitted: BTreeSet<PlayerId>,
 
-    /// Set of players for whom the "infinite mana" debug toggle is active. While
-    /// a player is in this set, their mana pool is topped up after every action
-    /// (`mana_payment::refill_infinite_mana`) and is NOT emptied at end of
-    /// step/phase — CR 500.5 is deliberately suppressed for this player only.
-    /// This is a debug-only departure from the rules, gated behind the same
-    /// debug-action permission as every other `DebugAction`. Toggled via
-    /// `DebugAction::SetInfiniteMana`; empty by default.
+    /// Per-controller set of resource axes a detected/forced unbounded loop pumps,
+    /// the engine-authoritative source for the `∞` HUD projection (`derive_views`)
+    /// and the byte-preserved infinite-mana refill/keep gates. The infinite-mana
+    /// debug toggle (`DebugAction::SetInfiniteMana`) is one producer: it records
+    /// the six `ResourceAxis::Mana(_)` axes (`INFINITE_MANA_AXES`) for the player,
+    /// which the `mana_payment::refill_infinite_mana` top-up and the
+    /// `turns` end-of-step keep gate read (CR 500.5 suppressed for that player
+    /// only — a debug-only departure from the rules). Written ONLY through
+    /// `mark_unbounded_loop` / `clear_unbounded_loop`.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `static_gate_truth` /
+    /// `devour_eligible_snapshot`): this is display/annotation state, not rules
+    /// state for equality. CR 104.4b/CR 732.2a loop detection (`loop_states_equal`)
+    /// and AI-search position dedup compare two states reached at different times;
+    /// a populated live state must still compare equal to the empty-`unbounded_resources`
+    /// ring snapshots, or loop detection yields false negatives. (`debug_infinite_mana`
+    /// relied on this same exclusion implicitly; it is now explicit.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+
+    /// CR 732.2a: per-game runtime gate for the live combo (infinite-loop) detector.
+    /// Default `Off` = exact pre-combo-detector behavior. This is the hot-path flag the
+    /// detector gates read; it is PROJECTED from the immutable [`MatchConfig::loop_detection`]
+    /// by [`GameState::set_match_config`] at game creation and is NOT mutated mid-game —
+    /// there is no `GameAction` that flips it, so no seat can opt the match in or out
+    /// during play. Game-wide because the gated shortcut ends the whole game; chosen at
+    /// match creation, whole-table by construction. See [`LoopDetectionMode`].
+    ///
+    /// INTENTIONALLY EXCLUDED from `impl PartialEq for GameState` and
+    /// `loop_fingerprint` (same family as `unbounded_resources`): this is
+    /// control/display state, not rules state for equality. It is invariant across
+    /// the snapshots CR 732.2a loop detection compares (a player cannot toggle it
+    /// mid-loop), and AI-search dedup ignores it (the AI never reads the detector),
+    /// so excluding it cannot cause a false loop match or a missed position dedup.
     #[serde(default)]
-    pub debug_infinite_mana: BTreeSet<PlayerId>,
+    pub loop_detection: LoopDetectionMode,
 
     #[serde(default)]
     pub match_config: MatchConfig,
@@ -6535,6 +6889,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 608.2c: The single object whose move paused the active
+    /// `pending_change_zone_iteration` on a per-permanent replacement CHOICE
+    /// (`ZoneMoveResult::NeedsChoice`), paired with its pre-move zone. Unlike the
+    /// `remaining` members, this object is delivered out-of-band by the
+    /// replacement resume (not by the iteration drain), so the drain would
+    /// otherwise never count it toward `moved_count`. The drain consumes this at
+    /// its top and increments the carried count iff the object actually reached
+    /// the iteration's destination — so a downstream "that many" includes the
+    /// object that prompted the replacement. Pause/resume is strictly sequential,
+    /// so at most one object is ever in flight (set on the pause, taken on the
+    /// next drain pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_change_zone_in_flight: Option<(ObjectId, crate::types::zones::Zone)>,
+
     /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
     /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
     /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
@@ -6677,6 +7045,20 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_trigger_match_count: Option<u32>,
 
+    /// CR 608.2 + CR 603.2c + CR 706.4: The resolution-scoped trigger context of
+    /// an ability that paused for an interactive `ChooseFromZoneChoice`, captured
+    /// while still live (before `stack::resolve_top` clears it) and restored
+    /// around the continuation drain in the `ChooseFromZoneChoice` handler so an
+    /// `EventContextAmount` ("that many") sub_ability resolves the triggering
+    /// event's amount after the pause (Amy Pond). Set on every single-pool
+    /// `ChooseFromZone` raise (`None` for non-trigger ChooseFromZone) and consumed
+    /// by `.take()` in the handler, so it never persists beyond one round-trip.
+    /// It must survive the pause→answer action boundary, so it is intentionally
+    /// NOT in the `apply()`-top transient clear. Building-block generalization of
+    /// `pending_optional_trigger_event` / `pending_optional_trigger_match_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choose_zone_trigger_context: Option<ResolvingTriggerContext>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -6753,6 +7135,28 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
+    /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
+    /// at an empty library (`count == 0`) — distinct from "no Dig has run in
+    /// this chain link," which is `false`. This is a brief, transient relay:
+    /// `effects::apply_parent_chain_context` reads and immediately clears it
+    /// at the very next parent->child hand-off (whatever that child turns out
+    /// to be), copying it onto that ONE child's typed
+    /// `ResolvedAbility::dig_found_nothing_for_parent_target` field. Nothing
+    /// else reads this flag directly — in particular, the shared
+    /// `resolved_targets` chokepoint does not, so an empty Dig can never
+    /// affect any `ParentTarget` consumer beyond its own immediate
+    /// sub_ability (e.g. Avenging Angel's unrelated LTB self-return stays
+    /// unaffected). The `PutAtLibraryPosition` Dig-tail seam
+    /// (`put_on_top.rs`) is the one place that acts on the per-ability field
+    /// for "put up to one of them on top … the rest on the bottom" — without
+    /// it, a reanimated Thassa's Oracle with an empty library (issue #1365)
+    /// would fall back to moving its own source into the library it just
+    /// found empty, corrupting devotion and library-count reads for the
+    /// trailing win condition. Transient resolution bookkeeping — not
+    /// serialized.
+    #[serde(skip)]
+    pub last_dig_found_nothing: bool,
+
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
@@ -6787,7 +7191,7 @@ pub struct GameState {
     /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
     /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
     #[serde(default)]
-    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+    pub last_vote_ballots: im::Vector<(PlayerId, u32)>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
@@ -6803,6 +7207,18 @@ pub struct GameState {
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
+
+    /// CR 120.10: Resolution-local twin of `last_effect_amount` carrying the
+    /// *excess* damage dealt by the preceding effect (damage beyond lethal), as
+    /// distinct from the total (CR 120.6). Stamped alongside `last_effect_amount`
+    /// after a damage-dealing effect resolves and read by
+    /// `AbilityCondition::PreviousEffectAmount { channel: DamageChannel::Excess }`
+    /// for the "if excess damage was dealt … this way" class. Resolution-scoped:
+    /// reset to `None` at depth-0. Follows the `last_effect_amount`
+    /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
+    /// (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_effect_excess_amount: Option<i32>,
 
     /// CR 706.2 + CR 706.4: The actual scalar result available to the current
     /// ability resolution. During a results-table roll, `roll_die::resolve`
@@ -7181,6 +7597,20 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
+    /// that creature's controller instead") across a damage replacement *choice*
+    /// pause. The resume in `handle_replacement_choice` rebuilds the
+    /// `DamageContext` from the source (which cannot re-derive an effect rider),
+    /// so it restores this onto the ctx to keep redirecting the excess. `None`
+    /// for every parked event that is not an excess-redirect damage hit.
+    #[serde(default)]
+    pub excess_recipient: Option<crate::types::ability::ExcessRecipient>,
+    /// CR 702.15b: the deferred lifelink bonus carried by a redirect leg (the
+    /// earlier creature leg's lethal). Preserved across the redirect leg's own
+    /// damage-replacement choice pause so the combined lifelink total is still
+    /// gained on resume. `0` for every parked event that is not such a leg.
+    #[serde(default)]
+    pub lifelink_bonus: u32,
     /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
     /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with more than one eligible land surfaces a
@@ -7205,10 +7635,10 @@ pub struct PendingReplacement {
 /// and addressed by the replacement pipeline via `ReplacementId { source:
 /// ObjectId(0), index }`.
 ///
-/// `description` is the player-facing string surfaced in `WaitingFor::
-/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
-/// the same emptying event and CR 616.1 requires the affected player to choose
-/// ordering.
+/// `description` (paired with `source`) is surfaced as a
+/// `ReplacementCandidateSummary` in `WaitingFor::ReplacementChoice::candidates`
+/// when multiple handlers apply to the same emptying event and CR 616.1
+/// requires the affected player to choose ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepEndManaScanEntry {
     pub source: ObjectId,
@@ -7310,12 +7740,26 @@ pub struct ScheduledTurnControl {
 /// LIFO ordering ("the most recently created phase will occur first") is
 /// preserved by scanning `extra_phases` from the end (`rposition`) for the
 /// first matching anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtraPhase {
     /// The phase after which this extra phase is inserted (CR 500.8).
     pub anchor: Phase,
     /// The phase to insert.
     pub phase: Phase,
+    /// CR 508.1c: Attacker restriction active while this scheduled combat phase
+    /// is current (concretized at resolution to `TrackedSet` / `Typed` /
+    /// `SpecificObject`). `None` for ordinary extra phases. Carried here so the
+    /// restriction activates exactly when (and only when) this phase begins.
+    #[serde(default)]
+    pub attacker_restriction: Option<TargetFilter>,
+    /// CR 611.2c: The source `ObjectId` of the effect that imposed this
+    /// attacker restriction. Used to build a correct `FilterContext` at
+    /// evaluation time so source-relative restriction predicates (e.g.,
+    /// "creatures that share a color with this card") resolve against the actual
+    /// scheduling spell rather than a dummy sentinel. `None` for unrestricted
+    /// extra phases.
+    #[serde(default)]
+    pub attacker_restriction_source: Option<ObjectId>,
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
@@ -7573,7 +8017,9 @@ impl GameState {
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
+            replacement_index: ReplacementIndex::default(),
             static_source_index: StaticSourceIndex::default(),
+            static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -7589,6 +8035,7 @@ impl GameState {
             pending_trigger_entry: None,
             deferred_triggers: Vec::new(),
             pending_trigger_order: None,
+            consumed_before_priority_trigger_events: Vec::new(),
             exile_links: Vec::new(),
             paradigm_primed: Vec::new(),
             delayed_triggers: Vec::new(),
@@ -7607,6 +8054,8 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            current_combat_attacker_restriction: None,
+            current_combat_attacker_restriction_source: None,
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),
@@ -7693,6 +8142,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
+            pending_change_zone_in_flight: None,
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
@@ -7709,6 +8159,7 @@ impl GameState {
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
+            pending_choose_zone_trigger_context: None,
             may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
@@ -7722,12 +8173,14 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            last_dig_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            last_effect_excess_amount: None,
             die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
@@ -7772,13 +8225,25 @@ impl GameState {
             objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
-            debug_infinite_mana: BTreeSet::new(),
+            unbounded_resources: BTreeMap::new(),
+            loop_detection: LoopDetectionMode::Off,
         }
     }
 
     /// Create a standard 2-player game (backward-compatible).
     pub fn new_two_player(seed: u64) -> Self {
         Self::new(FormatConfig::standard(), 2, seed)
+    }
+
+    /// CR 732.2a: adopt a match's immutable configuration, projecting the per-game
+    /// runtime gate(s) it controls. The combo-detector opt-in lives on [`MatchConfig`]
+    /// (chosen at match creation, whole-table, immutable during play); this is the
+    /// single authority that projects it onto [`GameState::loop_detection`] — the flag
+    /// the detector gates read. Called once per game at creation and at each
+    /// between-games rebuild so a multi-game match keeps a consistent detector setting.
+    pub fn set_match_config(&mut self, config: MatchConfig) {
+        self.match_config = config;
+        self.loop_detection = config.loop_detection;
     }
 
     /// Returns the current timestamp and increments for next use.
@@ -7981,6 +8446,32 @@ impl GameState {
         let snapshot = std::sync::Arc::new(self.normalize_for_loop());
         self.loop_detect_ring.push_back(snapshot);
     }
+
+    /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
+    /// pumps `axes`. The single write authority for `unbounded_resources` —
+    /// every producer routes through here, never mutating the map inline. Two
+    /// producers exist: the infinite-mana debug toggle
+    /// (`DebugAction::SetInfiniteMana`, ungated) and the live combo-detector at the
+    /// reconcile seam (`game::engine::reconcile_terminal_result`), which persists a
+    /// confirmed loop's `delta.unbounded_axes_for(winner)` — the same axes
+    /// `detect_loop` names in `LoopCertificate.unbounded` — but ONLY when the
+    /// user-controllable `GameState::loop_detection` gate is `On`. Idempotent
+    /// set-union: storing exactly the axes it is given
+    /// (so a mana toggle stores its six `Mana(_)` axes, a drain certificate stores
+    /// its `Life`/`DamageDealt` axes) without clobbering axes a prior producer
+    /// already recorded for the same controller.
+    pub fn mark_unbounded_loop(&mut self, controller: PlayerId, axes: &[ResourceAxis]) {
+        let entry = self.unbounded_resources.entry(controller).or_default();
+        entry.extend(axes.iter().copied());
+    }
+
+    /// CR 732.2a: clear every unbounded-resource axis recorded for `controller`.
+    /// Whole-player clear: with the infinite-mana toggle as the only PR-6 producer
+    /// this matches today's all-or-nothing disable; an axis-scoped clear can be
+    /// added when multiple producers coexist on one controller.
+    pub fn clear_unbounded_loop(&mut self, controller: PlayerId) {
+        self.unbounded_resources.remove(&controller);
+    }
 }
 
 /// PR-3 (Option C): max retained CR 732.2a loop-detection snapshots. A determinate
@@ -8078,6 +8569,9 @@ impl PartialEq for GameState {
             // static_definitions). Including it would break AI-search dedup on
             // semantically-identical positions whose caches differ only in
             // freshness.
+            // `static_mode_presence` is INTENTIONALLY excluded for the same reason
+            // (CR 104.4b) — a derived O(1) presence cache rebuilt from
+            // `game_functioning_statics`; it must not perturb loop-detection equality.
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
             && self.state_revision == other.state_revision
@@ -8106,6 +8600,10 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.current_combat_attacker_restriction
+                == other.current_combat_attacker_restriction
+            && self.current_combat_attacker_restriction_source
+                == other.current_combat_attacker_restriction_source
             && self.seat_order == other.seat_order
             && self.format_config == other.format_config
             && self.eliminated_players == other.eliminated_players
@@ -8234,6 +8732,8 @@ impl PartialEq for GameState {
             && self.current_trigger_match_count == other.current_trigger_match_count
             && self.pending_optional_trigger_match_count
                 == other.pending_optional_trigger_match_count
+            && self.pending_choose_zone_trigger_context
+                == other.pending_choose_zone_trigger_context
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             // CR 603.12a: K is nonzero AT the per-iteration `OptionalEffectChoice`
             // pause (a serde boundary across separate `apply()` calls). It is
@@ -8304,6 +8804,47 @@ mod tests {
         );
     }
 
+    /// PR-6 test 8 (B2 loop-equality guard): `unbounded_resources` is
+    /// display/annotation state, NOT rules state for equality. Two states
+    /// identical except one has a populated `unbounded_resources` (the
+    /// infinite-mana toggle's six `Mana(_)` axes via `mark_unbounded_loop`) MUST
+    /// compare EQUAL through every loop-detection comparator. Otherwise a populated
+    /// live state would stop matching the empty-`unbounded_resources` ring
+    /// snapshots and CR 104.4b / CR 732.2a loop detection would yield false
+    /// negatives (and AI-search position dedup would break).
+    ///
+    /// REVERT-PROBE: add `&& self.unbounded_resources == other.unbounded_resources`
+    /// to the manual `impl PartialEq for GameState` → `a == b`, `loop_states_equal`,
+    /// and `loop_states_equal_modulo_resources` all flip to false → every assertion
+    /// below fails.
+    #[test]
+    fn unbounded_resources_excluded_from_loop_equality() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+        use crate::game::mana_payment::INFINITE_MANA_AXES;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES);
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.unbounded_resources, b.unbounded_resources,
+            "fixture must actually differ in unbounded_resources"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude unbounded_resources (display state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude unbounded_resources"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude unbounded_resources"
+        );
+    }
+
     /// CR 104.4b confirmation: two states reached at different times (advancing
     /// the volatile counters PartialEq compares) but otherwise identical must
     /// confirm as equal — else a real loop could never be confirmed and drawn.
@@ -8348,6 +8889,36 @@ mod tests {
         assert!(
             !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
+
+    /// L1 / CR 104.4b: an object's `timestamp` is layer-ordering metadata
+    /// (CR 613.7) that `objects_content_eq` deliberately omits, like
+    /// `incarnation`. Two states differing ONLY in a per-object timestamp must
+    /// confirm as a repeat — otherwise a mandatory loop that re-stamps a
+    /// permanent every iteration (a repeated transform or re-attach) would never
+    /// draw. Revert-failing: adding `timestamp` to `objects_content_eq`'s
+    /// allow-list makes the two states differ and this assertion fail.
+    #[test]
+    fn loop_states_equal_ignores_object_timestamp() {
+        let mut a = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+
+        let mut b = a.clone();
+        let ts_a = b.objects[&ObjectId(500)].timestamp;
+        b.objects.get_mut(&ObjectId(500)).unwrap().timestamp = ts_a + 7;
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in an object's CR 613.7 timestamp must confirm as a repeat"
         );
     }
 
@@ -8662,6 +9233,61 @@ mod tests {
         assert_eq!(state, deserialized);
     }
 
+    /// Test E — deserialize-before-flush. `static_mode_presence` is `#[serde(skip)]` with an
+    /// `all_present` default, so a freshly-deserialized state (before any layers flush) has a
+    /// conservative all-present index. Gated consumers must stay CORRECT under that default by
+    /// falling through to their exact per-object scan; a full flush then makes the index
+    /// precise (a kind absent from the board reports false).
+    #[test]
+    fn static_mode_presence_defaults_all_present_after_deserialize() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{StaticMode, StaticModeKind};
+
+        let mut state = GameState::new_two_player(42);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Detection Tower".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: GameState = serde_json::from_str(&json).unwrap();
+
+        // Before any flush: the conservative all-present default (a board-absent kind still
+        // reports present).
+        assert!(restored
+            .static_mode_presence
+            .contains(StaticModeKind::IgnoreHexproof));
+        assert!(restored
+            .static_mode_presence
+            .contains(StaticModeKind::Shroud));
+        // Gated-consumer correctness under the all-present default: the Detection Tower grant
+        // is found because the consumer falls through to its exact scan, not the index.
+        assert!(crate::game::static_abilities::player_ignores_hexproof(
+            &restored,
+            PlayerId(0)
+        ));
+
+        // After a full flush the index is precise: a board-absent kind reports false.
+        let mut flushed = restored;
+        flushed.layers_dirty = LayersDirty::full();
+        crate::game::layers::flush_layers(&mut flushed);
+        assert!(!crate::game::functioning_abilities::static_kind_present(
+            &flushed,
+            StaticModeKind::Shroud
+        ));
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &flushed,
+            StaticModeKind::IgnoreHexproof
+        ));
+    }
+
     #[test]
     #[allow(clippy::vec_init_then_push)]
     fn waiting_for_variants_exist() {
@@ -8752,7 +9378,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 2,
-            candidate_descriptions: vec![],
+            candidates: vec![],
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),
@@ -8983,9 +9609,12 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -9239,9 +9868,12 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -9282,6 +9914,7 @@ mod tests {
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
             moved_count: None,
@@ -9298,6 +9931,7 @@ mod tests {
             }),
             library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.
@@ -9342,9 +9976,12 @@ mod tests {
                 subtypes: vec!["Forest".to_string()],
                 ward: None,
             }),
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

@@ -130,6 +130,47 @@ fn conditional_then_it_deals_variant_reads_boosted_power() {
 const BITE_DOWN_ON_CRIME_FIGHT: &str = "Target creature you control gets +2/+0 until end of turn. \
 It deals damage equal to its power to target creature you don't control.";
 
+/// Reproduction probe for GitHub #4234 (plain "Bite Down", the NO-BOOST
+/// variant): "Target creature you control deals damage equal to its power to
+/// target creature or planeswalker you don't control." The card legitimately
+/// targets TWO objects (CR 601.2c) — the source creature you control and the
+/// opponent's recipient — so "asks for 2 targets" is correct. The only real-bug
+/// question is whether the SOURCE wrongly takes damage too. P0's 4/4 deals 4 to
+/// the opponent's 6/6 and must take 0 itself.
+#[test]
+fn bite_down_no_boost_source_deals_power_and_takes_none() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    const BITE_DOWN_NO_BOOST: &str = "Target creature you control deals damage equal to its power \
+to target creature or planeswalker you don't control.";
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bite Down", true, BITE_DOWN_NO_BOOST)
+        .id();
+    let own = scenario.add_creature(P0, "Biting Beast", 4, 4).id();
+    let foe = scenario.add_creature(P1, "Opposing Ogre", 6, 6).id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[own, foe]).resolve();
+
+    let foe_damage = outcome.state().objects[&foe].damage_marked;
+    let own_damage = outcome.state().objects[&own].damage_marked;
+
+    assert_eq!(
+        foe_damage, 4,
+        "#4234: the source creature (power 4) must deal 4 to the opponent's \
+         creature; got {foe_damage}."
+    );
+    assert_eq!(
+        own_damage, 0,
+        "#4234: the source creature must take NO damage (it is the damage source, \
+         not a recipient); got {own_damage}. Non-zero means the source slot is \
+         being damaged as well — the reported double-damage bug."
+    );
+}
+
 #[test]
 fn bite_down_on_crime_boosted_creature_deals_its_power() {
     let mut scenario = GameScenario::new_n_player(2, 42);

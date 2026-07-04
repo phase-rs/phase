@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameAction, GameState, LegalActionsResult, SubmitResult } from "../../adapter/types";
+import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import {
+  buildGameState,
+  buildLegalActionsResult,
+  buildPlayer,
+  buildPriorityWaitingFor,
+} from "../../test/factories/gameStateFactory";
 import { dispatchAction } from "../dispatch";
 
 // Spy on the recovery escalation so we can assert the dispatch.ts branch that
@@ -21,11 +28,10 @@ vi.mock("../engineRecovery", () => ({
 }));
 
 /** Minimal stack-empty state — enough for dispatch's pre-call bookkeeping. */
-const emptyState = {
+const emptyState = buildGameState({
   stack: [],
-  waiting_for: null,
   players: [],
-} as unknown as GameState;
+});
 
 /**
  * Regression for the silent-freeze bug: when a gameplay worker round-trip
@@ -55,7 +61,7 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
       );
 
     useGameStore.setState({
-      adapter: { submitAction } as unknown as EngineAdapter,
+      adapter: buildEngineAdapterMock(emptyState, { submitAction }),
       gameState: emptyState,
       gameMode: "ai",
     });
@@ -93,10 +99,10 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
       .mockResolvedValue(emptyState);
     const getLegalActions = vi
       .fn<EngineAdapter["getLegalActions"]>()
-      .mockResolvedValue({ actions: [], autoPassRecommended: false } as unknown as LegalActionsResult);
+      .mockResolvedValue(buildLegalActionsResult());
 
     useGameStore.setState({
-      adapter: { submitAction, getState, getLegalActions } as unknown as EngineAdapter,
+      adapter: buildEngineAdapterMock(emptyState, { submitAction, getState, getLegalActions }),
       gameState: emptyState,
       gameMode: "ai",
     });
@@ -110,19 +116,18 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
   });
 
   it("drops a queued local action when the waiting prompt changes before it runs", async () => {
-    const firstWaitingFor = { type: "Priority", data: { player: 0 } };
-    const nextWaitingFor = { type: "Priority", data: { player: 1 } };
-    const initialState = {
-      ...emptyState,
+    const firstWaitingFor = buildPriorityWaitingFor();
+    const nextWaitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
+    const initialState = buildGameState({
       waiting_for: firstWaitingFor,
-      players: [{ id: 0 }, { id: 1 }],
-      objects: { 1: { id: 1 } },
-    } as unknown as GameState;
-    const nextState = {
+      players: [buildPlayer({ id: 0 }), buildPlayer({ id: 1 })],
+      objects: {},
+    });
+    const nextState = buildGameState({
       ...initialState,
       waiting_for: nextWaitingFor,
       priority_player: 1,
-    } as unknown as GameState;
+    });
     let releaseFirst!: () => void;
     const submitAction = vi
       .fn<EngineAdapter["submitAction"]>()
@@ -138,15 +143,14 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
       .mockResolvedValue(nextState);
     const getLegalActions = vi
       .fn<EngineAdapter["getLegalActions"]>()
-      .mockResolvedValue({
+      .mockResolvedValue(buildLegalActionsResult({
         actions: [{ type: "SelectCards", data: { cards: [] } }],
-        autoPassRecommended: false,
-      } as unknown as LegalActionsResult);
+      }));
 
     useGameStore.setState({
-      adapter: { submitAction, getState, getLegalActions } as unknown as EngineAdapter,
+      adapter: buildEngineAdapterMock(initialState, { submitAction, getState, getLegalActions }),
       gameState: initialState,
-      waitingFor: firstWaitingFor as unknown as GameState["waiting_for"],
+      waitingFor: firstWaitingFor,
       gameMode: "ai",
     });
 

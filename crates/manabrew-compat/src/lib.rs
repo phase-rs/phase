@@ -357,6 +357,12 @@ pub enum PlayerAction {
     DiscardDecision {
         discarded_card_ids: Vec<String>,
     },
+    // CR 107.1c + CR 701.21a (Slaughter the Strong): submit the chosen subset of
+    // eligible creatures to keep. The engine validates eligibility and the
+    // total-power cap on apply, so any subset of `eligibleCardIds` may be sent.
+    KeepCreaturesDecision {
+        kept_card_ids: Vec<String>,
+    },
     TargetSpell {
         spell_id: Option<String>,
     },
@@ -669,6 +675,14 @@ pub fn build_prompt(
             insert_json(&mut fields, "numToDiscard", count);
             "chooseDiscard"
         }
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of the
+        // eligible creatures whose combined power is at most the cap; the rest are
+        // sacrificed. Answered with `PlayerAction::KeepCreaturesDecision`.
+        WaitingFor::KeepWithinTotalPowerChoice { eligible, cap, .. } => {
+            insert_object_id_list(&mut fields, "eligibleCardIds", eligible);
+            insert_json(&mut fields, "totalPowerCap", cap);
+            "chooseKeepWithinTotalPower"
+        }
         WaitingFor::ModeChoice {
             modal,
             unavailable_modes,
@@ -721,7 +735,28 @@ pub fn build_prompt(
             insert_json(&mut fields, "validTypes", options);
             match choice_type {
                 ChoiceType::Color { .. } => "chooseColor",
-                ChoiceType::CreatureType
+                ChoiceType::CreatureType { .. }
+                | ChoiceType::CardType { .. }
+                | ChoiceType::LandType
+                | ChoiceType::BasicLandType => "chooseType",
+                ChoiceType::CardName => "chooseCardName",
+                _ => "chooseType",
+            }
+        }
+        // CR 601.2b + CR 701.4a: a pre-cost behold "choose a creature type"
+        // (Celestial Reunion) surfaces the same "pick a type from `validTypes`"
+        // decision as `NamedChoice`, so mirror its mapping — otherwise this
+        // prompt falls through to `UnsupportedPrompt` and the manabrew agent
+        // stalls mid-cast.
+        WaitingFor::CostTypeChoice {
+            choice_type,
+            options,
+            ..
+        } => {
+            insert_json(&mut fields, "validTypes", options);
+            match choice_type {
+                ChoiceType::Color { .. } => "chooseColor",
+                ChoiceType::CreatureType { .. }
                 | ChoiceType::CardType { .. }
                 | ChoiceType::LandType
                 | ChoiceType::BasicLandType => "chooseType",
@@ -814,6 +849,17 @@ pub fn translate_player_action(
             .get(action_index)
             .cloned()
             .ok_or(AdapterError::StaleOrInvalidActionIndex { action_index }),
+        // CR 107.1c + CR 701.21a (Slaughter the Strong): the chosen keep subset is
+        // an arbitrary selection of the eligible creatures, so it is submitted
+        // directly (not via the candidate action table). The engine validates
+        // eligibility and the total-power cap when the action is applied.
+        PlayerAction::KeepCreaturesDecision { kept_card_ids } => {
+            let kept = kept_card_ids
+                .iter()
+                .map(|id| parse_object_id(id))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(GameAction::ChooseKeptCreatures { kept })
+        }
         PlayerAction::Pass { .. }
         | PlayerAction::MulliganDecision { .. }
         | PlayerAction::MulliganPutBackDecision { .. }
@@ -1331,6 +1377,9 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
             .iter()
             .flat_map(|ids| ids.iter().copied())
             .collect(),
+        WaitingFor::KeepWithinTotalPowerChoice {
+            player, eligible, ..
+        } if *player == viewer => eligible.iter().copied().collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             destinations,
@@ -1443,6 +1492,9 @@ fn mana_cost_string(cost: &ManaCost) -> String {
         ManaCost::NoCost => String::new(),
         ManaCost::SelfManaCost => "its mana cost".to_string(),
         ManaCost::SelfManaValue => "its mana value".to_string(),
+        ManaCost::SelfManaCostReduced { reduction } => {
+            format!("its mana cost reduced by {{{reduction}}}")
+        }
         ManaCost::Cost { shards, generic } => {
             let mut out = String::new();
             if *generic > 0 {
@@ -1607,7 +1659,8 @@ fn source_card_id(waiting_for: &WaitingFor) -> Option<String> {
     match waiting_for {
         WaitingFor::TargetSelection { pending_cast, .. }
         | WaitingFor::ModeChoice { pending_cast, .. }
-        | WaitingFor::ChooseXValue { pending_cast, .. } => {
+        | WaitingFor::ChooseXValue { pending_cast, .. }
+        | WaitingFor::CostTypeChoice { pending_cast, .. } => {
             Some(encode_object_id(pending_cast.object_id))
         }
         WaitingFor::TriggerTargetSelection { source_id, .. } => source_id.map(encode_object_id),
@@ -1640,6 +1693,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::UnlessPayment { .. } => "UnlessPayment",
         WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
         WaitingFor::NamedChoice { .. } => "NamedChoice",
+        WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
         WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
         WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
@@ -1915,6 +1969,26 @@ mod tests {
                 PlayerId(0),
             ),
             HashSet::from([ObjectId(23), ObjectId(24)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::KeepWithinTotalPowerChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    eligible: vec![ObjectId(25), ObjectId(26)],
+                    cap: 4,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    source_id: ObjectId(1),
+                    source_controller: PlayerId(0),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(25), ObjectId(26)])
         );
         assert_eq!(
             choosable_objects(
@@ -2337,7 +2411,7 @@ mod tests {
                 "chooseType",
                 WaitingFor::NamedChoice {
                     player: PlayerId(0),
-                    choice_type: ChoiceType::CreatureType,
+                    choice_type: ChoiceType::creature_type(),
                     options: vec!["Wizard".to_string()],
                     source_id: Some(ObjectId(1)),
                 },
@@ -2371,6 +2445,23 @@ mod tests {
                 },
             ),
             ("gameOver", WaitingFor::GameOver { winner: None }),
+            (
+                "chooseKeepWithinTotalPower",
+                WaitingFor::KeepWithinTotalPowerChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    eligible: vec![ObjectId(1), ObjectId(2)],
+                    cap: 4,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    source_id: ObjectId(1),
+                    source_controller: PlayerId(0),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+            ),
         ];
 
         for (expected_type, waiting_for) in cases {
@@ -2378,6 +2469,80 @@ mod tests {
             assert_eq!(prompt.prompt_type, expected_type);
             assert!(prompt.fields.contains_key("availablePlayerActions"));
         }
+    }
+
+    /// Finding #3 (review MED): `WaitingFor::CostTypeChoice` (Celestial Reunion's
+    /// pre-cost behold "choose a creature type") must map like `NamedChoice` — a
+    /// `chooseType` prompt carrying `validTypes` and the casting spell as
+    /// `source_card_id`. Before the fix it fell through to `UnsupportedPrompt`,
+    /// which stalls the manabrew agent mid-cast. Discriminating on all three
+    /// wiring points: reverting the prompt-type arm makes `.expect` panic on the
+    /// `UnsupportedPrompt` error; reverting the `source_card_id` arm drops
+    /// `source_card_id` to `None`.
+    #[test]
+    fn cost_type_choice_prompt_maps_to_choose_type_with_source() {
+        let prompt = prompt_for(WaitingFor::CostTypeChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::creature_type(),
+            options: vec!["Wizard".to_string(), "Goblin".to_string()],
+            pending_cast: dummy_pending_cast(),
+        })
+        .expect("CostTypeChoice must build a prompt, not UnsupportedPrompt");
+        assert_eq!(prompt.prompt_type, "chooseType");
+        assert_eq!(
+            prompt.fields.get("validTypes").unwrap(),
+            &serde_json::json!(["Wizard", "Goblin"])
+        );
+        // `dummy_pending_cast()` carries ObjectId(1) => "card-1".
+        assert_eq!(prompt.source_card_id.as_deref(), Some("card-1"));
+    }
+
+    #[test]
+    fn keep_within_total_power_prompt_and_action_round_trip() {
+        let prompt = prompt_for(WaitingFor::KeepWithinTotalPowerChoice {
+            player: PlayerId(0),
+            target_player: PlayerId(0),
+            eligible: vec![ObjectId(7), ObjectId(8)],
+            cap: 4,
+            choose_filter: TargetFilter::Any,
+            sacrifice_filter: TargetFilter::Any,
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            source_id: ObjectId(1),
+            source_controller: PlayerId(0),
+            remaining_players: vec![],
+            all_kept: vec![],
+            scoped_players: vec![PlayerId(0)],
+        })
+        .unwrap();
+        assert_eq!(prompt.prompt_type, "chooseKeepWithinTotalPower");
+        assert_eq!(
+            prompt.fields.get("eligibleCardIds").unwrap(),
+            &serde_json::json!(["card-7", "card-8"])
+        );
+        assert_eq!(
+            prompt.fields.get("totalPowerCap").unwrap(),
+            &serde_json::json!(4)
+        );
+
+        // An arbitrary kept subset is submitted directly and maps to the engine
+        // action; the engine validates eligibility / the cap on apply.
+        let context = PromptContext {
+            action_table: vec![],
+        };
+        let action = translate_player_action(
+            PlayerAction::KeepCreaturesDecision {
+                kept_card_ids: vec!["card-7".to_string()],
+            },
+            &context,
+            &GameState::new_two_player(7),
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            GameAction::ChooseKeptCreatures {
+                kept: vec![ObjectId(7)]
+            }
+        );
     }
 
     #[test]

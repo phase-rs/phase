@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -515,9 +515,32 @@ fn parse_counter_equal_to(
     // table. Isolate the phrase up to the first clause boundary so trailing
     // ", then …" clauses stay in the remainder.
     let (after_equal, _) = tag("equal to ").parse(input)?;
-    let (_, phrase) =
+    let (rest, phrase_raw) =
         take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
-    let phrase = phrase.trim_end();
+
+    // CR 122.1 + CR 603.4 + CR 603.10a: bare anaphoric "the difference" — the
+    // count is the difference established by the enclosing trigger's
+    // intervening-if comparison ("if it had power greater than ~'s power, put a
+    // number of +1/+1 counters on ~ equal to the difference" — Drizzt
+    // Do'Urden). The two operands live on the hoisted trigger condition, not in
+    // this clause, so emit the deferred placeholder that the trigger-level
+    // difference binding in `lower_trigger_ir` (oracle_trigger.rs) resolves
+    // against the `QuantityComparison` operands. Distinct from the
+    // `parse_cda_quantity` "the difference between A and B" form below, which
+    // carries its own operands. Match on the fully-trimmed phrase (both ends) so
+    // stray leading whitespace ("equal to  the difference") still binds, and
+    // return `take_till`'s own remainder to preserve any trailing ", …" clause.
+    if all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+        .parse(phrase_raw.trim())
+        .is_ok()
+    {
+        return Ok((
+            rest,
+            crate::parser::oracle_effect::difference_anaphor_placeholder(),
+        ));
+    }
+
+    let phrase = phrase_raw.trim_end();
     if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
         return Ok((&after_equal[phrase.len()..], expr));
     }

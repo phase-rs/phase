@@ -46,7 +46,9 @@ fn enter_via_change_zone(runner_state: &mut engine::types::game_state::GameState
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         vec![],
         ObjectId(9000),
@@ -123,19 +125,15 @@ fn mox_diamond_decline_routes_to_graveyard_without_discard() {
 
     enter_via_change_zone(runner.state_mut(), mox);
 
-    let WaitingFor::ReplacementChoice {
-        candidate_descriptions,
-        ..
-    } = &runner.state().waiting_for
-    else {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
         panic!(
             "expected Mox Diamond MayCost ReplacementChoice, got {:?}",
             runner.state().waiting_for
         );
     };
-    let decline = candidate_descriptions
+    let decline = candidates
         .iter()
-        .position(|d| d.contains("Decline"))
+        .position(|c| c.description.contains("Decline"))
         .expect("decline option must be offered");
 
     runner

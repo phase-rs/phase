@@ -177,6 +177,39 @@ pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectI
     state.objects_that_dealt_damage.contains(&source_id)
 }
 
+/// CR 105.2 + CR 611.3a: True when the source permanent shares a color with the
+/// most common color among all battlefield permanents — counting every color
+/// tied for most common. Backs
+/// `StaticCondition::SharesColorWithMostCommonColorAmongPermanents` (Heroic
+/// Defiance, whose static gate wraps it in `Not` for the "unless" clause).
+pub(crate) fn eval_shares_color_with_most_common_color(
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    use crate::types::mana::ManaColor;
+    use std::collections::HashMap;
+
+    // CR 105.2a: only the five colors count; the histogram is over every colored
+    // battlefield permanent (the source itself included).
+    let mut counts: HashMap<ManaColor, usize> = HashMap::new();
+    for &id in crate::game::targeting::zone_object_ids(state, Zone::Battlefield).iter() {
+        if let Some(obj) = state.objects.get(&id) {
+            for color in &obj.color {
+                *counts.entry(*color).or_insert(0) += 1;
+            }
+        }
+    }
+    let Some(&max) = counts.values().max() else {
+        return false; // no colored permanent — there is no "most common color"
+    };
+    // A source color is most-common (or tied) iff its board-wide count equals the
+    // maximum; sharing any such color satisfies the predicate.
+    state
+        .objects
+        .get(&source_id)
+        .is_some_and(|source| source.color.iter().any(|c| counts.get(c) == Some(&max)))
+}
+
 /// CR 301.5 + CR 303.4: True when the source object is attached to a creature
 /// controlled by `controller`. Returns false when the source has no host, when
 /// the host is a player (Curse-style Aura), or when the host is not a creature
@@ -253,5 +286,44 @@ mod tests {
 
         assert!(eval_source_is_tapped_on_battlefield(&state, id));
         assert!(eval_source_is_tapped(&state, id));
+    }
+
+    /// CR 105.2 + CR 611.3a (Heroic Defiance): the most-common-color predicate is
+    /// true only when a source color's board-wide count equals the maximum, and a
+    /// color tied for most common still counts.
+    #[test]
+    fn shares_most_common_color_handles_majority_and_ties() {
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, cid: u64, colors: Vec<ManaColor>| {
+            let id = create_object(
+                &mut *state,
+                CardId(cid),
+                PlayerId(0),
+                "P".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().color = colors;
+            id
+        };
+
+        let white = mk(&mut state, 1, vec![ManaColor::White]);
+        mk(&mut state, 2, vec![ManaColor::White]);
+        let red = mk(&mut state, 3, vec![ManaColor::Red]);
+
+        // White is strictly most common (2 vs 1): a white source shares it; a
+        // red-only source does not.
+        assert!(eval_shares_color_with_most_common_color(&state, white));
+        assert!(!eval_shares_color_with_most_common_color(&state, red));
+
+        // Add a second red → White 2 / Red 2. CR 611.3a counts every tied color,
+        // so the red source now shares a most-common color.
+        mk(&mut state, 4, vec![ManaColor::Red]);
+        assert!(eval_shares_color_with_most_common_color(&state, red));
+
+        // A colorless source never shares a color, even at a tie.
+        let colorless = mk(&mut state, 5, vec![]);
+        assert!(!eval_shares_color_with_most_common_color(&state, colorless));
     }
 }

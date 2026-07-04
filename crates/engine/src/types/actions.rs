@@ -300,6 +300,16 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.38b: Cast a vote for one object candidate in an object-pool vote
+    /// (`VoteSubject::Objects` — Council's Judgment, Prime Minister's Cabinet
+    /// Room). `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`
+    /// (and the parallel `option_labels`). Index-based — not name-based — so
+    /// two candidates with the same printed name are disambiguated. Named votes
+    /// continue to use `ChooseOption { choice }`; object votes reject the string
+    /// path because their candidates are not canonical option words.
+    SubmitVoteCandidate {
+        candidate_index: u32,
+    },
     /// Alchemy spellbook draft: the player's chosen card name in response to
     /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
     /// pending destination.
@@ -533,6 +543,13 @@ pub enum GameAction {
     DiscoverChoice {
         choice: CastChoice,
     },
+    /// CR 608.2g + CR 609.4b: Accept/decline a during-resolution PAID cast of a
+    /// graveyard card (Quistis Trepe, Tinybones the Pickpocket). On accept the
+    /// caster pays the card's real printed cost with any-type mana; on decline
+    /// the card stays in the graveyard.
+    GraveyardPaidCastChoice {
+        choice: CastChoice,
+    },
     /// CR 702.85a: Choose to cast the cascaded card without paying its mana cost.
     CascadeChoice {
         choice: CastChoice,
@@ -639,6 +656,13 @@ pub enum GameAction {
     /// `WaitingFor::CategoryChoice::categories`. `None` = no permanent of that type.
     SelectCategoryPermanents {
         choices: Vec<Option<ObjectId>>,
+    },
+    /// CR 107.1c + CR 701.21a: Answer to `WaitingFor::KeepWithinTotalPowerChoice`
+    /// (Slaughter the Strong) — the subset of eligible creatures to keep. Every id
+    /// must be in the prompt's `eligible` set and their combined power must not
+    /// exceed `cap`; the rest are sacrificed.
+    ChooseKeptCreatures {
+        kept: Vec<ObjectId>,
     },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
@@ -1297,6 +1321,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
@@ -1323,6 +1348,7 @@ impl GameAction {
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
+            | GameAction::GraveyardPaidCastChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::RippleChoice { .. }
             | GameAction::FreeCastWindowChoice { .. }
@@ -1344,6 +1370,7 @@ impl GameAction {
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
+            | GameAction::ChooseKeptCreatures { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }

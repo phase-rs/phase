@@ -560,6 +560,19 @@ struct BasePtSetAxes {
 /// "base " on the second noun and the optional "and toughness" conjunct are each
 /// a single combinator.
 fn parse_base_pt_axes(input: &str) -> OracleResult<'_, BasePtSetAxes> {
+    // CR 208.1: "base toughness" alone (toughness-only, symmetric with the
+    // power-only axis) — Sentinel / Wall of Tombstones set base toughness without
+    // touching base power. Tried first; it cannot shadow the both-axes form,
+    // which always opens with "base power" ("base power and base toughness").
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("base toughness").parse(input) {
+        return Ok((
+            rest,
+            BasePtSetAxes {
+                set_power: false,
+                set_toughness: true,
+            },
+        ));
+    }
     let (input, _) = tag("base power").parse(input)?;
     let (input, toughness) =
         opt(alt((tag(" and base toughness"), tag(" and toughness")))).parse(input)?;
@@ -579,6 +592,12 @@ enum BasePtSetValue {
     Fixed { power: i32, toughness: i32 },
     /// Dynamic "[each] equal to <quantity>" — `SetPowerDynamic`/`SetToughnessDynamic`.
     Dynamic(QuantityExpr),
+    /// Split dynamic values per axis — Amplifire ("becomes twice that card's power
+    /// and its base toughness becomes twice that card's toughness").
+    SplitDynamic {
+        power: QuantityExpr,
+        toughness: QuantityExpr,
+    },
 }
 
 /// CR 208.1: Parse the value following the "become[s] " copula of a base-P/T-set
@@ -608,6 +627,132 @@ fn parse_base_pt_set_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
     let expr = oracle_quantity::parse_cda_quantity(tail)
         .or_else(|| oracle_quantity::parse_event_context_quantity(tail))?;
     Some((BasePtSetValue::Dynamic(expr), ""))
+}
+
+/// CR 208.1 + CR 613.4b: Parse the copula that separates a base-P/T subject from
+/// its value. The intransitive "become[s] " form and the transitive
+/// "change … to " form (Riptide Mangler, Shape Stealer, Halfdane) share one
+/// downstream value/emission path; `is_change` selects the token so the two
+/// surface verbs are a single parameterized copula rather than duplicated arms.
+fn parse_base_pt_copula(input: &str, is_change: bool) -> OracleResult<'_, ()> {
+    if is_change {
+        value((), tag(" to ")).parse(input)
+    } else {
+        value((), (tag(" become"), opt(tag("s")), tag(" "))).parse(input)
+    }
+}
+
+/// CR 208.1 + CR 613.4b: value side of the transitive "change <subject>'s base
+/// power [and toughness] to <value>" frame. Unlike the "become[s] equal to"
+/// copula, the "change … to" frame introduces the value with a bare " to ", so
+/// the value is a fixed "N/M" (Brine Hag), a paired "<X>'s power and toughness"
+/// referent (Shape Stealer, Halfdane), or a bare single-axis quantity (Riptide
+/// Mangler). Each form routes to the exact same building block the copula form
+/// uses — no value grammar is duplicated.
+fn parse_change_base_pt_value(remainder: &str) -> Option<(BasePtSetValue, &str)> {
+    if let Some((power, toughness, after)) =
+        super::animation::parse_fixed_become_pt_prefix(remainder)
+    {
+        return Some((BasePtSetValue::Fixed { power, toughness }, after));
+    }
+    if let Some((power, toughness)) = parse_pt_pair_referent(remainder) {
+        return Some((BasePtSetValue::SplitDynamic { power, toughness }, ""));
+    }
+    let tail = remainder.trim().trim_end_matches('.').trim();
+    let expr = parse_base_pt_axis_quantity(tail)?;
+    Some((BasePtSetValue::Dynamic(expr), ""))
+}
+
+/// CR 208.1: Resolve a paired "<X>'s power and toughness" / "the power and
+/// toughness of <X>" referent into its two single-axis quantities, both reading
+/// the same object `X` (its power feeds base power, its toughness feeds base
+/// toughness). Rather than duplicate the referent-scope grammar (event-context
+/// "that creature", "target creature", source), each axis is resolved by feeding
+/// the reconstructed single-axis phrase back through `parse_base_pt_axis_quantity`
+/// — the same combinator the copula form already uses — so every recognized
+/// referent scope composes automatically.
+fn parse_pt_pair_referent(tail: &str) -> Option<(QuantityExpr, QuantityExpr)> {
+    let trimmed = tail.trim().trim_end_matches('.').trim();
+    let lower = trimmed.to_lowercase();
+
+    // Possessive: "<X>'s power and toughness" (ASCII or Unicode apostrophe).
+    // Capture the possessor with nom `take_until` up to the "'s power and
+    // toughness" tail (prefix-oriented, mirroring the possessive subject
+    // grammar), requiring the tail to consume the remainder so only a genuine
+    // suffix matches. `apostrophe` re-attaches the possessive marker when
+    // reconstructing each single-axis referent.
+    for (marker, apostrophe) in [
+        ("'s power and toughness", "'s"),
+        ("\u{2019}s power and toughness", "\u{2019}s"),
+    ] {
+        if let Ok((rest_lower, possessor_lower)) =
+            (take_until::<_, _, OracleError<'_>>(marker), tag(marker))
+                .map(|(possessor, _)| possessor)
+                .parse(lower.as_str())
+        {
+            if !rest_lower.is_empty() {
+                continue;
+            }
+            let possessor = &trimmed[..possessor_lower.len()];
+            let power = parse_base_pt_axis_quantity(&format!("{possessor}{apostrophe} power"))?;
+            let toughness =
+                parse_base_pt_axis_quantity(&format!("{possessor}{apostrophe} toughness"))?;
+            return Some((power, toughness));
+        }
+    }
+
+    // Inverted genitive: "the power and toughness of <X>".
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("the power and toughness of ").parse(lower.as_str())
+    {
+        let object = &trimmed[trimmed.len() - rest.len()..];
+        let power = parse_base_pt_axis_quantity(&format!("the power of {object}"))?;
+        let toughness = parse_base_pt_axis_quantity(&format!("the toughness of {object}"))?;
+        return Some((power, toughness));
+    }
+
+    None
+}
+
+/// Parse a single-axis base-P/T quantity tail, including "twice that card's power"
+/// where the inner referent is event-context scoped (Amplifire).
+fn parse_base_pt_axis_quantity(tail: &str) -> Option<QuantityExpr> {
+    type VE<'a> = OracleError<'a>;
+    if let Some(qty) = oracle_quantity::parse_cda_quantity(tail)
+        .or_else(|| oracle_quantity::parse_event_context_quantity(tail))
+    {
+        return Some(qty);
+    }
+    let lower = tail.to_lowercase();
+    let Ok((rest_lower, factor)) = alt((
+        value(2i32, tag::<_, _, VE>("twice ")),
+        value(3, tag("three times ")),
+    ))
+    .parse(lower.as_str()) else {
+        return None;
+    };
+    let inner_text = tail[tail.len() - rest_lower.len()..].trim();
+    let inner = oracle_quantity::parse_event_context_quantity(inner_text)?;
+    Some(QuantityExpr::Multiply {
+        factor,
+        inner: Box::new(inner),
+    })
+}
+
+/// CR 208.1 + CR 608.2c: "<power-expr> and its base toughness becomes <toughness-expr>"
+/// when power and toughness each carry independent dynamic quantities (Amplifire).
+fn parse_split_base_pt_dynamic_values(
+    remainder: &str,
+) -> Option<(QuantityExpr, QuantityExpr, &str)> {
+    const TOUGHNESS_INTRO: &str = " and its base toughness becomes ";
+    let (power_part, rest) = nom_primitives::split_once_on(remainder, TOUGHNESS_INTRO)
+        .ok()?
+        .1;
+    let power_tail = power_part.trim().trim_end_matches('.').trim();
+    let tough_tail = rest.trim().trim_end_matches('.').trim();
+    let power = parse_base_pt_axis_quantity(power_tail)?;
+    let toughness = parse_base_pt_axis_quantity(tough_tail)?;
+    Some((power, toughness, ""))
 }
 
 /// CR 613.4b + CR 613.1f: "[subject]'s base power [and toughness] become[s]
@@ -643,64 +788,106 @@ fn try_parse_subject_base_pt_set_clause_ast(
 
     let lower = body.to_lowercase();
 
+    // CR 613.4b: two verb surface forms set base P/T with no type change:
+    //   (a) the intransitive "become[s] <value>" copula (Moon Girl, Pupu, Sita
+    //       Varma), and
+    //   (b) the transitive "change <subject>'s base power [and toughness] to
+    //       <value>" frame (Riptide Mangler, Shape Stealer, Halfdane, Eldrazi
+    //       Mimic).
+    // Strip the optional "change"/"you may change" verb so the shared possessive
+    // subject/axes grammar below applies to both forms; the copula token is then
+    // " to " (transitive) instead of " become[s] ", and the value side is bare
+    // (no "equal to" lead-in). Only the possessive subject form takes the
+    // transitive verb — the inverted-genitive "the base power and toughness of
+    // <subject>" would read the value through " to ", which collides with a
+    // " to " inside the subject (Brine Hag: "creatures that dealt damage to it"),
+    // so the inverted form stays copula-only.
+    let (parse_lower, is_change) = match alt((
+        tag::<_, _, VE>("you may change "),
+        tag::<_, _, VE>("change "),
+    ))
+    .parse(lower.as_str())
+    {
+        Ok((rest, _)) => (rest, true),
+        Err(_) => (lower.as_str(), false),
+    };
+    // Recover the original-case body at the same offset (the verb prefix, if
+    // any, is ASCII so the byte length delta is identical in `body`).
+    let parse_body = &body[body.len() - parse_lower.len()..];
+
     // Two surface forms, each yielding `(subject_text, axes, value_remainder)`:
-    //   1. Possessive:  "<subject>'s base power [and toughness] become[s] <value>"
+    //   1. Possessive:  "<subject>'s base power [and toughness] <copula> <value>"
     //   2. Inverted:    "the base power and toughness of <subject> become[s] <value>"
     // The possessive marker may be ASCII `'s` or the Unicode right single quote
     // `\u{2019}s`. `to_lowercase` preserves byte length/offsets for this text
-    // (ASCII letters, apostrophes, digits, slashes), so a span taken from `lower`
-    // indexes the same bytes in `body`.
-    let (subject, axes, remainder) = if let Ok((rest_lower, (axes, _, subject_lower, _, _, _))) =
+    // (ASCII letters, apostrophes, digits, slashes), so a span taken from
+    // `parse_lower` indexes the same bytes in `parse_body`.
+    let inverted = if is_change {
+        // The inverted genitive is copula-only (see the `is_change` note above).
+        None
+    } else {
         // Inverted genitive: "the base power and toughness of <subject> become[s] "
         (
-                preceded(tag::<_, _, VE>("the "), parse_base_pt_axes),
-                tag(" of "),
-                take_until::<_, _, VE>(" become"),
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .parse(lower.as_str())
-    {
-        // `subject_lower` is a sub-slice of `lower`; its byte offset is the
-        // pointer delta. Recover original case at the same span in `body`.
-        let subject_start = subject_lower.as_ptr() as usize - lower.as_ptr() as usize;
-        let subject = body
-            .get(subject_start..subject_start + subject_lower.len())?
-            .trim();
-        let remainder = &body[body.len() - rest_lower.len()..];
-        (subject, axes, remainder)
-    } else {
-        // Possessive: "<subject>'s base power [and toughness] become[s] "
-        let (rest_lower, (subject_lower, axes)) = alt((
-            (
-                take_until::<_, _, VE>("'s base power"),
-                tag("'s "),
-                parse_base_pt_axes,
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .map(|(subject, _, axes, _, _, _)| (subject, axes)),
-            (
-                take_until::<_, _, VE>("\u{2019}s base power"),
-                tag("\u{2019}s "),
-                parse_base_pt_axes,
-                tag(" become"),
-                opt(tag("s")),
-                tag(" "),
-            )
-                .map(|(subject, _, axes, _, _, _)| (subject, axes)),
-        ))
-        .parse(lower.as_str())
-        .ok()?;
-        let subject = body[..subject_lower.len()].trim();
-        let remainder = &body[body.len() - rest_lower.len()..];
-        (subject, axes, remainder)
+            preceded(tag::<_, _, VE>("the "), parse_base_pt_axes),
+            tag(" of "),
+            take_until::<_, _, VE>(" become"),
+            tag(" become"),
+            opt(tag("s")),
+            tag(" "),
+        )
+            .parse(parse_lower)
+            .ok()
     };
+    let (subject, axes, remainder) =
+        if let Some((rest_lower, (axes, _, subject_lower, _, _, _))) = inverted {
+            // `subject_lower` is a sub-slice of `parse_lower`; its byte offset is
+            // the pointer delta. Recover original case at the same span.
+            let subject_start = subject_lower.as_ptr() as usize - parse_lower.as_ptr() as usize;
+            let subject = parse_body
+                .get(subject_start..subject_start + subject_lower.len())?
+                .trim();
+            let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
+            (subject, axes, remainder)
+        } else {
+            // Possessive: "<subject>'s base power [and toughness]" followed by the
+            // copula (" to " for the transitive "change" frame, else "become[s] ").
+            // Anchor on "'s base " (not "'s base power") so the toughness-only
+            // axis ("~'s base toughness") reaches `parse_base_pt_axes`, which
+            // classifies the specific characteristic word.
+            let (rest_lower, (subject_lower, axes)) = alt((
+                (
+                    take_until::<_, _, VE>("'s base "),
+                    tag("'s "),
+                    parse_base_pt_axes,
+                )
+                    .map(|(subject, _, axes)| (subject, axes)),
+                (
+                    take_until::<_, _, VE>("\u{2019}s base "),
+                    tag("\u{2019}s "),
+                    parse_base_pt_axes,
+                )
+                    .map(|(subject, _, axes)| (subject, axes)),
+            ))
+            .parse(parse_lower)
+            .ok()?;
+            let (rest_lower, ()) = parse_base_pt_copula(rest_lower, is_change).ok()?;
+            let subject = parse_body[..subject_lower.len()].trim();
+            let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
+            (subject, axes, remainder)
+        };
 
-    // Parse the value side (fixed N/M or dynamic "[each] equal to <quantity>").
-    let (value, after_pt) = parse_base_pt_set_value(remainder)?;
+    // Parse the value side. The transitive "change … to" frame carries a bare
+    // value (fixed, paired referent, or single-axis quantity); the copula form
+    // carries "[each] equal to <quantity>" or an Amplifire-style per-axis split.
+    let (value, after_pt) = if is_change {
+        parse_change_base_pt_value(remainder)?
+    } else {
+        parse_base_pt_set_value(remainder).or_else(|| {
+            parse_split_base_pt_dynamic_values(remainder).map(|(power, toughness, after)| {
+                (BasePtSetValue::SplitDynamic { power, toughness }, after)
+            })
+        })?
+    };
 
     // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
     let keywords = parse_base_pt_set_trailing_keywords(after_pt);
@@ -731,6 +918,10 @@ fn try_parse_subject_base_pt_set_clause_ast(
             if axes.set_toughness {
                 modifications.push(ContinuousModification::SetToughnessDynamic { value: expr });
             }
+        }
+        BasePtSetValue::SplitDynamic { power, toughness } => {
+            modifications.push(ContinuousModification::SetPowerDynamic { value: power });
+            modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
         }
     }
     if modifications.is_empty() {
@@ -982,11 +1173,13 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
+                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
+                    by: None,
+                })
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None },
+                }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
             },
@@ -1535,7 +1728,38 @@ pub(super) fn parse_subject_application(
         // path of "target creature that player controls becomes …" (Gornog,
         // the Red Reaper) silently bound the target to the trigger
         // controller's own creatures.
-        let (filter, _) = parse_target_with_ctx(subject, ctx);
+        let (filter, rest) = parse_target_with_ctx(subject, ctx);
+        // CR 608.2c + CR 109.4: "target <filter>'s controller/owner <verb>s it"
+        // (Arcum Dagsson, Mercy Killing) — the ability TARGETS <filter>; its
+        // controller/owner performs the verb on it ("it" = that target). Preserve
+        // <filter> as the ability's object target while shifting the acting
+        // subject to the target's controller/owner, so the imperative lowering
+        // declares a `TargetOnly{<filter>}` slot (see `lower_subject_predicate_ast`)
+        // against which `ParentTarget`/`ParentTargetController` resolve. Only the
+        // exact possessive-controller/owner suffix (nothing else) qualifies.
+        if let Ok((_, actor)) = all_consuming(alt((
+            value(
+                TargetFilter::ParentTargetController,
+                alt((
+                    tag::<_, _, OracleError<'_>>("'s controller"),
+                    tag("\u{2019}s controller"),
+                )),
+            ),
+            value(
+                TargetFilter::ParentTargetOwner,
+                alt((tag("'s owner"), tag("\u{2019}s owner"))),
+            ),
+        )))
+        .parse(rest.trim())
+        {
+            return Some(SubjectApplication {
+                affected: actor,
+                target: Some(filter),
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
@@ -1874,6 +2098,20 @@ pub(super) fn parse_subject_application(
                 Some(ControllerRef::ParentTargetController)
             ) {
                 TargetFilter::ParentTargetController
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
+            ) {
+                // CR 608.2c + CR 106.12a: An explicit triggering/defending player
+                // scope established by `relative_player_scope_for_condition`
+                // (e.g. the instant/sorcery taps-for-mana delayed trigger split:
+                // "whenever a player taps <type> for mana, that player adds …" —
+                // High Tide, Bubbling Muck) makes "that player" the triggering
+                // player, NOT the parent target's controller. Without this arm the
+                // scope is resolved but silently discarded, defaulting to
+                // `ParentTargetController` below. `ctx_filter` is the matching
+                // event-context ref for the parsed subject phrase.
+                ctx_filter
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -2847,6 +3085,84 @@ fn build_continuous_clause(
     })
 }
 
+/// CR 702.62a + CR 702.62b + CR 611.2a + CR 608.2c: Recognize the plural,
+/// set-referencing "cards exiled this way gain <kw>" continuous keyword grant.
+/// This is the plural / relative-clause sibling of the singular "If it doesn't
+/// have suspend, it gains suspend" grant (Jhoira of the Ghitu, The Tenth
+/// Doctor): the subject "cards exiled this way" is a back-reference (CR 608.2c
+/// "this way") to the chain's tracked set, which the `GenericEffect` resolver
+/// broadcasts the grant to via `ParentTarget`.
+///
+/// Parameterized on the keyword (never Suspend-hardcoded) so it covers the whole
+/// "cards exiled this way gain <kw>" class (only the "exiled this way" head is
+/// matched today — no "affected this way" arm). The produced clause is
+/// byte-for-byte the Jhoira/Tenth suspend-grant shape.
+///
+/// The optional "that don't have <kw>" restrictive clause (CR 702.62a) is
+/// recognised by the parser but results in a strict-failure (`None`) because
+/// `evaluate_condition` resolves `SourceLacksKeyword` against the ability's
+/// `source_id` (the spell, which never carries the keyword), not each individual
+/// exiled card. Attaching the condition therefore produces an unconditional
+/// overgrant — already-<kw> cards would still receive a redundant grant. A
+/// correct per-card exclusion requires an object-scoped condition variant (e.g.
+/// `CostPaidObjectLacksKeyword`) that does not yet exist in the engine. Until
+/// that building block is added, "cards exiled this way that don't have <kw>
+/// gain <kw>" is a documented strict-failure deferred to `Unimplemented`.
+///
+/// Returns `None` (strict-failure to `Unimplemented`) when the restrictive
+/// clause is present or when the predicate is not a recognised "gain <kw>"
+/// keyword grant.
+pub(super) fn try_parse_exiled_this_way_keyword_grant(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Strip the set-referencing subject head ("cards exiled this way") — a
+    // back-reference (CR 608.2c) to the chain's exiled-card tracked set.
+    let (_, after_head) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag("the cards exiled this way"),
+                tag("a card exiled this way"),
+                tag("cards exiled this way"),
+            )),
+        )
+        .parse(i)
+    })?;
+
+    // Detect the restrictive "that don't have <kw>" clause (CR 702.62a).
+    // When present, strict-fail: the correct object-scoped condition
+    // (`evaluate_condition` per exiled card, not per spell source) is not
+    // yet implemented. Attaching `SourceLacksKeyword` here would silently
+    // overgrant — see the fn doc for the full explanation.
+    let after_head_lower = after_head.to_lowercase();
+    let has_restrictive = nom_on_lower(after_head, &after_head_lower, |i| {
+        let (i, _) = tag(" that do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag("n't"), tag(" not"))).parse(i)?;
+        let (i, _) = tag(" have ").parse(i)?;
+        let (i, _) = take_until(" gain").parse(i)?;
+        Ok((i, ()))
+    });
+    if has_restrictive.is_some() {
+        return None;
+    }
+
+    // The predicate must be a "gain <kw>" continuous keyword grant; reuse the
+    // shared `build_continuous_clause` machinery (which applies the keyword-driven
+    // `Suspend → Permanent` duration rule per CR 611.2a). `target.is_some()` maps
+    // `affected` to the runtime-bound `ParentTarget` back-reference.
+    let application = SubjectApplication {
+        affected: TargetFilter::ParentTarget,
+        target: Some(TargetFilter::ParentTarget),
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    };
+    build_continuous_clause(application, after_head.trim(), ctx)
+}
+
 /// Strip "for each [clause]" suffix from text so that duration extraction can find
 /// "until end of turn" that precedes it. Returns the text up to "for each" (or the
 /// original text if "for each" is not present). Only used for duration extraction —
@@ -3570,7 +3886,7 @@ fn try_parse_become_choice(
 
     let (choice_type, modification) = if lower.contains("creature type") {
         (
-            ChoiceType::CreatureType,
+            ChoiceType::creature_type(),
             ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             },
@@ -3961,6 +4277,12 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }
             | StaticMode::CantUntap
+            // CR 702.26a + CR 101.2: the phase-in lock is granted to the parent
+            // ability's chosen target ("It can't phase in …"), so it must
+            // propagate onto that permanent's `static_definitions` as a
+            // `SpecificObject` transient grant — without `AddStaticMode` the TCE
+            // carries empty modifications and the phase-in gate never sees it.
+            | StaticMode::CantPhaseIn
             | StaticMode::CantGainLife
             | StaticMode::CantLoseLife
             | StaticMode::CantLoseTheGame
@@ -4047,6 +4369,12 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
             vec![StaticMode::CantCrew],
             (tag("crew"), opt(tag(" vehicles"))),
         ),
+        // CR 702.26a + CR 101.2: "phase in" prohibition (The Pandorica: "It
+        // can't phase in for as long as ~ remains tapped"). The negation prefix
+        // and any trailing "for as long as …" duration are owned by the caller
+        // (`parse_restriction_modes` / `strip_trailing_duration`); this atom
+        // matches only the bare verb phrase.
+        value(vec![StaticMode::CantPhaseIn], tag("phase in")),
     ))
     .parse(input)
 }
@@ -4844,6 +5172,179 @@ mod tests {
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
 
+    // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
+    // (unconditional form — no "that don't have" clause) must produce the
+    // GenericEffect{AddKeyword(Suspend), ParentTarget, Permanent} shape that
+    // matches the singular Jhoira/Tenth suspend-grant, with no condition set.
+    #[test]
+    fn exiled_this_way_suspend_grant_matches_singular_shape() {
+        use crate::types::keywords::Keyword;
+        let ctx = ParseContext::default();
+        let clause =
+            try_parse_exiled_this_way_keyword_grant("Cards exiled this way gain suspend", &ctx)
+                .expect("should recognize the unconditional set-referencing suspend grant");
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+        // No condition on the unconditional form.
+        assert_eq!(clause.condition, None);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &clause.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", clause.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        assert_eq!(static_abilities.len(), 1);
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Suspend { .. }
+            }
+        )));
+    }
+
+    // Building-block proof: the recognizer is parameterized on the keyword, not
+    // Suspend-hardcoded. A synthetic "cards exiled this way gain flying" must
+    // produce an AddKeyword(Flying) grant with no condition.
+    #[test]
+    fn exiled_this_way_grant_is_keyword_parameterized() {
+        use crate::types::keywords::Keyword;
+        let ctx = ParseContext::default();
+        let clause =
+            try_parse_exiled_this_way_keyword_grant("Cards exiled this way gain flying", &ctx)
+                .expect("should recognize a keyword-parameterized set grant");
+        assert_eq!(clause.condition, None);
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &clause.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", clause.effect);
+        };
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }
+        )));
+    }
+
+    // Strict-failure guard: the "that don't have <kw>" restrictive clause
+    // produces a documented strict-failure (None) because the correct per-card
+    // object-scoped condition is not yet implemented. Both keyword variants must
+    // be rejected so the chunk falls through to Unimplemented.
+    #[test]
+    fn exiled_this_way_with_restrictive_clause_is_strict_failure() {
+        let ctx = ParseContext::default();
+        assert!(
+            try_parse_exiled_this_way_keyword_grant(
+                "Cards exiled this way that don't have suspend gain suspend",
+                &ctx,
+            )
+            .is_none(),
+            "suspend restrictive clause must strict-fail"
+        );
+        assert!(
+            try_parse_exiled_this_way_keyword_grant(
+                "Cards exiled this way that don't have flying gain flying",
+                &ctx,
+            )
+            .is_none(),
+            "flying restrictive clause must strict-fail"
+        );
+    }
+
+    // Strict-failure guard: a non-"gain <kw>" predicate after the subject head
+    // must decline (return None) so the chunk falls through to normal dispatch
+    // rather than producing a wrong continuous grant.
+    #[test]
+    fn exiled_this_way_grant_declines_non_keyword_predicate() {
+        let ctx = ParseContext::default();
+        assert!(try_parse_exiled_this_way_keyword_grant(
+            "Cards exiled this way are put into their owner's graveyard",
+            &ctx,
+        )
+        .is_none());
+    }
+
+    // CR 608.2c: The Wedding of River Song — full spell chain. Both Defect B
+    // ("then target opponent does the same") and Defect C ("cards exiled this
+    // way that don't have suspend gain suspend") are documented strict-failures
+    // (`Unimplemented`): Defect B pending cross-cutting opponent-choice routing,
+    // Defect C pending an object-scoped condition variant that applies per
+    // exiled card rather than per spell source (see
+    // try_parse_exiled_this_way_keyword_grant). Neither should degenerate into
+    // the prior silent `ChangeZone{empty, Opponent}` misparse.
+    #[test]
+    fn wedding_of_river_song_chain_strict_failures_are_documented() {
+        let def = super::super::parse_effect_chain(
+            "Draw two cards, then you may exile a nonland card from your hand with a \
+             number of time counters on it equal to its mana value. Then target \
+             opponent does the same. Cards exiled this way that don't have suspend \
+             gain suspend.\nTime travel.",
+            AbilityKind::Spell,
+        );
+
+        // Walk the whole def + sub_ability tree collecting every effect.
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Some(sub) = &def.sub_ability {
+                collect(sub, out);
+            }
+            if let Some(els) = &def.else_ability {
+                collect(els, out);
+            }
+        }
+        let mut effects = Vec::new();
+        collect(&def, &mut effects);
+
+        // Defect B: "does the same" lowers to a DOCUMENTED strict-failure keyed on
+        // the typed subject — never the degenerate `ChangeZone{empty, Opponent}`.
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                // allow-noncombinator: test assertion on the stable snake_case Unimplemented pattern-class key, not parser dispatch
+                Effect::Unimplemented { name, .. } if name == "target_opponent_does_the_same"
+            )),
+            "expected the documented 'does the same' strict-failure, got {effects:#?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: crate::types::zones::Zone::Exile,
+                    target: TargetFilter::Typed(tf),
+                    ..
+                } if tf.controller == Some(ControllerRef::Opponent) && tf.type_filters.is_empty()
+            )),
+            "the degenerate empty-Opponent exile misparse must be gone"
+        );
+
+        // Defect C: "cards exiled this way that don't have suspend gain suspend"
+        // must NOT produce a GenericEffect suspend grant. The "that don't have"
+        // restrictive clause strict-fails until an object-scoped condition exists.
+        fn chain_has_suspend_grant(def: &AbilityDefinition) -> bool {
+            use crate::types::keywords::Keyword;
+            let here = matches!(
+                &*def.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword { keyword: Keyword::Suspend { .. } }
+                    )))
+            );
+            here || def
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| chain_has_suspend_grant(s))
+        }
+        assert!(
+            !chain_has_suspend_grant(&def),
+            "Defect C must not produce a GenericEffect suspend grant (strict-failure expected)"
+        );
+    }
+
     // CR 611.3a + CR 702.16: Dominaria's Judgment — "creatures you control gain
     // protection from white if you control a Plains, from blue if you control an
     // Island, ..., and from green if you control a Forest" must emit one
@@ -5494,6 +5995,69 @@ mod tests {
                 mode: StaticMode::CantUntap
             }
         )));
+    }
+
+    /// CR 702.26a + CR 101.2 + CR 611.2b: "It can't phase in for as long as ~
+    /// remains tapped" (The Pandorica) lowers to a `CantPhaseIn` continuous
+    /// restriction — NOT an `Effect::PhaseIn` (locks the dispatch-priority
+    /// finding: the ` can't ` subject split wins before imperative "phase in").
+    /// The `ForAsLongAs { SourceIsTapped }` duration is preserved and the
+    /// restriction propagates via `AddStaticMode` so it registers as a
+    /// `SpecificObject` transient grant on the parent target.
+    #[test]
+    fn cant_phase_in_builds_restriction_not_phase_in() {
+        // Mark a prior typed object referent so the "It" anaphor binds to the
+        // parent target, mirroring the activated-ability chain.
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..ParseContext::default()
+        };
+        let clause = try_parse_subject_restriction_clause(
+            "It can't phase in for as long as ~ remains tapped",
+            &mut ctx,
+        )
+        .expect("phase-in restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, not PhaseIn, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(
+            !matches!(clause.effect, Effect::PhaseIn { .. }),
+            "must not be an Effect::PhaseIn"
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantPhaseIn);
+        assert_eq!(
+            duration,
+            &Some(Duration::ForAsLongAs {
+                condition: crate::types::ability::StaticCondition::SourceIsTapped,
+            })
+        );
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn
+            }
+        )));
+    }
+
+    /// CR 702.26a + CR 101.2: the restriction grammar maps the "phase in" atom
+    /// to `CantPhaseIn` for any subject, proving the building block covers the
+    /// class (not one card). The negation/duration are owned by the caller.
+    #[test]
+    fn parse_restriction_modes_phase_in_atom() {
+        assert_eq!(
+            parse_restriction_modes("can't phase in"),
+            Some(vec![StaticMode::CantPhaseIn])
+        );
     }
 
     /// CR 102.1 + CR 103.1: "the player to your right" as a subject resolves to
@@ -6801,6 +7365,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_split_base_pt_dynamic_values_smoke() {
+        let (power, toughness, _) = parse_split_base_pt_dynamic_values(
+            "twice that card's power and its base toughness becomes twice that card's toughness",
+        )
+        .expect("split dynamic values");
+        assert!(matches!(power, QuantityExpr::Multiply { factor: 2, .. }));
+        assert!(matches!(
+            toughness,
+            QuantityExpr::Multiply { factor: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn base_pt_set_clause_split_dynamic_revealed_card_referent() {
+        let (mods, duration) = base_pt_set_mods(
+            "Until your next turn, this creature's base power becomes twice that card's power and its base toughness becomes twice that card's toughness",
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPowerDynamic { value }
+                    if matches!(value, QuantityExpr::Multiply { factor: 2, .. })
+            )),
+            "expected SetPowerDynamic(Multiply x2), got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic { value }
+                    if matches!(value, QuantityExpr::Multiply { factor: 2, .. })
+            )),
+            "expected SetToughnessDynamic(Multiply x2), got {mods:?}"
+        );
+        assert!(matches!(
+            duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        ));
+    }
+
+    #[test]
     fn base_pt_set_clause_no_keyword_conjunct() {
         // Bare "become N/M" with no trailing keyword grant is still a valid
         // set-base-P/T clause.
@@ -6810,6 +7416,118 @@ mod tests {
         assert!(!mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 208.1 + CR 613.4b: the transitive "change <subject>'s base power [and
+    // toughness] to <value>" surface form. Same layer-7b set-base-P/T primitives
+    // as the "become[s]" copula, reached through the "change … to" verb frame.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn change_base_power_to_target_power_single_axis() {
+        // Riptide Mangler: "{1}{U}: Change ~'s base power to target creature's
+        // power." Only the power axis is set; the value reads the object target.
+        let (mods, _) = base_pt_set_mods("Change ~'s base power to target creature's power");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Target,
+                    },
+                },
+            }],
+            "power-only change clause should emit exactly one SetPowerDynamic",
+        );
+    }
+
+    #[test]
+    fn change_base_power_to_offset_aggregate() {
+        // Arni Brokenbrow: "you may change ~'s base power to 1 plus the greatest
+        // power among other creatures you control …". Exercises the "you may
+        // change" verb variant and an offset-aggregate value. The trailing
+        // duration is stripped by the effect pipeline before this function runs,
+        // so it is absent here.
+        let (mods, _) = base_pt_set_mods(
+            "you may change ~'s base power to 1 plus the greatest power among other creatures you control",
+        );
+        assert!(
+            matches!(
+                mods.as_slice(),
+                [ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Offset { offset: 1, .. }
+                }]
+            ),
+            "expected a single SetPowerDynamic(Offset +1), got {mods:?}",
+        );
+    }
+
+    #[test]
+    fn change_base_pt_to_paired_referent_dual_axis() {
+        // Shape Stealer / Eldrazi Mimic: "change ~'s base power and toughness to
+        // that creature's power and toughness". The paired referent splits into a
+        // per-axis SetPowerDynamic / SetToughnessDynamic reading the same object.
+        let (mods, _) = base_pt_set_mods(
+            "change ~'s base power and toughness to that creature's power and toughness",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPowerDynamic { .. })),
+            "expected SetPowerDynamic, got {mods:?}",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { .. })),
+            "expected SetToughnessDynamic, got {mods:?}",
+        );
+    }
+
+    #[test]
+    fn change_base_pt_to_fixed_value() {
+        // Fixed "N/M" value under the transitive verb frame — the same building
+        // block as "become N/M", reached via "change … to".
+        let (mods, _) = base_pt_set_mods("change ~'s base power and toughness to 0/2");
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 2 }));
+    }
+
+    #[test]
+    fn change_verb_frame_requires_base_pt_subject() {
+        // Guard: the "change" verb must not swallow unrelated "change … to"
+        // clauses that are not base-P/T sets (no "'s base power" subject).
+        let mut ctx = ParseContext::default();
+        assert!(
+            try_parse_subject_base_pt_set_clause_ast(
+                "change the target of target spell to another creature",
+                &mut ctx,
+            )
+            .is_none(),
+            "non-base-P/T change clause must not match",
+        );
+    }
+
+    #[test]
+    fn change_base_toughness_only_to_dynamic() {
+        // CR 208.1: toughness-only axis (Wall of Tombstones) — "change ~'s base
+        // toughness to <dynamic>" sets ONLY base toughness, leaving base power
+        // untouched (symmetric with the power-only axis).
+        let (mods, _) = base_pt_set_mods(
+            "change ~'s base toughness to 1 plus the number of creature cards in your graveyard",
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughnessDynamic { .. })),
+            "expected SetToughnessDynamic, got {mods:?}",
+        );
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPower { .. }
+                    | ContinuousModification::SetPowerDynamic { .. }
+            )),
+            "toughness-only clause must not touch base power, got {mods:?}",
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -136,13 +136,10 @@ function isStateLost(err: unknown): boolean {
 }
 
 /**
- * True when a gameplay round-trip to the engine worker timed out (the worker
- * wedged and never replied — see `ENGINE_REQUEST_TIMEOUT_MS`). Unlike
- * STATE_LOST this is NOT rehydratable in place: the worker itself is
- * unresponsive, so retrying or restoring through it would hang again. Surface
- * the Layer 3 reload prompt and let the error propagate so the dispatch mutex
- * is released (the alternative is an infinite freeze with a silently-held mutex
- * that drops every later click).
+ * Legacy adapter failure for an engine worker that has already been classified
+ * as unrecoverably unresponsive. Current worker watchdogs do not reject at 60s;
+ * they notify the UI and keep the request alive so the user can continue
+ * waiting for a late response.
  */
 function isEngineUnresponsive(err: unknown): boolean {
   return err instanceof AdapterError && err.code === AdapterErrorCode.ENGINE_UNRESPONSIVE;
@@ -714,8 +711,23 @@ export async function dispatchResolveAll(
 ): Promise<void> {
   if (batchResolveInProgress) return;
   const { adapter } = useGameStore.getState();
-  if (!adapter || !adapter.resolveAll) {
-    debugLog("dispatchResolveAll: adapter missing or no resolveAll support");
+  if (!adapter) {
+    debugLog("dispatchResolveAll: no adapter");
+    return;
+  }
+  if (!adapter.resolveAll || aiSeats.length === 0) {
+    // No batch drain (multiplayer transports), or no AI deciders for the other
+    // seats (local hotseat — every seat is a human, #4978): those seats are
+    // humans, and CR 117.4 entitles each of them to their own priority window
+    // before anything resolves — the engine must not pass on their behalf.
+    // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
+    // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
+    // this player receives priority and clears itself when the stack empties
+    // or grows (an opponent responded).
+    await dispatchAction(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      requester,
+    );
     return;
   }
 

@@ -74,11 +74,11 @@
     "resolveTooltip": "Przekaż priorytet, aby górny element na stosie mógł zostać rozpatrzony, jeśli każdy gracz również przekaże priorytet. Skrót: Spacja.",
     "resolveAll": "Rozpatrz wszystko",
     "resolveAllTooltip": "Przekazuj priorytet, dopóki stos się rozpatruje. Wymagany wybór lub zatrzymanie może to przerwać.",
-    "waiting": "Oczekiwanie",
     "priorityTooltip": "Przekaż priorytet. Jeśli stos jest pusty, spowoduje to przejście przez bieżące okno priorytetu. Skrót: Spacja.",
     "pass": "Przekaż",
     "passToEndTooltip": "Automatycznie przekazuj priorytet aż do kroku końcowego, chyba że przerwie to wybór, zatrzymanie lub Pełna kontrola. Skrót: Enter.",
-    "autoPassing": "Automatyczne przekazywanie do kroku końcowego..."
+    "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
+    "resolvingStack": "Rozpatrywanie stosu..."
   },
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
@@ -153,6 +153,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Zwiń rząd",
+      "auto": "Auto",
+      "on": "Zawsze wł.",
+      "off": "Zawsze wył."
     }
   },
   "permanent": {
@@ -174,6 +180,10 @@
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Wybierz",
+    "fanConfirm": "Potwierdź ({{count}})",
+    "viewAttachments_one": "Pokaż dołączoną kartę",
+    "viewAttachments_other": "Pokaż dołączone karty ({{count}})",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -185,7 +195,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "-1/-1",
-      "ringBearer": "Ring"
+      "ringBearer": "Ring",
+      "keep": "Zach."
     }
   },
   "player": {
@@ -216,7 +227,26 @@
     "you": "Ty",
     "ally": "Sojusznik",
     "restoreDialog": "Przywróć okno dialogowe",
-    "restoreDialogTitle": "Przywróć okno dialogowe celu ataku"
+    "restoreDialogTitle": "Przywróć okno dialogowe celu ataku",
+    "distribute": "Rozdziel",
+    "attackersColumn": "Atakujący",
+    "unassigned": "Nieprzydzieleni",
+    "assignedBadge": "Przydzielony",
+    "allAssigned": "Wszyscy atakujący przydzieleni",
+    "unassignedRemaining_one": "{{count}} nieprzydzielony",
+    "unassignedRemaining_other": "{{count}} nieprzydzielonych",
+    "evenSplitAll": "Rozłóż wszystkich równo",
+    "resetAssignments": "Zresetuj",
+    "allHere": "Wszyscy tutaj",
+    "spread": "Rozłóż",
+    "spreadEvenly": "Rozłóż równomiernie",
+    "assignOne": "Przydziel jednego do {{label}}",
+    "removeOne": "Usuń jednego z {{label}}",
+    "assignAllHere": "Wyślij wszystkich do {{label}}",
+    "assignRemaining_one": "Przydziel jeszcze {{count}}",
+    "assignRemaining_other": "Przydziel jeszcze {{count}}",
+    "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
+    "confirmDistribute_other": "Zadeklaruj {{count}} atakujących"
   },
   "fullControl": {
     "on": "Pełna kontrola włączona",
@@ -341,7 +371,20 @@
     "pendingFlash": "Następny czar można rzucić tak, jakby miał błysk",
     "pendingFree": "Następny czar bez płacenia jego kosztu many",
     "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
-    "companion": "Towarzysz"
+    "companion": "Towarzysz",
+    "unboundedTooltip": "Nieograniczone: {{resource}} (∞)",
+    "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
+    "unboundedMana": "mana",
+    "unboundedLife": "życie",
+    "unboundedDamage": "obrażenia",
+    "unboundedMill": "mielenie",
+    "unboundedCounters": "liczniki",
+    "unboundedTokens": "żetony",
+    "unboundedCards": "karty",
+    "unboundedCasts": "rzucenia",
+    "unboundedCombats": "walki",
+    "unboundedTurns": "tury",
+    "unboundedTriggers": "wyzwalacze"
   },
   "avatar": {
     "underAttack": "{{name}} jest atakowany"
@@ -439,7 +482,9 @@
     "viewFullHand_other": "Zobacz całą rękę ({{count}} kart)",
     "handLabel": "Ręka {{count}}",
     "handTitle": "Ręka ({{count}})",
-    "cardBack": "Rewers karty"
+    "cardBack": "Rewers karty",
+    "organizeLabel": "Uporządkuj rękę",
+    "reorderPausedHint": "Zmiana kolejności przeciąganiem jest wstrzymana, gdy ręka jest posortowana lub przefiltrowana."
   },
   "opponentHud": {
     "ally": "Sojusznik",
@@ -960,6 +1005,7 @@
       "manifest": "Manifest",
       "untap": "Odkręć",
       "tap": "Przekręć",
+      "attach": "Attach",
       "crew": "Crew ({{power}})",
       "saddle": "Saddle ({{power}})",
       "station": "Station (+{{power}})"
@@ -1038,10 +1084,19 @@
       "subtitleManaValueUpTo_other": "Wybierz do {{count}} kart w granicach limitu wartości many"
     },
     "searchPartition": {
-      "title": "Wybierz karty na pole bitwy",
-      "subtitle_one": "Wybierz {{count}} kartę, aby położyć na pole bitwy{{tapped}}; reszta trafia do twojej ręki",
-      "subtitle_other": "Wybierz {{count}} kart, aby położyć na pole bitwy{{tapped}}; reszta trafia do twojej ręki",
-      "tapped": " obrócone"
+      "title": "Wybierz karty",
+      "subtitle_one": "Wybierz {{count}} kartę, która trafi {{primary}}{{tapped}}; reszta trafia {{rest}}",
+      "subtitle_other": "Wybierz {{count}} kart, które trafią {{primary}}{{tapped}}; reszta trafia {{rest}}",
+      "tapped": " obrócone",
+      "zones": {
+        "Library": "do twojej biblioteki",
+        "Hand": "do twojej ręki",
+        "Battlefield": "na pole bitwy",
+        "Graveyard": "na twój cmentarz",
+        "Stack": "na stos",
+        "Exile": "na wygnanie",
+        "Command": "do strefy dowodzenia"
+      }
     },
     "outsideGame": {
       "title": "Wybierz z sideboardu",
@@ -1067,6 +1122,7 @@
       "titleHand": "Zwróć",
       "titleUntap": "Odkręć",
       "titleTap": "Przekręć",
+      "titleAttach": "Attach",
       "subtitleSacrificeExact_one": "Wybierz {{count}} trwałego do poświęcenia",
       "subtitleSacrificeExact_other": "Wybierz {{count}} trwałych do poświęcenia",
       "subtitleSacrificeUpTo_one": "Wybierz do {{count}} trwałego do poświęcenia",
@@ -1103,6 +1159,12 @@
       "subtitleTapUpTo_other": "Wybierz do {{count}} trwałych do przekręcenia",
       "subtitleTapRange_one": "Wybierz {{min}}-{{count}} trwałego do przekręcenia",
       "subtitleTapRange_other": "Wybierz {{min}}-{{count}} trwałych do przekręcenia",
+      "subtitleAttachExact_one": "Choose {{count}} Equipment to attach",
+      "subtitleAttachExact_other": "Choose {{count}} Equipment to attach",
+      "subtitleAttachUpTo_one": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
+      "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
@@ -1110,6 +1172,7 @@
       "labelTop": "Wierzch ({{selected}}/{{count}})",
       "labelPut": "Połóż ({{selected}}/{{count}})",
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
+      "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Wierzch"
     },
     "drawnThisTurn": {
@@ -1239,6 +1302,12 @@
       "optCmc": "Wartość many",
       "optType": "Typ",
       "optColor": "Kolor",
+      "filterLabel": "Pokaż",
+      "filterNone": "Wszystkie",
+      "filterPlayable": "Do zagrania",
+      "filterCreatures": "Stwory",
+      "filterLands": "Ziemie",
+      "filterNonland": "Niebędące ziemią",
       "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
       "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
       "keepInstead": "Zatrzymaj zamiast tego",
@@ -1469,16 +1538,20 @@
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
     "rippleEyebrow": "Ripple",
+    "graveyardPaidEyebrow": "Rzuć z cmentarza",
     "title": "Rzucić {{name}}?",
     "subtitleCascade": "Cascade wygnało {{name}} (wartość many poniżej {{sourceMv}}). Rzuć go bez płacenia jego kosztu many lub odmów i przetasuj wszystkie {{total}} wygnanych kart na spód swojej biblioteki.",
     "subtitleDiscover": "Discover wygnało {{name}}. Rzuć go bez płacenia jego kosztu many lub weź go do ręki i przetasuj pozostałe {{missCount}} wygnanych kart na spód swojej biblioteki.",
     "subtitleRipple": "Ripple ujawniło {{name}}. Rzuć go bez płacenia jego kosztu many lub odmów i umieść wszystkie {{total}} ujawnionych kart na spodzie swojej biblioteki w losowej kolejności.",
+    "subtitleGraveyardPaid": "Rzuć {{name}} z cmentarza, płacąc jej koszt many — można wydać manę dowolnego typu. Albo odmów i zostaw ją na cmentarzu.",
     "castNamed": "Rzuć {{name}}",
     "castSuffix": "(bez płacenia jego kosztu many)",
+    "castPaidSuffix": "(zapłać jej koszt many — można wydać manę dowolnego typu)",
     "putIntoHand": "Weź do ręki",
     "decline": "Odmów",
     "discoverDeclineSuffix": "(połóż resztę na spód)",
-    "cascadeDeclineSuffix": "(przetasuj wszystkie wygnane karty na spód)"
+    "cascadeDeclineSuffix": "(przetasuj wszystkie wygnane karty na spód)",
+    "graveyardPaidDeclineSuffix": "(zostaw ją na cmentarzu)"
   },
   "freeCastWindow": {
     "eyebrow": "Darmowe rzucenie",
@@ -1571,6 +1644,7 @@
     "copyDiagnostic": "Kopiuj diagnostykę",
     "copied": "Skopiowano!",
     "reportOnGithub": "Zgłoś na GitHub",
+    "continueWaiting": "Czekaj dalej",
     "reload": "Odśwież",
     "reportTitle": "Awaria silnika: {{summary}}",
     "reportConnectionSummary": "Utracono połączenie z silnikiem",
@@ -1827,7 +1901,8 @@
       "saddle": "Saddle",
       "station": "Station",
       "blight": "Blight",
-      "ringBearer": "Choose"
+      "ringBearer": "Choose",
+      "keep": "Zachowaj"
     },
     "prompt": {
       "single": "{{action}} a permanent",
@@ -1837,14 +1912,16 @@
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
       "upToCount_other": "{{action}} up to {{count}} permanents",
-      "totalPower": "{{action}}: power {{selected}} / {{required}}"
+      "totalPower": "{{action}}: power {{selected}} / {{required}}",
+      "totalPowerAtMost": "{{action}}: siła {{selected}} / {{max}} lub mniej"
     },
     "confirm": "Confirm",
     "confirmCount": "Confirm ({{selected}}/{{count}})",
     "confirmPower": "Confirm ({{selected}}/{{required}} power)",
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
-    "groupPower": "Power {{selected}} / {{required}}"
+    "groupPower": "Power {{selected}} / {{required}}",
+    "confirmPowerAtMost": "Potwierdź ({{selected}}/{{max}} siły)"
   },
   "planechase": {
     "active": "Active plane",
@@ -1860,5 +1937,26 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "status": {
+    "yourPriority": "Your priority",
+    "yourPriorityReason": "Your priority — {{reason}}",
+    "waitingFor": "Waiting for <player>{{player}}</player>",
+    "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
+    "reason": {
+      "declareAttackers": "declaring attackers",
+      "declareBlockers": "declaring blockers",
+      "assigningDamage": "assigning combat damage",
+      "choosingTargets": "choosing targets",
+      "payingCost": "paying a cost",
+      "mulligan": "mulligan decision",
+      "discarding": "discarding",
+      "orderingTriggers": "ordering triggers",
+      "respondingToStack": "responding to the stack",
+      "priorityCombat": "combat",
+      "priorityMain": "main phase",
+      "priority": "priority",
+      "thinking": "deciding"
+    }
   }
 }

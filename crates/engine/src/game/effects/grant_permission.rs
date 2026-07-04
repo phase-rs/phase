@@ -71,17 +71,28 @@ pub fn resolve(
                 .unwrap_or_default(),
             Some(*id),
         ),
-        TargetFilter::ParentTarget => (
-            ability
+        TargetFilter::ParentTarget => {
+            let ids: Vec<_> = ability
                 .targets
                 .iter()
                 .filter_map(|target| match target {
                     TargetRef::Object(obj_id) => Some(*obj_id),
                     TargetRef::Player(_) => None,
                 })
-                .collect(),
-            None,
-        ),
+                .collect();
+            // CR 608.2c: an anaphoric "it"/"this card" with no explicit target
+            // slot (e.g. The Foretold Soldier — "exile it ... it becomes
+            // foretold") binds to the ability's own source, which the preceding
+            // chained ChangeZone left in the new zone (the engine preserves the
+            // ObjectId across zone moves). Guarded on the empty case so grants
+            // that carry explicit object targets (plotted / PlayFromExile) are
+            // unaffected.
+            if ids.is_empty() {
+                (vec![ability.source_id], None)
+            } else {
+                (ids, None)
+            }
+        }
         TargetFilter::Any | TargetFilter::None if !ability.targets.is_empty() => (
             ability
                 .targets
@@ -194,9 +205,32 @@ pub fn resolve(
             } else {
                 None
             };
-            if let CastingPermission::Foretold { turn_foretold, .. } = &mut granted {
+            // CR 702.143d: an effect-driven "becomes foretold" designation —
+            // distinct from the CR 702.143a foretell special action.
+            let mut became_foretold = None;
+            if let CastingPermission::Foretold {
+                turn_foretold,
+                cost,
+            } = &mut granted
+            {
+                // CR 702.143d: the turn the card became foretold is stamped here
+                // so the "after the turn it became foretold has ended" cast gate
+                // reflects when the grant resolved (mirrors Plotted above).
                 *turn_foretold = state.turn_number;
                 obj.foretold = true;
+                // CR 702.143a / CR 702.143e: foretold cards sit face down in exile.
+                obj.face_down = true;
+                // CR 702.143d: the card is castable "for any foretell cost it
+                // has" — the printed Foretell keyword is the single authority
+                // for that cost (shared with the foretell special action via
+                // casting::foretell_cost). A parser-baked cost survives whenever
+                // the object has no Foretell keyword of its own, covering the
+                // CR 702.143d case where an effect grants a foretell cost to a
+                // card that lacks one.
+                if let Some(kw_cost) = crate::game::casting::foretell_cost(&*obj) {
+                    *cost = kw_cost;
+                }
+                became_foretold = Some(obj_id);
             }
             obj.casting_permissions.push(granted);
             if let Some(player_id) = plotted_for {
@@ -204,6 +238,9 @@ pub fn resolve(
                     object_id: obj_id,
                     player_id,
                 });
+            }
+            if let Some(object_id) = became_foretold {
+                events.push(GameEvent::BecameForetold { object_id });
             }
         }
     }
@@ -404,6 +441,86 @@ mod tests {
         assert_eq!(
             state.objects[&target].casting_permissions,
             vec![CastingPermission::Plotted { turn_plotted: 1 }]
+        );
+    }
+
+    /// CR 702.143d + CR 608.2c: The Foretold Soldier's "exile it ... it becomes
+    /// foretold" grant. The trigger has no explicit target slot, so the
+    /// `ParentTarget` grant must fall back to the ability source (the just-exiled
+    /// card). At resolution the object becomes a face-down foretold card whose
+    /// cost is derived from its printed Foretell keyword, the turn is stamped,
+    /// and a `BecameForetold` event fires (NOT the `Foretold` special-action
+    /// event — CR 702.143c).
+    #[test]
+    fn becomes_foretold_grant_derives_cost_and_falls_back_to_source() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(1);
+        state.turn_number = 5;
+        // The exiled card with its printed Foretell {1}{G}.
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Foretold Soldier".to_string(),
+            Zone::Exile,
+        );
+        let foretell_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .keywords
+            .push(Keyword::Foretell(foretell_cost.clone()));
+
+        // Empty target list + `source_id == card` mirrors the anaphoric "it"
+        // trigger after the chained ChangeZone has moved the source to exile.
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Foretold {
+                    cost: ManaCost::zero(),
+                    turn_foretold: 0,
+                },
+                target: TargetFilter::ParentTarget,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![],
+            card,
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&card];
+        assert!(obj.foretold, "card must become foretold");
+        assert!(
+            obj.face_down,
+            "foretold card sits face down (CR 702.143a/e)"
+        );
+        assert!(
+            matches!(
+                obj.casting_permissions.as_slice(),
+                [CastingPermission::Foretold { cost, turn_foretold }]
+                    if *cost == foretell_cost && *turn_foretold == 5
+            ),
+            "permission must carry the printed foretell cost and the stamped turn, got {:?}",
+            obj.casting_permissions
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::BecameForetold { object_id } if *object_id == card)
+            ),
+            "a BecameForetold event must fire"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Foretold { .. })),
+            "becoming foretold must NOT emit the foretell special-action event (CR 702.143c)"
         );
     }
 

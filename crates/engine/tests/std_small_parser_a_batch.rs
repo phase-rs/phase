@@ -328,7 +328,7 @@ fn vizier_filtered_any_type_spend_static_parses() {
         .statics
         .iter()
         .find_map(|s| match &s.mode {
-            StaticMode::SpendManaAsAnyColor { spell_filter } => Some(spell_filter),
+            StaticMode::SpendManaAsAnyColor { spell_filter, .. } => Some(spell_filter),
             _ => None,
         })
         .expect("the any-type-spend line must lower to a SpendManaAsAnyColor static");

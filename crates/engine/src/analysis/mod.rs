@@ -37,10 +37,20 @@ pub mod loop_check;
 pub mod resource;
 pub mod sim;
 
+// The combo corpus + bespoke driver toolkit, shared by the `#[cfg(test)]`
+// acceptance suite and the `combo-verify` CLI. Gated so it is excluded from the
+// shipped lib / WASM surface (no game behavior change).
+#[cfg(any(test, feature = "combo-verify"))]
+pub mod corpus;
+
 #[cfg(test)]
 mod corpus_tests;
 
 pub use ability_graph::{candidate_cycles, AbilityGraph, CandidateCycle};
+#[cfg(any(test, feature = "combo-verify"))]
+pub use corpus::{
+    corpus_len, drive_row, row, ComboRow, DeferralBucket, ResourceFamily, RowReport, RowStatus,
+};
 pub use loop_check::{detect_loop, LoopCertificate, WinKind};
 pub use resource::{
     loop_states_equal_modulo_resources, CounterClass, ObjectClass, ResourceAxis, ResourceVector,

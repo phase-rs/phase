@@ -776,6 +776,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -857,6 +858,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -920,6 +922,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1006,6 +1009,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1051,6 +1055,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1097,6 +1102,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1256,6 +1262,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1306,6 +1313,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1470,7 +1478,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(10),
@@ -1807,6 +1817,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1879,6 +1890,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1955,6 +1967,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: basalt,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2027,6 +2040,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2674,6 +2688,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2754,6 +2769,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2811,6 +2827,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let mut imprint_obj = GameObject::new(
@@ -2989,6 +3006,8 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![],
                 counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
             },
         });
 

@@ -15,6 +15,29 @@ use super::priority;
 use super::stack;
 
 use crate::types::ability::ResolvedAbility;
+use crate::types::events::ActivatedAbilityKind;
+
+/// CR 602.2 + CR 606.2: Classify an activated ability as `Loyalty` or `Normal`
+/// by inspecting the source object's ability definition at `ability_index`. A
+/// loyalty ability (CR 606.1) is one whose cost adds or removes loyalty counters.
+/// Used to populate `GameEvent::AbilityActivated { kind, .. }` at the activation
+/// sites that know the source object and ability index. Returns `Normal` when the
+/// object or ability cannot be found, or when the cost is not a loyalty cost.
+pub(crate) fn activated_ability_kind(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> ActivatedAbilityKind {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|o| o.abilities.get(ability_index))
+        .and_then(|a| a.cost.as_ref())
+        .filter(|c| crate::types::ability::is_loyalty_ability_cost(c))
+        .map_or(ActivatedAbilityKind::Normal, |_| {
+            ActivatedAbilityKind::Loyalty
+        })
+}
 
 /// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn.
 /// CR 606.1: Loyalty abilities are activated abilities with a loyalty symbol in their cost.
@@ -49,6 +72,32 @@ pub fn can_activate_loyalty_ability(
     planeswalker_id: ObjectId,
     player: PlayerId,
     ability_index: usize,
+) -> bool {
+    can_activate_loyalty_ability_impl(state, planeswalker_id, player, ability_index, None)
+}
+
+pub(crate) fn can_activate_loyalty_ability_with_restriction_gates(
+    state: &GameState,
+    planeswalker_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    restriction_gates: &super::restrictions::ActivationRestrictionStaticGates,
+) -> bool {
+    can_activate_loyalty_ability_impl(
+        state,
+        planeswalker_id,
+        player,
+        ability_index,
+        Some(restriction_gates),
+    )
+}
+
+fn can_activate_loyalty_ability_impl(
+    state: &GameState,
+    planeswalker_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
+    restriction_gates: Option<&super::restrictions::ActivationRestrictionStaticGates>,
 ) -> bool {
     let obj = match state.objects.get(&planeswalker_id) {
         Some(o) => o,
@@ -92,13 +141,23 @@ pub fn can_activate_loyalty_ability(
         return false;
     }
 
-    super::restrictions::check_activation_restrictions(
-        state,
-        player,
-        planeswalker_id,
-        ability_index,
-        &ability.activation_restrictions,
-    )
+    match restriction_gates {
+        Some(gates) => super::restrictions::check_activation_restrictions_with_static_gates(
+            state,
+            player,
+            planeswalker_id,
+            ability_index,
+            &ability.activation_restrictions,
+            gates,
+        ),
+        None => super::restrictions::check_activation_restrictions(
+            state,
+            player,
+            planeswalker_id,
+            ability_index,
+            &ability.activation_restrictions,
+        ),
+    }
     .is_ok()
 }
 
@@ -311,6 +370,8 @@ fn finalize_loyalty_activation(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id: pw_id,
+        // CR 606.2: This is the non-targeted loyalty-activation path.
+        kind: activated_ability_kind(state, pw_id, ability_index),
     });
     state.lands_tapped_for_mana.remove(&player);
     priority::clear_priority_passes(state);
@@ -695,6 +756,52 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// CR 606.2: a targeted `[-X]` loyalty ability's printed cost is
+    /// `RemoveCounter { X loyalty counters }`, which `is_loyalty_ability_cost`
+    /// recognizes. The X-cost path clears `pending.activation_cost` before the
+    /// targeted finalize (casting_costs.rs), so the kind MUST be derived from the
+    /// stable printed cost via `activated_ability_kind` — reading the cleared
+    /// `pending.activation_cost` would mis-classify it `Normal` and the
+    /// "whenever you activate a loyalty ability" trigger would miss this subclass.
+    #[test]
+    fn activated_ability_kind_classifies_minus_x_loyalty() {
+        let mut state = setup();
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Vraska",
+            5,
+            vec![make_minus_x_loyalty_ability(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            })],
+        );
+        assert_eq!(
+            activated_ability_kind(&state, pw, 0),
+            crate::types::events::ActivatedAbilityKind::Loyalty,
+            "a [-X] loyalty ability's printed cost must classify as Loyalty"
+        );
+
+        // Sibling: a non-loyalty activated ability classifies as Normal.
+        let normal_pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Tinkerer",
+            0,
+            vec![AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+        );
+        assert_eq!(
+            activated_ability_kind(&state, normal_pw, 0),
+            crate::types::events::ActivatedAbilityKind::Normal,
+        );
+    }
+
     #[test]
     fn minus_ability_insufficient_loyalty_rejected() {
         let mut state = setup();
@@ -1074,6 +1181,80 @@ mod tests {
             ),
             "the +1 (flash-timing GenericEffect) was activated, not the -3 bounce: {:?}",
             on_stack.ability().map(|a| &a.effect)
+        );
+    }
+
+    /// Cluster J2 (legal-action-seam regression guard): a planeswalker's
+    /// negative-loyalty ability must NOT be offered when the permanent lacks
+    /// enough loyalty counters to pay it. An Ob-Nixilis-shaped planeswalker
+    /// (loyalty abilities +2 / -2 / -8) at 1 loyalty offers ONLY the +2 at the
+    /// `can_activate_ability_now` legal-action seam — the exact layer whose
+    /// leak the report ("Ob Nixilis used -2 at 1 loyalty") alleged.
+    ///
+    /// CR 606.6: A loyalty ability with a negative loyalty cost can't be
+    /// activated unless the permanent has at least that many loyalty counters on
+    /// it. The +2 reach-guard proves the enumerator reaches each ability and the
+    /// gate is loyalty-sensitive (not blanket-false for negatives), and the
+    /// 2-loyalty boundary case proves -2 flips to payable at exactly 2 (2 >= 2).
+    #[test]
+    fn negative_loyalty_ability_not_offered_below_cost() {
+        use crate::game::casting::can_activate_ability_now;
+
+        fn draw(n: i32) -> Effect {
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: n },
+                target: TargetFilter::Controller,
+            }
+        }
+
+        fn ob_nixilis_abilities() -> Vec<AbilityDefinition> {
+            vec![
+                make_loyalty_ability(2, draw(1)),
+                make_loyalty_ability(-2, draw(2)),
+                make_loyalty_ability(-8, draw(7)),
+            ]
+        }
+
+        let mut state = setup();
+
+        // At 1 loyalty: +2 is always payable; -2 and -8 are not (CR 606.6).
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Ob Nixilis of the Black Oath",
+            1,
+            ob_nixilis_abilities(),
+        );
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw, 0),
+            "+2 must be offered at 1 loyalty (reach-guard: the enumerator reaches this ability)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw, 1),
+            "CR 606.6: -2 must NOT be offered at 1 loyalty (1 < 2)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw, 2),
+            "CR 606.6: -8 must NOT be offered at 1 loyalty (1 < 8)"
+        );
+
+        // Boundary: at exactly 2 loyalty, -2 becomes payable (2 >= 2), proving
+        // the gate is loyalty-sensitive rather than blanket-false for negatives.
+        let pw2 = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Ob Nixilis of the Black Oath",
+            2,
+            ob_nixilis_abilities(),
+        );
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw2, 1),
+            "CR 606.6 boundary: -2 becomes payable at exactly 2 loyalty (2 >= 2)"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), pw2, 2),
+            "CR 606.6: -8 still not payable at 2 loyalty (2 < 8)"
         );
     }
 }

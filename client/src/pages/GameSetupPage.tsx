@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
@@ -81,6 +81,9 @@ export function GameSetupPage() {
   const [formatConfig, setFormatConfig] = useState<FormatConfig | null>(null);
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
+  // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
+  // immutable once the game starts. Available at every player count.
+  const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   // We only ever read the active deck's compat (see `selectedCompat` below),
   // so MyDecks pushes up just that one entry instead of the entire map. Holding
@@ -191,8 +194,11 @@ export function GameSetupPage() {
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
+    // CR 732.2a: carry the creation-time combo-detector opt-in into the game URL;
+    // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
+    const loopParam = loopDetection.type === "On" ? "&loop=on" : "";
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
     );
   };
 
@@ -474,6 +480,38 @@ export function GameSetupPage() {
                       BO3
                     </button>
                   </div>
+
+                  {/* CR 732.2a: combo (infinite-loop) detector opt-in, immutable once
+                      the game starts. Offered at every player count (Commander infinites). */}
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-400" title={t("common:comboDetector.title")}>
+                      {t("common:comboDetector.label")}
+                    </span>
+                    <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                      <button
+                        type="button"
+                        onClick={() => setLoopDetection({ type: "Off" })}
+                        className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                          loopDetection.type === "Off"
+                            ? "bg-indigo-600 text-white"
+                            : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                        }`}
+                      >
+                        {t("common:comboDetector.off")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLoopDetection({ type: "On" })}
+                        className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                          loopDetection.type === "On"
+                            ? "bg-indigo-600 text-white"
+                            : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                        }`}
+                      >
+                        {t("common:comboDetector.on")}
+                      </button>
+                    </div>
+                  </label>
 
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-slate-400">{t("gameSetup.config.whoGoesFirst")}</span>

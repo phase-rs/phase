@@ -233,6 +233,7 @@ fn each_target_power_damage(sources_then_recipient: Vec<TargetRef>) -> ResolvedA
             },
             target: TargetFilter::Any,
             damage_source: Some(DamageSource::EachTarget),
+            excess: None,
         },
         sources_then_recipient,
         engine::types::identifiers::ObjectId(9_999),

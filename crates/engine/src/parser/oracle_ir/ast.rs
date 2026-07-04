@@ -3,10 +3,10 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    CounteredSpellDestination, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, DoorLockOp,
+    Duration, Effect, FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
     StaticCondition, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
@@ -206,6 +206,8 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
+        enters_under: Option<ControllerRef>,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
         /// When true, the found card enters "attached to" the search source.
@@ -237,12 +239,15 @@ pub(crate) enum ContinuationAst {
     /// `countered_spell_zone = Some(destination)` on the preceding
     /// `Effect::Counter` (Memory Lapse, Remand, Spell Crumple).
     CounterSpellZoneRedirect {
-        destination: CounteredSpellDestination,
+        destination: SpellStackToGraveyardReplacement,
     },
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
-    CopyMayRetarget,
+    /// `all_copies` is the plural "the copies" form: it patches every copy the
+    /// source ability makes (Increasing Vengeance's primary + conditional
+    /// second copy), where the singular "the copy" form binds only the nearest.
+    CopyMayRetarget { all_copies: bool },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
@@ -257,6 +262,12 @@ pub(crate) enum ContinuationAst {
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
+    /// CR 120.4a: "Excess damage is dealt to that creature's controller instead."
+    /// — sets `excess = Some(ExcessRecipient::TargetController)` on the preceding
+    /// `Effect::DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous
+    /// Tyrannosaurus). The conditional / trample-gated form (Ram Through) is NOT
+    /// recognized and lowers to `Effect::Unimplemented` instead.
+    ExcessDamageToController,
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
     /// to exile → ChooseFromZone { count, zone: Exile, chooser }.
     ChooseFromExile {
@@ -287,6 +298,8 @@ pub(crate) enum ContinuationAst {
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
+    /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
+    BecomesForetold,
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -341,7 +354,15 @@ pub(crate) enum ContinuationAst {
     /// CR 508.4 / CR 614.1: "It/The token enters tapped and attacking [that player]"
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
-    EntersTappedAttacking,
+    ///
+    /// CR 614.12: `moved_filter` carries an optional leading moved-object
+    /// type condition ("If that card is an enchantment card, it enters
+    /// tapped and attacking" — Summoner's Grimoire). When `Some`, the
+    /// absorbed ChangeZone gates the riders on the moved object via
+    /// `Effect::ChangeZone.enters_modified_if`. `None` = unconditional
+    /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
+    /// CopyTokenOf / Token always enter unconditionally.
+    EntersTappedAttacking { moved_filter: Option<TargetFilter> },
     /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
@@ -515,6 +536,23 @@ pub(crate) enum ImperativeFamilyAst {
     /// the card(s) the source exiled.
     TurnFaceUp {
         target: TargetFilter,
+    },
+    /// CR 708.2a: "Turn target [permanent] face down" — turns the targeted
+    /// face-up permanent(s) face down via a resolving effect (Cyber Conversion).
+    /// `profile` is seeded with `Some(vanilla_2_2())` at the verb arm so a
+    /// trailing "It's a 2/2 Cyberman artifact creature." `FaceDownProfileSpec`
+    /// continuation can refine the face-down body (CR 205.1a).
+    ///
+    /// CR 115.1d: `multi_target` carries the target-count quantifier when the
+    /// subject is plural ("turn any number of target tapped nontoken creatures
+    /// face down" — Illithid Harvester; "turn N target … face down"). It is
+    /// stamped onto the lowered `ParsedEffectClause` so the cast surfaces the
+    /// correct number of target slots rather than collapsing to one. `None` for
+    /// the single-subject form (Cyber Conversion, Backslide).
+    TurnFaceDown {
+        target: TargetFilter,
+        profile: Option<FaceDownProfile>,
+        multi_target: Option<MultiTargetSpec>,
     },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"
@@ -1036,6 +1074,10 @@ pub(crate) enum UtilityImperativeAst {
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,
+        /// CR 115.1d: "attach up to N target ..." / "attach any number of
+        /// target ..." cardinality belongs to the ability's target selection,
+        /// not the `Effect::Attach` payload.
+        multi_target: Option<MultiTargetSpec>,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1125,6 +1167,9 @@ pub(crate) enum ChooseImperativeAst {
         chooser_scope: crate::types::ability::CategoryChooserScope,
         choose_filter: crate::types::ability::TargetFilter,
         sacrifice_filter: crate::types::ability::TargetFilter,
+        /// Slaughter the Strong: keep ANY number of `choose_filter` permanents
+        /// whose combined power is at most this cap, instead of one per category.
+        total_power_cap: Option<crate::types::ability::QuantityExpr>,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).

@@ -7,9 +7,9 @@
 
 use engine::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
-    ZoneRef,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::player::PlayerCounterKind;
@@ -463,8 +463,8 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                     aggregate: AggregateFunction::Sum,
                     group_by: None,
                     damage_kind: DamageKindFilter::NoncombatOnly,
-                    // CR 120.10: non-overkill query — count all matching records.
-                    excess_only: false,
+                    // CR 120.6: total query — count all matching records (not overkill-only).
+                    channel: DamageChannel::Total,
                 },
             }
         }

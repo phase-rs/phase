@@ -97,6 +97,7 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let replacement_action_event_start = events.len();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -110,6 +111,19 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
+    // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
+    // the Damage resume arm can restore them onto the ctx it rebuilds from the
+    // source (which cannot re-derive either).
+    let parked_excess_recipient = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.excess_recipient);
+    let parked_lifelink_bonus = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.lifelink_bonus)
+        .unwrap_or(0);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -215,14 +229,21 @@ pub(super) fn handle_replacement_choice(
                     is_combat,
                     ..
                 } => {
-                    let ctx = DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                        let controller = state
-                            .objects
-                            .get(&source_id)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(state.active_player);
-                        DamageContext::fallback(source_id, controller)
-                    });
+                    let mut ctx =
+                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                            let controller = state
+                                .objects
+                                .get(&source_id)
+                                .map(|obj| obj.controller)
+                                .unwrap_or(state.active_player);
+                            DamageContext::fallback(source_id, controller)
+                        });
+                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                    // the deferred lifelink bonus dropped by the source-derived ctx
+                    // rebuild, so the resumed hit still redirects and a resumed redirect
+                    // leg still gains the combined lifelink total.
+                    ctx.excess_recipient = parked_excess_recipient;
+                    ctx.lifelink_bonus = parked_lifelink_bonus;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -704,7 +725,15 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
             {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+                let resume_cost_event_start = state
+                    .pending_discard_for_cost
+                    .is_some()
+                    .then_some(replacement_action_event_start);
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    resume_cost_event_start,
+                )?;
             }
 
             Ok(waiting_for)
@@ -720,6 +749,19 @@ pub(super) fn handle_replacement_choice(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
+                }
+                // CR 120.4a: a SECOND material replacement ordering choice on the
+                // same damage event re-parked a fresh record with
+                // `excess_recipient: None`. Reapply the rider captured before
+                // `continue_replacement` consumed the prior record so the eventual
+                // delivery still redirects the excess to the creature's controller.
+                if pending.excess_recipient.is_none() {
+                    pending.excess_recipient = parked_excess_recipient;
+                }
+                // CR 702.15b: likewise carry the deferred lifelink bonus onto the
+                // re-parked record so a second ordering choice cannot drop it.
+                if pending.lifelink_bonus == 0 {
+                    pending.lifelink_bonus = parked_lifelink_bonus;
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
@@ -2161,7 +2203,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))]
             .into();
@@ -2207,6 +2251,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
         });
@@ -2460,7 +2506,9 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
                         face_down_profile: None,
+                        enters_modified_if: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -2785,6 +2833,71 @@ mod tests {
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
         );
+    }
+
+    /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
+    /// creature card in exile with a takeover counter on it". `find_copy_targets`
+    /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
+    /// `FilterProp::Counters` predicate, returning only the marked exile card and
+    /// excluding an unmarked exile creature (and the battlefield entirely). This
+    /// is the runtime proof that the parsed source filter selects correctly.
+    #[test]
+    fn find_copy_targets_honors_exile_zone_and_takeover_counter_predicate() {
+        use crate::types::ability::{Comparator, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_creature = |state: &mut GameState, card: u64, zone: Zone| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Bear {card}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+
+        let marked_exile = make_creature(&mut state, 1, Zone::Exile);
+        state
+            .objects
+            .get_mut(&marked_exile)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("takeover".to_string()), 1);
+        let unmarked_exile = make_creature(&mut state, 2, Zone::Exile);
+        let bf_creature = make_creature(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The Master".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "a creature card in exile with a takeover counter on it"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone { zone: Zone::Exile },
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("takeover".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert_eq!(
+            targets,
+            vec![marked_exile],
+            "only the takeover-marked exile creature is a legal copy source"
+        );
+        assert!(!targets.contains(&unmarked_exile));
+        assert!(!targets.contains(&bf_creature));
     }
 
     /// 2026-05-09 audit M4 regression: the unified

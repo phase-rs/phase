@@ -12,6 +12,13 @@
     "data": "Datos"
   },
   "gameplay": {
+    "collapseLands": "Contraer Lands",
+    "collapseSupport": "Contraer Support",
+    "collapseZoneOptions": {
+      "auto": "Automático",
+      "on": "Siempre activado",
+      "off": "Siempre desactivado"
+    },
     "title": "Jugabilidad",
     "language": "Idioma",
     "cardSize": "Tamaño de las cartas",
@@ -54,6 +61,11 @@
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
     "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "multiplayerBoardLayout": "Diseño de tablero multijugador",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Oponente enfocado",
+      "split": "Mesa dividida"
+    },
     "cardPreviewDelay": "Retardo al pasar el cursor",
     "cardPreviewDelayInstant": "Instantáneo",
     "cardPreviewDelayValue": "{{ms}} ms",

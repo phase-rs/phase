@@ -28,6 +28,12 @@
     "updateIssue": "problema de actualización",
     "updated": "actualizado"
   },
+  "comboDetector": {
+    "label": "Detector de combos",
+    "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
+    "on": "Activado",
+    "off": "Desactivado"
+  },
   "gameMenu": {
     "menu": "Menú de la partida",
     "sandboxTools": "Herramientas de sandbox",

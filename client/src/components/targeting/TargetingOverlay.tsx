@@ -188,7 +188,10 @@ export function TargetingOverlay() {
             opponent's face-down hand (low-value space) and clears the
             opponent-HUD tab rail below it — the rail carries life/creature/land
             counts that must stay readable and clickable during targeting. */}
-        <div className="absolute left-0 right-0 top-1 flex flex-col items-center gap-1">
+        <div
+          className="absolute left-0 right-0 flex flex-col items-center gap-1"
+          style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
+        >
           {sourceName && (
             <div className="rounded-md bg-gray-800/90 px-4 py-1 text-sm font-medium text-amber-300 shadow">
               {sourceName}
@@ -437,6 +440,12 @@ function boardChoicePrompt(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.prompt.totalPowerAtMost", {
+        action,
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -485,6 +494,11 @@ function boardChoiceConfirmLabel(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.confirmPowerAtMost", {
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -503,6 +517,7 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-700 hover:bg-sky-600";
   }
 }

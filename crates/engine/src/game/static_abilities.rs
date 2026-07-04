@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use crate::game::combat::AttackTarget;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{
-    battlefield_active_statics, game_active_statics, game_functioning_statics,
+    battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
@@ -13,7 +13,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
-    CrewContributionKind, ProhibitionScope, StaticMode,
+    CrewContributionKind, ProhibitionScope, StaticMode, StaticModeKind,
 };
 
 /// Handler function type for static ability modes.
@@ -67,6 +67,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantAttack, handle_rule_mod);
     registry.insert(StaticMode::CantBlock, handle_rule_mod);
     registry.insert(StaticMode::CantAttackOrBlock, handle_rule_mod);
+    // CR 508.1c: The directional attack restriction is a passive rule-modifying
+    // marker; enforcement lives in `combat.rs`'s attacker-declaration gate.
+    registry.insert(StaticMode::AttackOnlyNeighbor, handle_rule_mod);
     registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
     // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
@@ -165,8 +168,15 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::Lifelink, handle_static_lifelink);
     registry.insert(StaticMode::CantTap, handle_rule_mod);
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
-    // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
-    registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 702.26a + CR 101.2: CantPhaseIn — a continuous restriction that
+    // overrides the phase-in turn-based action. Runtime enforcement lives in
+    // phasing.rs (untap-step TBA) and effects/phase_out.rs (explicit PhaseIn).
+    registry.insert(StaticMode::CantPhaseIn, handle_rule_mod);
+    // CR 509.1c: MustBeBlocked is now a parameterized, data-carrying variant
+    // (`by: Option<TargetFilter>`) — it cannot be an exact HashMap key, so it is
+    // NOT registry-keyed (mirrors CantBeBlockedBy). Coverage support is via
+    // coverage::is_data_carrying_static; runtime enforcement is direct-match in
+    // combat.rs declare-blockers validation.
     // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
     // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
     registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
@@ -219,7 +229,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // unbounded `TargetFilter` value space, so it gets coverage support via
     // `coverage::is_data_carrying_static` instead (mirrors SkipStep / RevealHand).
     registry.insert(
-        StaticMode::SpendManaAsAnyColor { spell_filter: None },
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        },
         handle_rule_mod,
     );
     // CR 107.4f: PayLifeAsColoredMana — "For each {C} in a cost, you may pay
@@ -432,6 +445,11 @@ pub(crate) fn triggered_cause_sacrifice_or_exile_muzzled(
     if acting_player != ability.controller {
         return false;
     }
+    // CR 604.1: O(1) presence gate — no CantCauseSacrificeOrExile static means no muzzle.
+    if !static_kind_present(state, StaticModeKind::CantCauseSacrificeOrExile) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (bf_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCauseSacrificeOrExile { ref cause } = def.mode else {
             continue;
@@ -669,6 +687,11 @@ pub fn check_static_ability(
     // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
     // loops hoist an existence gate in front of (see
     // `functioning_abilities::any_functioning_static_mode`).
+    // CR 604.1: static abilities are always on; when the O(1) presence index reports
+    // zero statics of this discriminant, no fall-through scan can match — return false.
+    if !static_kind_present(state, mode.kind()) {
+        return false;
+    }
     crate::game::perf_counters::record_static_full_scan();
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
@@ -834,25 +857,135 @@ pub(crate) fn transient_grants_static_mode_to_object(
     false
 }
 
+/// CR 702.26a + CR 101.2 + CR 611.2b: True iff `object_id` currently has an
+/// *active* `CantPhaseIn` restriction. The Pandorica grants this as a
+/// `SpecificObject` transient continuous effect (`AddStaticMode { CantPhaseIn }`)
+/// whose `ForAsLongAs { SourceIsTapped }` duration is re-evaluated on every query
+/// (CR 611.2b), so the lock lifts the instant the source untaps or leaves the
+/// battlefield (CR 110.5d). Mirrors the `cant_untap_ids` raw-id scan in
+/// `turns.rs`, but evaluates the duration/condition gate that the untap scan
+/// leaves to the per-permanent `check_static_ability` pass.
+///
+/// Three classes are covered: (1) the `SpecificObject`-pinned transient grant
+/// (the Pandorica path, which `transient_grants_static_mode_to_object`
+/// deliberately skips); (2) any filter-scoped transient grant; and (3) a printed
+/// static (parity with the `CantUntap` intrinsic path, future-proofing).
+pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: ObjectId) -> bool {
+    let condition_holds = |duration: &Duration,
+                           condition: &Option<crate::types::ability::StaticCondition>,
+                           controller: PlayerId,
+                           source_id: ObjectId|
+     -> bool {
+        if let Duration::ForAsLongAs { condition } = duration {
+            if !evaluate_condition(state, condition, controller, source_id) {
+                return false;
+            }
+        }
+        if let Some(condition) = condition {
+            if !evaluate_condition(state, condition, controller, source_id) {
+                return false;
+            }
+        }
+        true
+    };
+
+    // (1) SpecificObject-pinned transient grant — the Pandorica lock.
+    let pinned = state.transient_continuous_effects.iter().any(|tce| {
+        matches!(tce.affected, TargetFilter::SpecificObject { id } if id == object_id)
+            && tce.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }
+                )
+            })
+            && condition_holds(&tce.duration, &tce.condition, tce.controller, tce.source_id)
+    });
+    if pinned {
+        return true;
+    }
+
+    // (2) Filter-scoped transient grant (already condition-gated internally).
+    if transient_grants_static_mode_to_object(state, object_id, &StaticMode::CantPhaseIn) {
+        return true;
+    }
+
+    // (3) Printed static (parity with the CantUntap intrinsic path).
+    check_static_ability(
+        state,
+        StaticMode::CantPhaseIn,
+        &StaticCheckContext {
+            target_id: Some(object_id),
+            ..Default::default()
+        },
+    )
+}
+
 /// CR 609.4b: Check if a player has an unfiltered ("any spell/cost")
 /// "spend mana as any color/type" static active. Scans battlefield and command
-/// zone for `StaticMode::SpendManaAsAnyColor { spell_filter: None }` whose
+/// zone for `StaticMode::SpendManaAsAnyColor { spell_filter: None,
+/// activation_source_filter: None }` whose
 /// affected filter matches the given player.
 ///
-/// This is the board-wide path (Chromatic Orrery, Joiner Adept) — used for cost
-/// payments that have no spell object in context (effects, activations) and as
-/// the base case of the spell-scoped check. Spell-filtered statics (Vizier of
-/// the Menagerie) are NOT consulted here; see
-/// [`player_can_spend_as_any_color_for_spell_object`].
+/// This is the board-wide path (Chromatic Orrery) — used for cost
+/// payments that have no spell object in context (effects, activations without
+/// an activation-source filter) and as the base case of the spell-scoped and
+/// activation-source-scoped checks. Spell-filtered statics (Vizier of the
+/// Menagerie) and activation-source-filtered statics (Agatha's Soul Cauldron /
+/// Joiner Adept) are NOT consulted here; see
+/// [`player_can_spend_as_any_color_for_spell_object`] and
+/// [`player_can_spend_as_any_color_for_activation_source`].
 pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
-        StaticMode::SpendManaAsAnyColor { spell_filter: None },
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        },
         &StaticCheckContext {
             player_id: Some(player_id),
             ..Default::default()
         },
     )
+}
+
+/// CR 609.4b: Check if `player_id` may spend mana of any type/color to pay the
+/// mana cost of an activated ability whose source is `source_id`. True when
+/// either an unfiltered board-wide static is active (the
+/// [`player_can_spend_as_any_color`] base case) OR an activation-source-filtered
+/// `StaticMode::SpendManaAsAnyColor { activation_source_filter: Some(filter) }`
+/// controlled by `player_id` is active and `source_id` matches that filter
+/// (Agatha's Soul Cauldron / Joiner Adept: "you may spend mana as though it were
+/// mana of any color to activate abilities of creatures you control").
+///
+/// The filtered concession is re-derived against the activating permanent at
+/// spend time (CR 609.4b) and never applies to spell casts or effect payments.
+pub fn player_can_spend_as_any_color_for_activation_source(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if player_can_spend_as_any_color(state, player_id) {
+        return true;
+    }
+    for (obj, def) in game_active_statics(state) {
+        let StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: Some(ref filter),
+        } = def.mode
+        else {
+            continue;
+        };
+        if obj.controller != player_id {
+            continue;
+        }
+        let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
+        if matches_target_filter(state, source_id, filter, &ctx) {
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 609.4b: Check if `player_id` may spend mana of any type/color to cast the
@@ -883,6 +1016,7 @@ pub fn player_can_spend_as_any_color_for_spell_object(
     for (obj, def) in game_active_statics(state) {
         let StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(ref filter),
+            activation_source_filter: None,
         } = def.mode
         else {
             continue;
@@ -916,6 +1050,11 @@ pub fn player_life_payment_colors(
         ..Default::default()
     };
     let mut colors = LifePaymentColors::EMPTY;
+    // CR 604.1: O(1) presence gate — no PayLifeAsColoredMana static means no grant.
+    if !static_kind_present(state, StaticModeKind::PayLifeAsColoredMana) {
+        return colors;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 604.1 + CR 702.26b: `battlefield_active_statics` owns the
     // phased-out / command-zone / condition gate.
     for (obj, def) in battlefield_active_statics(state) {
@@ -1023,17 +1162,96 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
-/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
-/// have hexproof, including "hexproof from [quality]" variants.
+/// CR 702.11b + CR 702.11e: Check if `player_id` may target creatures as though
+/// they didn't have hexproof, including "hexproof from [quality]" variants
+/// (CR 702.11e: an "as though it didn't have hexproof" effect also defeats
+/// hexproof-from-quality). This is the player-scoped grant (Detection Tower
+/// class — "you may target ... as though it
+/// didn't have hexproof"), keyed on a battlefield `IgnoreHexproof` static with
+/// NO object `affected` filter, plus the per-player transient grant.
+///
+/// Object-scoped `IgnoreHexproof` statics (Nowhere to Run, `affected = Some`)
+/// are deliberately excluded here — they are not player grants and must not
+/// widen the bypass to every target `player_id` chooses. Those are evaluated
+/// per-target by [`target_ignores_hexproof`].
 pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::IgnoreHexproof,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no player-scoped hexproof-bypass grant is possible, so skip the
+    // O(battlefield) scan entirely (the O(1) presence index is precise post-flush; before
+    // the first flush it is conservatively all-present and this falls through to the exact
+    // scan below). Verdict-identical to the un-gated `.any()` for all inputs.
+    let player_scoped_grant = static_kind_present(state, StaticModeKind::IgnoreHexproof) && {
+        crate::game::perf_counters::record_static_full_scan();
+        game_functioning_statics(state).any(|(obj, def)| {
+            matches!(def.mode, StaticMode::IgnoreHexproof)
+                && def.affected.is_none()
+                && static_condition_matches_context(
+                    state,
+                    obj.id,
+                    obj.controller,
+                    def,
+                    &StaticCheckContext {
+                        player_id: Some(player_id),
+                        ..Default::default()
+                    },
+                )
+        })
+    };
+    player_scoped_grant
+        || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+}
+
+/// CR 702.11b + CR 702.11e: Whether a FUNCTIONING `IgnoreHexproof` static whose
+/// `condition` currently holds and which is scoped by an object `affected` filter
+/// makes `target_id` targetable as though it had no hexproof (CR 702.11e extends
+/// the bypass to hexproof-from-quality). Nowhere to Run — "Creatures your
+/// opponents control can be the targets of spells and abilities as though they
+/// didn't have hexproof." The card carries no "you control" qualifier on the
+/// spells or abilities, so the bypass applies to ANY targeting player: it is
+/// keyed solely on the would-be target matching the static's `affected` filter
+/// (evaluated from the static's own source), independent of the targeting
+/// source's controller — hexproof (CR 702.11b) only ever blocks opponents, so
+/// removing it for the matched permanents opens them to every player.
+///
+/// CR 604.1 + CR 613.1: mirrors [`player_ignores_hexproof`] — uses
+/// `game_functioning_statics` (so a source whose abilities are suppressed, or a
+/// phased-out / non-functioning source, grants nothing) and gates each static
+/// through `static_condition_matches_context` with `target_id: Some(target_id)`
+/// so an "as long as ..." condition is honored, and a condition that references
+/// the would-be target (the recipient) is evaluated against that target rather
+/// than skipped. Object-scoped (`affected = Some`) only; the player-scoped
+/// Detection Tower form (`affected = None`) is handled by
+/// [`player_ignores_hexproof`].
+pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no object-scoped hexproof-bypass grant is possible — skip the O(battlefield)
+    // scan. Precise post-flush; conservatively all-present before the first flush, where it
+    // falls through to the exact scan below. Verdict-identical to the un-gated `.any()`.
+    if !static_kind_present(state, StaticModeKind::IgnoreHexproof) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    game_functioning_statics(state).any(|(source_obj, def)| {
+        matches!(def.mode, StaticMode::IgnoreHexproof)
+            && def.affected.as_ref().is_some_and(|filter| {
+                matches_target_filter(
+                    state,
+                    target_id,
+                    filter,
+                    &FilterContext::from_source(state, source_obj.id),
+                )
+            })
+            && static_condition_matches_context(
+                state,
+                source_obj.id,
+                source_obj.controller,
+                def,
+                &StaticCheckContext {
+                    target_id: Some(target_id),
+                    ..Default::default()
+                },
+            )
+    })
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
@@ -1043,6 +1261,11 @@ pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
 /// also prevents damage/life-loss events. Paying 0 life remains legal under
 /// CR 119.4b and is handled by callers before consulting this predicate.
 pub fn player_cant_pay_life_as_cost(state: &GameState, player_id: PlayerId) -> bool {
+    // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantPayCost) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     battlefield_active_statics(state).any(|(source_obj, def)| {
         matches!(
             &def.mode,
@@ -1065,6 +1288,11 @@ pub fn player_cant_sacrifice_as_cost(
     player_id: PlayerId,
     object_id: ObjectId,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantPayCost) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     battlefield_active_statics(state).any(|(source_obj, def)| {
         let StaticMode::CantPayCost {
             who,
@@ -1168,60 +1396,75 @@ pub fn player_protection_from(
         player_id: Some(player_id),
         ..Default::default()
     };
-    // CR 114.4: Abilities of emblems function in the command zone.
-    for (src_obj, def) in game_functioning_statics(state) {
-        let StaticMode::PlayerProtection(ref target) = def.mode else {
-            continue;
-        };
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, &context, affected, src_obj.id) {
+    // CR 702.16: O(1) presence gate on the battlefield/command-zone PlayerProtection
+    // authority ONLY. The `Everything` transient-effect authority is handled by the
+    // short-circuit above (a separate authority the index does not fold), so wrap the
+    // loop rather than early-returning.
+    if static_kind_present(state, StaticModeKind::PlayerProtection) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        for (src_obj, def) in game_functioning_statics(state) {
+            let StaticMode::PlayerProtection(ref target) = def.mode else {
+                continue;
+            };
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, &context, affected, src_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                src_obj.id,
+                src_obj.controller,
+                def,
+                &context,
+            ) {
                 continue;
             }
-        }
-        if !static_condition_matches_context(state, src_obj.id, src_obj.controller, def, &context) {
-            continue;
-        }
-        let protects = match target {
-            // CR 702.16j: handled by the short-circuit above.
-            ProtectionTarget::Everything => false,
-            // CR 702.16 + CR 205.2: protection from the card type
-            // chosen as the granting permanent (e.g. Serra's Emissary) entered.
-            ProtectionTarget::ChosenCardType => state.objects.get(&source_id).is_some_and(|src| {
-                src_obj
-                    .chosen_card_type()
-                    .and_then(|ct| ct.protection_quality_str())
-                    .is_some_and(|quality| source_matches_card_type(src, quality))
-            }),
-            // CR 702.16k: "Protection from [a player]" at the player level — the
-            // protected player has protection from each object the specified
-            // player(s) control. "Each of your opponents" (CR 702.16i) → the
-            // `Opponent` scope: any source NOT controlled by the protected
-            // player is an opponent's object in 1v1 and free-for-all. Mirrors the
-            // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-            ProtectionTarget::FromPlayer(scope) => {
-                state
-                    .objects
-                    .get(&source_id)
-                    .is_some_and(|src| match scope {
-                        ControllerRef::Opponent => src.controller != player_id,
-                        ControllerRef::You => src.controller == player_id,
-                        // Target/chosen player refs have no static context here —
-                        // fail closed (the parser never emits them for protection).
-                        _ => false,
+            let protects = match target {
+                // CR 702.16j: handled by the short-circuit above.
+                ProtectionTarget::Everything => false,
+                // CR 702.16 + CR 205.2: protection from the card type
+                // chosen as the granting permanent (e.g. Serra's Emissary) entered.
+                ProtectionTarget::ChosenCardType => {
+                    state.objects.get(&source_id).is_some_and(|src| {
+                        src_obj
+                            .chosen_card_type()
+                            .and_then(|ct| ct.protection_quality_str())
+                            .is_some_and(|quality| source_matches_card_type(src, quality))
                     })
+                }
+                // CR 702.16k: "Protection from [a player]" at the player level — the
+                // protected player has protection from each object the specified
+                // player(s) control. "Each of your opponents" (CR 702.16i) → the
+                // `Opponent` scope: any source NOT controlled by the protected
+                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+                ProtectionTarget::FromPlayer(scope) => {
+                    state
+                        .objects
+                        .get(&source_id)
+                        .is_some_and(|src| match scope {
+                            ControllerRef::Opponent => src.controller != player_id,
+                            ControllerRef::You => src.controller == player_id,
+                            // Target/chosen player refs have no static context here —
+                            // fail closed (the parser never emits them for protection).
+                            _ => false,
+                        })
+                }
+                // Truly inert at the player level — no card grants these qualities to
+                // a player; object-level grants of these qualities flow through the
+                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+                ProtectionTarget::ChosenColor
+                | ProtectionTarget::Color(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::CardType(_)
+                | ProtectionTarget::Filter(_) => false,
+            };
+            if protects {
+                return true;
             }
-            // Truly inert at the player level — no card grants these qualities to
-            // a player; object-level grants of these qualities flow through the
-            // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
-            ProtectionTarget::ChosenColor
-            | ProtectionTarget::Color(_)
-            | ProtectionTarget::Multicolored
-            | ProtectionTarget::Quality(_)
-            | ProtectionTarget::CardType(_)
-            | ProtectionTarget::Filter(_) => false,
-        };
-        if protects {
-            return true;
         }
     }
     false
@@ -1247,28 +1490,35 @@ pub fn player_protection_from(
 /// constructing `StaticMode::Other(name.to_string())` on every call would
 /// allocate in potentially hot paths (damage resolution, sacrifice loops).
 fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticCheckContext) -> bool {
-    // CR 114.4: Abilities of emblems function in the command zone.
-    // Functioning gate is applied before context-specific condition evaluation.
-    for (source_obj, def) in game_functioning_statics(state) {
-        match &def.mode {
-            StaticMode::Other(s) if s == name => {}
-            _ => continue,
-        }
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, context, affected, source_obj.id) {
+    // CR 604.1: O(1) presence gate on the battlefield/command-zone `Other` static
+    // authority ONLY. The `transient_grants_other_static_to_context` fall-through below
+    // is a separate authority the index does not fold, so wrap the loop rather than
+    // early-returning.
+    if static_kind_present(state, StaticModeKind::Other) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        // Functioning gate is applied before context-specific condition evaluation.
+        for (source_obj, def) in game_functioning_statics(state) {
+            match &def.mode {
+                StaticMode::Other(s) if s == name => {}
+                _ => continue,
+            }
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, context, affected, source_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                source_obj.id,
+                source_obj.controller,
+                def,
+                context,
+            ) {
                 continue;
             }
+            return true;
         }
-        if !static_condition_matches_context(
-            state,
-            source_obj.id,
-            source_obj.controller,
-            def,
-            context,
-        ) {
-            continue;
-        }
-        return true;
     }
     transient_grants_other_static_to_context(state, name, context)
 }
@@ -1605,8 +1855,9 @@ fn transient_additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::StaticCondition;
-    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::statics::StaticMode;
@@ -1672,6 +1923,93 @@ mod tests {
             ..Default::default()
         };
         assert!(check_static_ability(&state, StaticMode::CantAttack, &ctx));
+    }
+
+    /// Unit 2, site #1: `check_static_ability` gates its O(N) whole-battlefield
+    /// scan behind the O(1) `StaticModePresence` index. On a large board with zero
+    /// functioning statics of the queried mode (index precise after a layers flush),
+    /// the call must run ZERO recorded full scans and return `false`. Reverting the
+    /// `if !static_kind_present(..) { return false }` gate makes the
+    /// `record_static_full_scan()` on the fall-through path fire, flipping the
+    /// counter assertion. The anchor half proves the counter is wired: with a
+    /// matching static present, the scan runs exactly once.
+    #[test]
+    fn check_static_ability_gate_zero_scans() {
+        let mut state = setup();
+        // Large vanilla board, no CantAttack static anywhere. Capture the first
+        // creature (controlled by P0) as the query target.
+        let mut target = None;
+        for i in 0..600u64 {
+            let id = create_object(
+                &mut state,
+                CardId(1000 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            if target.is_none() {
+                target = Some(id);
+            }
+        }
+        let target = target.unwrap();
+        // Flush makes the presence index PRECISE (CantAttack absent => gate short-circuits).
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let ctx = StaticCheckContext {
+            target_id: Some(target),
+            ..Default::default()
+        };
+        crate::game::perf_counters::reset();
+        let blocked = check_static_ability(&state, StaticMode::CantAttack, &ctx);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            !blocked,
+            "no CantAttack static means the check returns false"
+        );
+        assert_eq!(
+            scans, 0,
+            "the O(1) presence gate must skip the whole-battlefield scan (revert-failing)"
+        );
+
+        // Non-vacuous anchor: install a matching static (source controlled by P1,
+        // affecting opponents' creatures => matches the P0 target), reflush, and
+        // confirm the fall-through scan runs exactly once and the check now matches.
+        let source = create_object(
+            &mut state,
+            CardId(9999),
+            PlayerId(1),
+            "Pacifism Source".to_string(),
+            Zone::Battlefield,
+        );
+        let affected =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantAttack).affected(affected));
+        crate::game::layers::evaluate_layers(&mut state);
+
+        crate::game::perf_counters::reset();
+        let blocked = check_static_ability(&state, StaticMode::CantAttack, &ctx);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+        assert!(
+            blocked,
+            "the installed CantAttack static must match the P0 target on fall-through"
+        );
+        assert_eq!(
+            scans, 1,
+            "present index falls through to exactly one recorded scan"
+        );
     }
 
     #[test]
@@ -1984,10 +2322,14 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
                     .description("You may play two additional lands on each of your turns.".into()),
             );
 
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
     }
 
     #[test]
@@ -2021,6 +2363,96 @@ mod tests {
 
         // CR 305.2: Two Explorations = +2 additional land drops
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
+    }
+
+    #[test]
+    fn test_additional_land_drops_saturates_any_number() {
+        let mut state = setup();
+
+        let fastbond = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fastbond".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fastbond)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::AdditionalLandDrop { count: u8::MAX })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play any number of lands on each of your turns.".into()),
+            );
+
+        let exploration = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exploration".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exploration)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::MayPlayAdditionalLand)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .description("You may play an additional land on each of your turns.".into()),
+            );
+
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), u8::MAX);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
+    }
+
+    #[test]
+    fn test_parsed_controller_scoped_additional_land_drops_do_not_affect_opponent() {
+        let mut state = setup();
+
+        let fastbond = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fastbond".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fastbond)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("You may play any number of lands on each of your turns.")
+                    .expect("Fastbond land permission must parse"),
+            );
+
+        let azusa = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Azusa, Lost but Seeking".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&azusa)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("You may play two additional lands on each of your turns.")
+                    .expect("Azusa land permission must parse"),
+            );
+
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), u8::MAX);
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
     }
 
     /// Issue #2879 + CR 305.2 + CR 611.2c: a turn-scoped transient grant (Escape
@@ -2507,7 +2939,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![crate::types::ability::TargetRef::Object(token)],
             ObjectId(99),

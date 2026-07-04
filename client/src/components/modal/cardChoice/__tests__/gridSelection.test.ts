@@ -1,22 +1,31 @@
 import { describe, it, expect } from "vitest";
 import type { GameObject, ManaCost, ObjectId } from "../../../../adapter/types.ts";
+import { buildGameObjectWithCoreTypes } from "../../../../test/factories/gameObjectFactory.ts";
 import {
   orderCards,
   groupCards,
+  filterCards,
   applyBulk,
   rangeAdd,
 } from "../gridSelection.ts";
 
 const cost = (generic: number): ManaCost => ({ type: "Cost", shards: [], generic } as ManaCost);
 
-function obj(id: number, name: string, types: string[], generic: number, color: string[]): GameObject {
-  return {
+function obj(
+  id: number,
+  name: string,
+  types: string[],
+  generic: number,
+  color: GameObject["color"],
+): GameObject {
+  return buildGameObjectWithCoreTypes(types, {
     id,
+    card_id: id,
     name,
-    card_types: { supertypes: [], core_types: types, subtypes: [] },
     mana_cost: cost(generic),
     color,
-  } as unknown as GameObject;
+    base_color: color,
+  });
 }
 
 const objects: Record<ObjectId, GameObject> = {
@@ -50,6 +59,50 @@ describe("groupCards", () => {
   });
   it("returns a single unnamed group for 'none'", () => {
     expect(groupCards(all, objects, "none")).toEqual([{ key: "", ids: [1, 2, 3, 4] }]);
+  });
+});
+
+describe("filterCards", () => {
+  const playable = new Set<ObjectId>([1, 3]);
+
+  it("returns input order unchanged for 'none'", () => {
+    expect(filterCards(all, objects, "none", playable)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("keeps only engine-playable ids for 'playable' (never re-derives legality)", () => {
+    expect(filterCards(all, objects, "playable", playable)).toEqual([1, 3]);
+  });
+
+  it("keeps creatures, matching across the whole core_types array", () => {
+    // An Artifact Creature and a Land Creature both count as creatures.
+    const objs = {
+      ...objects,
+      5: obj(5, "Myr", ["Artifact", "Creature"], 1, []),
+      6: obj(6, "Dryad Arbor", ["Land", "Creature"], 0, ["Green"]),
+    };
+    expect(filterCards([1, 2, 3, 4, 5, 6], objs, "creatures", playable)).toEqual([1, 4, 5, 6]);
+  });
+
+  it("keeps lands, including a Land Creature", () => {
+    const objs = { ...objects, 6: obj(6, "Dryad Arbor", ["Land", "Creature"], 0, ["Green"]) };
+    expect(filterCards([1, 2, 3, 6], objs, "lands", new Set())).toEqual([2, 6]);
+  });
+
+  it("keeps nonland — a Land Creature is a land, so it is excluded", () => {
+    const objs = { ...objects, 6: obj(6, "Dryad Arbor", ["Land", "Creature"], 0, ["Green"]) };
+    expect(filterCards([1, 2, 3, 6], objs, "nonland", new Set())).toEqual([1, 3]);
+  });
+
+  it("treats a missing object as typeless: excluded from creatures, kept by nonland", () => {
+    expect(filterCards([1, 99], objects, "creatures", new Set())).toEqual([1]);
+    expect(filterCards([1, 99], objects, "nonland", new Set())).toEqual([1, 99]);
+  });
+
+  it("preserves input order and never mutates the source array", () => {
+    const input: ObjectId[] = [4, 2, 1, 3];
+    const result = filterCards(input, objects, "nonland", playable);
+    expect(result).toEqual([4, 1, 3]);
+    expect(input).toEqual([4, 2, 1, 3]);
   });
 });
 
