@@ -183,6 +183,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -196,6 +197,7 @@ mod tests {
             },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }
     }
 

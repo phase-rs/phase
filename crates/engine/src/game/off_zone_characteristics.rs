@@ -11,12 +11,87 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::zones::Zone;
 
+thread_local! {
+    /// CR 613.1f self-reference guard: the set of object ids whose off-zone
+    /// keyword set is currently being computed on this call stack. A keyword
+    /// grant may be gated on a keyword-presence predicate over the SAME object
+    /// (Dream Devourer: "Each nonland card in your hand WITHOUT FORETELL has
+    /// foretell"). Evaluating that predicate re-enters off-zone keyword
+    /// computation for the same object; without a guard this recurses forever.
+    /// While an object is in this set, a nested query resolves against the base
+    /// (printed) keywords only — the grant cannot use its own output as its
+    /// applicability input, which is exactly the rules-correct behavior.
+    static OFF_ZONE_KEYWORD_STACK: std::cell::RefCell<Vec<ObjectId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// CR 613.1f self-reference guard, RAII form. Constructing the guard records
+/// this frame's `object_id` in `OFF_ZONE_KEYWORD_STACK` iff it is not already
+/// present. `entered` is `true` only for the frame that actually inserted the
+/// id (the outermost frame for that object); re-entrant frames construct a
+/// guard with `entered == false` and thus own no removal. `Drop` pops the id
+/// unconditionally on every exit path — normal return, early return, or unwind
+/// — so a panic or early-return in nested keyword computation can never leave
+/// the thread-local set poisoned for the rest of the thread's life.
+struct OffZoneRecursionGuard {
+    object_id: ObjectId,
+    entered: bool,
+}
+
+impl OffZoneRecursionGuard {
+    fn enter(object_id: ObjectId) -> Self {
+        let entered = OFF_ZONE_KEYWORD_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.contains(&object_id) {
+                false
+            } else {
+                stack.push(object_id);
+                true
+            }
+        });
+        Self { object_id, entered }
+    }
+
+    /// `true` when this is a re-entrant frame for the same object — the caller
+    /// must resolve against base (printed) keywords only.
+    fn is_reentrant(&self) -> bool {
+        !self.entered
+    }
+}
+
+impl Drop for OffZoneRecursionGuard {
+    fn drop(&mut self) {
+        // Only the inserting frame owns removal; a re-entrant guard leaves the
+        // outer frame's entry intact.
+        if self.entered {
+            OFF_ZONE_KEYWORD_STACK.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                let popped = stack.pop();
+                debug_assert_eq!(
+                    popped,
+                    Some(self.object_id),
+                    "off-zone keyword guard imbalance"
+                );
+            });
+        }
+    }
+}
+
 pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Vec<Keyword> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
     if obj.zone == Zone::Battlefield {
         return obj.keywords.clone();
+    }
+
+    // CR 613.1f: re-entrant computation for the same object returns base
+    // (printed) keywords only, breaking the self-referential grant cycle. The
+    // RAII guard cleans up the thread-local set on every exit path (including
+    // panics/early returns), so the set can never be left poisoned.
+    let _guard = OffZoneRecursionGuard::enter(object_id);
+    if _guard.is_reentrant() {
+        return obj.base_keywords.clone();
     }
 
     let mut keywords = obj.base_keywords.clone();

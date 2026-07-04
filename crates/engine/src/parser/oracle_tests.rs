@@ -13282,7 +13282,7 @@ fn helper_parses_same_line_escape_grant_continuation() {
 fn escape_continuation_parser_accepts_self_mana_cost_clause() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         )
         .expect("continuation should parse");
     assert_eq!(keyword, granted_escape_cost(3));
@@ -13292,7 +13292,7 @@ fn escape_continuation_parser_accepts_self_mana_cost_clause() {
 fn escape_continuation_parser_rejects_trailing_text() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard until end of turn.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         );
     assert!(
         keyword.is_none(),

@@ -794,6 +794,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 amount: QuantityExpr::Fixed { value: 2 },
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             copy_id,

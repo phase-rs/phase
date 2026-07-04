@@ -9273,6 +9273,7 @@ mod tests {
                 },
                 target: TargetFilter::ParentTargetController,
                 damage_source: None,
+                excess: None,
             },
         );
         def.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -9309,6 +9310,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         rewrite_parent_target_controller_to_post_replacement_source(&mut def);

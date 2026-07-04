@@ -119,6 +119,7 @@ mod gimbal_gremlin_prodigy;
 mod gluntch_choose_player_chain;
 mod good_king_mog_xii_chapter_iv_588;
 mod gran_gran_integration;
+mod granted_alt_cost_hand_keyword;
 mod greater_good_activation;
 mod green_suns_zenith_regression;
 mod griffin_rider_conditional_self_buff;
