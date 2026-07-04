@@ -12,10 +12,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Effect, FilterProp, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -23,6 +23,7 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -39,22 +40,24 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
-    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
-    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
-    is_enters_with_counter_replacement_line, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    is_alternative_keyword_cost_pattern, is_as_enters_becomes_choice_pattern,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern,
+    is_collect_evidence_alt_cost_pattern, is_compound_turn_limit, is_defiler_cost_pattern,
+    is_enters_tapped_cant_untap_compound, is_enters_with_counter_replacement_line,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    split_flashback_trailing_self_spell_cost_reduction,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
-    rewrite_condition_keyword, try_parse_temporal_delayed_trigger_ability,
+    lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
+    parse_effect_chain_with_context, rewrite_condition_keyword,
+    try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
@@ -71,7 +74,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
+    parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -1145,6 +1149,145 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
+/// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
+/// carry a host-bound re-entry rider ("Tap that creature as it phases in this
+/// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
+fn reconcile_host_bound_phase_outs(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        reconcile_host_bound_phase_outs_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            reconcile_host_bound_phase_outs_in_ability(execute);
+        }
+    }
+}
+
+fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
+    let should_upgrade = matches!(*def.effect, Effect::PhaseOut { .. })
+        && def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()));
+    if should_upgrade {
+        upgrade_host_bound_phase_out_at_head(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        reconcile_host_bound_phase_outs_in_ability(sub);
+    }
+}
+
+fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
+    if is_host_bound_phase_in_tap_rider_node(def) {
+        return true;
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| chain_contains_host_bound_tap_rider(sub.as_ref()))
+}
+
+fn upgrade_host_bound_phase_out_at_head(def: &mut AbilityDefinition) {
+    let Effect::PhaseOut { target } = *def.effect.clone() else {
+        return;
+    };
+
+    let (tail, removed_rider) = remove_host_bound_tap_rider_from_chain(def.sub_ability.take());
+    if !removed_rider {
+        def.sub_ability = tail;
+        return;
+    }
+
+    let cant_phase_in = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantPhaseIn,
+            }])],
+        duration: Some(Duration::UntilHostLeavesPlay),
+        target: Some(TargetFilter::ParentTarget),
+    };
+
+    let mut return_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseIn {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )));
+
+    let mut delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            effect: Box::new(return_ability),
+            uses_tracked_set: false,
+        },
+    );
+    delayed.sub_ability = tail;
+
+    let mut lock = AbilityDefinition::new(AbilityKind::Spell, cant_phase_in);
+    lock.sub_ability = Some(Box::new(delayed));
+
+    *def.effect = Effect::PhaseOut { target };
+    def.sub_ability = Some(Box::new(lock));
+}
+
+/// Remove only the host-bound tap rider node, preserving any intervening siblings.
+fn remove_host_bound_tap_rider_from_chain(
+    chain: Option<Box<AbilityDefinition>>,
+) -> (Option<Box<AbilityDefinition>>, bool) {
+    let Some(mut node) = chain else {
+        return (None, false);
+    };
+
+    if is_host_bound_phase_in_tap_rider_node(&node) {
+        return (node.sub_ability.take(), true);
+    }
+
+    if let Some(sub) = node.sub_ability.take() {
+        let (new_sub, found) = remove_host_bound_tap_rider_from_chain(Some(sub));
+        node.sub_ability = new_sub;
+        if found {
+            return (Some(node), true);
+        }
+    }
+
+    (Some(node), false)
+}
+
+fn is_host_bound_phase_in_tap_rider_node(def: &AbilityDefinition) -> bool {
+    if !matches!(
+        def.effect.as_ref(),
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return false;
+    }
+    def.description
+        .as_deref()
+        .is_some_and(host_bound_phase_in_tap_phrase)
+}
+
+fn host_bound_phase_in_tap_phrase(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    scan_contains(&lower, "as it phases in this way")
+        || scan_contains(&lower, "as that creature phases in this way")
+        || scan_contains(&lower, "as that permanent phases in this way")
+}
+
 fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     if types.iter().any(|card_type| card_type == "Creature") {
         Some(ChosenSubtypeKind::CreatureType)
@@ -1181,7 +1324,7 @@ fn chosen_subtype_kind_from_persisted_choice(
 fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSubtypeKind> {
     match def.effect.as_ref() {
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         } => Some(ChosenSubtypeKind::CreatureType),
@@ -1364,6 +1507,14 @@ fn strip_instead_clause(
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
     if let Some((before, after)) = tp.rsplit_around(" instead if ") {
         let condition_text = after.lower.trim().trim_end_matches('.');
+        // CR 608.2c + CR 601.2b: An inverted additional-cost / gift "instead if"
+        // is folded to the dedicated `AdditionalCostPaidInstead` by the chain's
+        // `strip_additional_cost_conditional`. Defer the whole line so the chain
+        // builds the conditional else_ability (Cinder Strike) rather than the
+        // line-level path dropping the unrecognized condition here.
+        if parse_additional_cost_instead_condition_fragment(condition_text).is_some() {
+            return (text.to_string(), None, false);
+        }
         // CR 614.1a + CR 608.2c: an inverted "instead if <cond>" followed by a further
         // printed instruction (Throw from the Saddle: "… instead if it's a Mount. Then it
         // deals damage …") is an INTRA-CHAIN override, not a whole-line replacement. The
@@ -1375,6 +1526,19 @@ fn strip_instead_clause(
         if condition_text.contains('.') {
             // allow-noncombinator: structural sentence-boundary split (mirrors the
             // pattern-3 `before_trim.contains('.')` guard below), not parsing dispatch
+            return (text.to_string(), None, false);
+        }
+        // CR 608.2c + CR 614.1a: A multi-sentence effect line
+        // ("[prior sentence]. [effect] instead if <cond>", e.g. Steer Clear) is an
+        // INTRA-CHAIN override — the "instead" replaces only the trailing sentence's
+        // effect, not the whole line, and its condition ("you controlled a Mount as
+        // you cast this spell") is owned by the chain-level `parse_condition_text`
+        // recognizers, not the line-level `parse_inner_condition`. Defer the whole
+        // line to the chain parser (mirrors the pattern-3 `before_trim.contains('.')`
+        // guard below) so `try_parse_generic_instead_clause` builds the conditional
+        // sub-ability and the prior sentence is preserved.
+        if before.original.trim().trim_end_matches('.').contains('.') {
+            // allow-noncombinator: structural sentence-boundary split, not parsing dispatch
             return (text.to_string(), None, false);
         }
         let condition = parse_inner_condition(condition_text)
@@ -3564,6 +3728,21 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
+            // CR 208.2b + CR 614.1c + CR 614.12a: modal "As ~ enters, it becomes
+            // your choice of [P/T profiles]" as-enters replacement (Primal Plasma,
+            // Primal Clay, Corrupted Shapeshifter, Aquamorph Entity). This is a
+            // single-sentence replacement line with NO bullet block, so the
+            // Priority-1 `OracleBlockAst::AsEntersAnchorWordModal` block parser
+            // never fires — it must be lowered here. [G2] It MUST run BEFORE the
+            // generic `parse_replacement_sentence_sequence` / `parse_replacement_line`
+            // parsers so those don't claim the "becomes your choice of" line as a
+            // plain choice/animate and drop the per-mode gated statics.
+            if is_as_enters_becomes_choice_pattern(&lower)
+                && lower_as_enters_becomes_choice_modal(&line, &mut result)
+            {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -4167,6 +4346,7 @@ pub(crate) fn parse_oracle_ir(
 
     reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
+    reconcile_host_bound_phase_outs(&mut result);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

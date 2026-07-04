@@ -79,6 +79,25 @@ pub(crate) fn resolve_fight_fighters(
         })
         .collect();
 
+    // CR 701.14a + CR 608.2c: "those creatures fight each other" — a two-fighter
+    // chain (Malamet/Longstalk/Duel) whose declared fighters live in the two
+    // earliest chain slots. Under most-recent-only chain propagation the Fight
+    // node's LOCAL `targets` carry at most one object, so recover BOTH fighters
+    // from the flattened chain root. Fire ONLY when the root genuinely declares
+    // two distinct object slots; otherwise fall through untouched, protecting
+    // incumbent single-fighter `Fight{ParentTarget}` cards (time to feed,
+    // ezuri's predation, joust, …) whose root has <2 object slots (slot 1 → None).
+    if object_targets.len() < 2 {
+        if let (Some(TargetRef::Object(a)), Some(TargetRef::Object(b))) = (
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, 0),
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, 1),
+        ) {
+            if a != b {
+                return Ok(Some((a, b)));
+            }
+        }
+    }
+
     if object_targets.len() >= 2 {
         return Ok(Some((object_targets[0], object_targets[1])));
     }
@@ -904,6 +923,66 @@ mod tests {
         assert_eq!(
             state.objects[&bear].damage_marked, 0,
             "phased-out bear deals no damage"
+        );
+    }
+
+    /// CR 701.14a + CR 608.2c: the b2 dual-fight divert must fire ONLY when the
+    /// flattened chain root declares two distinct object slots. A 1-slot root
+    /// (`resolve_parent_slot_from_root(1) == None`) falls through to the
+    /// single-target path; a 2-slot root recovers both fighters. Synthetic,
+    /// zero card-data dependency: the two cases differ only in whether a second
+    /// chain slot exists. Reverting to a naive `len<2 && ParentTarget` guard
+    /// makes the 1-slot case wrongly reinterpret the lone target as a divert.
+    #[test]
+    fn dual_fight_divert_guarded_on_two_distinct_root_slots() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_creature(&mut state, PlayerId(0), "A", 3, 3);
+        let b = make_creature(&mut state, PlayerId(1), "B", 2, 2);
+
+        // 1-slot root: top node is the Fight with a single local object target and
+        // NO sub-chain. flatten_targets_in_chain == [a] → slot 1 is None → divert
+        // off → single-target fall-through (subject SelfRef → source, target a).
+        let one_slot = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(a)],
+            a, // source
+            PlayerId(0),
+        );
+        let fighters = resolve_fight_fighters(&state, &one_slot).unwrap();
+        assert_eq!(
+            fighters,
+            Some((a, a)),
+            "1-slot root: no divert; SelfRef subject + sole target → (source, target)"
+        );
+
+        // 2-slot root: top node holds [a], a sub-ability node holds [b]. The
+        // flattened root is [a, b] → both slots Some & distinct → divert fires.
+        let mut two_slot = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(a)],
+            a,
+            PlayerId(0),
+        );
+        let sub = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            a,
+            PlayerId(0),
+        );
+        two_slot.sub_ability = Some(Box::new(sub));
+        let fighters = resolve_fight_fighters(&state, &two_slot).unwrap();
+        assert_eq!(
+            fighters,
+            Some((a, b)),
+            "2-slot root: divert recovers both declared fighters (slot0, slot1)"
         );
     }
 

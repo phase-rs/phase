@@ -97,6 +97,7 @@ fn yarus_dies_trigger_gates_return_and_chains_turn_face_up() {
         Some(AbilityCondition::TargetMatchesFilter {
             filter: TargetFilter::Typed(tf),
             use_lki,
+            ..
         }) => {
             assert!(
                 !use_lki,
@@ -184,6 +185,7 @@ fn reptilian_gain_control_gated_on_or_if_disjunction() {
         AbilityCondition::TargetMatchesFilter {
             filter: TargetFilter::Typed(tf),
             use_lki,
+            ..
         } => {
             assert!(!use_lki);
             assert!(

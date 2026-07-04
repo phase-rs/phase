@@ -1914,6 +1914,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // fresh cache for the next incremental flush's truth-delta consult.
     refresh_static_gate_truth(state);
 
+    // Rebuild the O(1) `StaticModeKind` presence index from the fully-derived board,
+    // immediately after the gate-truth cache and before `layers_dirty = Clean`, so a full
+    // eval always leaves a precise presence index for the next scan-gate consult.
+    refresh_static_mode_presence(state);
+
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
     // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
@@ -2107,6 +2112,8 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        // Per-turn bend-type tracking (Avatar Aang) — turn history, not a zone read.
+        | QuantityRef::BendTypesThisTurn
         | QuantityRef::ChosenNumber
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::CommanderCastFromCommandZoneCount
@@ -2193,6 +2200,12 @@ pub fn flush_layers(state: &mut GameState) {
             if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
                 apply_layers_incremental(state, prepared);
+                // Rebuild the presence index so the incremental arm leaves a PRECISE index
+                // (not a conservative superset). The incremental path is already
+                // O(battlefield): `prepare_incremental_flush` unconditionally calls
+                // `StaticSourceIndex::rebuild_from_state`, so a full presence rebuild here is
+                // DRY, matches the sibling-cache convention, and adds no asymptotic cost.
+                refresh_static_mode_presence(state);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
                 }
@@ -2501,6 +2514,19 @@ fn refresh_static_gate_truth(state: &mut GameState) {
         }
     });
     state.static_gate_truth = next;
+}
+
+/// Rebuild the O(1) `StaticModeKind` presence index wholesale from the same
+/// `game_functioning_statics` iterator its consumers would otherwise scan, so the index is
+/// exactly `.any(|(_, d)| d.mode.kind() == kind)` for every kind — no false negatives. The
+/// fold accumulates into a local `StaticModePresence` first (the iterator borrows `state`),
+/// then assigns.
+fn refresh_static_mode_presence(state: &mut GameState) {
+    let mut presence = crate::types::statics::StaticModePresence::empty();
+    for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+        presence.insert(def.mode.kind());
+    }
+    state.static_mode_presence = presence;
 }
 
 /// CR 613.1: Continuous effects are applied in layers to determine object characteristics.
@@ -14517,6 +14543,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
 
@@ -16141,6 +16168,124 @@ mod tests {
         assert_eq!(
             ctrl.name, "Secret Bear",
             "the controller still sees the real back-face identity"
+        );
+    }
+
+    // ── StaticModePresence refresh tests (Verification Matrix D/F) ──
+
+    /// Test D — incremental-arm refresh. A battlefield entrant carrying an `IgnoreHexproof`
+    /// static (a non-`Continuous` static, so the flush takes the incremental fast path) must
+    /// still leave the presence index PRECISE. Advisory A: establish a precise presence=false
+    /// baseline via a FULL flush FIRST, so assertion (2) cannot pass vacuously.
+    #[test]
+    fn incremental_flush_refreshes_static_mode_presence() {
+        use crate::types::statics::StaticModeKind;
+        let mut state = setup();
+        // Baseline: full flush with NO IgnoreHexproof static => precise presence = false.
+        evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "baseline: no IgnoreHexproof static means presence is precisely false"
+        );
+
+        // Entrant carries an object-scoped IgnoreHexproof static (mode != Continuous => the
+        // incremental fast path handles it, no full escalation).
+        let entrant = make_creature(&mut state, "Nowhere to Run", 2, 2, PlayerId(0));
+        state.objects.get_mut(&entrant).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::IgnoreHexproof).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                )),
+            ]
+            .into();
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        // (1) Branch proof: the incremental arm ran (NOT a Full escalation).
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "must take the incremental arm, not escalate"
+        );
+        assert_eq!(counters.layers_full_eval, 0, "must not escalate to full");
+        // (2) Revert guard: presence now reports IgnoreHexproof present. Removing the
+        //     Step 4c refresh_static_mode_presence call leaves this stale-false.
+        assert!(
+            crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "incremental flush must refresh the presence index"
+        );
+        // (3) A kind absent from the board still reports false — the incremental arm builds a
+        //     PRECISE index, not a conservative all-present one.
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "incremental refresh must remain precise for absent kinds"
+        );
+    }
+
+    /// Test F — building-block equivalence (the Unit 2/3 contract). After a full flush on a
+    /// mixed board (a phased-out static, plus plain battlefield statics of distinct kinds),
+    /// the presence index must equal `game_functioning_statics().any(kind == K)` for EVERY
+    /// kind. `StaticModePresence: PartialEq` compares the whole discriminant array, so a
+    /// single `assert_eq!` IS the "for every K" check.
+    #[test]
+    fn static_mode_presence_equals_functioning_statics_fold() {
+        use crate::types::statics::{StaticModeKind, StaticModePresence};
+        let mut state = setup();
+        // Plain battlefield statics of two distinct kinds.
+        let a = make_creature(&mut state, "Ignore Hexproof Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&a).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&b).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+        // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
+        // game_functioning_statics, so its kind must NOT appear in presence.
+        let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&phased).unwrap();
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::Shroud)].into();
+            obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        }
+
+        evaluate_layers(&mut state);
+
+        // Whole-array equivalence: recompute from the same iterator the consumers scan.
+        let mut expected = StaticModePresence::empty();
+        for (_, def) in crate::game::functioning_abilities::game_functioning_statics(&state) {
+            expected.insert(def.mode.kind());
+        }
+        assert_eq!(
+            expected, state.static_mode_presence,
+            "presence index must equal the game_functioning_statics fold for every kind"
+        );
+        // Explicit spot-checks of the interesting scopings.
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::IgnoreHexproof
+        ));
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::CantBeTargeted
+        ));
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "phased-out static (CR 702.26b) must not appear in presence"
         );
     }
 }

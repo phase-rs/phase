@@ -865,7 +865,18 @@ mod diagnostic_snapshots {
     }
 
     #[test]
-    fn diagnostic_swallowed_clause() {
+    fn diagnostic_swallowed_clause_cleared_for_a_killer() {
+        // Regression guard for S07 N2: A Killer Among Us' ETB "Then secretly
+        // choose Human, Merfolk, or Goblin" used to be a swallowed clause (the
+        // enumerated creature-type choice was unrecognized). The new
+        // `parse_creature_type_enumeration` arm in `try_parse_named_choice` now
+        // parses it as `ChoiceType::CreatureType { options }`, so no
+        // swallowed-clause diagnostic is emitted.
+        //
+        // The ETB now creates all THREE tokens: the comma-listed same-verb token
+        // chain ("create A, a B, and a C token") N-way split fix (commit
+        // f2648a0cb) no longer drops the MIDDLE element (Merfolk). Full cast-path
+        // coverage lives in `crates/engine/tests/a_killer_among_us.rs`.
         let diagnostics = parse_diagnostics(
             "When this enchantment enters, create a 1/1 white Human creature token, a 1/1 blue Merfolk creature token, and a 1/1 red Goblin creature token. Then secretly choose Human, Merfolk, or Goblin.\nSacrifice this enchantment, Reveal the creature type you chose: If target attacking creature token is the chosen type, put three +1/+1 counters on it and it gains deathtouch until end of turn.",
             "A Killer Among Us",
@@ -873,13 +884,12 @@ mod diagnostic_snapshots {
             &[],
         );
         assert!(
-            diagnostics
+            !diagnostics
                 .iter()
                 .any(|d| d.category_name() == "swallowed-clause"),
-            "Expected swallowed-clause diagnostic for A Killer Among Us, got: {:?}",
+            "Expected NO swallowed-clause diagnostic for A Killer Among Us after N2, got: {:?}",
             diagnostics
         );
-        insta::assert_json_snapshot!("diagnostic_swallowed_clause", &diagnostics);
     }
 
     // NOTE: CascadeLoss diagnostic is not triggered by any card in the current

@@ -92,6 +92,12 @@ pub fn record_state_clone_for_legality() {
 /// (each `check_static_ability` call). Combat/untap legality loops hoist a
 /// once-computed existence gate to drive this toward zero, collapsing O(N^2)
 /// per-loop scans to O(N).
+///
+/// Also incremented at the two hexproof scan gates in `static_abilities`
+/// (`player_ignores_hexproof`, `target_ignores_hexproof`), which each guard their
+/// O(battlefield) `.any()` behind the O(1) `static_kind_present(IgnoreHexproof)`
+/// presence index — so on a board with zero functioning `IgnoreHexproof` statics this
+/// counter stays at 0 across an entire target enumeration.
 pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
 }

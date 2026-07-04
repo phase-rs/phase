@@ -45,8 +45,8 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_mass_type_union, parse_target, parse_target_with_ctx, parse_target_with_syntax,
-    parse_type_phrase, resolve_pronoun_target, TargetSyntax,
+    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_type_phrase, resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -1839,7 +1839,7 @@ pub(super) fn parse_targeted_action_ast(
         // Preserve the optional-target spec through the AST; it is stamped onto
         // the clause in `lower_imperative_family_ast`.
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+        let (target, _rem) = parse_fight_target(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight {
@@ -3148,6 +3148,56 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
     .parse(input)
 }
 
+/// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
+/// discards the rest" (Monomania). The chosen player keeps exactly one card of
+/// their choice and discards every other card in hand -- equivalently, discards
+/// `hand size - 1` cards, chooser-directed. Routes to the existing
+/// `Effect::Discard` (via `TargetedImperativeAst::Discard`) using the canonical
+/// `ClampMin { Offset { HandSize, -1 }, 0 }` "N - 1, floored at 0" count
+/// (CR 107.1b keeps the amount non-negative when the hand holds one or zero
+/// cards); no new effect is introduced. Whole-clause anchored with `eof` so a
+/// bare "choose a card ..." prefix cannot hijack unrelated choose clauses. The
+/// leading verb has already been de-inflected to "choose" by the subject-
+/// stripping layer, but `opt("s")` also accepts a raw "chooses" for
+/// context-free callers. The possessive selects the `HandSize` scope;
+/// `Effect::Discard.target` is left as `Controller` for `inject_subject_target`
+/// to rewrite to the discarding player, exactly as the sibling "discard their
+/// hand" path does.
+fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<TargetedImperativeAst> {
+    let (hand_owner, _) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("choose").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" a card in ").parse(input)?;
+        let (input, hand_owner) = alt((
+            value(PlayerScope::Controller, tag("your hand")),
+            value(PlayerScope::Target, tag("their hand")),
+            value(PlayerScope::Target, tag("his or her hand")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" and discard").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" the rest").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, hand_owner))
+    })?;
+    Some(TargetedImperativeAst::Discard {
+        count: QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { player: hand_owner },
+                }),
+                offset: -1,
+            }),
+            minimum: 0,
+        },
+        random: false,
+        up_to: false,
+        unless_filter: None,
+        filter: None,
+    })
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -4274,7 +4324,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
-                    | ChoiceType::CreatureType
+                    | ChoiceType::CreatureType { .. }
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
@@ -8239,8 +8289,12 @@ pub(super) fn parse_imperative_family_ast(
             }),
 
         // Choose (CR 700.2)
-        "choose" | "secretly" => parse_choose_ast(text, lower, ctx)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast))),
+        "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
+            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            .or_else(|| {
+                parse_choose_ast(text, lower, ctx)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast)))
+            }),
 
         // ── Exact-match keyword actions ──
         "explore" if lower == "explore" || lower == "explore again" => {
@@ -14112,6 +14166,97 @@ mod tests {
                 );
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
+        }
+    }
+
+    /// CR 701.9a + CR 107.1b: Monomania -- "chooses a card in their hand and
+    /// discards the rest" routes through the "choose" verb to the existing
+    /// `Effect::Discard` with a `hand size - 1` (floored at 0) count. The
+    /// possessive drives the `HandSize` scope; "their" -> `Target`.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_their() {
+        let text = "choose a card in their hand and discards the rest";
+        match parse_choose_discard_rest_of_hand(text, text) {
+            Some(TargetedImperativeAst::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            }) => {
+                assert!(!random && !up_to);
+                assert!(unless_filter.is_none() && filter.is_none());
+                match count {
+                    QuantityExpr::ClampMin { inner, minimum } => {
+                        assert_eq!(minimum, 0);
+                        match *inner {
+                            QuantityExpr::Offset { inner, offset } => {
+                                assert_eq!(offset, -1);
+                                assert!(
+                                    matches!(
+                                        *inner,
+                                        QuantityExpr::Ref {
+                                            qty: QuantityRef::HandSize {
+                                                player: PlayerScope::Target
+                                            }
+                                        }
+                                    ),
+                                    "expected HandSize(Target), got {inner:?}"
+                                );
+                            }
+                            other => panic!("expected Offset(-1), got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected ClampMin, got {other:?}"),
+                }
+            }
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
+
+    /// The de-inflected leading "choose" verb and the "your hand" possessive
+    /// (Controller scope) are both accepted.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_your() {
+        let text = "choose a card in your hand and discard the rest";
+        match parse_choose_discard_rest_of_hand(text, text) {
+            Some(TargetedImperativeAst::Discard { count, .. }) => match count {
+                QuantityExpr::ClampMin { inner, .. } => match *inner {
+                    QuantityExpr::Offset { inner, .. } => assert!(matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
+                        }
+                    )),
+                    other => panic!("expected Offset, got {other:?}"),
+                },
+                other => panic!("expected ClampMin, got {other:?}"),
+            },
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
+
+    /// Whole-clause anchoring guard: near-miss clauses that share the "choose"
+    /// / "the rest" tokens must NOT be captured by the Monomania recognizer.
+    /// A bare "choose a card in their hand" (no disposal), a "discard it"
+    /// back-reference, a plain targeting clause, a "two cards" cardinality
+    /// mismatch, and the Balance-family "a number of ... they control ...
+    /// discards the rest" equalization clause all return `None`.
+    #[test]
+    fn parse_choose_discard_rest_of_hand_rejects_near_misses() {
+        for s in [
+            "choose a card in their hand",
+            "choose a card in their hand and discard it",
+            "choose a creature",
+            "choose two cards in their hand and discard the rest",
+            "choose a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then discards the rest",
+        ] {
+            assert!(
+                parse_choose_discard_rest_of_hand(s, s).is_none(),
+                "near-miss must not match: {s:?}"
+            );
         }
     }
 
