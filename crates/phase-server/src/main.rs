@@ -7152,8 +7152,7 @@ mod admin_auth_tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
         let game_db_path = temp_dir.path().join("games.db");
-        let game_db =
-            Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
+        let game_db = Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
@@ -7235,10 +7234,7 @@ mod admin_auth_tests {
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
         let (app, _temp) = test_admin_app(Some(TOKEN));
-        assert_eq!(
-            get_admin_drafts(app, None).await,
-            StatusCode::UNAUTHORIZED
-        );
+        assert_eq!(get_admin_drafts(app, None).await, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
