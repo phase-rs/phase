@@ -1017,7 +1017,7 @@ impl LegalityPoisonGates {
                     | StaticMode::MustBlock
                     | StaticMode::MustBlockAttacker { .. }
                     | StaticMode::MustBeBlocked { .. }
-                    | StaticMode::MustBeBlockedByAll
+                    | StaticMode::MustBeBlockedByAll { .. }
                     | StaticMode::MaxBlockersEachCombat { .. }
                     | StaticMode::ExtraBlockers { .. }
                     | StaticMode::CanBlockShadow

@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Data-carrying static mode variants that are supported but can't be registered
 /// by exact key in the static registry (because the key includes runtime data).
-fn is_data_carrying_static(mode: &StaticMode) -> bool {
+pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
     matches!(
         mode,
         // CR 514.2: nullary marker static — runtime enforcement is the cleanup
@@ -128,6 +128,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // direct-match in combat.rs declare-blockers validation (mirrors
             // CantBeBlockedBy).
             | StaticMode::MustBeBlocked { .. }
+            // CR 509.1c: MustBeBlockedByAll carries an optional blocker
+            // `TargetFilter` (None = all creatures (Lure); Some = only matching
+            // creatures compelled, Talruum Piper flying / Marble Priest Walls).
+            // The variant is now parameterized with a non-Hash TargetFilter, so
+            // it is no longer registry-keyed; runtime enforcement is direct-match
+            // in combat.rs declare-blockers validation (mirrors MustBeBlocked).
+            | StaticMode::MustBeBlockedByAll { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -8104,7 +8111,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 static_abilities.iter().any(|s| match &s.mode {
                     // CR 509.1c: "All creatures able to block ~ do so" lowers to the
                     // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
-                    StaticMode::MustBeBlockedByAll => {
+                    StaticMode::MustBeBlockedByAll { .. } => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }

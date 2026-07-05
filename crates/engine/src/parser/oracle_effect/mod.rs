@@ -7979,9 +7979,18 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// - "all creatures able to block ~ do so"
 /// - "all creatures able to block ~ this turn do so"
 fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        value((), tag("all creatures able to block ")).parse(i)
-    })?;
+    // Two-slot blocker grammar after "all ": slot A ("creature(s) able to block ")
+    // yields `blockers = None` (every creature — the mass Lure form); slot B
+    // ("<type-phrase> able to block ", e.g. "creatures your opponents control")
+    // yields `blockers = Some(filter)`. Shared with the permanent path in
+    // oracle_static::evasion. A runs before B, byte-identical to the old literal,
+    // so unfiltered lines are unchanged. CR 509.1c.
+    let (_, after_all_orig) =
+        nom_on_lower(tp.original, tp.lower, |i| value((), tag("all ")).parse(i))?;
+    let after_all_lower = &tp.lower[tp.lower.len() - after_all_orig.len()..];
+    let (rest_lower_slot, blockers) =
+        super::oracle_static::parse_forced_block_blocker_slot(after_all_lower)?;
+    let rest_orig = &after_all_orig[after_all_orig.len() - rest_lower_slot.len()..];
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let rest = TextPair::new(rest_orig, rest_lower);
 
@@ -8014,11 +8023,13 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll)
-                .affected(target.clone())
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBeBlockedByAll,
-                }])],
+            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll {
+                blockers: blockers.clone(),
+            })
+            .affected(target.clone())
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlockedByAll { blockers },
+            }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
         },

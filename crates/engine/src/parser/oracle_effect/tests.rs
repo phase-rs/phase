@@ -17514,10 +17514,13 @@ fn mass_forced_block_target_creature() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlockedByAll { blockers: None }
+                )
             )
         ),
-        "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
+        "Expected GenericEffect with unfiltered MustBeBlockedByAll, got {:?}",
         e
     );
 }
@@ -17529,11 +17532,76 @@ fn mass_forced_block_self_ref() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlockedByAll { .. }
+                )
             )
         ),
         "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
         e
+    );
+}
+
+#[test]
+fn mass_forced_block_filtered_opponents_control() {
+    // CR 509.1c: a one-shot filtered lure — "All creatures your opponents control
+    // able to block that creature this turn do so" — must lower to a
+    // MustBeBlockedByAll carrying Some(filter) so only the opponents' creatures
+    // are compelled. This is the reach-guard for the slot-B / 8020 seam: it
+    // fails if the parser drops the filter (Some → None) OR if the filter is not
+    // threaded into the AddStaticMode modification.
+    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    use crate::types::statics::StaticMode;
+    let expected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+
+    let e = parse_effect(
+        "All creatures your opponents control able to block that creature this turn do so",
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &e
+    else {
+        panic!("Expected GenericEffect, got {:?}", e);
+    };
+
+    // The top-level static carries Some(filter) (guards the 8017 seam).
+    let sd = static_abilities
+        .iter()
+        .find(|sd| {
+            matches!(
+                &sd.mode,
+                StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Expected top-level MustBeBlockedByAll {{ blockers: Some(opponents' creatures) }}, got {:?}",
+                static_abilities
+            )
+        });
+
+    // The SAME Some(filter) must appear inside the AddStaticMode modification
+    // (guards the distinct 8020 seam).
+    assert!(
+        sd.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlockedByAll { blockers: Some(f) }
+            } if *f == expected
+        )),
+        "AddStaticMode modification must carry the same Some(filter), got {:?}",
+        sd.modifications
+    );
+
+    // Positive reach-guard: the subject ("that creature") produced a non-None
+    // effect target, proving the line parsed as the mass-forced-block form and
+    // did not short-circuit before the blocker slot.
+    assert!(
+        target.is_some(),
+        "the mass-forced-block effect must carry a subject target, got None"
     );
 }
 
