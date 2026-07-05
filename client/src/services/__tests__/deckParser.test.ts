@@ -282,6 +282,37 @@ Deck
     ]);
   });
 
+  it('normalizes multi-part single-slash split names to canonical " // "', () => {
+    const result = parseMtgaDeck('1 Who / What / When / Where / Why');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Who // What // When // Where // Why' },
+    ]);
+  });
+
+  it('preserves a printed name that literally contains "//" (issue #4790)', () => {
+    // "SP//dr, Piloted by Peni" is a single-faced card whose real name contains
+    // "//" with no surrounding spaces. Splitting it into "SP // dr, ..." breaks
+    // the engine's exact-name lookup, so the card is left unrecognized.
+    const result = parseMtgaDeck('1 SP//dr, Piloted by Peni');
+    expect(result.main).toEqual([
+      { count: 1, name: 'SP//dr, Piloted by Peni' },
+    ]);
+  });
+
+  it('leaves an already-canonical split name unchanged', () => {
+    const result = parseMtgaDeck('1 Fire // Ice');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Fire // Ice' },
+    ]);
+  });
+
+  it('canonicalizes irregular spacing around a "//" separator', () => {
+    // A "//" with whitespace on either side is a separator; collapse the
+    // spacing to canonical " // " (but a glued "//" like SP//dr is left alone).
+    expect(parseMtgaDeck('1 Fire// Ice').main).toEqual([{ count: 1, name: 'Fire // Ice' }]);
+    expect(parseMtgaDeck('1 Wear //Tear').main).toEqual([{ count: 1, name: 'Wear // Tear' }]);
+  });
+
   it('preserves an explicit sideboard header instead of promoting commander heuristically', () => {
     const content = `Deck
 1 Sol Ring
