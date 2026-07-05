@@ -1048,10 +1048,10 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // CR 205.1a + CR 604.1: Imprisoned-in-the-Moon — "Enchanted <subject> is a
-    // colorless <type> with "<ability>" and loses all other card types and
-    // abilities." Must precede parse_enchanted_is_type, whose base-P/T split does
-    // not model the with-"<ability>" clause (issue #4770).
+    // CR 205.1a + CR 613.1f: Imprisoned-in-the-Moon — "Enchanted <subject> is a
+    // colorless [<subtype>...] <type> with "<ability>" and loses all other card
+    // types and abilities." Must precede parse_enchanted_is_type, whose base-P/T
+    // split does not model the with-"<ability>" clause (issue #4770).
     if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
         return Some(def);
     }

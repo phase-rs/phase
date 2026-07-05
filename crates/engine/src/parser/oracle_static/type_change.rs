@@ -552,22 +552,27 @@ pub(crate) fn try_parse_self_is_also_subtypes(
 ///
 /// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
 /// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
-/// CR 205.1a + CR 613.1d (Layer 4) + CR 604.1 (Layer 6): Imprisoned-in-the-Moon
+/// CR 205.1a + CR 613.1d (Layer 4) + CR 613.1f (Layer 6): Imprisoned-in-the-Moon
 /// class — an Aura that turns the enchanted permanent into a colorless permanent
-/// of a single card type carrying a granted ability while stripping everything
-/// else: "Enchanted <subject> is a[n] colorless <core type> with "<quoted
-/// ability>" and loses all other card types and abilities." Imprisoned in the
-/// Moon ("Enchanted permanent is a colorless land with "{T}: Add {C}" and loses
-/// all other card types and abilities.") is the type specimen.
+/// of a single card type (optionally with subtype[s]) carrying a granted ability
+/// while stripping everything else: "Enchanted <subject> is a[n] colorless
+/// [<subtype>...] <core type> with "<quoted ability>" and loses all other card
+/// types and abilities." Imprisoned in the Moon ("Enchanted permanent is a
+/// colorless land with "{T}: Add {C}" and loses all other card types and
+/// abilities.") is the type specimen; Sugar Coat ("... is a colorless Food
+/// artifact with "..." and loses ...") is the subtype-bearing sibling.
 ///
 /// Emits, in written order: `SetCardTypes` (replace all card types with
-/// <core type>, CR 205.1a), `SetColor([])` (become colorless, CR 105.2),
-/// `RemoveAllAbilities` (the permanent loses its own abilities), then the
-/// `GrantAbility` produced by the shared `parse_quoted_ability_modifications`
-/// authority. `RemoveAllAbilities` is emitted BEFORE the grant so the granted
-/// ability SURVIVES the wipe (CR 613.7a intra-effect written order — the same
-/// ordering the `RemoveAllSubtypes` → `AddChosenSubtype` composition relies on).
-/// No new variant, no new runtime.
+/// <core type>, CR 205.1a), `SetColor([])` (become colorless, CR 105.2), one
+/// `AddSubtype` per parsed subtype (CR 205.1a, Layer 4 — e.g. Sugar Coat's
+/// Food), `RemoveAllAbilities` (the permanent loses its own abilities, Layer 6
+/// CR 613.1f), then the `GrantAbility` produced by the shared
+/// `parse_quoted_ability_modifications` authority. `RemoveAllAbilities` is
+/// emitted BEFORE the grant so the granted ability SURVIVES the wipe (CR 613.6 —
+/// the removal and the grant are parts of one continuous effect applied
+/// together, so a grant emitted after the wipe within this single effect is not
+/// itself removed; the same ordering the `RemoveAllSubtypes` → `AddChosenSubtype`
+/// composition relies on). No new variant, no new runtime.
 ///
 /// Dispatched BEFORE [`parse_enchanted_is_type`], whose ` with base power and
 /// toughness ` split does not model a `with "<ability>"` clause and so drops
@@ -590,6 +595,16 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
         .parse(r)
         .ok()?;
     let (r, _) = tag::<_, _, OracleError<'_>>("colorless ").parse(r).ok()?;
+    // CR 205.3: optional subtype(s) preceding the core card type — Sugar Coat
+    // ("colorless Food artifact ...") vs Imprisoned ("colorless land ...").
+    // `parse_subtype` is case-insensitive (runs on the lowered slice) and a core
+    // type word is never a subtype, so the loop stops before the head noun.
+    let mut r = r;
+    let mut subtypes: Vec<String> = Vec::new();
+    while let Some((canonical, consumed)) = parse_subtype(r) {
+        subtypes.push(canonical);
+        r = r[consumed..].trim_start();
+    }
     let (r, type_tf) = nom_target::parse_type_filter_word(r).ok()?;
     if !r.trim().is_empty() {
         return None;
@@ -633,8 +648,13 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
             core_types: vec![core_type],
         },
         ContinuousModification::SetColor { colors: Vec::new() },
-        ContinuousModification::RemoveAllAbilities,
     ];
+    // CR 205.1a (Layer 4): grant each parsed subtype (Sugar Coat → Food). Placed
+    // with the other type-identity modifications, before the Layer-6 ability wipe.
+    for subtype in subtypes {
+        modifications.push(ContinuousModification::AddSubtype { subtype });
+    }
+    modifications.push(ContinuousModification::RemoveAllAbilities);
     // GrantAbility AFTER RemoveAllAbilities so the granted ability survives.
     modifications.extend(grant_modifications);
 

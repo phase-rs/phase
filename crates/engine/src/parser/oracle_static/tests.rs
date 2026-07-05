@@ -14376,6 +14376,50 @@ fn imprisoned_in_the_moon_becomes_colorless_land_with_granted_mana_ability() {
     }
 }
 
+// Issue #4770 sibling — Sugar Coat: "Enchanted permanent is a colorless Food
+// artifact with "..." and loses all other card types and abilities." Same class
+// as Imprisoned in the Moon but with a SUBTYPE (Food) before the core type. Must
+// emit SetCardTypes(Artifact) + SetColor([]) + AddSubtype(Food) as the Layer-4
+// identity, then RemoveAllAbilities before the granted ability (Layer 6). This
+// is the subtype-before-core-type generalization of the parser.
+#[test]
+fn sugar_coat_becomes_colorless_food_artifact_with_granted_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a colorless Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life\" and loses all other card types and abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Artifact],
+        }),
+        "must become an artifact: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetColor { colors: vec![] }),
+        "must become colorless: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Food".to_string(),
+        }),
+        "must gain the Food subtype (subtype-before-core-type sibling shape): {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted sacrifice ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_permanent_is_forest_land_produces_set_basic_land_type() {
     // CR 305.7: Without color prefix, should still use SetBasicLandType
