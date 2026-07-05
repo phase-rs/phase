@@ -3386,10 +3386,17 @@ enum TriggerOrderingDisposition {
 /// across a group). The recursion is load-bearing: derived `PartialEq` descends
 /// into `sub_ability`/`else_ability`, so their `source_id`s must also be zeroed.
 ///
+/// `source_card_id` is the source's latched card identity (CR 400.7 / CR 704.5d,
+/// for AllCopies priority-yield matching) — a per-instance identity latch with no
+/// bearing on the trigger's game outcome, so it is zeroed alongside `source_id`;
+/// otherwise two outcome-identical triggers off different cards would ride in the
+/// derived `==` as distinguishable and lose their CR 603.3b auto-ordering.
+///
 /// `pub(crate)` so `analysis::resource`'s coverability stack-normalizer shares this
 /// exact identity-stripping rather than keeping a drift-prone parallel copy.
 pub(crate) fn normalize_ability_identity(ability: &mut ResolvedAbility) {
     ability.source_id = ObjectId(0);
+    ability.source_card_id = None;
     if let Some(sub) = ability.sub_ability.as_mut() {
         normalize_ability_identity(sub);
     }
@@ -6362,6 +6369,25 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some(),
+        // CR 603.4 + CR 701.9a: Intervening-if on the triggering event's object
+        // (e.g. the discarded card). The object may already have left the hand,
+        // so fall back to LKI when the live object no longer matches.
+        TriggerCondition::EventObjectMatchesFilter { filter } => trigger_event
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .is_some_and(|object_id| {
+                let ctx = FilterContext::from_source_with_controller(
+                    source_id.unwrap_or(ObjectId(0)),
+                    controller,
+                );
+                if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
+                    return true;
+                }
+                state.lki_cache.get(&object_id).is_some_and(|lki| {
+                    super::filter::matches_target_filter_on_lki_snapshot(
+                        state, object_id, lki, filter, &ctx,
+                    )
+                })
+            }),
         // CR 120.1 + CR 108.3: "deals combat damage to its owner" — the damaged
         // player must be the owner of the object that dealt the damage (CR 120.1:
         // the object that deals damage is the source of that damage). Two event
@@ -7374,6 +7400,10 @@ pub(super) fn build_triggered_ability(
         // higher incarnation and the self-reference finds nothing.
         resolved
             .set_source_incarnation_recursive(state.objects.get(&source_id).map(|o| o.incarnation));
+        // CR 400.7 identity latch + CR 704.5d: snapshot the source's card
+        // identity so an `AllCopies` priority yield can still match by card
+        // identity after the source (e.g. a token) has ceased to exist.
+        resolved.source_card_id = state.objects.get(&source_id).map(|o| o.card_id);
         resolved
     } else {
         // Trigger with no execute -- use Unimplemented as no-op marker
@@ -7718,6 +7748,64 @@ pub mod tests {
         assert!(
             !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &no_cause),
             "a discard with no recorded cause must NOT satisfy the constraint"
+        );
+    }
+
+    /// Issue #5143 — Anje Falkenrath: intervening-if "if it has madness" must
+    /// read the discarded card, not fire for every discard.
+    #[test]
+    fn event_object_madness_intervening_if_gates_discard_trigger() {
+        use crate::types::ability::{FilterProp, TriggerCondition};
+        use crate::types::keywords::{Keyword, KeywordKind};
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup();
+        let anje = make_creature(&mut state, PlayerId(0), "Anje Falkenrath", 1, 3);
+        let madness_card = make_creature(&mut state, PlayerId(0), "Basking Rootwalla", 1, 1);
+        let normal_card = make_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+
+        if let Some(obj) = state.objects.get_mut(&madness_card) {
+            obj.keywords.push(Keyword::Madness(ManaCost::default()));
+        }
+
+        let condition = TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Madness,
+                },
+            ])),
+        };
+
+        let madness_discard = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: madness_card,
+            source_id: None,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(anje),
+                Some(&madness_discard),
+            ),
+            "madness discard must satisfy the intervening-if"
+        );
+
+        let normal_discard = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: normal_card,
+            source_id: None,
+        };
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(anje),
+                Some(&normal_discard),
+            ),
+            "non-madness discard must NOT satisfy the intervening-if"
         );
     }
 
@@ -8534,6 +8622,70 @@ pub mod tests {
         assert_eq!(state.players[0].life, 19);
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 0);
+    }
+
+    /// CR 400.7 + CR 704.5d: `build_triggered_ability` must snapshot the source's
+    /// card identity when a dies-trigger is pushed, so an AllCopies priority
+    /// yield (CR 117.3d) can later match by card identity even after the token
+    /// source ceases to exist. The kill is a zone change (models an effect-driven
+    /// death whose triggers are collected before the token-cease SBA runs).
+    /// Reverting the `source_card_id` stamp in `build_triggered_ability` leaves
+    /// the pushed entry's `source_card_id` as `None`, failing this test.
+    #[test]
+    fn build_triggered_ability_stamps_source_card_id_for_token_dies_trigger() {
+        let mut state = setup();
+        let token = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Zombie Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+            let mut trig = TriggerDefinition::new(TriggerMode::ChangesZone);
+            trig.origin = Some(Zone::Battlefield);
+            trig.destination = Some(Zone::Graveyard);
+            trig.valid_card = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }));
+            trig.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            obj.trigger_definitions.push(trig);
+        }
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        let ability = state
+            .stack
+            .iter()
+            .find_map(|e| match &e.kind {
+                StackEntryKind::TriggeredAbility {
+                    source_id, ability, ..
+                } if *source_id == token => Some(ability),
+                _ => None,
+            })
+            .expect("reach-guard: the token's dies-trigger is on the stack as a TriggeredAbility");
+        assert_eq!(
+            ability.source_card_id,
+            Some(CardId(77)),
+            "the dies-trigger must latch the token's card identity at push",
+        );
+        assert!(
+            ability.source_incarnation.is_some(),
+            "the dies-trigger must also latch the source incarnation at push",
+        );
     }
 
     #[test]

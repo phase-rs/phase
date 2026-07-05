@@ -172,6 +172,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         targets: _,               // concrete announced target refs (already resolved)
         source_id: _,             // object id
         source_incarnation: _,    // epoch guard token
+        source_card_id: _,        // latched card identity token (AllCopies yield), no read
         controller: _,            // player id
         original_controller: _,   // player id
         scoped_player: _,         // player id (iteration binding)
@@ -194,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         may_trigger_origin: _,    // provenance tag
         target_selection_mode: _, // Chosen/Random tag
         chosen_players: _,        // concrete chosen player ids
+        replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;
@@ -2688,6 +2690,15 @@ fn scan_trigger_condition(x: &TriggerCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        TriggerCondition::EventObjectMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         TriggerCondition::DamagedPlayerIsEventSourceOwner => Axes {
             event: true,
             sibling: false,
@@ -3571,6 +3582,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // epoch guard token
+        source_card_id: _, // latched card identity token (AllCopies yield), no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -3588,6 +3600,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         may_trigger_origin: _, // provenance tag
         target_selection_mode: _, // Chosen/Random tag (announce-time)
         chosen_players: _, // concrete chosen player ids (already selected)
+        replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;

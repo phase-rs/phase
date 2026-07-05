@@ -751,6 +751,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
+    filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
@@ -1209,6 +1210,7 @@ mod tests {
             player,
             source_id,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -1437,6 +1439,28 @@ mod tests {
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
         assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+    }
+
+    /// CR 117.3d: priority yields are private preference state — a viewer sees
+    /// only their own, never an opponent's.
+    #[test]
+    fn filters_other_players_priority_yields() {
+        let mut state = GameState::new_two_player(42);
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies { card_id: CardId(9) },
+        );
+        state.add_priority_yield(
+            PlayerId(1),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(10),
+            },
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(filtered.priority_yields.len(), 1);
+        assert_eq!(filtered.priority_yields[0].player, PlayerId(0));
     }
 
     #[test]

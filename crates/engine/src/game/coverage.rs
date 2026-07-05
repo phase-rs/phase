@@ -3563,6 +3563,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::EventDamageSourceMatchesFilter { filter } => {
             format!("damage source is {}", fmt_target(filter))
         }
+        TC::EventObjectMatchesFilter { filter } => {
+            format!("event object is {}", fmt_target(filter))
+        }
         TC::DamagedPlayerIsEventSourceOwner => "damaged player is the source's owner".into(),
         TC::ChosenLabelIs { label } => format!("chosen label is {label}"),
         TC::AttackersDeclaredCount {

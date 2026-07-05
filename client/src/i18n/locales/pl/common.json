@@ -35,9 +35,14 @@
     "off": "Wył."
   },
   "gameMenu": {
+    "reportCard": "Zgłoś kartę",
     "menu": "Menu gry",
     "sandboxTools": "Narzędzia piaskownicy",
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
+    "openSandboxTools": "Otwórz narzędzia piaskownicy",
+    "clickModeButton": "Przycisk trybu kliknięcia",
+    "shown": "Widoczny",
+    "hidden": "Ukryty",
     "resume": "Wznów",
     "settings": "Ustawienia",
     "boardLayoutSplit": "Podzielony",
@@ -237,5 +242,11 @@
     "heading": "Coś poszło nie tak",
     "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
     "reload": "Załaduj ponownie"
+  },
+  "actionError": {
+    "title": "{{action}} nie powiodła się",
+    "skipTarget": "Pomiń cel",
+    "genericAction": "Akcja",
+    "unknownEngineError": "Nieznany błąd silnika"
   }
 }

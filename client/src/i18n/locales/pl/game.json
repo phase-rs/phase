@@ -82,7 +82,25 @@
     "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
     "resolvingStack": "Rozpatrywanie stosu..."
   },
+  "cardReport": {
+    "title": "Zgłoś problem z kartą",
+    "subtitle": "Wybierz kartę, która nie działa poprawnie.",
+    "search": "Szukaj kart…",
+    "empty": "Brak widocznych kart do zgłoszenia.",
+    "zone": {
+      "Stack": "Stos",
+      "Battlefield": "Pole bitwy",
+      "Hand": "Ręka",
+      "Graveyard": "Cmentarz",
+      "Exile": "Wygnanie",
+      "Command": "Strefa dowodzenia"
+    },
+    "emblemTag": "Emblemat",
+    "allPlayers": "Wszyscy",
+    "cancel": "Anuluj"
+  },
   "board": {
+    "reportCard": "Zgłoś problem z kartą",
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
     "customizeLayout": "Dostosuj układ…",
@@ -289,6 +307,9 @@
     "cleanupDescription": "Obrażenia znikają i sprawdzany jest maksymalny rozmiar ręki.",
     "tooltipStopSet": "Zatrzymanie ustawione: kliknij, aby usunąć to zatrzymanie automatycznego przekazywania.",
     "tooltipNoStop": "Brak zatrzymania: kliknij, aby wstrzymać tutaj automatyczne przekazywanie.",
+    "scopeAllTurns": "Zatrzymuje się w każdej turze.",
+    "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
+    "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
     "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -564,6 +585,14 @@
     "paidKickedTimes": "kicker ×{{count}}",
     "paidAdditionalCost": "dodatkowy koszt",
     "paidConvoked": "convoke ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Rezygnacje z priorytetu",
+    "yieldThis": "Zrezygnuj z tego",
+    "yieldAllCopies": "Zrezygnuj ze wszystkich kopii",
+    "revoke": "Cofnij",
+    "clearAll": "Wyczyść wszystko",
+    "allCopiesHint": "Zalecane dla żetonów"
   },
   "targeting": {
     "choosePermanentToCopy": "Wybierz trwałego do skopiowania",
@@ -917,7 +946,8 @@
       "title": "Wybierz koszt aktywacji"
     },
     "debug": {
-      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę"
+      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę",
+      "modeButtonOff": "TRYB KLIKNIĘCIA WYŁĄCZONY"
     }
   },
   "gameProvider": {

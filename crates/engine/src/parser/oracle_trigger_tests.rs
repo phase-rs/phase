@@ -7283,6 +7283,40 @@ fn trigger_intervening_if_opponent_discarded_this_turn() {
     );
 }
 
+/// Issue #5143 — Anje Falkenrath: "Whenever you discard a card, if it has
+/// madness, untap Anje Falkenrath." The madness intervening-if must gate on
+/// the discarded card, not fire on every discard.
+#[test]
+fn trigger_intervening_if_discarded_card_has_madness() {
+    use crate::types::ability::FilterProp;
+    use crate::types::keywords::KeywordKind;
+
+    let def = parse_trigger_line(
+        "Whenever you discard a card, if it has madness, untap Anje Falkenrath.",
+        "Anje Falkenrath",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    let Some(TriggerCondition::EventObjectMatchesFilter { filter }) = &def.condition else {
+        panic!(
+            "expected EventObjectMatchesFilter intervening-if, got {:?}",
+            def.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed madness filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Madness
+            }
+        )),
+        "expected madness keyword filter, got {:?}",
+        tf.properties
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players

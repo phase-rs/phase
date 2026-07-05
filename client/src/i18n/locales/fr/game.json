@@ -82,7 +82,25 @@
     "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
     "resolvingStack": "Résolution de la pile..."
   },
+  "cardReport": {
+    "title": "Signaler un problème de carte",
+    "subtitle": "Choisissez la carte qui ne fonctionne pas correctement.",
+    "search": "Rechercher des cartes…",
+    "empty": "Aucune carte à signaler visible.",
+    "zone": {
+      "Stack": "Pile",
+      "Battlefield": "Champ de bataille",
+      "Hand": "Main",
+      "Graveyard": "Cimetière",
+      "Exile": "Exil",
+      "Command": "Zone de commandement"
+    },
+    "emblemTag": "Emblème",
+    "allPlayers": "Tous",
+    "cancel": "Annuler"
+  },
   "board": {
+    "reportCard": "Signaler un problème de carte",
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
     "customizeLayout": "Personnaliser la disposition…",
@@ -289,6 +307,9 @@
     "cleanupDescription": "Les blessures s'estompent et la taille maximale de main est vérifiée.",
     "tooltipStopSet": "Arrêt défini : cliquez pour retirer cet arrêt de passage automatique.",
     "tooltipNoStop": "Aucun arrêt défini : cliquez pour mettre en pause le passage automatique ici.",
+    "scopeAllTurns": "S'arrête à chaque tour.",
+    "scopeOwnTurn": "S'arrête uniquement lors de vos tours.",
+    "scopeOpponentsTurns": "S'arrête uniquement lors des tours des adversaires.",
     "tooltipCurrentPhase": "Phase actuelle.",
     "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -564,6 +585,14 @@
     "paidKickedTimes": "kické ×{{count}}",
     "paidAdditionalCost": "coût supplémentaire",
     "paidConvoked": "convoqué ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Renoncements de priorité",
+    "yieldThis": "Passer celui-ci",
+    "yieldAllCopies": "Passer toutes les copies",
+    "revoke": "Révoquer",
+    "clearAll": "Tout effacer",
+    "allCopiesHint": "Recommandé pour les capacités de jetons"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
@@ -917,7 +946,8 @@
       "title": "Choisir le coût d'activation"
     },
     "debug": {
-      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte"
+      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte",
+      "modeButtonOff": "MODE CLIC DÉSACTIVÉ"
     }
   },
   "gameProvider": {

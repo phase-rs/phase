@@ -82,7 +82,25 @@
     "autoPassing": "Passaggio automatico fino al passo finale...",
     "resolvingStack": "Risoluzione della pila..."
   },
+  "cardReport": {
+    "title": "Segnala un problema con una carta",
+    "subtitle": "Scegli la carta che non funziona correttamente.",
+    "search": "Cerca carte…",
+    "empty": "Nessuna carta segnalabile in vista.",
+    "zone": {
+      "Stack": "Pila",
+      "Battlefield": "Campo di battaglia",
+      "Hand": "Mano",
+      "Graveyard": "Cimitero",
+      "Exile": "Esilio",
+      "Command": "Zona di comando"
+    },
+    "emblemTag": "Emblema",
+    "allPlayers": "Tutti",
+    "cancel": "Annulla"
+  },
   "board": {
+    "reportCard": "Segnala un problema con una carta",
     "regroupCreatures": "Raggruppa i gruppi di creature duplicate",
     "changeBackground": "Cambia sfondo…",
     "customizeLayout": "Personalizza layout…",
@@ -289,6 +307,9 @@
     "cleanupDescription": "Il danno svanisce e si controlla la dimensione massima della mano.",
     "tooltipStopSet": "Stop impostato: clicca per rimuovere questo stop del passaggio automatico.",
     "tooltipNoStop": "Nessuno stop impostato: clicca per mettere in pausa il passaggio automatico qui.",
+    "scopeAllTurns": "Si ferma a ogni turno.",
+    "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
+    "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
     "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -564,6 +585,14 @@
     "paidKickedTimes": "potenziata ×{{count}}",
     "paidAdditionalCost": "costo extra",
     "paidConvoked": "convocata ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Rinunce di priorità",
+    "yieldThis": "Rinuncia a questo",
+    "yieldAllCopies": "Rinuncia a tutte le copie",
+    "revoke": "Revoca",
+    "clearAll": "Cancella tutto",
+    "allCopiesHint": "Consigliato per le pedine"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",
@@ -917,7 +946,8 @@
       "title": "Scegli il costo di attivazione"
     },
     "debug": {
-      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta"
+      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
+      "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"
     }
   },
   "gameProvider": {

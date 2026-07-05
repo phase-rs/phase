@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import type { EngineAdapter, Phase } from "../adapter/types";
+import type { EngineAdapter, PhaseStop } from "../adapter/types";
 import { dispatchAction } from "../game/dispatch";
 import { useGameStore } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
@@ -19,16 +19,16 @@ export function usePhaseStopsSync(): void {
     // Dedup against the last-sent array, keyed by adapter identity so a new
     // game (fresh adapter) always gets a dispatch even if the preference is
     // unchanged since the previous game.
-    let lastSent: { adapter: EngineAdapter; stops: readonly Phase[] } | null = null;
+    let lastSent: { adapter: EngineAdapter; stops: readonly PhaseStop[] } | null = null;
 
-    const send = (stops: readonly Phase[]): void => {
+    const send = (stops: readonly PhaseStop[]): void => {
       const adapter = useGameStore.getState().adapter;
       if (!adapter) return;
       if (
         lastSent !== null &&
         lastSent.adapter === adapter &&
         lastSent.stops.length === stops.length &&
-        lastSent.stops.every((v, i) => v === stops[i])
+        lastSent.stops.every((v, i) => v.phase === stops[i].phase && v.scope === stops[i].scope)
       ) {
         return;
       }

@@ -82,7 +82,25 @@
     "autoPassing": "Automatisch bis zum Endschritt abgeben...",
     "resolvingStack": "Stapel wird aufgelöst..."
   },
+  "cardReport": {
+    "title": "Kartenproblem melden",
+    "subtitle": "Wähle die Karte, die nicht richtig funktioniert.",
+    "search": "Karten suchen…",
+    "empty": "Keine meldbaren Karten sichtbar.",
+    "zone": {
+      "Stack": "Stapel",
+      "Battlefield": "Schlachtfeld",
+      "Hand": "Hand",
+      "Graveyard": "Friedhof",
+      "Exile": "Exil",
+      "Command": "Kommandozone"
+    },
+    "emblemTag": "Emblem",
+    "allPlayers": "Alle",
+    "cancel": "Abbrechen"
+  },
   "board": {
+    "reportCard": "Kartenproblem melden",
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
     "changeBackground": "Hintergrund ändern…",
     "customizeLayout": "Layout anpassen…",
@@ -289,6 +307,9 @@
     "cleanupDescription": "Schaden verschwindet und die maximale Handgröße wird geprüft.",
     "tooltipStopSet": "Stopp gesetzt: klicken, um diesen Auto-Abgabe-Stopp zu entfernen.",
     "tooltipNoStop": "Kein Stopp gesetzt: klicken, um das automatische Abgeben hier zu pausieren.",
+    "scopeAllTurns": "Stoppt in jedem Zug.",
+    "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
+    "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
     "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -564,6 +585,14 @@
     "paidKickedTimes": "verstärkt ×{{count}}",
     "paidAdditionalCost": "Zusatzkosten",
     "paidConvoked": "beschworen ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Prioritätsverzichte",
+    "yieldThis": "Diesen überspringen",
+    "yieldAllCopies": "Alle Kopien überspringen",
+    "revoke": "Widerrufen",
+    "clearAll": "Alle löschen",
+    "allCopiesHint": "Empfohlen für Spielstein-Auslöser"
   },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",
@@ -917,7 +946,8 @@
       "title": "Aktivierungskosten wählen"
     },
     "debug": {
-      "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte"
+      "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte",
+      "modeButtonOff": "KLICKMODUS AUS"
     }
   },
   "gameProvider": {

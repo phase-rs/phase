@@ -290,6 +290,16 @@ export type Phase =
   | "End"
   | "Cleanup";
 
+/** Turn-direction scope for a phase stop (mirrors engine `PhaseStopScope`). */
+export type PhaseStopScope = "AllTurns" | "OwnTurn" | "OpponentsTurns";
+
+/** A single phase stop: the phase to pause at plus its turn-direction scope
+ *  (mirrors engine `PhaseStop`). */
+export interface PhaseStop {
+  phase: Phase;
+  scope: PhaseStopScope;
+}
+
 export type Zone =
   | "Library"
   | "Hand"
@@ -954,6 +964,15 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  /**
+   * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
+   * identity snapshotted at trigger push, so an `AllCopies` priority yield can
+   * be matched by card identity after the source object has ceased to exist (a
+   * token that left the battlefield is removed from `objects` before priority is
+   * next offered). Set only for triggered abilities; absent otherwise (serde
+   * `skip_serializing_if`).
+   */
+  source_card_id?: CardId;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
@@ -1605,6 +1624,26 @@ export type DebugAction =
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
 
+// CR 117.3d: priority-yield preference types, mirroring the engine's
+// `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The
+// frontend never constructs an incarnation or card_id — it names a stack source
+// and scope for `Add`, and echoes a stored `YieldTarget` verbatim for `Remove`.
+export type YieldScope = "ThisObject" | "AllCopies";
+
+export type YieldTarget =
+  | { ThisObject: { source_id: ObjectId; incarnation: number } }
+  | { AllCopies: { card_id: CardId } };
+
+export type PriorityYieldOp =
+  | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
+  | { type: "Remove"; data: { target: YieldTarget } }
+  | { type: "ClearAll" };
+
+export interface PriorityYield {
+  player: PlayerId;
+  target: YieldTarget;
+}
+
 export type GameAction =
   | { type: "PassPriority" }
   | { type: "RollPlanarDie" }
@@ -1699,9 +1738,17 @@ export type GameAction =
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
-  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | {
+      type: "SetAutoPass";
+      data: {
+        mode:
+          | { type: "UntilStackEmpty" }
+          | { type: "UntilTurnBoundary"; until: TurnBoundary };
+      };
+    }
   | { type: "CancelAutoPass" }
-  | { type: "SetPhaseStops"; data: { stops: Phase[] } }
+  | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
+  | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
@@ -2233,7 +2280,9 @@ export interface GameState {
   day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
-  phase_stops?: Record<number, Phase[]>;
+  phase_stops?: Record<number, PhaseStop[]>;
+  /** CR 117.3d: the viewer's standing priority-yield preferences. */
+  priority_yields?: PriorityYield[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;
@@ -2246,9 +2295,11 @@ export interface GameState {
   loop_detection?: LoopDetectionMode;
 }
 
+export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
+
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
-  | { type: "UntilEndOfTurn" };
+  | { type: "UntilTurnBoundary"; until: TurnBoundary };
 
 /**
  * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)

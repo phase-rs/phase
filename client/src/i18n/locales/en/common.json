@@ -35,9 +35,14 @@
     "off": "Off"
   },
   "gameMenu": {
+    "reportCard": "Report a card",
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",
     "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",
+    "openSandboxTools": "Open Sandbox Tools",
+    "clickModeButton": "Click Mode Button",
+    "shown": "Shown",
+    "hidden": "Hidden",
     "resume": "Resume",
     "settings": "Settings",
     "boardLayoutSplit": "Split",
@@ -237,5 +242,11 @@
     "heading": "Something went wrong",
     "body": "The app hit an unexpected error and can't continue on this screen. Reloading usually fixes it.",
     "reload": "Reload"
+  },
+  "actionError": {
+    "title": "{{action}} failed",
+    "skipTarget": "Skip target",
+    "genericAction": "Action",
+    "unknownEngineError": "Unknown engine error"
   }
 }

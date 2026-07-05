@@ -49,6 +49,7 @@ use crate::types::ability::{
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
@@ -3891,6 +3892,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" — intervening-if
+    // on discard triggers whose subject is the discarded card (Anje Falkenrath: "if it has
+    // madness"). MUST precede the zone-change-object "if it " arms below, which would
+    // otherwise mis-route this predicate.
+    if let Some((before, condition, rest)) = scan_preceded(
+        &lower,
+        parse_event_object_has_alt_cost_keyword_intervening_if,
+    ) {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
     // CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
     // ability" — anti-recursion intervening-if (Kodama of the East Tree). The
     // entering permanent must NOT have been placed by this very ability, so a
@@ -4331,6 +4348,26 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     let (rest, _) = tag("if it's not a ").parse(input)?;
     let (rest, _) = tag("token").parse(rest)?;
     Ok((rest, zone_change_object_token_condition(true)))
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: Build an event-object intervening-if
+/// filter for a named alt-cost keyword on the triggering object.
+fn event_object_has_alt_cost_keyword_condition(keyword: KeywordKind) -> TriggerCondition {
+    TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::HasKeywordKind { value: keyword }]),
+        ),
+    }
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" on
+/// event-object intervening-ifs (e.g. discard triggers: "if it has madness").
+fn parse_event_object_has_alt_cost_keyword_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it has ").parse(input)?;
+    let (rest, keyword) = nom_primitives::parse_alt_cost_keyword_name_to_kind.parse(rest)?;
+    Ok((rest, event_object_has_alt_cost_keyword_condition(keyword)))
 }
 
 /// CR 603.4 + CR 603.6a + CR 208.1: Entering-object intervening-if comparing the

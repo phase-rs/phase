@@ -8,7 +8,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+    AutoPassMode, GameState, PendingCounterAddition, PendingEffectResolved, TurnBoundary,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -768,10 +769,21 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // Clear all UntilEndOfTurn flags — no auto-pass survives a turn boundary.
-    state
-        .auto_pass
-        .retain(|_, mode| !matches!(mode, AutoPassMode::UntilEndOfTurn));
+    // CR 102.1 + CR 500.1: resolve each auto-pass boundary against the turn now
+    // beginning. EndOfCurrentTurn clears at every turn start (its turn has
+    // ended); MyNextTurnStart persists through opponents' turns and clears only
+    // when the session owner's own next turn begins (active == owner).
+    // UntilStackEmpty is turn-agnostic and untouched. If the owner's next turn
+    // is skipped (the `turns_to_skip` fast-path returns before this point),
+    // MyNextTurnStart clears at the next non-skipped turn start — matching how
+    // EndOfCurrentTurn already interacts with skips.
+    state.auto_pass.retain(|&pid, mode| match mode {
+        AutoPassMode::UntilStackEmpty { .. } => true,
+        AutoPassMode::UntilTurnBoundary { until } => match *until {
+            TurnBoundary::EndOfCurrentTurn => false,
+            TurnBoundary::MyNextTurnStart => pid != active,
+        },
+    });
 
     events.push(GameEvent::TurnStarted {
         player_id: state.active_player,
@@ -3789,6 +3801,149 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::TurnStarted { turn_number: 2, .. })));
+    }
+
+    /// V4: CR 102.1 + CR 500.1. `EndOfCurrentTurn` (the legacy behavior) clears
+    /// at the very next turn start regardless of whose turn begins. Driven
+    /// through the real `start_next_turn` clear seam; the reach-guard asserts the
+    /// flag is live immediately before the boundary so the negative is not
+    /// vacuous.
+    #[test]
+    fn end_of_current_turn_boundary_cleared_at_next_turn_start() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        // Reach-guard: the session is live before the boundary.
+        assert!(state.auto_pass.contains_key(&PlayerId(0)));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events); // P1's turn begins.
+
+        assert!(
+            !state.auto_pass.contains_key(&PlayerId(0)),
+            "EndOfCurrentTurn must clear at the next turn start"
+        );
+    }
+
+    /// V5: CR 102.1. `MyNextTurnStart` persists through an intervening opponent
+    /// turn (3-player). The sibling `EndOfCurrentTurn` on the identical fixture
+    /// is gone after the same opponent turn start — proving the boundary axis
+    /// actually gates the retain rather than both behaving alike.
+    #[test]
+    fn my_next_turn_start_survives_opponent_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        state.active_player = PlayerId(0);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        );
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events); // P1's turn begins.
+        assert_eq!(state.active_player, PlayerId(1));
+
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart
+            }),
+            "MyNextTurnStart must survive an opponent's turn start"
+        );
+
+        // Sibling: EndOfCurrentTurn on the identical fixture is gone.
+        let mut sibling = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        sibling.turn_number = 1;
+        sibling.active_player = PlayerId(0);
+        sibling.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        start_next_turn(&mut sibling, &mut Vec::new());
+        assert!(
+            !sibling.auto_pass.contains_key(&PlayerId(0)),
+            "EndOfCurrentTurn must NOT survive the opponent's turn start"
+        );
+    }
+
+    /// V6: CR 102.1. `MyNextTurnStart` clears only when the session owner's own
+    /// next turn begins. Survives P1's and P2's turn starts (reach-guards),
+    /// clears exactly when P0 becomes active again.
+    #[test]
+    fn my_next_turn_start_clears_on_owner_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        state.active_player = PlayerId(0);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        );
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events); // → P1
+        assert_eq!(state.active_player, PlayerId(1));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "survives P1's turn start"
+        );
+
+        start_next_turn(&mut state, &mut events); // → P2
+        assert_eq!(state.active_player, PlayerId(2));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "survives P2's turn start"
+        );
+
+        start_next_turn(&mut state, &mut events); // → P0 (owner's next turn)
+        assert_eq!(state.active_player, PlayerId(0));
+        assert!(
+            !state.auto_pass.contains_key(&PlayerId(0)),
+            "MyNextTurnStart must clear when the owner's next turn begins"
+        );
+    }
+
+    /// Mixed-map coexistence: the retain evaluates each entry independently — a
+    /// turn-agnostic `UntilStackEmpty` for another player is untouched while an
+    /// `EndOfCurrentTurn` session clears at the same boundary.
+    #[test]
+    fn start_next_turn_retains_until_stack_empty_across_boundary() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        state.active_player = PlayerId(0);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        state.auto_pass.insert(
+            PlayerId(1),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 2,
+            },
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(!state.auto_pass.contains_key(&PlayerId(0)));
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(1)),
+            Some(&AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 2
+            }),
+            "UntilStackEmpty is turn-agnostic and must survive the boundary"
+        );
     }
 
     #[test]

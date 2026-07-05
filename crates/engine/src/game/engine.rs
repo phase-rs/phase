@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
@@ -452,6 +452,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -553,9 +554,11 @@ enum AutoPassDecision {
 /// priority window.
 ///
 /// Interrupts (MTGA-style): `UntilStackEmpty` bails when the stack empties or
-/// grows beyond the baseline (trigger or opponent spell); `UntilEndOfTurn`
+/// grows beyond the baseline (trigger or opponent spell); `UntilTurnBoundary`
 /// bails when an opponent-controlled object is on top of the stack or when the
-/// current phase is in the user-supplied `phase_stops` list.
+/// current phase is in the user-supplied `phase_stops` list. The per-window
+/// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
+/// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
@@ -568,12 +571,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
                 AutoPassDecision::Pass
             }
         }
-        AutoPassMode::UntilEndOfTurn => {
-            let opponent_on_stack = state
-                .stack
-                .last()
-                .is_some_and(|top| top.controller != player);
-            if opponent_on_stack || phase_stop_hit(state, player) {
+        AutoPassMode::UntilTurnBoundary { .. } => {
+            // CR 117.3d: An opponent-controlled top-of-stack normally ends the
+            // session so the player can respond — unless they have pre-committed
+            // to yield priority for that exact triggered ability, in which case
+            // the session keeps auto-passing through it.
+            let opponent_on_stack = state.stack.last().is_some_and(|top| {
+                top.controller != player && !state.is_priority_yielded(player, top)
+            });
+            if opponent_on_stack || state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -582,23 +588,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     }
 }
 
-/// True when `player` has an active `UntilEndOfTurn` auto-pass session.
+/// True when `player` has an active turn-boundary auto-pass session (either
+/// boundary). Both `EndOfCurrentTurn` and `MyNextTurnStart` drive the
+/// DeclareAttackers/DeclareBlockers empty auto-submit arms, since both
+/// auto-submit empty attackers within the current turn.
 fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
     matches!(
         state.auto_pass.get(&player),
-        Some(AutoPassMode::UntilEndOfTurn)
+        Some(AutoPassMode::UntilTurnBoundary { .. })
     )
-}
-
-/// True when the current phase appears in `player`'s configured phase-stop list.
-/// Consulted at every engine-driven auto-pass site so the user's preference is
-/// respected whether or not an auto-pass session is active (e.g. suppresses
-/// the empty-blockers auto-submit when the defender wants a Ninjutsu window).
-fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
-    state
-        .phase_stops
-        .get(&player)
-        .is_some_and(|stops| stops.contains(&state.phase))
 }
 
 fn pass_priority_once_with_pipeline(
@@ -726,7 +724,7 @@ fn priority_player_has_meaningful_action(state: &GameState) -> bool {
 /// action that ends the loop. The cap-path [`priority_player_has_meaningful_action`]
 /// checks only the CURRENT priority holder; the loop-shortcut WIN designates a
 /// LOSER, so its gate must be stronger — the would-be loop-breaker (a victim whose
-/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilEndOfTurn` session,
+/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilTurnBoundary` session,
 /// which `priority_auto_pass_decision` Passes WITHOUT a meaningful check) need NOT
 /// hold priority at the modulo-match iteration. Probe EVERY living player as the
 /// priority holder (`legal_actions`/`has_meaningful_priority_action` key off
@@ -945,10 +943,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // UntilEndOfTurn: auto-submit empty attackers unless the user flagged
-            // this phase as a stop.
+            // UntilTurnBoundary: auto-submit empty attackers unless the user
+            // flagged this phase as a stop.
             WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !phase_stop_hit(state, *player) =>
+                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -973,7 +971,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
+            } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
                     || !super::combat::has_attackers_in_play(state)) =>
             {
@@ -1141,6 +1139,33 @@ fn apply_action(
             state.phase_stops.remove(&actor);
         } else {
             state.phase_stops.insert(actor, stops.clone());
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
+    // preference — a pre-committed decision to pass priority while a class of
+    // triggered ability resolves. Pure preference state, routed by `actor`, and
+    // handled BEFORE the loop-ring clear and auto-pass session clearing below so
+    // yields are exempt from that per-session teardown (CR 400.7: an `Add`
+    // snapshots the source's latched identity from the on-stack trigger).
+    if let GameAction::SetPriorityYield { op } = &action {
+        match op {
+            PriorityYieldOp::Add { source_id, scope } => {
+                if let Some(target) = state.resolve_yield_target_from_stack(*source_id, *scope) {
+                    state.add_priority_yield(actor, target);
+                }
+            }
+            PriorityYieldOp::Remove { target } => {
+                state.remove_priority_yield(actor, target);
+            }
+            PriorityYieldOp::ClearAll => {
+                state.clear_priority_yields(actor);
+            }
         }
         return Ok(ActionResult {
             events: vec![],
@@ -4324,7 +4349,9 @@ fn apply_action(
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
                     initial_stack_len: state.stack.len(),
                 },
-                AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
+                AutoPassRequest::UntilTurnBoundary { until } => {
+                    AutoPassMode::UntilTurnBoundary { until }
+                }
             };
             state.auto_pass.insert(*player, stored_mode);
             let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;

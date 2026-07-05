@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
     AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
@@ -11,7 +13,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -1114,6 +1116,7 @@ pub(super) fn apply_post_replacement_effect(
     object_id: Option<ObjectId>,
     spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<&ReplacementEvent>,
+    replacement_applied: HashSet<ReplacementId>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let (source_id, controller) = object_id
@@ -1148,8 +1151,9 @@ pub(super) fn apply_post_replacement_effect(
                 .into_iter()
                 .map(TargetRef::Object)
                 .collect::<Vec<_>>();
-            let resolved =
+            let mut resolved =
                 build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
+            resolved.set_replacement_applied_recursive(replacement_applied);
             let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
             return match &state.waiting_for {
                 WaitingFor::Priority { .. } => None,
@@ -1190,7 +1194,9 @@ pub(super) fn apply_post_replacement_effect(
             .into_iter()
             .collect::<Vec<_>>()
     };
-    let resolved = build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    let mut resolved =
+        build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    resolved.set_replacement_applied_recursive(replacement_applied);
     let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 
     match &state.waiting_for {
@@ -1207,6 +1213,7 @@ pub(super) fn apply_pending_post_replacement_effect(
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let source = state.post_replacement_source.take().or(object_id);
+    let replacement_applied = std::mem::take(&mut state.post_replacement_applied);
     // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
     // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
     // is made *before* the permanent enters, but the engine's pipeline applies the
@@ -1219,7 +1226,7 @@ pub(super) fn apply_pending_post_replacement_effect(
     // is an AST that resolves against `source` for ETB / Optional accept.
     let waiting_for = match state.post_replacement_continuation.take() {
         Some(PostReplacementContinuation::Resolved(resolved)) => {
-            apply_post_replacement_resolved_effect(state, &resolved, events)
+            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
         }
         Some(PostReplacementContinuation::Template(effect_def)) => apply_post_replacement_effect(
             state,
@@ -1227,6 +1234,7 @@ pub(super) fn apply_pending_post_replacement_effect(
             source,
             spell_resolution,
             event.as_ref(),
+            replacement_applied,
             events,
         ),
         None => None,
@@ -1354,9 +1362,12 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
 fn apply_post_replacement_resolved_effect(
     state: &mut GameState,
     resolved: &ResolvedAbility,
+    replacement_applied: HashSet<ReplacementId>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
+    let mut resolved = resolved.clone();
+    resolved.set_replacement_applied_recursive(replacement_applied);
+    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => None,
@@ -3981,6 +3992,7 @@ mod tests {
             Some(dralnu),
             None,
             Some(&ReplacementEvent::DealtDamage),
+            Default::default(),
             &mut events,
         );
 
@@ -4042,6 +4054,7 @@ mod tests {
             Some(devourer),
             None,
             Some(&ReplacementEvent::Moved),
+            Default::default(),
             &mut events,
         );
 
@@ -4577,6 +4590,7 @@ mod tests {
             branch_descriptions: Vec::new(),
             parent_targets: Vec::new(),
             context: Default::default(),
+            replacement_applied: Default::default(),
             remaining_players: Vec::new(),
         };
         state.priority_player = PlayerId(0);

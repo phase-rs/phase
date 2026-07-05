@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -14,13 +15,14 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint,
 };
-use super::identifiers::{ObjectId, TrackedSetId};
+use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
 };
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::proposed_event::ReplacementId;
 use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::stickers::{AppliedSticker, StickerKind};
@@ -16217,6 +16219,14 @@ pub enum TriggerCondition {
     /// Checked at both fire-time and resolution-time per CR 603.4.
     EventDamageSourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 603.4 + CR 701.9a: Intervening-if whose subject is the object named
+    /// by the triggering event (e.g. the discarded card on `GameEvent::Discarded`),
+    /// not the permanent that owns the ability. Distinct from
+    /// `ZoneChangeObjectMatchesFilter` (zone-change subjects) and
+    /// `SourceMatchesFilter` (the ability's own permanent). Used by discard
+    /// riders such as "if it has madness" (Anje Falkenrath).
+    EventObjectMatchesFilter { filter: TargetFilter },
+
     /// CR 120.1 + CR 108.3 + CR 603.4: Intervening-if predicate that holds when
     /// the player dealt the triggering damage is the OWNER of the object that
     /// dealt it ("deals combat damage to its owner"). Reads the triggering
@@ -18231,6 +18241,14 @@ pub struct ResolvedAbility {
     /// battlefield it is a new object and the self-reference finds nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_incarnation: Option<u64>,
+    /// CR 400.7 identity latch + CR 704.5d token cessation: the source's card
+    /// identity snapshotted at trigger push, so an `AllCopies` priority yield
+    /// can match by card identity after the source object ceases to exist (a
+    /// token that has left the battlefield is removed from `state.objects`
+    /// before priority is next offered). Set only for triggered abilities;
+    /// `None` for activated abilities, casts, and engine-internal abilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_card_id: Option<CardId>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -18384,6 +18402,13 @@ pub struct ResolvedAbility {
     /// predicate. Read by the `repeat_until` dispatch in `resolve_ability_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_until: Option<RepeatContinuation>,
+    /// CR 614.5 + CR 616.1f: Replacement effects that already applied to the
+    /// proposed event whose post-replacement continuation is resolving. When an
+    /// interactive continuation later proposes a follow-up event (for example a
+    /// replacement's ChooseOneOf branch creates the substitute token), that event
+    /// must inherit this set so the same replacement cannot apply to itself again.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub replacement_applied: HashSet<ReplacementId>,
     /// CR 608.2c: How this ability links to its parent when present as a
     /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
@@ -18458,8 +18483,10 @@ impl ResolvedAbility {
             target_chooser: None,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
             source_incarnation: None,
+            source_card_id: None,
             modal: None,
             mode_abilities: Vec::new(),
             dig_found_nothing_for_parent_target: false,
@@ -18578,6 +18605,18 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_scoped_player_recursive(player);
+        }
+    }
+
+    /// CR 614.5 + CR 616.1f: Carry replacement application identity through a
+    /// post-replacement continuation and any branch/sub-chain it resolves.
+    pub fn set_replacement_applied_recursive(&mut self, applied: HashSet<ReplacementId>) {
+        self.replacement_applied = applied.clone();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_replacement_applied_recursive(applied.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_replacement_applied_recursive(applied);
         }
     }
 

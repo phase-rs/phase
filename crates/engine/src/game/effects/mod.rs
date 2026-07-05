@@ -4839,19 +4839,26 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
         }
     }
 
-    // Subject-anchored SearchLibrary: prompt the library owner / searcher.
+    // CR 608.2c (issue #822): Subject-anchored SearchLibrary — "its controller
+    // may search their library" (Erode, Path to Exile) — prompts the parent
+    // target's controller. Route through the same LKI-aware central resolver
+    // the `Sacrifice` branch above uses instead of reading `obj.controller`
+    // directly: Destroy/Exile always moves the target off the battlefield
+    // before this optional gate is evaluated, and `reset_for_battlefield_exit`
+    // resets `base_controller` to the object's owner at that point, so a live
+    // lookup silently prompts the owner instead of the controller whenever a
+    // stolen/control-changed creature is the one destroyed or exiled.
     if let Effect::SearchLibrary {
         target_player: Some(TargetFilter::ParentTargetController),
         ..
     } = &ability.effect
     {
-        if let Some(parent_obj_id) = ability.targets.iter().find_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            _ => None,
-        }) {
-            if let Some(obj) = state.objects.get(&parent_obj_id) {
-                return obj.controller;
-            }
+        if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetController,
+        ) {
+            return player;
         }
     }
 

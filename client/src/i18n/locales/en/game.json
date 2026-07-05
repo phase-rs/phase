@@ -82,7 +82,25 @@
     "autoPassing": "Auto-Passing to End Step...",
     "resolvingStack": "Resolving Stack..."
   },
+  "cardReport": {
+    "title": "Report a card problem",
+    "subtitle": "Pick the card that isn't working correctly.",
+    "search": "Search cards…",
+    "empty": "No reportable cards in view.",
+    "zone": {
+      "Stack": "Stack",
+      "Battlefield": "Battlefield",
+      "Hand": "Hand",
+      "Graveyard": "Graveyard",
+      "Exile": "Exile",
+      "Command": "Command"
+    },
+    "emblemTag": "Emblem",
+    "allPlayers": "All",
+    "cancel": "Cancel"
+  },
   "board": {
+    "reportCard": "Report a card problem",
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
     "customizeLayout": "Customize layout…",
@@ -321,6 +339,9 @@
     "cleanupDescription": "Damage wears off and maximum hand size is checked.",
     "tooltipStopSet": "Stop set: click to remove this auto-pass stop.",
     "tooltipNoStop": "No stop set: click to pause auto-pass here.",
+    "scopeAllTurns": "Stops on every turn.",
+    "scopeOwnTurn": "Stops only on your turns.",
+    "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
     "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -596,6 +617,14 @@
     "paidKickedTimes": "kicked ×{{count}}",
     "paidAdditionalCost": "extra cost",
     "paidConvoked": "convoked ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Priority yields",
+    "yieldThis": "Yield this",
+    "yieldAllCopies": "Yield all copies",
+    "revoke": "Revoke",
+    "clearAll": "Clear all",
+    "allCopiesHint": "Recommended for token triggers"
   },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",
@@ -949,7 +978,8 @@
       "title": "Choose Activation Cost"
     },
     "debug": {
-      "modeBanner": "DEBUG MODE - Click any card"
+      "modeBanner": "DEBUG MODE - Click any card",
+      "modeButtonOff": "CLICK MODE OFF"
     }
   },
   "spectator": {

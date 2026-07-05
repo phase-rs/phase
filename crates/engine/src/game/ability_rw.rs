@@ -1808,6 +1808,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+        | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
         | TriggerCondition::TriggeringSpellTargetsFilter { .. }
         | TriggerCondition::ManaColorSpent { .. }
@@ -3399,6 +3400,7 @@ fn walk_ability(
         targets: _,
         source_id: _,
         source_incarnation: _,
+        source_card_id: _, // latched card identity token (AllCopies yield), no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3422,6 +3424,7 @@ fn walk_ability(
         target_selection_mode: _,
         chosen_players: _,
         sub_link: _,
+        replacement_applied: _,
         dig_found_nothing_for_parent_target: _,
     } = a;
 
@@ -5572,6 +5575,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+        | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
         | TriggerCondition::TriggeringSpellTargetsFilter { .. } => reads_event_live(),
         TriggerCondition::ManaColorSpent { .. } | TriggerCondition::ManaSpentCondition { .. } => {

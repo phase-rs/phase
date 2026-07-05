@@ -53,4 +53,50 @@ describe("GameMenu", () => {
 
     expect(screen.getByRole("button", { name: "Switch to split table view" })).toHaveTextContent("Legacy");
   });
+
+  it("opens sandbox tools from the sandbox dropdown", () => {
+    const onSandboxToolsClick = vi.fn();
+    renderGameMenu({ showSandboxTools: true, onSandboxToolsClick });
+
+    const sandboxButton = screen.getByRole("button", { name: "Sandbox Tools" });
+
+    expect(sandboxButton).toHaveAttribute("aria-haspopup", "menu");
+    expect(sandboxButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(sandboxButton);
+
+    expect(sandboxButton).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open Sandbox Tools" }));
+
+    expect(onSandboxToolsClick).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menuitem", { name: "Open Sandbox Tools" })).not.toBeInTheDocument();
+  });
+
+  it("toggles the floating click mode button from the sandbox dropdown", () => {
+    const onToggleDebugClickModeButtonVisible = vi.fn();
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      onToggleDebugClickModeButtonVisible,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Sandbox Tools" }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Click Mode Button Hidden" }));
+
+    expect(onToggleDebugClickModeButtonVisible).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the floating click mode button as pinned in the sandbox dropdown", () => {
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      debugClickModeButtonVisible: true,
+      onToggleDebugClickModeButtonVisible: vi.fn(),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Sandbox Tools" }));
+
+    expect(screen.getByRole("menuitemcheckbox", { name: "Click Mode Button Shown" })).toBeChecked();
+  });
 });
