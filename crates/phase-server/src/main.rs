@@ -39,7 +39,9 @@ use server_core::client_message_wire_guard::{
     guard_broker_projection_inbound, guard_client_message_before_dispatch,
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
-use server_core::draft_session::{draft_seats_needing_auto_pick, DraftSessionManager};
+use server_core::draft_session::{
+    check_draft_lobby_password, draft_seats_needing_auto_pick, DraftSessionManager,
+};
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
     guard_reconnect_draft,
@@ -5796,8 +5798,11 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::SpectateDraft { draft_code } => {
-            if let Err(reason) = guard_spectate_draft(&draft_code) {
+        ClientMessage::SpectateDraft {
+            draft_code,
+            password,
+        } => {
+            if let Err(reason) = guard_spectate_draft(&draft_code, &password) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -5808,16 +5813,27 @@ async fn handle_client_message(
             let visibility = {
                 let drafts = draft_state.lock().await;
                 match drafts.sessions.get(&draft_code) {
-                    Some(session) => session.config.spectator_visibility,
-                    None => {
-                        let msg = ServerMessage::Error {
-                            message: "Draft not found".to_string(),
-                        };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
+                    Some(session) => {
+                        if let Err(reason) =
+                            check_draft_lobby_password(&session.lobby_meta, password.as_deref())
+                        {
+                            Err(reason)
+                        } else {
+                            Ok(session.config.spectator_visibility)
                         }
-                        return;
                     }
+                    None => Err("Draft not found".to_string()),
+                }
+            };
+
+            let visibility = match visibility {
+                Ok(visibility) => visibility,
+                Err(message) => {
+                    let msg = ServerMessage::Error { message };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
                 }
             };
 

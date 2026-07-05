@@ -152,7 +152,10 @@ pub fn guard_client_message_before_dispatch(
             draft_code,
             player_token,
         } => guard_reconnect_draft(draft_code, player_token),
-        ClientMessage::SpectateDraft { draft_code } => guard_spectate_draft(draft_code),
+        ClientMessage::SpectateDraft {
+            draft_code,
+            password,
+        } => guard_spectate_draft(draft_code, password),
     }
 }
 

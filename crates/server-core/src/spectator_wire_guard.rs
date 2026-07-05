@@ -3,7 +3,9 @@
 //! `SpectatorJoin` and `SpectateDraft` are handled directly in `phase-server`
 //! and use client-provided game/draft codes for map lookups and identity state.
 
-use lobby_broker::validation::{validate_token, MAX_GAME_CODE_LEN};
+use lobby_broker::validation::{
+    validate_optional_token, validate_token, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN,
+};
 
 /// Per-game live spectator cap. This bounds fan-out sender storage and the
 /// repeated full-state snapshot work performed on SpectatorJoin.
@@ -41,8 +43,10 @@ pub fn guard_draft_spectator_capacity(current: usize) -> Result<(), String> {
 }
 
 /// Validate a draft spectator join request before draft/session lookup.
-pub fn guard_spectate_draft(draft_code: &str) -> Result<(), String> {
-    validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)
+pub fn guard_spectate_draft(draft_code: &str, password: &Option<String>) -> Result<(), String> {
+    validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)?;
+    validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -86,7 +90,14 @@ mod tests {
 
     #[test]
     fn spectate_draft_rejects_oversized_code() {
-        let err = guard_spectate_draft(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
+        let err = guard_spectate_draft(&"x".repeat(MAX_GAME_CODE_LEN + 1), &None).unwrap_err();
         assert!(err.contains("draft_code"));
+    }
+
+    #[test]
+    fn spectate_draft_rejects_oversized_password() {
+        let err = guard_spectate_draft("ABC123", &Some("p".repeat(MAX_PASSWORD_LEN + 1)))
+            .unwrap_err();
+        assert!(err.contains("password"));
     }
 }

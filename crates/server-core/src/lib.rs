@@ -33,7 +33,9 @@ pub use client_message_wire_guard::{
 };
 pub use deck_resolve::resolve_deck;
 pub use draft_action_payload_guard::guard_draft_action_payload;
-pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
+pub use draft_session::{
+    check_draft_lobby_password, generate_draft_code, DraftSession, DraftSessionManager,
+};
 pub use draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
     guard_reconnect_draft,

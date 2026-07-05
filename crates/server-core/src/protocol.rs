@@ -228,6 +228,8 @@ pub enum ClientMessage {
     },
     SpectateDraft {
         draft_code: String,
+        #[serde(default)]
+        password: Option<String>,
     },
     /// GH #1507: ask every other human player at the table to approve
     /// rolling the game back to the state immediately before the requester's
@@ -1757,12 +1759,33 @@ mod tests {
     fn client_message_spectate_draft_roundtrips() {
         let msg = ClientMessage::SpectateDraft {
             draft_code: "ABCD12".to_string(),
+            password: Some("secret".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::SpectateDraft { draft_code } => {
+            ClientMessage::SpectateDraft {
+                draft_code,
+                password,
+            } => {
                 assert_eq!(draft_code, "ABCD12");
+                assert_eq!(password.as_deref(), Some("secret"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_spectate_draft_defaults_missing_password() {
+        let json = r#"{"type":"SpectateDraft","data":{"draft_code":"ABCD12"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::SpectateDraft {
+                draft_code,
+                password,
+            } => {
+                assert_eq!(draft_code, "ABCD12");
+                assert_eq!(password, None);
             }
             _ => panic!("wrong variant"),
         }

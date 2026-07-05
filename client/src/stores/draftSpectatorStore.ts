@@ -14,7 +14,7 @@ interface DraftSpectatorState {
   error: string | null;
   session: DraftSpectatorSession | null;
 
-  watchDraft: (draftCode: string) => Promise<void>;
+  watchDraft: (draftCode: string, password?: string) => Promise<void>;
   leave: () => void;
 }
 
@@ -27,13 +27,13 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
   error: null,
   session: null,
 
-  watchDraft: async (draftCode) => {
+  watchDraft: async (draftCode, password) => {
     get().leave();
     const requestId = ++draftSpectatorRequestId;
     set({ draftCode, status: "connecting", error: null, view: null });
     try {
       const serverUrl = import.meta.env.VITE_WS_URL ?? (await detectServerUrl());
-      const session = await connectDraftSpectator(serverUrl, draftCode);
+      const session = await connectDraftSpectator(serverUrl, draftCode, password);
       if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) {
         session.close();
         return;

@@ -16,6 +16,7 @@ export interface DraftSpectatorSession {
 export async function connectDraftSpectator(
   serverUrl: string,
   draftCode: string,
+  password?: string,
 ): Promise<DraftSpectatorSession> {
   if (!isValidWebSocketUrl(serverUrl)) {
     throw new Error("Invalid WebSocket URL");
@@ -57,7 +58,13 @@ export async function connectDraftSpectator(
   socket.ws.addEventListener("message", onMessage);
   socket.ws.addEventListener("close", () => emit({ type: "disconnected" }));
   socket.ws.send(
-    JSON.stringify({ type: "SpectateDraft", data: { draft_code: draftCode } }),
+    JSON.stringify({
+      type: "SpectateDraft",
+      data: {
+        draft_code: draftCode,
+        ...(password !== undefined ? { password } : {}),
+      },
+    }),
   );
 
   return {

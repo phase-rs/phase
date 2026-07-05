@@ -17,6 +17,23 @@ use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
 use crate::session::{generate_player_token, SessionManager};
 
+/// Enforce draft lobby password when `lobby_meta` carries one.
+pub fn check_draft_lobby_password(
+    lobby_meta: &Option<PersistedLobbyMeta>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    if let Some(meta) = lobby_meta {
+        match (&meta.password, password) {
+            (None, _) => Ok(()),
+            (Some(_), None) => Err("password_required".to_string()),
+            (Some(expected), Some(provided)) if expected == provided => Ok(()),
+            (Some(_), Some(_)) => Err("Wrong password".to_string()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 /// Server-side draft session, mirroring `GameSession` for game play.
 /// Wraps `draft_core::types::DraftSession` (the pure reducer state) with
 /// server-specific concerns: player tokens, connection tracking, reconnect
@@ -223,14 +240,7 @@ impl DraftSessionManager {
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
 
-        if let Some(meta) = &session.lobby_meta {
-            match (&meta.password, password) {
-                (None, _) => {}
-                (Some(_), None) => return Err("password_required".to_string()),
-                (Some(expected), Some(provided)) if expected == provided => {}
-                (Some(_), Some(_)) => return Err("Wrong password".to_string()),
-            }
-        }
+        check_draft_lobby_password(&session.lobby_meta, password)?;
 
         if session.session.status != DraftStatus::Lobby {
             return Err("Draft has already started".to_string());
@@ -783,6 +793,29 @@ mod tests {
         assert_eq!(token.len(), 32);
         assert_eq!(seat, 0);
         assert!(mgr.sessions.contains_key(&code));
+    }
+
+    #[test]
+    fn check_draft_lobby_password_requires_and_validates_secret() {
+        let meta = PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        };
+
+        assert_eq!(
+            check_draft_lobby_password(&Some(meta.clone()), None).unwrap_err(),
+            "password_required"
+        );
+        assert_eq!(
+            check_draft_lobby_password(&Some(meta.clone()), Some("wrong")).unwrap_err(),
+            "Wrong password"
+        );
+        assert!(check_draft_lobby_password(&Some(meta), Some("secret")).is_ok());
+        assert!(check_draft_lobby_password(&None, None).is_ok());
     }
 
     #[test]
