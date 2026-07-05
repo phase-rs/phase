@@ -7292,3 +7292,137 @@ mod admin_auth_tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod p2p_backup_http_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use axum::routing::{get, post};
+    use axum::Router;
+    use http::StatusCode;
+    use lobby_broker::validation::MAX_TOKEN_LEN;
+    use server_core::MAX_P2P_SNAPSHOT_LEN;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+    use url::Url;
+
+    use super::{admin, draft_pools, persistence, AppState, ServerMode};
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
+        let game_db = Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
+        AppState {
+            sessions: Arc::new(Mutex::new(server_core::SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(server_core::DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(lobby_broker::Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            public_url: None,
+        }
+    }
+
+    async fn spawn_p2p_backup_http_test() -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir)
+    {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let app = Router::new()
+            .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+            .route(
+                "/p2p-draft-backup/{code}",
+                get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+            )
+            .with_state(app_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("http://{addr}"), handle, temp_dir)
+    }
+
+    async fn post_p2p_backup(
+        base_url: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
+        let url = Url::parse(&format!("{base_url}/p2p-draft-backup")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = String::from("POST /p2p-draft-backup HTTP/1.1\r\n");
+        request.push_str(&format!("Host: {host}\r\n"));
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        request.push_str("Connection: close\r\n\r\n");
+        request.push_str(body);
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .expect("status line");
+        let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        (
+            StatusCode::from_u16(status_code).expect("status code"),
+            response[body_start..].to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn p2p_backup_post_rejects_oversized_host_peer_id() {
+        let (base_url, server, _temp) = spawn_p2p_backup_http_test().await;
+        let oversized = "p".repeat(MAX_TOKEN_LEN + 1);
+        let body = serde_json::json!({
+            "draft_code": "ABC123",
+            "host_peer_id": oversized,
+            "snapshot_json": r#"{"draftCode":"ABC123"}"#,
+        });
+        let (status, reason) = post_p2p_backup(&base_url, &body.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("host_peer_id"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn p2p_backup_post_rejects_oversized_snapshot() {
+        let (base_url, server, _temp) = spawn_p2p_backup_http_test().await;
+        let oversized = "x".repeat(MAX_P2P_SNAPSHOT_LEN + 1);
+        let body = serde_json::json!({
+            "draft_code": "ABC123",
+            "host_peer_id": "peer-host",
+            "snapshot_json": oversized,
+        });
+        let (status, reason) = post_p2p_backup(&base_url, &body.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("snapshot_json"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn p2p_backup_post_accepts_valid_payload() {
+        let (base_url, server, _temp) = spawn_p2p_backup_http_test().await;
+        let body = serde_json::json!({
+            "draft_code": "ABC123",
+            "host_peer_id": "peer-host",
+            "snapshot_json": r#"{"draftCode":"ABC123","draftStarted":true}"#,
+        });
+        let (status, _) = post_p2p_backup(&base_url, &body.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        server.abort();
+    }
+}
