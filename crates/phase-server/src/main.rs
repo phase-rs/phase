@@ -7140,7 +7140,7 @@ mod admin_auth_tests {
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
     use tokio::sync::Mutex;
-    use tower::ServiceExt;
+    use tower::Service;
 
     use super::{
         admin_request_authorized, draft_pools, mount_admin_routes, persistence, tokens_match,
@@ -7177,14 +7177,18 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn get_admin_drafts(mut app: Router<AppState>, auth: Option<&str>) -> StatusCode {
-        let mut service = app.as_service();
+    async fn get_admin_drafts(app: Router<AppState>, auth: Option<&str>) -> StatusCode {
+        let mut service = app.into_service::<Body>();
         let mut builder = Request::builder().method("GET").uri("/admin/drafts");
         if let Some(value) = auth {
             builder = builder.header(http::header::AUTHORIZATION, value);
         }
+        let request = builder.body(Body::empty()).unwrap();
         let response = service
-            .oneshot(builder.body(Body::empty()).unwrap())
+            .ready()
+            .await
+            .expect("service ready")
+            .call(request)
             .await
             .expect("router response");
         response.status()
