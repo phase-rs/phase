@@ -1846,7 +1846,9 @@ fn cancel_auto_pass_routes_by_actor() {
     let mut state = setup_game_at_main_phase();
     state.auto_pass.insert(
         PlayerId(0),
-        crate::types::game_state::AutoPassMode::UntilEndOfTurn,
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
     );
     state.priority_player = PlayerId(1);
     state.waiting_for = WaitingFor::Priority {
@@ -2065,7 +2067,9 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
     let mut state = setup_game_at_main_phase();
     state.auto_pass.insert(
         PlayerId(0),
-        crate::types::game_state::AutoPassMode::UntilEndOfTurn,
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
     );
     let source = ObjectId(500);
     push_token_trigger(&mut state, source, PlayerId(1), Some(4), Some(CardId(77)));

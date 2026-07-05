@@ -602,7 +602,7 @@ pub enum GameAction {
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
     /// Replace the acting player's phase-stop preference list. Phase stops
-    /// interrupt an `UntilEndOfTurn` auto-pass session and prevent the engine
+    /// interrupt an `UntilTurnBoundary` auto-pass session and prevent the engine
     /// from auto-submitting empty blocker declarations during the named phases.
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {

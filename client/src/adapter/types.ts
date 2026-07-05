@@ -1729,7 +1729,14 @@ export type GameAction =
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
-  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | {
+      type: "SetAutoPass";
+      data: {
+        mode:
+          | { type: "UntilStackEmpty" }
+          | { type: "UntilTurnBoundary"; until: TurnBoundary };
+      };
+    }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
@@ -2279,9 +2286,11 @@ export interface GameState {
   loop_detection?: LoopDetectionMode;
 }
 
+export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
+
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
-  | { type: "UntilEndOfTurn" };
+  | { type: "UntilTurnBoundary"; until: TurnBoundary };
 
 /**
  * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)

@@ -9,7 +9,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::CastingVariant;
+use crate::types::game_state::{CastingVariant, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::{PhaseStop, PhaseStopScope};
 use crate::types::zones::Zone;
@@ -64,7 +64,9 @@ fn apply_reconciles_eliminated_two_player_game_to_game_over() {
         &mut state,
         PlayerId(0),
         GameAction::SetAutoPass {
-            mode: AutoPassRequest::UntilEndOfTurn,
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
         },
     )
     .unwrap();
@@ -87,6 +89,34 @@ fn apply_reconciles_eliminated_two_player_game_to_game_over() {
             winner: Some(PlayerId(0))
         }
     )));
+}
+
+/// V7: the requested boundary is carried through the production
+/// `SetAutoPass` dispatch into the stored `AutoPassMode` — not hardcoded to
+/// `EndOfCurrentTurn`. Driven through `apply(GameAction::SetAutoPass)`, the real
+/// request→mode conversion seam. The negative sibling proves the conversion is
+/// not stuck on a single boundary.
+#[test]
+fn set_auto_pass_carries_requested_boundary_via_dispatch() {
+    for until in [
+        TurnBoundary::MyNextTurnStart,
+        TurnBoundary::EndOfCurrentTurn,
+    ] {
+        let mut state = priority_state();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilTurnBoundary { until }),
+            "SetAutoPass must store the requested boundary {until:?}"
+        );
+    }
 }
 
 fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
@@ -164,9 +194,12 @@ fn until_end_of_turn_passes_through_empty_stack_without_phase_stop() {
         phase: Phase::PostCombatMain,
         ..GameState::default()
     };
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     assert!(is_pass(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
@@ -176,9 +209,12 @@ fn until_end_of_turn_finishes_on_opponent_stack_activity() {
     // always gets a chance to respond.
     let mut state = GameState::default();
     state.stack.push_back(stack_entry(PlayerId(1)));
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
@@ -187,9 +223,12 @@ fn until_end_of_turn_passes_through_own_stack_activity() {
     // MTGA-style: resolve your own spells without pausing.
     let mut state = GameState::default();
     state.stack.push_back(stack_entry(PlayerId(0)));
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     assert!(is_pass(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
@@ -201,14 +240,58 @@ fn until_end_of_turn_finishes_at_configured_phase_stop() {
         phase: Phase::DeclareBlockers,
         ..GameState::default()
     };
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     state.phase_stops.insert(
         PlayerId(0),
         vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
     );
     assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
+}
+
+/// V8: the per-window interrupt logic is boundary-agnostic. A
+/// `MyNextTurnStart` session must Pass/Finish in exactly the same windows as
+/// the `EndOfCurrentTurn` sessions above (empty stack → Pass, opponent stack →
+/// Finish, phase stop → Finish). This composes with CR 117.3d yield handling
+/// (unchanged) and guards against the decision arm ever branching on `until`.
+#[test]
+fn my_next_turn_start_window_behavior_matches_end_of_current_turn() {
+    let mode = AutoPassMode::UntilTurnBoundary {
+        until: TurnBoundary::MyNextTurnStart,
+    };
+
+    // Empty stack, no phase stop → Pass.
+    let mut empty = GameState {
+        phase: Phase::PostCombatMain,
+        ..GameState::default()
+    };
+    empty.auto_pass.insert(PlayerId(0), mode);
+    assert!(is_pass(&priority_auto_pass_decision(&empty, PlayerId(0))));
+
+    // Opponent-controlled top-of-stack → Finish.
+    let mut opp = GameState::default();
+    opp.stack.push_back(stack_entry(PlayerId(1)));
+    opp.auto_pass.insert(PlayerId(0), mode);
+    assert!(is_finish(&priority_auto_pass_decision(&opp, PlayerId(0))));
+
+    // User-flagged phase stop → Finish.
+    let mut stopped = GameState {
+        phase: Phase::DeclareBlockers,
+        ..GameState::default()
+    };
+    stopped.auto_pass.insert(PlayerId(0), mode);
+    stopped.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
+    );
+    assert!(is_finish(&priority_auto_pass_decision(
+        &stopped,
+        PlayerId(0)
+    )));
 }
 
 #[test]
@@ -223,9 +306,12 @@ fn until_end_of_turn_scope_gates_session_owner_auto_pass() {
             active_player: active,
             ..GameState::default()
         };
-        state
-            .auto_pass
-            .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
         state
             .phase_stops
             .insert(PlayerId(0), vec![stop(Phase::DeclareBlockers, scope)]);
@@ -344,9 +430,12 @@ fn until_end_of_turn_does_not_auto_submit_available_blockers() {
         waiting_for: waiting_for.clone(),
         ..GameState::default()
     };
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
 
     let mut result = ActionResult {
         events: Vec::new(),
@@ -477,7 +566,7 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
     // Matrix row 7: owner = active player P0 declaring attackers on their own
     // turn (CR 508.1). An OwnTurn stop on Declare Attackers fires (owner ==
     // active_player), so the engine must NOT auto-submit the empty attacker
-    // declaration even with an armed UntilEndOfTurn session — the player keeps
+    // declaration even with an armed UntilTurnBoundary session — the player keeps
     // the step to attack (CR 102.1 live compare).
     let waiting_for = WaitingFor::DeclareAttackers {
         player: PlayerId(0),
@@ -493,9 +582,12 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
     // Reach-guard: with the session armed, the empty-attacker arm would fire
     // (`end_of_turn_active` is true) absent the stop, so the pause is
     // attributable to the phase stop rather than a missing auto-pass session.
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     state.phase_stops.insert(
         PlayerId(0),
         vec![stop(Phase::DeclareAttackers, PhaseStopScope::OwnTurn)],
@@ -539,9 +631,12 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
         waiting_for: waiting_for.clone(),
         ..GameState::default()
     };
-    state
-        .auto_pass
-        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
     state.phase_stops.insert(
         PlayerId(0),
         vec![stop(

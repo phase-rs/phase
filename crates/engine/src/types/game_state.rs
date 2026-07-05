@@ -5115,17 +5115,41 @@ impl WaitingFor {
     }
 }
 
+/// CR 102.1 + CR 500.1: which turn boundary ends an auto-pass session.
+///
+/// The session owner is compared against the active player (CR 102.1) at each
+/// turn start (CR 500.1) to decide whether the session survives the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TurnBoundary {
+    /// Clears at the next turn start (i.e. the end of the session owner's
+    /// current turn), regardless of whose turn begins. Legacy behavior; the
+    /// serde-migration default.
+    #[default]
+    EndOfCurrentTurn,
+    /// Persists through intervening opponent turns; clears only when the
+    /// session owner's own next turn begins (CR 102.1 active player == owner).
+    MyNextTurnStart,
+}
+
 /// What the frontend requests for auto-pass (no internal state).
 ///
-/// Phase stops that should interrupt `UntilEndOfTurn` are a separate per-player
-/// preference on `GameState::phase_stops`, managed via `GameAction::SetPhaseStops`.
-/// Keeping them out of the request preserves a single source of truth and lets
-/// the preference change mid-session without requiring a new auto-pass request.
+/// Phase stops that should interrupt a turn-boundary session are a separate
+/// per-player preference on `GameState::phase_stops`, managed via
+/// `GameAction::SetPhaseStops`. Keeping them out of the request preserves a
+/// single source of truth and lets the preference change mid-session without
+/// requiring a new auto-pass request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoPassRequest {
     UntilStackEmpty,
-    UntilEndOfTurn,
+    /// Requests deserialize the same shape as the stored mode. Requests are
+    /// transient (never persisted); the `alias`/`default` here is deploy-window
+    /// insurance for FE/engine version skew, not a persistence requirement.
+    #[serde(alias = "UntilEndOfTurn")]
+    UntilTurnBoundary {
+        #[serde(default)]
+        until: TurnBoundary,
+    },
 }
 
 /// What the engine stores for auto-pass (includes captured state).
@@ -5135,11 +5159,22 @@ pub enum AutoPassMode {
     /// Auto-pass while stack is non-empty. Clears when stack empties or grows
     /// beyond `initial_stack_len` (the stack size when the flag was set).
     UntilStackEmpty { initial_stack_len: usize },
-    /// Auto-pass through priority/combat stops until the flagged player's next
-    /// turn starts. Interrupted by opponent stack activity (MTGA-style) or when
-    /// the current phase matches a scope-applicable entry in the player's
-    /// `GameState::phase_stops` (see `GameState::phase_stop_hit`).
-    UntilEndOfTurn,
+    /// Auto-pass through priority/combat stops until the turn boundary in
+    /// `until` is reached — `EndOfCurrentTurn` (the flag dies at the next turn
+    /// start, regardless of whose turn it is) or `MyNextTurnStart` (persists
+    /// through opponents' turns, dies only when the owner's next turn begins).
+    /// Interrupted per-window by opponent stack activity (unless priority-
+    /// yielded, CR 117.3d) or a scope-applicable `phase_stops` entry (see
+    /// `GameState::phase_stop_hit`).
+    ///
+    /// `#[serde(alias = "UntilEndOfTurn")]` + `#[serde(default)]` on `until`
+    /// migrate legacy persisted `{"type":"UntilEndOfTurn"}` payloads (IndexedDB/
+    /// SQLite) forward to `UntilTurnBoundary { until: EndOfCurrentTurn }`.
+    #[serde(alias = "UntilEndOfTurn")]
+    UntilTurnBoundary {
+        #[serde(default)]
+        until: TurnBoundary,
+    },
 }
 
 /// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
@@ -6452,7 +6487,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub auto_pass: HashMap<PlayerId, AutoPassMode>,
 
-    /// Per-player phase-stop preferences. While a player's `UntilEndOfTurn`
+    /// Per-player phase-stop preferences. While a player's `UntilTurnBoundary`
     /// auto-pass session is active, the engine will interrupt auto-pass whenever
     /// the current phase appears in that player's list and its scope applies on
     /// the current turn. Also consulted when deciding whether to auto-submit
@@ -8989,6 +9024,69 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    /// V1: legacy persisted `{"type":"UntilEndOfTurn"}` (pre-parameterization
+    /// wire form) must deserialize to `UntilTurnBoundary { EndOfCurrentTurn }`
+    /// via `#[serde(alias)]` + `#[serde(default)]`. The `UntilStackEmpty` arm is
+    /// asserted unchanged as a positive reach-guard proving the alias captured
+    /// the right tag and did not disturb the sibling variant.
+    #[test]
+    fn auto_pass_mode_legacy_eot_deserializes() {
+        assert_eq!(
+            serde_json::from_str::<AutoPassMode>(r#"{"type":"UntilEndOfTurn"}"#).unwrap(),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<AutoPassMode>(
+                r#"{"type":"UntilStackEmpty","initial_stack_len":3}"#
+            )
+            .unwrap(),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 3
+            }
+        );
+    }
+
+    /// V2: the canonical new wire form round-trips for both boundaries, and
+    /// `EndOfCurrentTurn` always serializes with an explicit `until` (never the
+    /// bare legacy tag) — `alias` affects deserialization only.
+    #[test]
+    fn auto_pass_mode_roundtrips_both_boundaries() {
+        let my_next = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        };
+        let json = serde_json::to_string(&my_next).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"UntilTurnBoundary","until":"MyNextTurnStart"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AutoPassMode>(&json).unwrap(),
+            my_next
+        );
+
+        let eot = AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        };
+        assert_eq!(
+            serde_json::to_string(&eot).unwrap(),
+            r#"{"type":"UntilTurnBoundary","until":"EndOfCurrentTurn"}"#
+        );
+    }
+
+    /// V3: the transient `AutoPassRequest` also accepts the legacy tag, covering
+    /// FE/engine version skew during a deploy window.
+    #[test]
+    fn auto_pass_request_legacy_eot_deserializes() {
+        assert_eq!(
+            serde_json::from_str::<AutoPassRequest>(r#"{"type":"UntilEndOfTurn"}"#).unwrap(),
+            AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn
+            }
+        );
+    }
 
     /// CR 104.4b: the loop fingerprint must distinguish object tap state — else a
     /// tap/untap loop's two phases would be indistinguishable. (A false negative
