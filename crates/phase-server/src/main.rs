@@ -1157,7 +1157,27 @@ async fn main() {
         Some(_) => info!("admin HTTP endpoints enabled (bearer-token authenticated)"),
         None => info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)"),
     }
-    app = merge_admin_routes(app, admin_token.as_deref());
+    if let Some(token) = admin_token.as_deref().filter(|t| !t.is_empty()) {
+        let auth_layer = |expected: Arc<str>| {
+            from_fn(move |request: Request, next: Next| {
+                let expected = expected.clone();
+                async move { require_admin_auth(expected, request, next).await }
+            })
+        };
+        let list_auth = auth_layer(Arc::from(token));
+        let detail_auth = auth_layer(Arc::from(token));
+        app = app
+            .route(
+                "/admin/drafts",
+                get(admin::admin_list_drafts).route_layer(list_auth),
+            )
+            .route(
+                "/admin/drafts/{code}",
+                get(admin::admin_get_draft)
+                    .delete(admin::admin_delete_draft)
+                    .route_layer(detail_auth),
+            );
+    }
 
     let app = app.layer(cors).with_state(AppState {
         sessions: state,
@@ -1277,35 +1297,6 @@ fn admin_token_from_env() -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-}
-
-/// Mount `/admin/*` routes when `admin_token` is present, guarded by bearer auth.
-fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
-        let auth_layer = |expected: Arc<str>| {
-            from_fn(move |request: Request, next: Next| {
-                let expected = expected.clone();
-                async move { require_admin_auth(expected, request, next).await }
-            })
-        };
-        let list_auth = auth_layer(Arc::from(token));
-        let detail_auth = auth_layer(Arc::from(token));
-        app = app
-            .route(
-                "/admin/drafts",
-                get(admin::admin_list_drafts).route_layer(list_auth),
-            )
-            .route(
-                "/admin/drafts/{code}",
-                get(admin::admin_get_draft)
-                    .delete(admin::admin_delete_draft)
-                    .route_layer(detail_auth),
-            );
-    }
-    app
 }
 
 /// Decide whether an `Authorization` header value authorizes an admin request.
