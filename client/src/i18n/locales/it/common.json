@@ -40,6 +40,10 @@
     "sandboxToolsTitle": "Strumenti Sandbox — imposta qualsiasi stato del campo (`)",
     "resume": "Riprendi",
     "settings": "Impostazioni",
+    "boardLayoutSplit": "Diviso",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Passa alla vista tavolo diviso",
+    "switchToLegacyView": "Passa alla vista legacy focalizzata",
     "helpShortcuts": "Aiuto e scorciatoie",
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",
@@ -228,5 +232,10 @@
     "settings": "Impostazioni",
     "languageSettings": "Lingua ({{lang}}) — apri impostazioni",
     "languageTitle": "Lingua: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Qualcosa è andato storto",
+    "body": "L'app ha riscontrato un errore imprevisto e non può continuare in questa schermata. Ricaricare di solito risolve il problema.",
+    "reload": "Ricarica"
   }
 }

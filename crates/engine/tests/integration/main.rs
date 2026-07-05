@@ -401,6 +401,7 @@ mod issue_4388_mana_on_opponents_turn;
 mod issue_4420_lava_blister_unless_deal_damage;
 mod issue_4459_decoy_gambit_unless_have_you_draw;
 mod issue_4503_incremental_growth;
+mod issue_4544_abhorrent_oculus_manifest_nonpermanent;
 mod issue_4560_winter_soldier;
 mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;

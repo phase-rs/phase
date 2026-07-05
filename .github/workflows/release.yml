@@ -358,6 +358,9 @@ jobs:
           # cloud sync stays disabled and the app falls back to file backup.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # First-party telemetry ingest (lobby Worker → Analytics Engine, see
+          # docs/telemetry-proposal.md). Unset would compile telemetry to a no-op.
+          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -958,6 +961,9 @@ jobs:
           # Anon key is client-safe (RLS gates access).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Telemetry ingest define reaches vite.config.ts via the same
+          # beforeBuildCommand path as the Supabase vars above.
+          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

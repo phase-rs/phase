@@ -54,7 +54,7 @@ pub use p2p_backup_guard::{
     guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
     MAX_P2P_SNAPSHOT_LEN,
 };
-pub use persist::{PersistedLobbyMeta, PersistedSession};
+pub use persist::{restored_draft_lobby_register_request, PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
     AiSeatRequest, ClientMessage, DeckChoice, DeckData, LobbyGame, PlayerSlotInfo, SeatKind,
     SeatMutation, SeatView, ServerMessage,

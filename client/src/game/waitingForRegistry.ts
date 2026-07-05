@@ -258,3 +258,16 @@ export function waitingForReason(
       return { key: "status.reason.thinking" };
   }
 }
+
+/**
+ * Map a reason to its standalone seat-badge key. `status.seat.*` mirrors
+ * `status.reason.*` key-for-key but holds self-contained chip labels
+ * ("Responding") instead of sentence fragments meant for composition
+ * ("Your priority — responding to the stack").
+ */
+export function seatStatusKey(reason: WaitingReason | null): string {
+  return (reason?.key ?? "status.reason.thinking").replace(
+    "status.reason.",
+    "status.seat.",
+  );
+}
