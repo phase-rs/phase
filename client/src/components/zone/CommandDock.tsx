@@ -77,14 +77,14 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
-  // never both, so the interactive commander card is never duplicated.
-  const fullContent = (
-    <div
-      className={splitOverview ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}
-    >
-      <CommanderCardZone playerId={playerId} />
+  // never both, so the interactive commander card is never duplicated. The
+  // popover always renders at full fidelity (it's the expanded, readable view),
+  // so only the inline body inherits the split-pane compaction.
+  const fullContent = (split: boolean) => (
+    <div className={split ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}>
+      <CommanderCardZone playerId={playerId} splitOverview={split} />
       <CommandZone playerId={playerId} />
-      <CommanderDamage playerId={playerId} compact={splitOverview} />
+      <CommanderDamage playerId={playerId} compact={split} />
     </div>
   );
 
@@ -96,7 +96,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
         data-debug-label="Command"
         data-command-dock={isMirrored ? "opponent" : "player"}
       >
-        {fullContent}
+        {fullContent(splitOverview)}
       </div>
     );
   }
@@ -110,7 +110,7 @@ export function CommandDock({ playerId, isMirrored, splitOverview = false }: Com
       label={t("zone.commandZone")}
       dockRole={isMirrored ? "opponent" : "player"}
     >
-      {fullContent}
+      {fullContent(false)}
     </CompactCommandDock>
   );
 }

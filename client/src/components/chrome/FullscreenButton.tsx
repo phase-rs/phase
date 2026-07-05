@@ -48,11 +48,11 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
     return (
       <button
         onClick={toggle}
-        className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
+        className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
         aria-label={label}
         title={label}
       >
-        <Icon className="h-5 w-5" />
+        <Icon className="h-4 w-4" />
       </button>
     );
   }
