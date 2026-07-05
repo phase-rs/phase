@@ -173,6 +173,7 @@ Docker uses environment variables for the common options:
 | `PHASE_LOBBY_ONLY` | `--lobby-only` | false | Matchmaking broker mode |
 | `PHASE_LOG_JSON` | `--log-json` | false | Emit JSON logs |
 | `PHASE_LOG_DIR` | `--log-dir` | stdout | Write logs to files |
+| `PHASE_ADMIN_TOKEN` | — | unset | Bearer token for `/admin/*` endpoints (environment variable only; no CLI flag). Unset ⇒ admin routes disabled (404). Send as `Authorization: Bearer <token>`. |
 
 You can also pass server flags after the image name:
 

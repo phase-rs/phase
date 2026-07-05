@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::{Request, State, WebSocketUpgrade};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
@@ -1137,21 +1138,28 @@ async fn main() {
         info!(public_url = %url, "advertising public URL for join-code sharing");
     }
 
-    let app = Router::new()
+    // Public, client-facing HTTP surface. `/p2p-draft-backup*` is part of the
+    // normal P2P draft flow; only the administrative `/admin/*` routes are gated.
+    let mut app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
-        .route("/admin/drafts", get(admin::admin_list_drafts))
-        .route(
-            "/admin/drafts/{code}",
-            get(admin::admin_get_draft).delete(admin::admin_delete_draft),
-        )
         .route("/p2p-draft-backup", post(admin::p2p_backup_store))
         .route(
             "/p2p-draft-backup/{code}",
             get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        )
-        .layer(cors)
-        .with_state(AppState {
+        );
+
+    // Administrative endpoints are destructive and information-disclosing, and
+    // reachable through the same reverse proxy as `/ws` (see deploy nginx).
+    // Mount them only when PHASE_ADMIN_TOKEN is set; otherwise absent (404).
+    let admin_token = admin_token_from_env();
+    match admin_token.as_deref() {
+        Some(_) => info!("admin HTTP endpoints enabled (bearer-token authenticated)"),
+        None => info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)"),
+    }
+    app = merge_admin_routes(app, admin_token.as_deref());
+
+    let app = app.layer(cors).with_state(AppState {
             sessions: state,
             draft_sessions,
             draft_pools,
@@ -1247,6 +1255,78 @@ async fn shutdown_signal() {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Constant-time byte comparison so admin-token validation does not leak the
+/// expected token through response timing.
+fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in presented.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Load the admin bearer token from the environment. Intentionally not a CLI
+/// flag — command-line secrets leak via process listings and shell history.
+fn admin_token_from_env() -> Option<String> {
+    std::env::var("PHASE_ADMIN_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Mount `/admin/*` routes when `admin_token` is present, guarded by bearer auth.
+fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Router<S> {
+    if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+        let expected: Arc<str> = Arc::from(token);
+        let admin_routes = Router::new()
+            .route("/admin/drafts", get(admin::admin_list_drafts))
+            .route(
+                "/admin/drafts/{code}",
+                get(admin::admin_get_draft).delete(admin::admin_delete_draft),
+            )
+            .layer(from_fn_with_state(expected, require_admin_auth));
+        app = app.merge(admin_routes);
+    }
+    app
+}
+
+/// Decide whether an `Authorization` header value authorizes an admin request.
+/// Scheme must be `Bearer` (case-insensitive per RFC 9110); credential must
+/// match `expected` in constant time.
+fn admin_request_authorized(auth_header: Option<&str>, expected: &str) -> bool {
+    let Some(value) = auth_header.map(str::trim) else {
+        return false;
+    };
+    let Some((scheme, credentials)) = value.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return false;
+    }
+    tokens_match(credentials.trim().as_bytes(), expected.as_bytes())
+}
+
+/// Auth guard for the administrative `/admin/*` routes.
+async fn require_admin_auth(
+    State(expected): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let auth_header = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    if admin_request_authorized(auth_header, &expected) {
+        next.run(request).await
+    } else {
+        (http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
 }
 
 /// Validate an operator-supplied public URL at the system boundary. It must
@@ -7040,6 +7120,126 @@ mod issue_4548_deadlock_tests {
         .await
         .expect(
             "create_and_connect_multiplayer_session must release state+connections before returning",
+        );
+    }
+}
+
+#[cfg(test)]
+mod admin_auth_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::Router;
+    use lobby_broker::Broker;
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    use super::{
+        admin_request_authorized, merge_admin_routes, tokens_match, AppState, ServerMode,
+    };
+
+    const TOKEN: &str = "s3cr3t-admin-token";
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db = Arc::new(
+            persistence::GameDb::open(temp_dir.path().join("games.db")).expect("game db"),
+        );
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            public_url: None,
+        }
+    }
+
+    fn test_admin_app(admin_token: Option<&str>) -> (Router<AppState>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app =
+            merge_admin_routes(Router::new(), admin_token).with_state(test_app_state(&temp_dir));
+        (app, temp_dir)
+    }
+
+    async fn get_admin_drafts(app: &mut Router<AppState>, auth: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().method("GET").uri("/admin/drafts");
+        if let Some(value) = auth {
+            builder = builder.header(http::header::AUTHORIZATION, value);
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .expect("router response");
+        response.status()
+    }
+
+    #[test]
+    fn tokens_match_is_exact() {
+        assert!(tokens_match(b"abc", b"abc"));
+        assert!(!tokens_match(b"abc", b"abd"));
+        assert!(!tokens_match(b"abc", b"ab"));
+        assert!(!tokens_match(b"", b"x"));
+        assert!(tokens_match(b"", b""));
+    }
+
+    #[test]
+    fn authorized_only_with_matching_bearer_token() {
+        let ok = format!("Bearer {TOKEN}");
+        assert!(admin_request_authorized(Some(&ok), TOKEN));
+        let padded = format!("Bearer   {TOKEN}  ");
+        assert!(admin_request_authorized(Some(&padded), TOKEN));
+        assert!(admin_request_authorized(Some(&format!("bearer {TOKEN}")), TOKEN));
+        assert!(admin_request_authorized(Some(&format!("BEARER {TOKEN}")), TOKEN));
+    }
+
+    #[test]
+    fn rejects_missing_wrong_or_malformed_header() {
+        assert!(!admin_request_authorized(None, TOKEN));
+        assert!(!admin_request_authorized(Some(""), TOKEN));
+        assert!(!admin_request_authorized(Some("Bearer wrong-token"), TOKEN));
+        let basic = format!("Basic {TOKEN}");
+        assert!(!admin_request_authorized(Some(&basic), TOKEN));
+        assert!(!admin_request_authorized(Some(TOKEN), TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_routes_absent_without_token() {
+        let (mut app, _temp) = test_admin_app(None);
+        assert_eq!(get_admin_drafts(&mut app, None).await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_routes_reject_missing_bearer() {
+        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        assert_eq!(get_admin_drafts(&mut app, None).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_routes_reject_wrong_bearer() {
+        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        assert_eq!(
+            get_admin_drafts(&mut app, Some("Bearer wrong-token")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_routes_accept_valid_bearer() {
+        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        assert_eq!(
+            get_admin_drafts(&mut app, Some(&format!("Bearer {TOKEN}"))).await,
+            StatusCode::OK
         );
     }
 }
