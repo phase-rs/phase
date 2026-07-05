@@ -244,7 +244,7 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
     }
 
     let filter = if filters.len() == 1 {
-        filters.remove(0)
+        filters.pop().unwrap()
     } else {
         TargetFilter::Or { filters }
     };

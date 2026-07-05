@@ -1727,9 +1727,12 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
     let mut props = Vec::new();
-    if let Some(leg) = &type_leg {
-        props.extend(leg.properties.iter().cloned());
-    }
+    let type_filter = if let Some(leg) = type_leg {
+        props.extend(leg.properties);
+        leg.type_filter
+    } else {
+        TypeFilter::Card
+    };
     if let Some(z) = zone {
         props.push(FilterProp::InZone { zone: z });
     }
@@ -1737,9 +1740,6 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
         props.push(prop);
     }
     props.extend(without_keyword);
-    let type_filter = type_leg
-        .map(|leg| leg.type_filter)
-        .unwrap_or(TypeFilter::Card);
     let mut filter = TypedFilter::new(type_filter);
     if !props.is_empty() {
         filter = filter.properties(props);
