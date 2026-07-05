@@ -2100,6 +2100,12 @@ pub struct PendingManaAbility {
     pub player: PlayerId,
     pub source_id: ObjectId,
     pub ability_index: usize,
+    /// CR 605.3b + CR 400.7: Mana ability choices can be answered after the
+    /// source paid a cost that moved it out of existence (Treasure tokens, etc.).
+    /// Preserve the activated ability definition from activation time so the
+    /// chosen-color resume can resolve from LKI even when `source_id` is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_snapshot: Option<AbilityDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -9854,6 +9860,7 @@ mod tests {
                     player: PlayerId(0),
                     source_id: ObjectId(1),
                     ability_index: 0,
+                    ability_snapshot: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     chosen_tappers: Vec::new(),

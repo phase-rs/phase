@@ -1209,6 +1209,7 @@ mod tests {
             player,
             source_id,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
