@@ -3253,6 +3253,13 @@ pub enum WaitingFor {
         crew_power: u32,
         /// Untapped creatures the player controls (excluding the Vehicle itself).
         eligible_creatures: Vec<ObjectId>,
+        /// CR 702.122a: each eligible creature's crew-power contribution
+        /// (`object_crew_power_contribution`), aligned index-for-index with
+        /// `eligible_creatures`. The engine owns this computation — "as though its
+        /// power were N greater" (Pilot tokens) and "using its toughness" (Giant
+        /// Ox) mean the contribution differs from the creature's printed power, so
+        /// the UI MUST sum these values, not raw power, when gating the selection.
+        contributions: Vec<i32>,
     },
     /// CR 702.184a: Player must pick another untapped creature they control
     /// to tap as the station ability's cost. The chosen creature's power

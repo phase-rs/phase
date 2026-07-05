@@ -838,6 +838,7 @@ pub fn candidate_actions_broad_with_probe(
             vehicle_id,
             crew_power,
             eligible_creatures,
+            ..
         } => crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures),
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
