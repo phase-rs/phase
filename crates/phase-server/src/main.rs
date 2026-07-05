@@ -7169,19 +7169,17 @@ mod admin_auth_tests {
         }
     }
 
-    fn test_admin_router(app_state: AppState, admin_token: Option<&str>) {
-        let mut app = Router::new();
-        if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
-            app = mount_admin_routes(app, token);
-        }
-        app.with_state(app_state)
-    }
-
     async fn spawn_admin_http_test(
         admin_token: Option<&str>,
     ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app = test_admin_router(test_app_state(&temp_dir), admin_token);
+        let app_state = test_app_state(&temp_dir);
+        // Mirror production: establish Router<AppState> before mounting admin routes.
+        let mut app = Router::new().route("/ws", get(super::ws_handler));
+        if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+            app = mount_admin_routes(app, token);
+        }
+        let app = app.with_state(app_state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
