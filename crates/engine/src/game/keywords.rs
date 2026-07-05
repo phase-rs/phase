@@ -221,6 +221,11 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
 /// CR 702.188a + CR 604.1: honor web-slinging GRANTED by a CastWithKeyword static
 /// (Amazing Spider-Man), not only printed keywords. effective_spell_keywords merges
 /// printed obj.keywords with statically-granted keywords for `caster`.
+///
+/// CR 702.102b: CORRECTNESS-NEUTRAL — web-slinging (CR 702.188a) functions only on
+/// creature spells and is never carried by or value-key-granted to an
+/// instant/sorcery split card, so a fused split cast's combined-vs-front projection
+/// can never change this read. Left on the non-fuse-aware collector deliberately.
 pub fn effective_web_slinging_cost(
     state: &GameState,
     caster: PlayerId,

@@ -1260,14 +1260,18 @@ impl GameObject {
         }
     }
 
-    /// The other Split half to combine when this object is a FUSED split spell
-    /// (CR 702.102b). `None` for non-fused casts and non-split objects, so callers
-    /// combine both halves ONLY for a fused spell. Distinct from
+    /// The other Split half to combine when this object is being cast as a FUSED
+    /// split spell (CR 702.102b). `None` for non-fused casts and non-split objects,
+    /// so callers combine both halves ONLY for a fused spell. Distinct from
     /// `split_half_to_combine`, which also fires for ANY split card off the stack
-    /// (the object-characteristic rule, CR 709.4) — this one is keyed purely on the
-    /// `fused_split_spell` marker and is therefore zone-independent.
-    fn fused_split_half(&self) -> Option<&BackFaceData> {
-        if !self.fused_split_spell {
+    /// (the object-characteristic rule, CR 709.4). `fused` is the caller's
+    /// determination — either the persisted `fused_split_spell` marker
+    /// (already-finalized casts) OR a pre-payment `CastingVariant::Fuse` override,
+    /// which is not yet reflected in the marker while enumerating / preparing on an
+    /// immutable `&GameState`. The single-face guard (`layout_kind == Split`) still
+    /// applies, so a non-split object returns `None` even when `fused == true`.
+    fn fused_split_half_for(&self, fused: bool) -> Option<&BackFaceData> {
+        if !fused {
             return None;
         }
         self.back_face
@@ -1287,7 +1291,18 @@ impl GameObject {
     /// `fused_split_spell` marker is set BEFORE mana payment so both consumers see
     /// the combined value.
     pub fn spell_mana_value(&self) -> u32 {
-        match self.fused_split_half() {
+        self.spell_mana_value_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_mana_value`](Self::spell_mana_value).
+    /// `fused` lets a pre-payment caller (option enumeration / cast preparation on
+    /// an immutable `&GameState`, where the `fused_split_spell` marker is not yet
+    /// set) request the COMBINED mana value a fused split spell would present to
+    /// spell filters (CR 202.3d + CR 702.102b + CR 709.4d). The public
+    /// [`spell_mana_value`](Self::spell_mana_value) delegates with the persisted
+    /// marker so its existing callers stay byte-identical.
+    pub fn spell_mana_value_for(&self, fused: bool) -> u32 {
+        match self.fused_split_half_for(fused) {
             // Fuse cards carry no {X} in either half, so summing X-as-0 mana values
             // is exact (CR 202.3e is moot here).
             Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
@@ -1304,7 +1319,15 @@ impl GameObject {
     /// `fused_split_spell` marker rather than the zone gate used by
     /// `effective_colors`.
     pub fn spell_colors(&self) -> Vec<ManaColor> {
-        match self.fused_split_half() {
+        self.spell_colors_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_colors`](Self::spell_colors). `fused`
+    /// requests the COMBINED colors (CR 202.3d + CR 702.102b) a fused split spell
+    /// would present pre-payment, before the `fused_split_spell` marker is set.
+    /// The public [`spell_colors`](Self::spell_colors) delegates with the marker.
+    pub fn spell_colors_for(&self, fused: bool) -> Vec<ManaColor> {
+        match self.fused_split_half_for(fused) {
             Some(bf) => ManaColor::ALL
                 .into_iter()
                 .filter(|c| self.color.contains(c) || bf.color.contains(c))
@@ -2467,6 +2490,60 @@ mod tests {
                 "Gray Ogre is mono-red in {zone:?}"
             );
         }
+    }
+
+    /// OR-gate anchor for the pre-payment fuse projection (PR #5093). The
+    /// `spell_mana_value_for(fused)` / `spell_colors_for(fused)` helpers let a
+    /// pre-payment caller (option enumeration / cast preparation on an immutable
+    /// `&GameState`, before the `fused_split_spell` marker is set) request the
+    /// COMBINED characteristics a fused split spell would present to spell filters
+    /// (CR 202.3d + CR 702.102b). `fused = false` reports the front half; `true`
+    /// reports both halves combined — WITHOUT ever touching the marker. Reverting
+    /// the `_for` split (making the projection key only on the marker) makes the
+    /// `true` case still report the front half and fails these assertions.
+    #[test]
+    fn spell_mana_value_and_colors_for_fused_hint_combine_without_marker() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        // Breaking // Entering: Breaking {U}{B} (MV 2, {U,B}) front + Entering
+        // {4}{B}{R} (MV 6, {B,R}) back Split half. Combined MV 8, colors {U,B,R}.
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        let obj = sc.state.objects.get(&breaking).unwrap();
+
+        // Marker is NOT set — the object is a raw hand card mid-enumeration.
+        assert!(
+            !obj.fused_split_spell,
+            "fixture must exercise the marker-independent `_for` path"
+        );
+
+        // fused = false: front half only (MV 2, no red).
+        assert_eq!(
+            obj.spell_mana_value_for(false),
+            2,
+            "spell_mana_value_for(false) reports the front half MV (2)"
+        );
+        assert!(
+            !obj.spell_colors_for(false).contains(&ManaColor::Red),
+            "spell_colors_for(false) is the front half (no red)"
+        );
+
+        // fused = true: combined halves (MV 8, includes red) — no marker set.
+        assert_eq!(
+            obj.spell_mana_value_for(true),
+            8,
+            "spell_mana_value_for(true) reports the COMBINED MV (8) with no marker set"
+        );
+        assert!(
+            obj.spell_colors_for(true).contains(&ManaColor::Red),
+            "spell_colors_for(true) includes Entering's red with no marker set"
+        );
+
+        // The public marker-keyed accessors still report the front half (marker unset).
+        assert_eq!(
+            obj.spell_mana_value(),
+            2,
+            "public spell_mana_value() stays marker-keyed (front half while marker unset)"
+        );
     }
 
     /// (h) The Room gate (CR 709.5 / CR 709.5c): a Room card ON the battlefield is

@@ -2498,7 +2498,32 @@ pub fn spell_object_matches_filter_from(
     source_controller: PlayerId,
     all_creature_types: &[String],
 ) -> bool {
-    let record = spell_cast_record_from_object(spell_obj);
+    spell_object_matches_filter_from_for(
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+        false,
+    )
+}
+
+/// Fuse-aware sibling of [`spell_object_matches_filter_from`]. `fused` requests
+/// the COMBINED characteristics projection (CR 702.102b) for a pre-payment fused
+/// split spell whose `fused_split_spell` marker is not yet set. The non-`_for`
+/// entry delegates with `fused = false` so existing callers stay byte-identical.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_for(
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    fused: bool,
+) -> bool {
+    let record = spell_cast_record_from_object_for(spell_obj, fused);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -2522,10 +2547,37 @@ pub fn spell_object_matches_filter_from_state(
     source_id: ObjectId,
     all_creature_types: &[String],
 ) -> bool {
+    spell_object_matches_filter_from_state_for(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        false,
+    )
+}
+
+/// Fuse-aware sibling of [`spell_object_matches_filter_from_state`]. `fused`
+/// requests the COMBINED characteristics projection (CR 702.102b) for a
+/// pre-payment fused split spell. The non-`_for` entry delegates with
+/// `fused = false` so existing callers stay byte-identical.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_state_for(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object(spell_obj);
+    let record = spell_cast_record_from_object_for(spell_obj, fused);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -2557,11 +2609,24 @@ pub fn spell_object_matches_filter_from_state(
 /// `restrictions::spell_cast_record` authority so a fused split spell carries the
 /// COMBINED mana value / colors of both halves. `CastingVariant::Normal` is the
 /// historical placeholder for these live per-spell filters.
+///
+/// Non-fuse-aware entry retained for existing tests; production reaches the
+/// projection through `spell_cast_record_from_object_for` with the fused hint.
+#[cfg(test)]
 fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
-    crate::game::restrictions::spell_cast_record(
+    spell_cast_record_from_object_for(spell_obj, false)
+}
+
+/// Fuse-aware sibling of [`spell_cast_record_from_object`]. `fused` selects the
+/// COMBINED-characteristics projection (CR 702.102b) for a pre-payment fused
+/// split spell whose `fused_split_spell` marker is not yet set; the non-`_for`
+/// entry delegates with `fused = false`.
+fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> SpellCastRecord {
+    crate::game::restrictions::spell_cast_record_for(
         spell_obj,
         spell_obj.zone,
         crate::types::game_state::CastingVariant::Normal,
+        fused,
     )
 }
 

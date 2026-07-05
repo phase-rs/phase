@@ -482,6 +482,412 @@ fn build_spell_meta_fused_split_spell_uses_combined_mana_value_and_colors() {
     );
 }
 
+// --------------------------------------------------------------------------
+// PR #5093 — pre-payment fused split spells must present the COMBINED mana
+// value / colors to spell filters that run BEFORE the `fused_split_spell`
+// marker is set (option enumeration on an immutable `&GameState`). These three
+// tests drive the private `casting_variant_choice_set` directly and inspect the
+// offered options WITHOUT setting the marker — the whole point of the fix is
+// that the enumeration path can no longer rely on the marker. Each asserts an
+// option that flips when the projection is reverted to the front half.
+//
+// Breaking // Entering (Fuse): Breaking {U}{B} (front, MV 2, {U,B}) + Entering
+// {4}{B}{R} (back Split half, MV 6, {B,R}). Combined MV 8, colors {U,B,R}.
+// --------------------------------------------------------------------------
+
+/// Add a battlefield permanent controlled by `controller` carrying a single
+/// static `def`, then return its id. Used to install a pre-payment spell filter
+/// (PerTurnCastLimit / CastWithKeyword) for the fuse-enumeration tests.
+fn add_static_permanent(
+    scenario: &mut crate::game::scenario::GameScenario,
+    controller: PlayerId,
+    def: StaticDefinition,
+) -> ObjectId {
+    let card_id = CardId(scenario.state.next_object_id);
+    let id = create_object(
+        &mut scenario.state,
+        card_id,
+        controller,
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    scenario
+        .state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .static_definitions
+        .push(def);
+    id
+}
+
+/// Give `player` a large heterogeneous mana pool so both the front-half Normal
+/// cast ({U}{B}) and the fused cast ({4}{U}{B}{B}{R}) are affordable — the
+/// enumeration path drops an option that `can_cast_prepared_now` deems
+/// unaffordable, so affordability must never be the reason a variant is absent.
+fn fill_mana_for_fused_cast(scenario: &mut crate::game::scenario::GameScenario, player: PlayerId) {
+    for (color, n) in [
+        (ManaType::Blue, 2),
+        (ManaType::Black, 3),
+        (ManaType::Red, 2),
+        (ManaType::Colorless, 6),
+    ] {
+        add_mana(&mut scenario.state, player, color, n);
+    }
+}
+
+fn cmc_ge(value: i32) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed { value },
+    }]))
+}
+
+fn fuse_option_offered(set: &CastingVariantChoiceSet) -> bool {
+    set.options
+        .iter()
+        .any(|o| o.variant == CastingVariant::Fuse)
+}
+
+fn normal_option_offered(set: &CastingVariantChoiceSet) -> bool {
+    set.options
+        .iter()
+        .any(|o| o.variant == CastingVariant::Normal)
+}
+
+/// Test 1 (prohibition / per-turn-limit path). A `PerTurnCastLimit { max: 0,
+/// spell_filter: Cmc >= 5 }` prohibits casting any spell with mana value >= 5.
+/// A fused Breaking // Entering (combined MV 8) must be BLOCKED — so Fuse is
+/// absent from the offered options — while the Normal front-half cast (MV 2)
+/// stays legal. Hostile control (Cmc >= 9) proves the compared value is exactly
+/// 8, not merely "some large number": the fused cast IS offered under >= 9.
+/// Reverting the projection makes the enumeration see MV 2 for the fused cast,
+/// so Fuse would be offered under Cmc >= 5 and the positive assertion fails.
+#[test]
+fn fused_split_spell_blocked_by_combined_mana_value_per_turn_limit_enumeration() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+
+    // Cmc >= 5: combined MV 8 matches → fused cast blocked.
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut sc, P0);
+    add_static_permanent(
+        &mut sc,
+        P0,
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 0,
+            spell_filter: Some(cmc_ge(5)),
+        }),
+    );
+    // Sanity: marker must NOT be set — this exercises the pre-payment path.
+    assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+    let set = casting_variant_choice_set(&sc.state, P0, breaking);
+    assert!(
+        !fuse_option_offered(&set),
+        "a fused Breaking // Entering (combined MV 8) must be BLOCKED by a \
+         PerTurnCastLimit(Cmc >= 5); reverting the combined projection would wrongly \
+         offer Fuse (front half MV 2 < 5). Offered: {:?}",
+        set.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+    assert!(
+        normal_option_offered(&set),
+        "the Normal front-half cast (MV 2 < 5) must still be offered — the fix must \
+         not over-combine the non-fused variant. Offered: {:?}",
+        set.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+
+    // Cmc >= 9: combined MV 8 does NOT match → fused cast offered (hostile;
+    // proves the compared value is exactly 8, not just "large").
+    let mut sc9 = GameScenario::new();
+    sc9.at_phase(Phase::PreCombatMain);
+    let breaking9 = sc9.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut sc9, P0);
+    add_static_permanent(
+        &mut sc9,
+        P0,
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 0,
+            spell_filter: Some(cmc_ge(9)),
+        }),
+    );
+    let set9 = casting_variant_choice_set(&sc9.state, P0, breaking9);
+    assert!(
+        fuse_option_offered(&set9),
+        "under Cmc >= 9 the fused cast (combined MV 8 < 9) is NOT blocked and must be \
+         offered — this proves the compared value is exactly 8. Offered: {:?}",
+        set9.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+}
+
+/// Test 2 (keyword-grant path inside `prepare_spell_cast_with_variant_override_inner`).
+/// A `CastWithKeyword { Dash }` static whose `affected` filter is `Cmc >= 5`
+/// grants Dash only to spells of combined MV >= 5. The fused cast (MV 8) must
+/// receive the grant — observable because Dash becomes an offered casting
+/// variant on the fused card. Under `Cmc >= 9` (combined MV 8 < 9) the fused
+/// cast does NOT get Dash. Reverting the projection makes the grant read the
+/// front half (MV 2), so Dash is never granted and the positive case fails.
+#[test]
+fn fused_split_spell_receives_value_keyed_keyword_grant_only_under_combined_projection() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let dash_kw = Keyword::Dash(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    });
+
+    let dash_offered = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: dash_kw.clone(),
+            })
+            .affected(filter),
+        );
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+        casting_variant_choice_set(&sc.state, P0, breaking)
+            .options
+            .iter()
+            .any(|o| o.variant == CastingVariant::Dash)
+    };
+
+    assert!(
+        dash_offered(cmc_ge(5)),
+        "a `CastWithKeyword {{ Dash }}` gated on Cmc >= 5 must grant Dash to the fused \
+         Breaking // Entering (combined MV 8) — so Dash is an offered variant. Reverting the \
+         combined projection reads the front half (MV 2 < 5) and never grants Dash."
+    );
+    assert!(
+        !dash_offered(cmc_ge(9)),
+        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) must NOT receive Dash — this \
+         proves the grant compares the exact combined MV (8), not just a large number."
+    );
+}
+
+/// Test 2b (pre-payment cost-keyword read: Assist). CR 702.132a + CR 702.102b.
+/// A value-keyed `CastWithKeyword { Assist, affected: Cmc >= 5 }` static grants
+/// Assist only to spells of combined MV >= 5. Driving the FUSED cast of Breaking //
+/// Entering (combined MV 8, cost {4}{U}{B}{B}{R} — has a generic component) through
+/// the real production entry `handle_casting_variant_choice` must reach
+/// `WaitingFor::AssistChoosePlayer` because `assist_offer_params` now fuse-projects
+/// the effective-keyword read. Reverting that threading reads the front half (MV 2
+/// < 5), drops the Assist grant, and the cast auto-finalizes with NO assist offer —
+/// so the positive assertion flips. The `Cmc >= 9` control (combined MV 8 < 9)
+/// proves the compared value is exactly 8, not merely "large": no assist offer.
+#[test]
+fn fused_split_spell_assist_offer_uses_combined_projection() {
+    use super::super::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let assist_kw = Keyword::Assist;
+
+    // Returns true iff casting Breaking FUSED reaches the assist player-choice.
+    let assist_offered_on_fuse = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        let card_id = sc.state.objects[&breaking].card_id;
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: assist_kw.clone(),
+            })
+            .affected(filter),
+        );
+        // Marker must NOT be set — this exercises the pre-payment path.
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+        let set = casting_variant_choice_set(&sc.state, P0, breaking);
+        let options: Vec<CastingVariantChoiceOption> = set.options.clone();
+        let fuse_index = options
+            .iter()
+            .position(|o| o.variant == CastingVariant::Fuse)
+            .expect("Fuse must be an offered variant for Breaking // Entering");
+
+        let mut events = Vec::new();
+        let waiting = handle_casting_variant_choice(
+            &mut sc.state,
+            P0,
+            breaking,
+            card_id,
+            &options,
+            fuse_index,
+            &mut events,
+        )
+        .expect("casting the fused variant should not error");
+        // Breaking // Entering's front half (Breaking) targets a player to mill.
+        // The fused cast pauses for target selection FIRST; submitting the target
+        // advances the real cast pipeline through `enter_payment_step`, where the
+        // (also-threaded) assist offer for a fused cast surfaces.
+        let waiting = match waiting {
+            WaitingFor::AssistChoosePlayer { .. } => waiting,
+            WaitingFor::TargetSelection { .. } => {
+                // Publish the returned WaitingFor onto the state machine so the
+                // `SelectTargets` action drives the real `apply()` pipeline.
+                sc.state.waiting_for = waiting;
+                apply_as_current(
+                    &mut sc.state,
+                    GameAction::SelectTargets {
+                        targets: vec![crate::types::ability::TargetRef::Player(P1)],
+                    },
+                )
+                .expect("selecting the mill target should advance the cast")
+                .waiting_for
+            }
+            other => panic!("unexpected WaitingFor after choosing Fuse: {other:?}"),
+        };
+        matches!(
+            waiting,
+            WaitingFor::AssistChoosePlayer {
+                player,
+                ref candidates,
+                ..
+            } if player == P0 && candidates.contains(&P1)
+        )
+    };
+
+    assert!(
+        assist_offered_on_fuse(cmc_ge(5)),
+        "a `CastWithKeyword {{ Assist }}` gated on Cmc >= 5 must grant Assist to the \
+         fused Breaking // Entering (combined MV 8), so the fused cast reaches \
+         AssistChoosePlayer. Reverting the combined projection reads the front half \
+         (MV 2 < 5), drops the grant, and the cast auto-finalizes with no assist offer."
+    );
+    assert!(
+        !assist_offered_on_fuse(cmc_ge(9)),
+        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) must NOT receive Assist — \
+         proving the grant compares the exact combined MV (8), not just a large number."
+    );
+}
+
+/// Test 2c (pre-payment timing-keyword read: Flash). CR 702.8a + CR 702.102b.
+/// A value-keyed `CastWithKeyword { Flash, affected: Cmc >= 5 }` grants Flash only
+/// to spells of combined MV >= 5. On the OPPONENT's end step (outside P0's
+/// sorcery-speed window), the Fuse variant of Breaking // Entering (combined MV 8)
+/// is castable — hence offered by `casting_variant_choice_set` (whose
+/// `can_cast_prepared_now` gate runs the flash-feasibility timing check) — ONLY
+/// because the `has_granted_flash` / flash-feasibility reads now fuse-project the
+/// combined MV. Reverting that projection reads the front half (MV 2 < 5), the
+/// grant is dropped, sorcery-speed timing rejects the fused cast, and Fuse is not
+/// offered. The `Cmc >= 9` control (combined MV 8 < 9) proves the compared value is
+/// exactly 8: no Flash, so Fuse is not offered on the opponent's turn.
+#[test]
+fn fused_split_spell_granted_flash_timing_uses_combined_projection() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+
+    let fuse_offered_on_opponent_turn = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        // CR 307.1 / CR 608.3: place P0 outside its sorcery-speed window — the
+        // opponent (P1) is the active player during their end step, P0 has
+        // priority. A sorcery-speed fused cast is illegal here UNLESS the spell
+        // has (granted) Flash.
+        sc.state.phase = Phase::End;
+        sc.state.active_player = P1;
+        sc.state.priority_player = P0;
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            })
+            .affected(filter),
+        );
+        // Marker must NOT be set — this exercises the pre-payment path.
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+        fuse_option_offered(&casting_variant_choice_set(&sc.state, P0, breaking))
+    };
+
+    assert!(
+        fuse_offered_on_opponent_turn(cmc_ge(5)),
+        "a `CastWithKeyword {{ Flash }}` gated on Cmc >= 5 must grant Flash to the fused \
+         Breaking // Entering (combined MV 8), so the fused cast is legal at instant \
+         speed on the opponent's turn and Fuse is offered. Reverting the combined \
+         projection reads the front half (MV 2 < 5), drops Flash, and sorcery-speed \
+         timing rejects the fused cast."
+    );
+    assert!(
+        !fuse_offered_on_opponent_turn(cmc_ge(9)),
+        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) does NOT receive Flash, so \
+         a sorcery-speed fused cast on the opponent's turn is illegal and Fuse is not \
+         offered — proving the grant compares the exact combined MV (8)."
+    );
+}
+
+/// Test 3 (candidate-enumeration path in `casting_variant_candidates`). The Dash
+/// CANDIDATE is only pushed when the spell's effective keywords include Dash,
+/// which for a value-keyed `CastWithKeyword { Dash, affected: Cmc >= 5 }` grant
+/// depends on the projected mana value at candidate-enumeration time — BEFORE the
+/// Fuse candidate itself is pushed. This exercises the fuse-capability predicate
+/// in `casting_variant_candidates`, distinct from Test 2's per-variant prepare
+/// path. Under `Cmc >= 9` the Dash candidate is absent (combined MV 8 < 9).
+/// Reverting the candidate-enumeration projection reads the front half and never
+/// enumerates Dash, so the positive assertion fails.
+#[test]
+fn fused_split_spell_candidate_enumeration_uses_combined_projection_for_granted_keyword() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let dash_kw = Keyword::Dash(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    });
+
+    // Directly inspect the candidate list (pre-`can_cast_prepared_now` filtering)
+    // so this asserts the enumeration projection, not downstream legality.
+    let dash_candidate_present = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: dash_kw.clone(),
+            })
+            .affected(filter),
+        );
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+        casting_variant_candidates(&sc.state, P0, breaking).contains(&CastingVariant::Dash)
+    };
+
+    assert!(
+        dash_candidate_present(cmc_ge(5)),
+        "candidate enumeration for a fuse-capable Breaking // Entering must project the \
+         COMBINED MV (8) when reading granted keywords, so a `CastWithKeyword {{ Dash }}` \
+         gated on Cmc >= 5 enumerates the Dash candidate. Reverting the candidate-path \
+         projection reads the front half (MV 2 < 5) and never enumerates Dash."
+    );
+    assert!(
+        !dash_candidate_present(cmc_ge(9)),
+        "gated on Cmc >= 9 the combined MV 8 < 9, so the Dash candidate must be absent — \
+         proving the enumeration compares the exact combined MV."
+    );
+}
+
 #[test]
 fn foretell_cast_uses_foretell_cost_only_after_current_turn() {
     let mut state = setup_game_at_main_phase();

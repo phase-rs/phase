@@ -3320,9 +3320,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // resources for an illegal cast. We perform the same check again at
     // `finalize_cast_with_phyrexian_choices` so the canonical terminus is
     // closed even for flows that bypass this entry point.
+    // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
+    // cast (marker not yet set at this pre-payment additional-cost seam) so a
+    // value-keyed granted Flash is not dropped on the front half.
     if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
         && !super::restrictions::target_dependent_flash_permission_satisfied(
-            state, player, object_id, &ability,
+            state,
+            player,
+            object_id,
+            &ability,
+            casting_variant == CastingVariant::Fuse,
         )
     {
         let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -3845,6 +3852,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if casting_variant == CastingVariant::Evoke {
         // CR 601.2h: non-mana evoke residual from effective keywords (granted
         // evoke).
+        // CR 702.102b: GUARDED — this arm requires `casting_variant == Evoke`,
+        // which Fuse never equals, so a fused split cast never reaches this read
+        // (and Evoke is a creature keyword never value-key-granted to a split card).
         let evoke_split = super::casting::effective_spell_keywords(state, player, object_id)
             .iter()
             .find_map(|k| match k {
@@ -3874,6 +3884,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // the spell's mana cost in `prepare_spell_cast` and is paid through the
     // normal mana-payment flow inside `pay_additional_cost`'s fall-through.
     if casting_variant == CastingVariant::Bestow {
+        // CR 702.102b: GUARDED — this arm requires `casting_variant == Bestow`,
+        // which Fuse never equals, so a fused split cast never reaches this read
+        // (and Bestow is an Aura keyword never value-key-granted to a split card).
         let bestow_split = super::casting::effective_spell_keywords(state, player, object_id)
             .iter()
             .find_map(|k| match k {
@@ -5043,6 +5056,12 @@ pub(super) fn effective_casualty_additional_cost_instances(
 /// spell's effective Conspire keyword, including statics-granted Conspire (Wort,
 /// the Raidmother / Rassilon, the War President). Mirrors
 /// `effective_casualty_additional_cost`.
+///
+/// CR 702.102b: Left on the marker-default (non-fuse-aware) `effective_spell_keywords`
+/// deliberately — no real split card carries Conspire, and the fuse projection only
+/// affects a value-keyed `CastWithKeyword` `affected` filter, a class that does not
+/// arise here. Same rationale as `escalate_cost_for_selected_modes` /
+/// `effective_casualty_additional_cost`.
 pub(super) fn effective_conspire_additional_cost(
     state: &GameState,
     player: PlayerId,
@@ -5191,6 +5210,11 @@ pub(super) fn effective_replicate_additional_cost_instances(
 /// CR 702.48a: Return the quality (creature subtype) string from a spell's
 /// Offering keyword, if it has one. Uses `effective_spell_keywords` so
 /// layer-granted copies are included.
+///
+/// CR 702.102b: CORRECTNESS-NEUTRAL — Offering is a creature-spell keyword that no
+/// split card carries and that is not value-key-granted; the fuse projection only
+/// changes value-keyed `CastWithKeyword` grants, so front-vs-combined never changes
+/// this outcome. Same rationale as `effective_conspire_additional_cost`.
 pub(super) fn effective_offering_quality(
     state: &GameState,
     player: PlayerId,
@@ -5579,7 +5603,15 @@ pub(super) fn pay_and_push_adventure(
     // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
     // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
     // Check for Convoke, Waterbend, or Improvise keyword on the spell.
-    let convoke_mode = super::casting::spell_tap_payment_mode(state, player, object_id);
+    // CR 702.102b: derive the pre-payment fused hint from the casting variant so a
+    // `CastWithKeyword`-granted tap-payment keyword keyed on the combined mana
+    // value / colors is seen on a fused split spell before its marker is set.
+    let convoke_mode = super::casting::spell_tap_payment_mode_for(
+        state,
+        player,
+        object_id,
+        casting_variant == CastingVariant::Fuse,
+    );
     // Gate on eligible creatures/artifacts being present.
     let convoke_mode = convoke_mode.filter(|mode| {
         state.objects.values().any(|o| match mode {
@@ -5612,7 +5644,13 @@ pub(super) fn pay_and_push_adventure(
     // step pending), so before finalizing, a spell with assist and a generic
     // component lets the caster choose another player to help pay it. Stash the
     // pending cast so the assist answer handlers can resume via `enter_payment_step`.
-    if let Some((generic, candidates)) = assist_offer_params(state, player, object_id, cost) {
+    if let Some((generic, candidates)) = assist_offer_params(
+        state,
+        player,
+        object_id,
+        cost,
+        casting_variant == CastingVariant::Fuse,
+    ) {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -5762,9 +5800,16 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // condition (or a real Flash keyword) must authorize the cast. If none do,
     // the cast is illegal under CR 601.3d — abort by popping the stack entry
     // and surface the error to the caller.
+    // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
+    // cast (this re-validation runs before the `fused_split_spell` marker is set
+    // below) so a value-keyed granted Flash is not dropped on the front half.
     if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
         && !super::restrictions::target_dependent_flash_permission_satisfied(
-            state, player, object_id, &ability,
+            state,
+            player,
+            object_id,
+            &ability,
+            casting_variant == CastingVariant::Fuse,
         )
     {
         let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -7943,17 +7988,25 @@ fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> u3
 /// helper may pay and the eligible helper players. Returns `None` when assist
 /// does not apply. Shared by the `enter_payment_step` (X / convoke / manual) and
 /// `pay_and_push_adventure` (direct auto-finalize) offer sites.
+///
+/// CR 702.102b + CR 702.132a: THREADED. Assist is a `CastWithKeyword`-grantable
+/// cost keyword whose grant filter may be value-keyed (Cmc/HasColor/ColorCount),
+/// and this read is pre-payment-reachable (before the fuse marker at
+/// `pay_and_push`'s payment step) for a FUSED split cast. `fused` projects the
+/// combined MV/colors so a value-keyed assist grant is not silently dropped on the
+/// front half. Callers pass `casting_variant == CastingVariant::Fuse`.
 fn assist_offer_params(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     cost: &ManaCost,
+    fused: bool,
 ) -> Option<(u32, Vec<PlayerId>)> {
     let generic = match cost {
         ManaCost::Cost { generic, .. } if *generic > 0 => *generic,
         _ => return None,
     };
-    if !super::casting::effective_spell_keywords(state, player, object_id)
+    if !super::casting::effective_spell_keywords_for(state, player, object_id, fused)
         .contains(&Keyword::Assist)
     {
         return None;
@@ -8107,7 +8160,15 @@ pub fn enter_payment_step(
         if pending.assist_state != AssistState::NotOffered {
             return None;
         }
-        assist_offer_params(state, player, pending.object_id, &pending.cost)
+        // CR 702.102b: fuse-project the assist grant read for a fused split cast so
+        // a value-keyed `CastWithKeyword{Assist}` is not dropped on the front half.
+        assist_offer_params(
+            state,
+            player,
+            pending.object_id,
+            &pending.cost,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
     });
     if let Some((generic, candidates)) = assist_offer {
         if let Some(pending) = state.pending_cast.as_mut() {
