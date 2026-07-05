@@ -142,7 +142,11 @@ describe("gameLoopController auto-pass authorization", () => {
     controller.dispose();
   });
 
-  it("re-checks phase stops before firing a delayed auto-pass", async () => {
+  it("re-checks the engine auto-pass recommendation before firing a delayed auto-pass", async () => {
+    // Phase-stop gating now lives in the engine, surfaced via `autoPassRecommended`
+    // (a phase stop on the new phase flips it to false). The controller must
+    // re-read the latest recommendation at fire time and cancel the delayed
+    // auto-pass when the engine no longer recommends it.
     const waitingFor = priority(0);
     storeState = {
       waitingFor,
@@ -161,9 +165,9 @@ describe("gameLoopController auto-pass authorization", () => {
       gameState: {
         ...stateFor(waitingFor, 0),
         phase: "PreCombatMain",
-        phase_stops: { 0: ["PreCombatMain"] },
       },
-      autoPassRecommended: true,
+      // Engine now recommends against auto-pass (phase stop on PreCombatMain).
+      autoPassRecommended: false,
     };
 
     await vi.advanceTimersByTimeAsync(200);

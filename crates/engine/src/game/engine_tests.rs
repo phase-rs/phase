@@ -1815,7 +1815,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
         &mut state,
         PlayerId(0),
         GameAction::SetPhaseStops {
-            stops: vec![Phase::End],
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
         },
     );
 
@@ -1825,7 +1828,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
     );
     assert_eq!(
         state.phase_stops.get(&PlayerId(0)),
-        Some(&vec![Phase::End]),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
         "expected actor (P0) preference to be written, not authorized submitter (P1)",
     );
     assert!(!state.phase_stops.contains_key(&PlayerId(1)));

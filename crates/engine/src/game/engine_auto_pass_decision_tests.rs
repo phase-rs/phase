@@ -11,6 +11,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::CastingVariant;
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::phase::{PhaseStop, PhaseStopScope};
 use crate::types::zones::Zone;
 
 fn stack_entry(controller: PlayerId) -> StackEntry {
@@ -25,6 +26,10 @@ fn stack_entry(controller: PlayerId) -> StackEntry {
             },
         },
     }
+}
+
+fn stop(phase: Phase, scope: PhaseStopScope) -> PhaseStop {
+    PhaseStop { phase, scope }
 }
 
 fn is_pass(d: &AutoPassDecision) -> bool {
@@ -199,38 +204,113 @@ fn until_end_of_turn_finishes_at_configured_phase_stop() {
     state
         .auto_pass
         .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
-    state
-        .phase_stops
-        .insert(PlayerId(0), vec![Phase::DeclareBlockers]);
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
+    );
     assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
 #[test]
+fn until_end_of_turn_scope_gates_session_owner_auto_pass() {
+    // The session owner's own-turn stop fires only when they are the active
+    // player; an opponents'-turns stop fires only when they are NOT. This
+    // proves scope gates the engine.rs:580 session-owner auto-pass site
+    // against the live active_player (CR 102.1).
+    let base = |active: PlayerId, scope: PhaseStopScope| {
+        let mut state = GameState {
+            phase: Phase::DeclareBlockers,
+            active_player: active,
+            ..GameState::default()
+        };
+        state
+            .auto_pass
+            .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+        state
+            .phase_stops
+            .insert(PlayerId(0), vec![stop(Phase::DeclareBlockers, scope)]);
+        state
+    };
+
+    // OpponentsTurns stop, active player is the opponent → finishes.
+    let opp_turn = base(PlayerId(1), PhaseStopScope::OpponentsTurns);
+    assert!(is_finish(&priority_auto_pass_decision(
+        &opp_turn,
+        PlayerId(0)
+    )));
+
+    // OwnTurn stop, but active player is the opponent → does NOT finish (passes).
+    let own_on_opp_turn = base(PlayerId(1), PhaseStopScope::OwnTurn);
+    assert!(is_pass(&priority_auto_pass_decision(
+        &own_on_opp_turn,
+        PlayerId(0)
+    )));
+}
+
+#[test]
 fn phase_stop_hit_reads_per_player_preferences() {
+    // active_player defaults to PlayerId(0) → PlayerId(0)'s own turn.
     let mut state = GameState {
         phase: Phase::DeclareBlockers,
         ..GameState::default()
     };
     // No entry for the player → no stop.
-    assert!(!phase_stop_hit(&state, PlayerId(0)));
+    assert!(!state.phase_stop_hit(PlayerId(0)));
 
     // Unrelated phase in the list → no stop.
-    state.phase_stops.insert(PlayerId(0), vec![Phase::Upkeep]);
-    assert!(!phase_stop_hit(&state, PlayerId(0)));
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::Upkeep, PhaseStopScope::AllTurns)],
+    );
+    assert!(!state.phase_stop_hit(PlayerId(0)));
 
     // Current phase in the list → stop.
-    state
-        .phase_stops
-        .insert(PlayerId(0), vec![Phase::Upkeep, Phase::DeclareBlockers]);
-    assert!(phase_stop_hit(&state, PlayerId(0)));
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![
+            stop(Phase::Upkeep, PhaseStopScope::AllTurns),
+            stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns),
+        ],
+    );
+    assert!(state.phase_stop_hit(PlayerId(0)));
 
     // Per-player: player 1's stops don't bleed into player 0.
     state.phase_stops.remove(&PlayerId(0));
-    state
-        .phase_stops
-        .insert(PlayerId(1), vec![Phase::DeclareBlockers]);
-    assert!(!phase_stop_hit(&state, PlayerId(0)));
-    assert!(phase_stop_hit(&state, PlayerId(1)));
+    state.phase_stops.insert(
+        PlayerId(1),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
+    );
+    assert!(!state.phase_stop_hit(PlayerId(0)));
+    assert!(state.phase_stop_hit(PlayerId(1)));
+}
+
+#[test]
+fn phase_stop_hit_scope_resolves_against_active_player() {
+    // 3 scopes × 2 turn-directions, resolved against the live active_player
+    // (CR 102.1). Owner is PlayerId(0).
+    let build = |active: PlayerId, scope: PhaseStopScope| {
+        let mut state = GameState {
+            phase: Phase::DeclareBlockers,
+            active_player: active,
+            ..GameState::default()
+        };
+        state
+            .phase_stops
+            .insert(PlayerId(0), vec![stop(Phase::DeclareBlockers, scope)]);
+        state
+    };
+
+    // AllTurns: fires regardless of whose turn it is.
+    assert!(build(PlayerId(0), PhaseStopScope::AllTurns).phase_stop_hit(PlayerId(0)));
+    assert!(build(PlayerId(1), PhaseStopScope::AllTurns).phase_stop_hit(PlayerId(0)));
+
+    // OwnTurn: fires iff active_player == owner.
+    assert!(build(PlayerId(0), PhaseStopScope::OwnTurn).phase_stop_hit(PlayerId(0)));
+    assert!(!build(PlayerId(1), PhaseStopScope::OwnTurn).phase_stop_hit(PlayerId(0)));
+
+    // OpponentsTurns: fires iff active_player != owner.
+    assert!(!build(PlayerId(0), PhaseStopScope::OpponentsTurns).phase_stop_hit(PlayerId(0)));
+    assert!(build(PlayerId(1), PhaseStopScope::OpponentsTurns).phase_stop_hit(PlayerId(0)));
 }
 
 #[test]
@@ -242,10 +322,11 @@ fn phase_stop_hit_is_independent_of_auto_pass_mode() {
         phase: Phase::DeclareBlockers,
         ..GameState::default()
     };
-    state
-        .phase_stops
-        .insert(PlayerId(0), vec![Phase::DeclareBlockers]);
-    assert!(phase_stop_hit(&state, PlayerId(0)));
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
+    );
+    assert!(state.phase_stop_hit(PlayerId(0)));
     assert!(!end_of_turn_active(&state, PlayerId(0)));
 }
 
@@ -284,6 +365,202 @@ fn until_end_of_turn_does_not_auto_submit_available_blockers() {
     assert!(
         state.auto_pass.contains_key(&PlayerId(0)),
         "the defender's auto-pass session should stay armed after pausing for legal blockers"
+    );
+}
+
+#[test]
+fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
+    // Matrix row 6: owner = defender P0; the attacker P1 is the active player.
+    // An OpponentsTurns stop on Declare Blockers fires (owner != active_player),
+    // so the engine must NOT auto-submit the empty blocker declaration — the
+    // defender keeps the instant / Ninjutsu window (CR 102.1 live compare).
+    let waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(0),
+        valid_blocker_ids: vec![],
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+    };
+    let mut state = GameState {
+        phase: Phase::DeclareBlockers,
+        active_player: PlayerId(1),
+        waiting_for: waiting_for.clone(),
+        ..GameState::default()
+    };
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::OpponentsTurns)],
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                ..
+            }
+        ),
+        "OpponentsTurns stop fires on the attacker's turn → the empty-blocker \
+         auto-submit is paused"
+    );
+}
+
+#[test]
+fn declare_blockers_own_turn_stop_does_not_pause_on_opponents_turn() {
+    // Matrix row 6 revert-discriminator: an OwnTurn stop does NOT fire on the
+    // opponent's turn (owner P0 defender, active_player P1 attacker), so the
+    // empty blocker declaration auto-submits and combat advances past the step.
+    // Pre-scope code (`stops.contains(&phase)`) would have paused here — this
+    // assertion flips if the scope fix is reverted.
+    let mut state = GameState {
+        phase: Phase::DeclareBlockers,
+        active_player: PlayerId(1),
+        ..GameState::default()
+    };
+    // Minimal combat: P1's creature attacks P0, no blockers declared yet.
+    let attacker = create_object(
+        &mut state,
+        CardId(950),
+        PlayerId(1),
+        "Attacker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    state.combat = Some(crate::game::combat::CombatState {
+        attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+            attacker,
+            PlayerId(0),
+        )],
+        ..Default::default()
+    });
+
+    let waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(0),
+        valid_blocker_ids: vec![],
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+    };
+    state.waiting_for = waiting_for.clone();
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::OwnTurn)],
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::DeclareBlockers { .. }),
+        "OwnTurn stop must not fire on the opponent's turn; empty blockers \
+         auto-submit and combat advances past Declare Blockers"
+    );
+}
+
+#[test]
+fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
+    // Matrix row 7: owner = active player P0 declaring attackers on their own
+    // turn (CR 508.1). An OwnTurn stop on Declare Attackers fires (owner ==
+    // active_player), so the engine must NOT auto-submit the empty attacker
+    // declaration even with an armed UntilEndOfTurn session — the player keeps
+    // the step to attack (CR 102.1 live compare).
+    let waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: vec![],
+        valid_attack_targets: vec![],
+    };
+    let mut state = GameState {
+        phase: Phase::DeclareAttackers,
+        active_player: PlayerId(0),
+        waiting_for: waiting_for.clone(),
+        ..GameState::default()
+    };
+    // Reach-guard: with the session armed, the empty-attacker arm would fire
+    // (`end_of_turn_active` is true) absent the stop, so the pause is
+    // attributable to the phase stop rather than a missing auto-pass session.
+    state
+        .auto_pass
+        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareAttackers, PhaseStopScope::OwnTurn)],
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                ..
+            }
+        ),
+        "OwnTurn stop fires on the owner's own turn → the empty-attacker \
+         auto-submit is paused"
+    );
+}
+
+#[test]
+fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
+    // Matrix row 7 revert-discriminator: an OpponentsTurns stop does NOT fire on
+    // the owner's own turn (owner == active_player P0), so the armed session
+    // auto-submits the empty attacker declaration and combat advances past
+    // Declare Attackers. Pre-scope code (`stops.contains(&phase)`) would have
+    // paused here — this assertion flips if the scope fix is reverted.
+    let waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: vec![],
+        valid_attack_targets: vec![],
+    };
+    let mut state = GameState {
+        phase: Phase::DeclareAttackers,
+        active_player: PlayerId(0),
+        waiting_for: waiting_for.clone(),
+        ..GameState::default()
+    };
+    state
+        .auto_pass
+        .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(
+            Phase::DeclareAttackers,
+            PhaseStopScope::OpponentsTurns,
+        )],
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::DeclareAttackers { .. }),
+        "OpponentsTurns stop must not fire on the owner's own turn; empty \
+         attackers auto-submit and combat advances past Declare Attackers"
     );
 }
 

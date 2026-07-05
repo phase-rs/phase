@@ -289,6 +289,9 @@
     "cleanupDescription": "Obrażenia znikają i sprawdzany jest maksymalny rozmiar ręki.",
     "tooltipStopSet": "Zatrzymanie ustawione: kliknij, aby usunąć to zatrzymanie automatycznego przekazywania.",
     "tooltipNoStop": "Brak zatrzymania: kliknij, aby wstrzymać tutaj automatyczne przekazywanie.",
+    "scopeAllTurns": "Zatrzymuje się w każdej turze.",
+    "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
+    "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
     "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },

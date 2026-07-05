@@ -289,6 +289,9 @@
     "cleanupDescription": "Schaden verschwindet und die maximale Handgröße wird geprüft.",
     "tooltipStopSet": "Stopp gesetzt: klicken, um diesen Auto-Abgabe-Stopp zu entfernen.",
     "tooltipNoStop": "Kein Stopp gesetzt: klicken, um das automatische Abgeben hier zu pausieren.",
+    "scopeAllTurns": "Stoppt in jedem Zug.",
+    "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
+    "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
     "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },

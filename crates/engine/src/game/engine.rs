@@ -577,7 +577,7 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
                 top.controller != player && !state.is_priority_yielded(player, top)
             });
-            if opponent_on_stack || phase_stop_hit(state, player) {
+            if opponent_on_stack || state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -592,17 +592,6 @@ fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
         state.auto_pass.get(&player),
         Some(AutoPassMode::UntilEndOfTurn)
     )
-}
-
-/// True when the current phase appears in `player`'s configured phase-stop list.
-/// Consulted at every engine-driven auto-pass site so the user's preference is
-/// respected whether or not an auto-pass session is active (e.g. suppresses
-/// the empty-blockers auto-submit when the defender wants a Ninjutsu window).
-fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
-    state
-        .phase_stops
-        .get(&player)
-        .is_some_and(|stops| stops.contains(&state.phase))
 }
 
 fn pass_priority_once_with_pipeline(
@@ -952,7 +941,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
             // UntilEndOfTurn: auto-submit empty attackers unless the user flagged
             // this phase as a stop.
             WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !phase_stop_hit(state, *player) =>
+                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -977,7 +966,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
+            } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
                     || !super::combat::has_attackers_in_play(state)) =>
             {

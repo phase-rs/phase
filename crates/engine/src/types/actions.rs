@@ -606,7 +606,7 @@ pub enum GameAction {
     /// from auto-submitting empty blocker declarations during the named phases.
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {
-        stops: Vec<super::phase::Phase>,
+        stops: Vec<super::phase::PhaseStop>,
     },
     /// CR 117.3d: Update the acting player's standing priority-yield preferences —
     /// a pre-committed decision to pass priority while a class of triggered

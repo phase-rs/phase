@@ -25,7 +25,7 @@ use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
-use super::phase::Phase;
+use super::phase::{Phase, PhaseStop};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
 use super::replacements::ReplacementEvent;
@@ -5137,7 +5137,8 @@ pub enum AutoPassMode {
     UntilStackEmpty { initial_stack_len: usize },
     /// Auto-pass through priority/combat stops until the flagged player's next
     /// turn starts. Interrupted by opponent stack activity (MTGA-style) or when
-    /// the current phase matches the player's entry in `GameState::phase_stops`.
+    /// the current phase matches a scope-applicable entry in the player's
+    /// `GameState::phase_stops` (see `GameState::phase_stop_hit`).
     UntilEndOfTurn,
 }
 
@@ -6453,12 +6454,14 @@ pub struct GameState {
 
     /// Per-player phase-stop preferences. While a player's `UntilEndOfTurn`
     /// auto-pass session is active, the engine will interrupt auto-pass whenever
-    /// the current phase appears in that player's list. Also consulted when
-    /// deciding whether to auto-submit empty blockers during Declare Blockers,
-    /// so users can pause the step to activate instants / Ninjutsu even when
-    /// no legal blockers exist.
+    /// the current phase appears in that player's list and its scope applies on
+    /// the current turn. Also consulted when deciding whether to auto-submit
+    /// empty blockers during Declare Blockers, so users can pause the step to
+    /// activate instants / Ninjutsu even when no legal blockers exist. Each stop
+    /// carries a `PhaseStopScope` (all turns / own turn / opponents' turns),
+    /// resolved against `active_player` (CR 102.1) by `phase_stop_hit`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub phase_stops: HashMap<PlayerId, Vec<Phase>>,
+    pub phase_stops: HashMap<PlayerId, Vec<PhaseStop>>,
 
     /// CR 605.3: Lands manually tapped for mana via TapLandForMana this priority window.
     /// Per-player map enables multiplayer correctness (e.g., UnlessPayment opponent tapping).
@@ -7964,6 +7967,20 @@ impl GameState {
             .copied()
             .filter(|id| self.objects.get(id).is_some_and(|obj| obj.is_phased_in()))
             .collect()
+    }
+
+    /// True when the current phase is a configured stop for `player` that applies
+    /// on the current turn. Consulted at every engine-driven auto-pass site so the
+    /// user's preference is respected whether or not an auto-pass session is active.
+    ///
+    /// CR 102.1: scope (`AllTurns` / `OwnTurn` / `OpponentsTurns`) is resolved
+    /// against `active_player` (the player whose turn it is).
+    pub fn phase_stop_hit(&self, player: PlayerId) -> bool {
+        self.phase_stops.get(&player).is_some_and(|stops| {
+            stops
+                .iter()
+                .any(|stop| stop.phase == self.phase && stop.applies(player, self.active_player))
+        })
     }
 
     /// CR 730.2: True if `object_id` is an absorbed (non-surviving) component of

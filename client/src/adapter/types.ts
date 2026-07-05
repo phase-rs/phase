@@ -290,6 +290,16 @@ export type Phase =
   | "End"
   | "Cleanup";
 
+/** Turn-direction scope for a phase stop (mirrors engine `PhaseStopScope`). */
+export type PhaseStopScope = "AllTurns" | "OwnTurn" | "OpponentsTurns";
+
+/** A single phase stop: the phase to pause at plus its turn-direction scope
+ *  (mirrors engine `PhaseStop`). */
+export interface PhaseStop {
+  phase: Phase;
+  scope: PhaseStopScope;
+}
+
 export type Zone =
   | "Library"
   | "Hand"
@@ -1721,7 +1731,7 @@ export type GameAction =
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
-  | { type: "SetPhaseStops"; data: { stops: Phase[] } }
+  | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
@@ -2254,7 +2264,7 @@ export interface GameState {
   day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
-  phase_stops?: Record<number, Phase[]>;
+  phase_stops?: Record<number, PhaseStop[]>;
   /** CR 117.3d: the viewer's standing priority-yield preferences. */
   priority_yields?: PriorityYield[];
   lands_tapped_for_mana?: Record<number, number[]>;

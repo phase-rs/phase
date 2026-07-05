@@ -321,6 +321,9 @@
     "cleanupDescription": "Damage wears off and maximum hand size is checked.",
     "tooltipStopSet": "Stop set: click to remove this auto-pass stop.",
     "tooltipNoStop": "No stop set: click to pause auto-pass here.",
+    "scopeAllTurns": "Stops on every turn.",
+    "scopeOwnTurn": "Stops only on your turns.",
+    "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
     "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
